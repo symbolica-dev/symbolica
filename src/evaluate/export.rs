@@ -190,6 +190,227 @@ impl ExportSettings {
 }
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    pub(super) fn external_cpp_name(&self, index: usize) -> String {
+        let external = &self.external_fns[index];
+        if external.sub_evaluator.is_some() {
+            format!(
+                "{}_{}",
+                external
+                    .symbol
+                    .get_stripped_ascii_name()
+                    .expect("exportable function should have an ASCII name"),
+                index
+            )
+        } else {
+            external.export_name().to_owned()
+        }
+    }
+
+    fn export_external_cpps(&self) -> String {
+        self.export_external_cpps_for_target(false, None)
+    }
+
+    fn export_external_cpps_cuda(&self) -> String {
+        self.export_external_cpps_for_target(true, None)
+    }
+
+    fn export_external_asm_cpps(&self, number_class: NumberClass, asm: InlineASM) -> String {
+        self.export_external_cpps_for_target(false, Some((number_class, asm)))
+    }
+
+    fn export_external_cpps_for_target(
+        &self,
+        cuda: bool,
+        asm: Option<(NumberClass, InlineASM)>,
+    ) -> String {
+        fn append<T: ExportNumber + SingleFloat>(
+            evaluator: &ExpressionEvaluator<T>,
+            cuda: bool,
+            asm: Option<(NumberClass, InlineASM)>,
+            seen: &mut HashSet<String>,
+            output: &mut String,
+        ) {
+            for (external_index, external) in evaluator.external_fns.iter().enumerate() {
+                if external.constant_index.is_some() {
+                    continue;
+                }
+
+                if let Some(sub_evaluator) = &external.sub_evaluator {
+                    append(sub_evaluator, cuda, asm, seen, output);
+
+                    let name = evaluator.external_cpp_name(external_index);
+                    if !seen.insert(format!("sub-evaluator:{name}")) {
+                        continue;
+                    }
+
+                    if let Some((number_class, asm)) = asm {
+                        output.push_str(&sub_evaluator.export_asm_sub_evaluator(
+                            &name,
+                            number_class,
+                            asm,
+                        ));
+                        continue;
+                    }
+
+                    output.push_str("template<typename T>\n");
+                    if cuda {
+                        output.push_str("__device__ __noinline__ ");
+                    } else {
+                        output.push_str("__attribute__((noinline)) ");
+                    }
+                    output.push_str(&format!(
+                        "T {name}({}) {{\n",
+                        (0..sub_evaluator.param_count)
+                            .map(|index| format!("T p{index}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+
+                    if sub_evaluator.param_count == 0 {
+                        output.push_str("\tT params[1] = {};\n");
+                    } else {
+                        output.push_str(&format!(
+                            "\tT params[{}] = {{{}}};\n",
+                            sub_evaluator.param_count,
+                            (0..sub_evaluator.param_count)
+                                .map(|index| format!("p{index}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    output.push_str(&format!("\tT Z[{}];\n", sub_evaluator.stack.len().max(1)));
+                    sub_evaluator.export_cpp_impl("", "T", true, output);
+
+                    let result = sub_evaluator.result_indices[0];
+                    output.push_str("\treturn ");
+                    if result < sub_evaluator.param_count {
+                        output.push_str(&format!("params[{result}]"));
+                    } else if result < sub_evaluator.reserved_indices {
+                        output.push_str(&sub_evaluator.stack[result].export_wrapped_with("T"));
+                    } else {
+                        output.push_str(&format!("Z[{result}]"));
+                    }
+                    output.push_str(";\n}\n\n");
+                    continue;
+                }
+
+                let Some(snippet) = external.cpp() else {
+                    continue;
+                };
+                if seen.insert(format!("external:{snippet}")) {
+                    output.push_str(snippet);
+                    if !snippet.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    output.push('\n');
+                }
+            }
+        }
+
+        let mut seen = HashSet::default();
+        let mut output = String::new();
+        append(self, cuda, asm, &mut seen, &mut output);
+        output
+    }
+
+    fn export_asm_sub_evaluator(
+        &self,
+        function_name: &str,
+        number_class: NumberClass,
+        asm: InlineASM,
+    ) -> String {
+        debug_assert_ne!(asm, InlineASM::None);
+        debug_assert_eq!(self.result_indices.len(), 1);
+
+        let number_type = if asm == InlineASM::AVX2 {
+            "simd"
+        } else if number_class == NumberClass::ComplexF64 {
+            "std::complex<double>"
+        } else {
+            "double"
+        };
+
+        let mut output = String::new();
+        match number_class {
+            NumberClass::RealF64 => {
+                let mut constants = (self.param_count..self.reserved_indices)
+                    .map(|i| {
+                        let value = self.stack[i].to_complex_double().re;
+                        if asm == InlineASM::AVX2 {
+                            format!("simd({value:e})")
+                        } else {
+                            value.export()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                constants.push("1".to_string());
+                output.push_str(&format!(
+                    "static const {number_type} {function_name}_CONSTANTS_double[{}] = {{{}}};\n\n",
+                    constants.len(),
+                    constants.join(",")
+                ));
+            }
+            NumberClass::ComplexF64 => {
+                let mut constants = (self.param_count..self.reserved_indices)
+                    .map(|i| {
+                        let value = self.stack[i].to_complex_double();
+                        if asm == InlineASM::AVX2 {
+                            format!("simd(std::complex<double>({:e}, {:e}))", value.re, value.im)
+                        } else {
+                            format!("std::complex<double>({:e}, {:e})", value.re, value.im)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                constants.push(if asm == InlineASM::AVX2 {
+                    "-0.".to_string()
+                } else {
+                    "std::complex<double>(0, -0.)".to_string()
+                });
+                constants.push("1".to_string());
+                output.push_str(&format!(
+                    "static const {number_type} {function_name}_CONSTANTS_complex[{}] = {{{}}};\n\n",
+                    constants.len(),
+                    constants.join(",")
+                ));
+            }
+        }
+
+        output.push_str(&format!(
+            "__attribute__((noinline)) {number_type} {function_name}({}) {{\n",
+            (0..self.param_count)
+                .map(|index| format!("{number_type} p{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        if self.param_count == 0 {
+            output.push_str(&format!("\t{number_type} params[1] = {{}};\n"));
+        } else {
+            output.push_str(&format!(
+                "\t{number_type} params[{}] = {{{}}};\n",
+                self.param_count,
+                (0..self.param_count)
+                    .map(|index| format!("p{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push_str(&format!(
+            "\t{number_type} Z[{}];\n\t{number_type} out[1];\n",
+            self.stack.len().max(1)
+        ));
+
+        match number_class {
+            NumberClass::RealF64 => {
+                self.export_asm_double_impl(&self.instructions, function_name, asm, &mut output);
+            }
+            NumberClass::ComplexF64 => {
+                self.export_asm_complex_impl(&self.instructions, function_name, asm, &mut output);
+            }
+        }
+        output.push_str("\treturn out[0];\n}\n\n");
+        output
+    }
+
     /// Create a C++ code representation of the evaluation tree.
     /// The resulting source code can be compiled and loaded.
     ///
@@ -277,7 +498,12 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
 
         match asm {
             InlineASM::AVX2 => {
-                res += &self.export_external_cpps();
+                let number_class = if complex {
+                    NumberClass::ComplexF64
+                } else {
+                    NumberClass::RealF64
+                };
+                res += &self.export_external_asm_cpps(number_class, asm);
 
                 res += &format!(
                     "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -379,7 +605,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += "typedef double CudaNumber;\n";
             res += "typedef double Number;\n";
         }
-        res += &self.export_external_cpps();
+        res += &self.export_external_cpps_cuda();
 
         res += &format!(
             "\n__device__ void {}(CudaNumber* params, CudaNumber* out, size_t index) {{\n",
@@ -720,7 +946,7 @@ extern "C" {{
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(o, s, a) => {
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out +=
@@ -768,7 +994,7 @@ extern "C" {{
             res += header;
             res += "\n";
         }
-        res += &self.export_external_cpps();
+        res += &self.export_external_asm_cpps(NumberClass::RealF64, settings.inline_asm);
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -824,7 +1050,7 @@ extern "C" {{
             res += header;
             res += "\n";
         }
-        res += &self.export_external_cpps();
+        res += &self.export_external_asm_cpps(NumberClass::ComplexF64, settings.inline_asm);
 
         res += &format!(
             "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -1961,7 +2187,7 @@ extern "C" {{
                 RegInstr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
@@ -2744,7 +2970,7 @@ extern "C" {{
                 Instr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = self.external_cpp_name(*s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();

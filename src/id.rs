@@ -25,13 +25,13 @@ use ahash::{HashMap, HashSet};
 use dyn_clone::DynClone;
 
 use crate::{
-    OperationCount,
     atom::{
         Atom, AtomCore, AtomType, AtomView, Indeterminate, InlineNum, ListIterator, SliceType,
         Symbol, representation::InlineVar,
     },
     coefficient::{Coefficient, CoefficientView},
     domains::rational::Rational,
+    evaluate::OperationCount,
     poly::PolyVariable,
     state::{RecycledAtom, Workspace},
     transformer::{Transformer, TransformerError},

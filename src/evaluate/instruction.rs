@@ -137,30 +137,84 @@ impl std::fmt::Display for Instruction {
 ///
 /// This is the portable representation used when an evaluator is translated to another runtime.
 /// Parameters are referenced by [`Slot::Param`], constants by [`Slot::Const`], temporaries by
-/// [`Slot::Temp`], and outputs by [`Slot::Out`].
+/// [`Slot::Temp`], and outputs by [`Slot::Out`]. Calls to functions defined as non-inlined in a
+/// [`FunctionMap`] can be resolved through [`ExportedInstructions::sub_evaluators`].
 #[derive(Debug, Clone)]
 pub struct ExportedInstructions<T> {
+    /// The number of values expected in the parameter list.
+    pub input_count: usize,
+    /// The number of values produced in the output list.
+    pub output_count: usize,
     /// The linear instruction stream.
     pub instructions: Vec<Instruction>,
     /// The number of temporary storage slots required to execute `instructions`.
     pub temporary_count: usize,
     /// Constant values referenced by [`Slot::Const`].
     pub constants: Vec<T>,
+    /// Locally defined evaluators called by [`Instruction::Fun`] instructions in this stream.
+    ///
+    /// A call resolves to a sub-evaluator when its symbol and tags match the corresponding fields
+    /// of an entry in this list. Calls without a matching entry remain ordinary external function
+    /// calls. Sub-evaluators may recursively contain their own sub-evaluators.
+    pub sub_evaluators: Vec<ExportedSubEvaluator<T>>,
+}
+
+/// A non-inlined function body exported alongside an instruction stream.
+///
+/// The `symbol` and `tags` fields form the call signature and match the corresponding values in an
+/// [`Instruction::Fun`] instruction. Parameters are passed in the order of that instruction's
+/// argument slots.
+#[derive(Debug, Clone)]
+pub struct ExportedSubEvaluator<T> {
+    /// The function symbol used by the calling [`Instruction::Fun`].
+    pub symbol: Symbol,
+    /// The function tags used by the calling [`Instruction::Fun`].
+    pub tags: Vec<String>,
+    /// The number of parameter values expected by this evaluator.
+    pub input_count: usize,
+    /// The number of values produced by this evaluator.
+    pub output_count: usize,
+    /// The recursively exported function body.
+    pub instructions: ExportedInstructions<T>,
 }
 
 impl<T: Clone> ExpressionEvaluator<T> {
-    /// Export the instruction stream, temporary storage size, and constants.
+    /// Export the instruction stream, temporary storage size, constants, and sub-evaluators.
     ///
     /// The returned [`ExportedInstructions`] value contains all data needed to execute the evaluator
     /// outside Symbolica:
+    /// - [`ExportedInstructions::input_count`] is the number of input parameters.
+    /// - [`ExportedInstructions::output_count`] is the number of output values.
     /// - [`ExportedInstructions::instructions`] is the linear instruction list.
     /// - [`ExportedInstructions::temporary_count`] is the number of temporary slots required.
     /// - [`ExportedInstructions::constants`] contains the values addressed by [`Slot::Const`].
+    /// - [`ExportedInstructions::sub_evaluators`] contains bodies for non-inlined functions. A
+    ///   function instruction without a matching sub-evaluator is an ordinary external call.
     ///
     /// This function can be used to create an evaluator in a different language.
     pub fn export_instructions(&self) -> ExportedInstructions<T> {
         let mut instr = vec![];
         let constants: Vec<_> = self.stack[self.param_count..self.reserved_indices].to_vec();
+        let sub_evaluators = self
+            .external_fns
+            .iter()
+            .filter_map(|external| {
+                external.sub_evaluator.as_ref().map(|evaluator| {
+                    let instructions = evaluator.export_instructions();
+                    ExportedSubEvaluator {
+                        symbol: external.symbol,
+                        tags: external
+                            .tags
+                            .iter()
+                            .map(|tag| tag.to_canonical_string())
+                            .collect(),
+                        input_count: instructions.input_count,
+                        output_count: instructions.output_count,
+                        instructions,
+                    }
+                })
+            })
+            .collect();
 
         macro_rules! get_slot {
             ($i:expr) => {
@@ -271,9 +325,12 @@ impl<T: Clone> ExpressionEvaluator<T> {
         }
 
         ExportedInstructions {
+            input_count: self.param_count,
+            output_count: self.result_indices.len(),
             instructions: instr,
             temporary_count: self.stack.len() - self.reserved_indices,
             constants,
+            sub_evaluators,
         }
     }
 }

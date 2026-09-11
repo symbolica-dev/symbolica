@@ -6,7 +6,6 @@ use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
-    OperationCount,
     atom::{
         AddView, AliasedAtom, AtomType, FunctionBuilder, Indeterminate, KeyLookup, MulView,
         NumView, VarView, representation::FunView,
@@ -26,7 +25,7 @@ use crate::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    evaluate::{EvaluationDomain, EvaluatorBuilder},
+    evaluate::{EvaluationDomain, EvaluatorBuilder, OperationCount},
     id::{
         BorrowReplacement, Condition, ConditionResult, Context, MatchSettings, Pattern,
         PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,

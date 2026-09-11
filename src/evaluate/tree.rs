@@ -41,6 +41,9 @@ pub enum EvaluationError {
         expected: usize,
         actual: usize,
     },
+    FunctionRedefined {
+        function: Atom,
+    },
     NumericalTypeDoesNotSupportImaginaryUnit,
     EvaluationFailed {
         expression: Atom,
@@ -129,6 +132,10 @@ impl std::fmt::Display for EvaluationError {
                 "function {} cannot be registered with {actual} tag(s); it was already registered with {expected} tag(s)",
                 function.get_name()
             ),
+            EvaluationError::FunctionRedefined { function } => {
+                write!(f, "function {} is redefined", function.to_plain_string())
+            }
+
             EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
                 f.write_str("numerical type does not support imaginary unit")
             }
@@ -516,6 +523,7 @@ impl<'a> AtomView<'a> {
             let res = expr.as_atom_view().linearize_impl(
                 fn_map,
                 &mut args,
+                &settings,
                 &mut constants,
                 &mut constant_map,
                 &mut external_functions,
@@ -651,11 +659,161 @@ impl<'a> AtomView<'a> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn linearize_sub_evaluator(
+        fn_map: &FunctionMap,
+        params: &HashMap<AtomView<'_>, Vec<Slot>>,
+        settings: &OptimizationSettings,
+        symbol: Symbol,
+        tags: Vec<Atom>,
+        arg_spec: &[Indeterminate],
+        arg_slots: Vec<Slot>,
+        body: &Atom,
+        constants: &mut Vec<Complex<Rational>>,
+        constant_map: &mut HashMap<Complex<Rational>, usize>,
+        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
+        instr: &mut Vec<Instruction>,
+    ) -> Result<Slot, EvaluationError> {
+        // Capture parameters from the surrounding function scope. Explicit arguments of this
+        // function are appended afterwards so that they shadow equally-named captured values.
+        let mut captures = params
+            .iter()
+            .filter(|(parameter, values)| {
+                !values.is_empty()
+                    && arg_spec
+                        .iter()
+                        .all(|argument| argument.as_view() != **parameter)
+            })
+            .map(|(parameter, values)| (parameter.to_owned(), *values.last().unwrap()))
+            .collect::<Vec<_>>();
+        captures.sort_by_cached_key(|(parameter, _)| parameter.to_canonical_string());
+
+        let build_evaluator = |captures: &[(Atom, Slot)]| {
+            let mut sub_params = captures
+                .iter()
+                .map(|(parameter, _)| parameter.clone())
+                .collect::<Vec<_>>();
+            sub_params.extend(arg_spec.iter().map(|arg| arg.as_view().to_owned()));
+            Self::linearize_multiple(
+                std::slice::from_ref(body),
+                fn_map,
+                &sub_params,
+                settings.clone(),
+            )
+        };
+
+        let mut evaluator = build_evaluator(&captures)?;
+
+        // The body is initially built with every in-scope parameter so lexical captures remain
+        // available. Afterwards, retain only captures that the generated instruction stream
+        // actually reads. Explicit function arguments are never removed, even if the body does
+        // not use them, because they are part of the declared call signature.
+        let mut used_captures = vec![false; captures.len()];
+        let mut mark_used = |index: usize| {
+            if index < used_captures.len() {
+                used_captures[index] = true;
+            }
+        };
+        for (instruction, _) in &evaluator.instructions {
+            match instruction {
+                Instr::Add(_, args) | Instr::Mul(_, args) | Instr::ExternalFun(_, _, args) => {
+                    for &arg in args {
+                        mark_used(arg);
+                    }
+                }
+                Instr::Pow(_, base, _) | Instr::BuiltinFun(_, _, base) => mark_used(*base),
+                Instr::Powf(_, base, exponent) => {
+                    mark_used(*base);
+                    mark_used(*exponent);
+                }
+                Instr::IfElse(condition, _) => mark_used(*condition),
+                Instr::Join(_, condition, if_true, if_false) => {
+                    mark_used(*condition);
+                    mark_used(*if_true);
+                    mark_used(*if_false);
+                }
+                Instr::Goto(_) | Instr::Label(_) => {}
+            }
+        }
+        for &result in &evaluator.result_indices {
+            mark_used(result);
+        }
+
+        if used_captures.iter().any(|used| !used) {
+            captures = captures
+                .into_iter()
+                .zip(used_captures)
+                .filter_map(|(capture, used)| used.then_some(capture))
+                .collect();
+            evaluator = build_evaluator(&captures)?;
+        }
+
+        let mut call_args = captures
+            .into_iter()
+            .map(|(_, slot)| slot)
+            .collect::<Vec<_>>();
+        call_args.extend(arg_slots);
+
+        // Keep all coefficients in the top-level evaluator. This makes coefficient remapping and
+        // arbitrary-precision evaluation work exactly as they do for an inlined function.
+        let sub_constants =
+            evaluator.stack[evaluator.param_count..evaluator.reserved_indices].to_vec();
+        for (i, coefficient) in sub_constants.iter().enumerate() {
+            let slot = if let Some(external) = evaluator
+                .external_fns
+                .iter()
+                .find(|external| external.constant_index == Some(i))
+            {
+                Slot::Const(register_constant_external_container(
+                    external_functions,
+                    external.symbol,
+                    external.tags.clone(),
+                    external.fixed_args.clone(),
+                    constants,
+                ))
+            } else if let Some(index) = constant_map.get(coefficient) {
+                Slot::Const(*index)
+            } else {
+                let index = constants.len();
+                constants.push(coefficient.clone());
+                constant_map.insert(coefficient.clone(), index);
+                Slot::Const(index)
+            };
+            call_args.push(slot);
+        }
+
+        evaluator
+            .external_fns
+            .retain(|external| external.constant_index.is_none());
+        evaluator.param_count = evaluator.reserved_indices;
+        for value in evaluator.stack.iter_mut().take(evaluator.reserved_indices) {
+            *value = Complex::default();
+        }
+
+        let tag_strings = tags.iter().map(|tag| tag.to_canonical_string()).collect();
+        if external_functions.iter().all(|external| {
+            external.symbol != symbol || external.tags != tags || external.sub_evaluator.is_none()
+        }) {
+            external_functions.push(ExternalFunctionContainer::new_sub_evaluator(
+                symbol, tags, evaluator,
+            ));
+        }
+
+        let result = Slot::Temp(instr.len());
+        instr.push(Instruction::Fun(
+            result,
+            Box::new((symbol, tag_strings, call_args)),
+            false,
+        ));
+        Ok(result)
+    }
+
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
         fn_map: &'a FunctionMap,
         params: &mut HashMap<AtomView<'a>, Vec<Slot>>,
+        settings: &OptimizationSettings,
         constants: &mut Vec<Complex<Rational>>,
         constant_map: &mut HashMap<Complex<Rational>, usize>,
         external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
@@ -720,14 +878,32 @@ impl<'a> AtomView<'a> {
                 let s = v.get_symbol();
 
                 if let Some(expr) = fn_map.get(*self) {
-                    return expr.body.as_view().linearize_impl(
+                    if expr.options.should_inline() {
+                        return expr.body.as_view().linearize_impl(
+                            fn_map,
+                            params,
+                            settings,
+                            constants,
+                            constant_map,
+                            external_functions,
+                            instr,
+                            subexpressions,
+                        );
+                    }
+
+                    return Self::linearize_sub_evaluator(
                         fn_map,
                         params,
+                        settings,
+                        s,
+                        vec![],
+                        &expr.args,
+                        vec![],
+                        &expr.body,
                         constants,
                         constant_map,
                         external_functions,
                         instr,
-                        subexpressions,
                     );
                 }
 
@@ -767,6 +943,7 @@ impl<'a> AtomView<'a> {
                     let arg_eval = arg.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -801,6 +978,7 @@ impl<'a> AtomView<'a> {
                     let cond = cond.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -886,6 +1064,7 @@ impl<'a> AtomView<'a> {
                             then_branch.linearize_impl(
                                 fn_map,
                                 params,
+                                settings,
                                 constants,
                                 constant_map,
                                 external_functions,
@@ -896,6 +1075,7 @@ impl<'a> AtomView<'a> {
                             else_branch.linearize_impl(
                                 fn_map,
                                 params,
+                                settings,
                                 constants,
                                 constant_map,
                                 external_functions,
@@ -915,6 +1095,7 @@ impl<'a> AtomView<'a> {
                     let then_branch = then_branch.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -931,6 +1112,7 @@ impl<'a> AtomView<'a> {
                     let else_branch = else_branch.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -979,6 +1161,7 @@ impl<'a> AtomView<'a> {
                             arg.linearize_impl(
                                 fn_map,
                                 params,
+                                settings,
                                 constants,
                                 constant_map,
                                 external_functions,
@@ -1010,6 +1193,7 @@ impl<'a> AtomView<'a> {
                         tag_len,
                         args: arg_spec,
                         body: e,
+                        options,
                         ..
                     } = fun;
 
@@ -1027,6 +1211,7 @@ impl<'a> AtomView<'a> {
                         let slot = eval_arg.linearize_impl(
                             fn_map,
                             params,
+                            settings,
                             constants,
                             constant_map,
                             external_functions,
@@ -1043,6 +1228,24 @@ impl<'a> AtomView<'a> {
                         arg_slots.push(slot);
                     }
 
+                    if !options.should_inline() {
+                        let tags = f.iter().take(*tag_len).map(|tag| tag.to_owned()).collect();
+                        return Self::linearize_sub_evaluator(
+                            fn_map,
+                            params,
+                            settings,
+                            name,
+                            tags,
+                            arg_spec,
+                            arg_slots,
+                            e,
+                            constants,
+                            constant_map,
+                            external_functions,
+                            instr,
+                        );
+                    }
+
                     for (eval_arg, arg_slot) in arg_spec.iter().zip(arg_slots) {
                         params.entry(eval_arg.as_view()).or_default().push(arg_slot);
                     }
@@ -1054,6 +1257,7 @@ impl<'a> AtomView<'a> {
                     let r = e.as_view().linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -1085,6 +1289,7 @@ impl<'a> AtomView<'a> {
                     let e_eval = e.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -1107,6 +1312,7 @@ impl<'a> AtomView<'a> {
                 let b_eval = b.linearize_impl(
                     fn_map,
                     params,
+                    settings,
                     constants,
                     constant_map,
                     external_functions,
@@ -1162,6 +1368,7 @@ impl<'a> AtomView<'a> {
                 let e_eval = e.linearize_impl(
                     fn_map,
                     params,
+                    settings,
                     constants,
                     constant_map,
                     external_functions,
@@ -1179,6 +1386,7 @@ impl<'a> AtomView<'a> {
                     let a = arg.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -1200,6 +1408,7 @@ impl<'a> AtomView<'a> {
                     adds.push(arg.linearize_impl(
                         fn_map,
                         params,
+                        settings,
                         constants,
                         constant_map,
                         external_functions,
@@ -1659,34 +1868,6 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
                 *h
             }
         }
-    }
-}
-
-impl<T> ExpressionEvaluator<T> {
-    #[cfg(feature = "native_code_generation")]
-    pub(super) fn export_external_cpps(&self) -> String {
-        let mut seen = HashSet::default();
-        let mut res = String::new();
-
-        for external in &self.external_fns {
-            if external.constant_index.is_some() {
-                continue;
-            }
-
-            let Some(snippet) = external.cpp() else {
-                continue;
-            };
-
-            if seen.insert(snippet.to_owned()) {
-                res += snippet;
-                if !snippet.ends_with('\n') {
-                    res += "\n";
-                }
-                res += "\n";
-            }
-        }
-
-        res
     }
 }
 
@@ -3680,6 +3861,7 @@ impl<'a> AtomView<'a> {
                     tag_len,
                     args: arg_spec,
                     body: e,
+                    ..
                 }) = fn_map.get(*self)
                 {
                     return {
