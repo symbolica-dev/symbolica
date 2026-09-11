@@ -3401,7 +3401,6 @@ class Expression:
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> MatchIterator:
@@ -3409,7 +3408,7 @@ class Expression:
         Return an iterator over the pattern `self` matching to `lhs`.
         Restrictions on the pattern can be supplied through `cond`.
 
-        The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+        `min_level` and `max_level` specify the inclusive matching bounds.
         The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
         depending on `level_is_tree_depth`.
 
@@ -3433,8 +3432,6 @@ class Expression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -3447,7 +3444,6 @@ class Expression:
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -3472,8 +3468,6 @@ class Expression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -3493,7 +3487,6 @@ class Expression:
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -3531,9 +3524,6 @@ class Expression:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -3556,7 +3546,6 @@ class Expression:
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -3596,9 +3585,6 @@ class Expression:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -4117,7 +4103,6 @@ class Replacement:
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -4140,8 +4125,6 @@ class Replacement:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -4408,7 +4391,6 @@ class HeldExpression:
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -4426,8 +4408,6 @@ class HeldExpression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -5365,7 +5345,6 @@ class Transformer:
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -5404,9 +5383,6 @@ class Transformer:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -5699,7 +5675,6 @@ class Transformer:
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -5717,8 +5692,6 @@ class Transformer:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool

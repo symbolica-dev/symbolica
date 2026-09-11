@@ -289,14 +289,6 @@ impl Replacement {
         self
     }
 
-    /// Specifies the `[min,max]` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
-    /// depending on `level_is_tree_depth`.
-    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
-        self.match_settings.level_range = level_range;
-        self
-    }
-
     /// Set the minimum level at which the pattern is allowed to match.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
@@ -305,11 +297,12 @@ impl Replacement {
         self
     }
 
-    /// Set the maximum level at which the pattern is allowed to match.
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
-    pub fn max_level(mut self, max_level: usize) -> Self {
-        self.match_settings.level_range.1 = Some(max_level);
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.match_settings.level_range.1 = max_level.into();
         self
     }
 
@@ -453,13 +446,6 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         self.match_settings.non_greedy_wildcards = non_greedy_wildcards;
         self
     }
-    /// Specifies the `[min,max]` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
-    /// depending on `level_is_tree_depth`.
-    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
-        self.match_settings.level_range = level_range;
-        self
-    }
 
     /// Set the minimum level at which the pattern is allowed to match.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
@@ -469,11 +455,12 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         self
     }
 
-    /// Set the maximum level at which the pattern is allowed to match.
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
-    pub fn max_level(mut self, max_level: usize) -> Self {
-        self.match_settings.level_range.1 = Some(max_level);
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.match_settings.level_range.1 = max_level.into();
         self
     }
 
@@ -4733,9 +4720,19 @@ impl MatchSettings {
         self
     }
 
-    /// Specify the `[min,max]` level at which the pattern is allowed to match.
-    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
-        self.level_range = level_range;
+    /// Set the inclusive minimum level at which the pattern is allowed to match.
+    /// Level zero is the root. Levels count function nesting unless
+    /// [`Self::level_is_tree_depth`] is enabled.
+    pub fn min_level(mut self, min_level: usize) -> Self {
+        self.level_range.0 = min_level;
+        self
+    }
+
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum. Levels count function nesting unless
+    /// [`Self::level_is_tree_depth`] is enabled.
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.level_range.1 = max_level.into();
         self
     }
 
@@ -6435,7 +6432,7 @@ pub struct PatternAtomTreeIterator<'a, 'b> {
     match_stack: WrappedMatchStack<'a, 'b>,
     tree_pos: Vec<usize>,
     used_flags: Vec<bool>,
-    first_match: bool,
+    has_target: bool,
 }
 
 /// A part of an expression with its position that yields a match.
@@ -6457,36 +6454,43 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
         conditions: Option<&'b Condition<PatternRestriction>>,
         settings: Option<&'b MatchSettings>,
     ) -> PatternAtomTreeIterator<'a, 'b> {
-        let mut it =
-            AtomTreeIterator::new(target, settings.unwrap_or(&DEFAULT_MATCH_SETTINGS).clone());
-        it.next(); // prevent a repeated match attempt on the entire target
+        let settings = settings.unwrap_or(&DEFAULT_MATCH_SETTINGS);
+        let mut it = AtomTreeIterator::new(target, settings.clone());
 
-        let match_stack = WrappedMatchStack::new(
-            conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
-            settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
-        );
+        let match_stack =
+            WrappedMatchStack::new(conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION), settings);
         let mut pattern_iter = AtomMatchIterator::new(pattern);
-        pattern_iter.set_new_target(target, &match_stack);
+        let mut tree_pos = Vec::new();
+        let first_target = if !settings.partial && settings.level_range.0 > 0 {
+            None
+        } else {
+            it.next_into(Some(&mut tree_pos))
+        };
+        if let Some(target) = first_target {
+            pattern_iter.set_new_target(target, &match_stack);
+        }
 
         PatternAtomTreeIterator {
             atom_tree_iterator: it,
             pattern_iter,
             match_stack,
-            tree_pos: Vec::new(),
+            tree_pos,
             used_flags: Vec::new(),
-            first_match: false,
+            has_target: first_target.is_some(),
         }
     }
 
     /// Generate the next match if it exists, with detailed information about the
     /// matched position. Use the iterator [Self::next] to obtain a map of wildcard matches.
     pub fn next_detailed(&mut self) -> Option<PatternMatch<'a, '_>> {
+        if !self.has_target {
+            return None;
+        }
         loop {
             if let Some(used_flags) = self.pattern_iter.next(&mut self.match_stack) {
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
 
-                self.first_match = true;
                 return Some(PatternMatch {
                     position: &self.tree_pos,
                     used_flags: &self.used_flags,
@@ -6496,6 +6500,7 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
             }
 
             if !self.match_stack.settings.partial {
+                self.has_target = false;
                 return None;
             }
 
@@ -6503,6 +6508,7 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
                 self.pattern_iter
                     .set_new_target(cur_target, &self.match_stack);
             } else {
+                self.has_target = false;
                 return None;
             }
         }
@@ -6728,7 +6734,8 @@ impl<'a: 'b, 'b> Iterator for ReplaceIterator<'a, 'b> {
 #[cfg(test)]
 mod test {
     use super::{
-        AtomMatchIterator, DEFAULT_MATCH_SETTINGS, DEFAULT_PATTERN_CONDITION, WrappedMatchStack,
+        AtomMatchIterator, DEFAULT_MATCH_SETTINGS, DEFAULT_PATTERN_CONDITION,
+        PatternAtomTreeIterator, WrappedMatchStack,
     };
     use crate::{
         atom::{Atom, AtomCore, AtomType},
@@ -6903,9 +6910,44 @@ mod test {
         let p = parse!("v1");
         let rhs = parse!("1");
 
-        let r = a.replace(p).level_range((1, Some(1))).with(rhs);
+        let r = a.replace(p).min_level(1).max_level(1).with(rhs);
         let res = parse!("v1*f1(1,f1(v1))");
         assert_eq!(r, res);
+
+        let replacement = Replacement::new(parse!("v1"), parse!("1"))
+            .min_level(1)
+            .max_level(1);
+        assert_eq!(a.replace_multiple([replacement]), res);
+
+        let settings = MatchSettings::new().min_level(1).max_level(1);
+        let count_variables = |settings| {
+            AtomTreeIterator::new(a.as_view(), settings)
+                .filter(|(_, atom)| *atom == parse!("v1").as_view())
+                .count()
+        };
+        assert_eq!(count_variables(settings.clone()), 1);
+        assert_eq!(count_variables(settings.clone().max_level(None)), 2);
+        let pattern = parse!("v1").to_pattern();
+        let mut matches =
+            PatternAtomTreeIterator::new(&pattern, a.as_view(), None, Some(&settings));
+        let first = matches.next_detailed().unwrap();
+        assert!(!first.position.is_empty());
+        assert_eq!(first.target, parse!("v1").as_view());
+        assert!(matches.next().is_none());
+        let root_pattern = a.to_pattern();
+        assert!(
+            PatternAtomTreeIterator::new(&root_pattern, a.as_view(), None, Some(&settings))
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            a.replace(parse!("v1"))
+                .min_level(1)
+                .max_level(1)
+                .max_level(None)
+                .with(parse!("1")),
+            parse!("v1*f1(1,f1(1))")
+        );
     }
 
     #[test]
