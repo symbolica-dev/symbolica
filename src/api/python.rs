@@ -71,9 +71,7 @@ use crate::{
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
         float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
-        integer::{
-            FromFiniteField, Integer, IntegerRelationError, IntegerRing, MultiPrecisionInteger, Z,
-        },
+        integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,

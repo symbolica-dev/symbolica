@@ -2991,8 +2991,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
         } else if let Ok(num) = ob.extract::<i64>() {
             Ok(ConvertibleToExpression(Atom::num(num).into()))
         } else if let Ok(num) = ob.cast::<PyInt>() {
-            let a = num.to_string();
-            let i = Integer::from(a.parse::<MultiPrecisionInteger>().unwrap());
+            let i = num.extract::<Integer>()?;
             Ok(ConvertibleToExpression(Atom::num(i).into()))
         } else if ob.extract::<PyBackedStr>().is_ok() {
             // disallow direct string conversion

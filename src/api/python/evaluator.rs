@@ -465,7 +465,8 @@ impl PythonExpressionEvaluator {
             .map(|x| x.0.to_double_float())
             .collect::<Vec<_>>();
         let mut out = vec![0f64.into(); self.eval_complex.get_output_len()];
-        eval.evaluate(&inputs, &mut out);
+        eval.try_evaluate(&inputs, &mut out)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(out.into_iter().map(|x| Float::from(x).into()).collect())
     }
 
@@ -490,7 +491,8 @@ impl PythonExpressionEvaluator {
             .collect::<Vec<_>>();
         let mut out =
             vec![Complex::from(DoubleFloat::from(0.)); self.eval_complex.get_output_len()];
-        eval.evaluate(&inputs, &mut out);
+        eval.try_evaluate(&inputs, &mut out)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(out
             .into_iter()
             .map(|x| (Float::from(x.re).into(), Float::from(x.im).into()))
@@ -1007,14 +1009,15 @@ impl PythonExpressionEvaluator {
 
         let eval = self.eval_real.as_mut().unwrap();
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
-            eval.evaluate(
+            eval.try_evaluate(
                 i.as_slice().ok_or_else(|| {
                     exceptions::PyValueError::new_err("Failed to convert input to slice")
                 })?,
                 o.as_slice_mut().ok_or_else(|| {
                     exceptions::PyValueError::new_err("Failed to convert output to slice")
                 })?,
-            );
+            )
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         }
 
         Ok(out.into_pyarray(py))
@@ -1040,7 +1043,7 @@ impl PythonExpressionEvaluator {
     /// inputs: Sequence[float | str | Decimal]
     ///     The input values or batches to evaluate.
     /// decimal_digit_precision: int
-    ///     The decimal precision used for arbitrary-precision evaluation.
+    ///     Positive decimal precision. Invalid precision or input counts raise ValueError.
     #[gen_stub(override_return_type(type_repr = "list[decimal.Decimal]", imports = ("decimal")))]
     fn evaluate_with_prec<'py>(
         &mut self,
@@ -1051,7 +1054,8 @@ impl PythonExpressionEvaluator {
             return self.evaluate_double_float(inputs);
         }
 
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
 
         if self.rational_constants.iter().any(|c| !c.is_real()) {
             return Err(exceptions::PyValueError::new_err(
@@ -1059,7 +1063,11 @@ impl PythonExpressionEvaluator {
             ));
         }
 
-        if self.eval_arb_prec.is_none() || self.eval_arb_prec.as_ref().unwrap().0 != prec {
+        if self
+            .eval_arb_prec
+            .as_ref()
+            .is_none_or(|(cached_prec, _)| *cached_prec != prec)
+        {
             self.eval_arb_prec = Some((
                 prec,
                 self.eval_complex
@@ -1073,7 +1081,8 @@ impl PythonExpressionEvaluator {
 
         let inputs = inputs.into_iter().map(|x| x.0).collect::<Vec<_>>();
         let mut out = vec![Float::with_val(prec, 0); self.eval_complex.get_output_len()];
-        eval.evaluate(&inputs, &mut out);
+        eval.try_evaluate(&inputs, &mut out)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(out.into_iter().map(|x| x.into()).collect())
     }
 
@@ -1200,7 +1209,9 @@ impl PythonExpressionEvaluator {
                 )
             };
 
-            self.eval_complex.evaluate(sc, os);
+            self.eval_complex
+                .try_evaluate(sc, os)
+                .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         }
         Ok(out.into_pyarray(py))
     }
@@ -1226,7 +1237,7 @@ impl PythonExpressionEvaluator {
     /// inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]]
     ///     The input values or batches to evaluate.
     /// decimal_digit_precision: int
-    ///     The decimal precision used for arbitrary-precision evaluation.
+    ///     Positive decimal precision. Invalid precision or input counts raise ValueError.
     #[gen_stub(override_return_type(type_repr = "list[tuple[decimal.Decimal, decimal.Decimal]]", imports = ("decimal")))]
     fn evaluate_complex_with_prec<'py>(
         &mut self,
@@ -1237,10 +1248,13 @@ impl PythonExpressionEvaluator {
             return self.evaluate_double_float_complex(inputs);
         }
 
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
 
-        if self.eval_arb_prec_complex.is_none()
-            || self.eval_arb_prec_complex.as_ref().unwrap().0 != prec
+        if self
+            .eval_arb_prec_complex
+            .as_ref()
+            .is_none_or(|(cached_prec, _)| *cached_prec != prec)
         {
             // build a new arb prec evaluator with the desired precision
             self.eval_arb_prec_complex = Some((
@@ -1270,7 +1284,8 @@ impl PythonExpressionEvaluator {
             Complex::new(Float::with_val(prec, 0), Float::with_val(prec, 0));
             self.eval_complex.get_output_len()
         ];
-        eval.evaluate(&inputs, &mut out);
+        eval.try_evaluate(&inputs, &mut out)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(out
             .into_iter()
             .map(|x| (x.re.into(), x.im.into()))

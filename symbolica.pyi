@@ -9943,6 +9943,10 @@ class Evaluator:
         self, inputs: Sequence[float | str | Decimal], decimal_digit_precision: int
     ) -> list[Decimal]:
         """
+        Input counts must match the evaluator. Precision must be positive and
+        fit the supported range; violations raise ValueError. Values outside
+        the u32 argument range raise OverflowError during Python conversion.
+
         Evaluate the expression for a single input. The precision of the input parameters is honored, and
         all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
 
@@ -9963,7 +9967,7 @@ class Evaluator:
         inputs: Sequence[float | str | Decimal]
             The input values or batches to evaluate.
         decimal_digit_precision: int
-            The decimal precision used for arbitrary-precision evaluation.
+            Positive decimal precision. Invalid precision or input counts raise ValueError.
         """
 
     def evaluate_complex(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
@@ -9997,6 +10001,10 @@ class Evaluator:
         decimal_digit_precision: int,
     ) -> list[tuple[Decimal]]:
         """
+        Input counts must match the evaluator. Precision must be positive and
+        fit the supported range; violations raise ValueError. Values outside
+        the u32 argument range raise OverflowError during Python conversion.
+
         Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts.
         The precision of the input parameters is honored, and all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
 
@@ -10018,7 +10026,7 @@ class Evaluator:
         inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]]
             The input values or batches to evaluate.
         decimal_digit_precision: int
-            The decimal precision used for arbitrary-precision evaluation.
+            Positive decimal precision. Invalid precision or input counts raise ValueError.
         """
 
 class CompiledRealEvaluator:
