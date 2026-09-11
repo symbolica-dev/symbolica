@@ -32,7 +32,7 @@ fn create_evaluator_with_1000_variables() {
                     .iter()
                     .enumerate()
                     .map(|(i, x)| (parse!(x), i as f64))
-                    .collect()
+                    .collect::<std::collections::HashMap<_, _>>()
             )
             .unwrap()
     );

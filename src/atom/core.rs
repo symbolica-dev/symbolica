@@ -2,6 +2,8 @@
 //!
 //! See [AtomCore] for the possible operations.
 
+use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
+
 use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
@@ -886,12 +888,12 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x + y");
     /// let x = parse!("x");
     /// let y = parse!("y");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// const_map.insert(x.clone(), 1.0);
     /// const_map.insert(y.clone(), 2.0);
     /// let result = expr.evaluate(&const_map).unwrap();
@@ -899,7 +901,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain + FixedPrecision>(
         &self,
-        map: &HashMap<A, T>,
+        map: &StdHashMap<A, T, impl BuildHasher>,
     ) -> Result<T, EvaluationError> {
         self.as_atom_view()
             .evaluate(map, T::BINARY_PRECISION as u32)
@@ -915,18 +917,18 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("2x");
     /// let x = parse!("x");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// const_map.insert(x.clone(), Float::with_val(200, 3));
     /// let result = expr.evaluate_with_prec(&const_map, 200).unwrap();
     /// assert_eq!(result, Float::with_val(200, 6));
     /// ```
     fn evaluate_with_prec<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        map: &HashMap<A, T>,
+        map: &StdHashMap<A, T, impl BuildHasher>,
         binary_prec: u32,
     ) -> Result<T, EvaluationError> {
         self.as_atom_view().evaluate(map, binary_prec)
@@ -940,11 +942,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("1/3*x^2 + 2");
     /// let x = parse!("x");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// let r = Zp::new(5);
     /// const_map.insert(x.clone(), r.nth(3.into()));
     /// let result = expr.evaluate_in_ring(&const_map, &r).unwrap();
@@ -952,7 +954,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn evaluate_in_ring<A: AtomCore + KeyLookup, R: ConvertToRing>(
         &self,
-        map: &HashMap<A, R::Element>,
+        map: &StdHashMap<A, R::Element, impl BuildHasher>,
         ring: &R,
     ) -> Result<R::Element, EvaluationError> {
         self.as_atom_view().evaluate_in_ring(map, ring)
