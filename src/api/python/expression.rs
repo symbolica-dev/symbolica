@@ -4591,6 +4591,39 @@ impl PythonExpression {
         self.expr.sqrt().into()
     }
 
+    /// Construct the root with index `index` of the polynomial represented by
+    /// this expression. If `variable` is provided, explicitly select it as the
+    /// polynomial variable.
+    ///
+    /// Examples
+    /// --------
+    /// >>> E("x^3-1").root(1) == E("root(x^3-1,1)")
+    /// True
+    ///
+    /// If the polynomial contains parameters, explicitly select the polynomial
+    /// variable:
+    /// >>> x = E("x")
+    /// >>> E("x^2-a").root(1, x) == E("root(x^2-a,x,1)")
+    /// True
+    #[pyo3(signature = (index, variable = None))]
+    pub fn root(
+        &self,
+        index: usize,
+        variable: Option<ConvertibleToExpression>,
+    ) -> PythonExpression {
+        if let Some(variable) = variable {
+            crate::transcendental::root()
+                .call((
+                    self.expr.as_view(),
+                    variable.to_expression().expr.as_view(),
+                    index,
+                ))
+                .into()
+        } else {
+            self.expr.root(index).into()
+        }
+    }
+
     /// Compute the absolute value of the expression.
     pub fn abs(&self) -> PythonExpression {
         self.expr.abs().into()

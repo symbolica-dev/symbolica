@@ -60,7 +60,7 @@ use crate::{
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
     tensors::matrix::{Matrix, MatrixError},
-    transcendental::TranscendentalFunctions,
+    transcendental::{TranscendentalFunctions, root_var},
 };
 
 use super::{
@@ -143,6 +143,9 @@ pub struct GroebnerBasis<R: Field, E: Exponent, O: MonomialOrder> {
 pub struct PolynomialSolution<R: Ring> {
     field: AlgebraicExtension<R>,
     values: HashMap<PolyVariable, AlgebraicNumber<R>>,
+    // Preserve the minimal expression found when a value is introduced,
+    // before later adjunctions embed it into a potentially much larger field.
+    atom_values: HashMap<PolyVariable, Atom>,
 }
 
 impl<R: Ring> PolynomialSolution<R> {
@@ -181,7 +184,15 @@ impl PolynomialSolution<RationalField> {
     pub fn to_atom_map(&self) -> Result<HashMap<PolyVariable, Atom>, String> {
         self.values
             .iter()
-            .map(|(variable, value)| Ok((variable.clone(), self.field.try_to_atom(value)?)))
+            .map(|(variable, value)| {
+                Ok((
+                    variable.clone(),
+                    self.atom_values
+                        .get(variable)
+                        .cloned()
+                        .unwrap_or_else(|| self.field.element_to_atom_simplified(value)),
+                ))
+            })
             .collect()
     }
 }
@@ -430,7 +441,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
     fn primitive_atom(&self, conjugates: &[usize]) -> Atom {
         match &self.construction {
             ParametricExtensionConstruction::Primitive => {
-                let root_variable: Atom = crate::symbol!("symbolica::root::z").into();
+                let root_variable: Atom = root_var().into();
                 let mut defining_polynomial = Atom::Zero;
                 for term in self.polynomial() {
                     let coefficient = term.coefficient.to_expression();
@@ -452,7 +463,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                     .split_last()
                     .expect("An adjoined extension must have a conjugate path");
                 let base_generator = base.primitive_atom(base_conjugates);
-                let root_variable: Atom = crate::symbol!("symbolica::root::z").into();
+                let root_variable: Atom = root_var().into();
                 let mut defining_polynomial = Atom::Zero;
                 for term in polynomial {
                     let coefficient =
@@ -643,6 +654,7 @@ impl<E: PositiveExponent> ParametricSolution<E> {
         Ok(PolynomialSolution {
             field,
             values: solution_values,
+            atom_values: HashMap::default(),
         })
     }
 
@@ -1574,13 +1586,15 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
     ) -> PolynomialSolution<RationalField> {
         let extension = AlgebraicExtension::new_with_embedding(polynomial, embedding);
         let new_variable = solution.field.get_new_var();
-        let (field, old_generator, new_generator) = solution
+        let (field, old_generator, new_generator, new_generator_field) = solution
             .field
-            .adjoin_with_embedding(&extension, Some(new_variable));
+            .adjoin_with_embedding_and_generator_field(&extension, Some(new_variable));
+        let atom = new_generator_field.element_to_atom(&new_generator_field.generator());
         for value in solution.values.values_mut() {
             *value = Self::transport_element(value, &field, &old_generator);
         }
         solution.field = field;
+        solution.atom_values.insert(target.clone(), atom);
         solution.values.insert(target, new_generator);
         solution
     }
@@ -1662,8 +1676,14 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                 let field = AlgebraicExtension::trivial(Q);
                 let root = Q.neg(&Q.div(&factor.get_constant(), &factor.lcoeff()));
                 let mut values = HashMap::default();
-                values.insert(variables[last].clone(), field.constant(root));
-                branches.push(PolynomialSolution { field, values });
+                values.insert(variables[last].clone(), field.constant(root.clone()));
+                let mut atom_values = HashMap::default();
+                atom_values.insert(variables[last].clone(), Atom::num(root));
+                branches.push(PolynomialSolution {
+                    field,
+                    values,
+                    atom_values,
+                });
                 continue;
             }
 
@@ -1673,7 +1693,16 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                 let root = field.generator();
                 let mut values = HashMap::default();
                 values.insert(variables[last].clone(), root);
-                branches.push(PolynomialSolution { field, values });
+                let mut atom_values = HashMap::default();
+                atom_values.insert(
+                    variables[last].clone(),
+                    field.element_to_atom(values.get(&variables[last]).unwrap()),
+                );
+                branches.push(PolynomialSolution {
+                    field,
+                    values,
+                    atom_values,
+                });
             }
         }
 
@@ -1721,7 +1750,9 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                             let root = branch
                                 .field
                                 .neg(&branch.field.div(&factor.get_constant(), &factor.lcoeff()));
+                            let atom = branch.field.element_to_atom_simplified(&root);
                             let mut child = branch.clone();
+                            child.atom_values.insert(variables[target].clone(), atom);
                             child.values.insert(variables[target].clone(), root);
                             children.push(child);
                             continue;
@@ -2732,6 +2763,8 @@ mod test {
         let solutions = atom_solutions(GroebnerBasis::new(&ideal, false).solve().unwrap());
 
         assert_eq!(solutions.len(), 4);
+        let sqrt_two = parse!("2^(1/2)");
+        let negative_sqrt_two = parse!("-2^(1/2)");
         for solution in solutions {
             let x_value = solution.get(&x).unwrap();
             let y_value = solution.get(&y).unwrap();
@@ -2745,6 +2778,10 @@ mod test {
             assert_algebraic_zero(x_value.clone() - y_value.clone() - z_value.clone());
             assert_algebraic_zero(y_value.clone().pow(Atom::num(2)) - z_value.clone());
             assert_algebraic_zero(z_value.clone().pow(Atom::num(2)) - Atom::num(2));
+            assert!(
+                z_value == &sqrt_two || z_value == &negative_sqrt_two,
+                "solve should simplify algebraic-number output, got {z_value}"
+            );
         }
     }
 
@@ -3256,8 +3293,9 @@ mod test {
         let y = PolyVariable::from(symbol!("y"));
         assert_eq!(solutions.len(), 3);
         for solution in solutions {
+            let x_value = solution.get(&x).unwrap();
             let y_value = solution.get(&y).unwrap();
-            assert_eq!(solution.get(&x), Some(&y_value.clone().pow(Atom::num(2))));
+            assert_algebraic_zero(x_value.clone() - y_value.clone().pow(Atom::num(2)));
         }
     }
 

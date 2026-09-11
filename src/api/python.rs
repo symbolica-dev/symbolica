@@ -105,6 +105,7 @@ use crate::{
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
+    transcendental::TranscendentalFunctions,
     transformer::{StatsOptions, Transformer, TransformerError, TransformerState},
     try_parse, warn,
 };
