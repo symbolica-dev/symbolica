@@ -2743,9 +2743,22 @@ impl PythonCondition {
         format!("{}", self.condition)
     }
 
+    /// Render algebraic expressions in the condition using native HTML formatting.
+    pub fn _repr_html_(&self) -> String {
+        if let Some(text) = format_algebraic_condition(&self.condition, &solution::formatted_atom) {
+            solution::inline_html(&text)
+        } else {
+            crate::printer::AnsiHtmlFormatter::escape_html(&self.__str__())
+        }
+    }
+
     /// Evaluate the condition, returning None when its truth is undecidable.
     /// Unbound Transformers require an input and cannot be evaluated here.
     pub fn eval(&self) -> PyResult<Option<bool>> {
+        if let Ok(truth) = algebraic_condition_truth(&self.condition) {
+            return Ok(truth);
+        }
+
         Ok(
             match self
                 .condition
@@ -2761,9 +2774,9 @@ impl PythonCondition {
 
     /// Convert a decidable condition to bool; raise TypeError for unknown truth.
     pub fn __bool__(&self) -> PyResult<bool> {
-        self.eval()?.ok_or_else(|| exceptions::PyTypeError::new_err(
-            "The truth of this Condition is undecidable. Pass it to solve, replace, or Transformer.if_then; use &, |, and ~ to combine Conditions.",
-        ))
+        self.eval()?.ok_or_else(|| {
+            exceptions::PyTypeError::new_err("The truth of this Condition is undecidable.")
+        })
     }
 
     /// Create a new pattern restriction that is the logical 'and' operation between two restrictions (i.e., both should hold).
@@ -2904,6 +2917,186 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToPatternRestriction {
 
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(ConvertibleToPatternRestriction = PythonPatternRestriction | PythonCondition);
+
+/// Read concrete operands without admitting pattern predicates into equation solving.
+fn algebraic_operands(relation: &Relation) -> Option<(Atom, Atom)> {
+    let (a, b) = match relation {
+        Relation::Eq(a, b)
+        | Relation::Ne(a, b)
+        | Relation::Lt(a, b)
+        | Relation::Le(a, b)
+        | Relation::Gt(a, b)
+        | Relation::Ge(a, b) => (a, b),
+        _ => return None,
+    };
+    let a = a.to_atom().ok()?;
+    let b = b.to_atom().ok()?;
+    if [&a, &b].iter().any(|a| {
+        a.get_all_symbols(true)
+            .iter()
+            .any(|s| s.get_wildcard_level() > 0)
+    }) {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Evaluate concrete algebraic comparisons while retaining operand definedness.
+fn algebraic_condition_truth(condition: &Condition<Relation>) -> Result<Option<bool>, ()> {
+    let and = |a, b| match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    };
+    Ok(match condition {
+        Condition::True => Some(true),
+        Condition::False => Some(false),
+        Condition::Not(c) => algebraic_condition_truth(c)?.map(|v| !v),
+        Condition::And(c) => and(
+            algebraic_condition_truth(&c.0)?,
+            algebraic_condition_truth(&c.1)?,
+        ),
+        Condition::Or(c) => match (
+            algebraic_condition_truth(&c.0)?,
+            algebraic_condition_truth(&c.1)?,
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        Condition::Yield(relation) => {
+            let (a, b) = algebraic_operands(relation).ok_or(())?;
+            let mut defined = Some(true);
+            for denominator in [&a, &b]
+                .iter()
+                .filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view()))
+            {
+                let nonzero = crate::id::exact_numeric_value(denominator.as_view())
+                    .map(|v| !v.re.is_zero() || !v.im.is_zero());
+                defined = and(defined, nonzero);
+            }
+            let difference = a - b;
+            let truth = if !difference.is_finite() {
+                Some(false)
+            } else if let Some(value) = crate::id::exact_numeric_value(difference.as_view()) {
+                let zero = Rational::from(0);
+                match relation {
+                    Relation::Eq(..) => Some(value.re == zero && value.im == zero),
+                    Relation::Ne(..) => Some(value.re != zero || value.im != zero),
+                    _ if value.im != zero => None,
+                    Relation::Lt(..) => Some(value.re < zero),
+                    Relation::Le(..) => Some(value.re <= zero),
+                    Relation::Gt(..) => Some(value.re > zero),
+                    Relation::Ge(..) => Some(value.re >= zero),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            };
+            and(defined, truth)
+        }
+    })
+}
+
+fn format_algebraic_condition(
+    condition: &Condition<Relation>,
+    atom: &impl Fn(&Atom) -> String,
+) -> Option<String> {
+    Some(match condition {
+        Condition::True => "True".into(),
+        Condition::False => "False".into(),
+        Condition::And(c) => format!(
+            "({} & {})",
+            format_algebraic_condition(&c.0, atom)?,
+            format_algebraic_condition(&c.1, atom)?
+        ),
+        Condition::Or(c) => format!(
+            "({} | {})",
+            format_algebraic_condition(&c.0, atom)?,
+            format_algebraic_condition(&c.1, atom)?
+        ),
+        Condition::Not(c) => format!("~({})", format_algebraic_condition(c, atom)?),
+        Condition::Yield(relation) => {
+            let (a, b) = algebraic_operands(relation)?;
+            let guards = [&a, &b]
+                .iter()
+                .filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view()))
+                .collect::<Vec<_>>();
+            let op = match relation {
+                Relation::Eq(..) => "=",
+                Relation::Ne(..) => "!=",
+                Relation::Lt(..) => "<",
+                Relation::Le(..) => "<=",
+                Relation::Gt(..) => ">",
+                Relation::Ge(..) => ">=",
+                _ => unreachable!(),
+            };
+            let mut text = format!("{} {op} 0", atom(&(a - b)));
+            for guard in guards {
+                text.push_str(&format!(" & {} != 0", atom(&guard)));
+            }
+            text
+        }
+    })
+}
+
+/// Equations and poles retained before comparing their left and right sides.
+pub struct ConvertibleToSolveInput {
+    equations: Vec<Atom>,
+    denominators: Vec<Atom>,
+}
+impl ConvertibleToSolveInput {
+    fn append_condition(&mut self, condition: &Condition<Relation>) -> PyResult<()> {
+        match condition {
+            Condition::True => {},
+            Condition::False => self.equations.push(Atom::num(1)),
+            Condition::And(c) => { self.append_condition(&c.0)?; self.append_condition(&c.1)?; },
+            Condition::Yield(relation @ Relation::Eq(..)) => {
+                let (a,b) = algebraic_operands(relation).ok_or_else(|| exceptions::PyTypeError::new_err("Solve requires concrete equations without wildcards or pattern predicates"))?;
+                self.denominators.extend([&a,&b].iter().filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view())));
+                self.equations.push(a-b);
+            }
+            _ => return Err(solution::solve_error(crate::solve::SolveError::UnsupportedProblem("solve accepts equalities only; inequalities and general Boolean combinations are not supported".into()))),
+        }
+        Ok(())
+    }
+}
+impl<'py> FromPyObject<'_, 'py> for ConvertibleToSolveInput {
+    type Error = PyErr;
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        let mut input = Self {
+            equations: Vec::new(),
+            denominators: Vec::new(),
+        };
+        // bool is an integer subtype, but True imposes no equation.
+        if ob.is_instance_of::<pyo3::types::PyBool>() {
+            if !ob.extract::<bool>()? {
+                input.equations.push(Atom::num(1));
+            }
+        } else if let Ok(c) = ob.extract::<PythonCondition>() {
+            input.append_condition(&c.condition)?;
+        } else if let Ok(e) = ob.extract::<ConvertibleToExpression>() {
+            input.equations.push(e.to_expression().expr);
+        } else if let Ok(items) = ob.extract::<Vec<Bound<'py, PyAny>>>() {
+            for item in items {
+                let item = item.extract::<ConvertibleToSolveInput>()?;
+                input.equations.extend(item.equations);
+                input.denominators.extend(item.denominators);
+            }
+        } else {
+            return Err(exceptions::PyTypeError::new_err(
+                "Expected an equation, expression, bool, or sequence",
+            ));
+        }
+        Ok(input)
+    }
+}
+#[cfg(feature = "python_stubgen")]
+struct SolveScalarStub;
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(SolveScalarStub = ConvertibleToExpression | PythonCondition | bool);
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(ConvertibleToSolveInput = SolveScalarStub | Vec<SolveScalarStub>);
 
 impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
     type Error = PyErr;
@@ -8051,116 +8244,116 @@ impl PythonExpression {
         Ok(res.into())
     }
 
-    /// Find the exact solutions of a system of equations.
+    /// Find exact solutions to an equation or a system of equations.
     ///
-    /// Write every equation as an expression equal to zero. For example, pass
-    /// `x + y - 3` to represent `x + y = 3`. The result contains one `Solution`
-    /// for each solution branch. A solution behaves like a read-only dictionary,
-    /// so values can be accessed with `solution[x]` or copied with
-    /// `solution.as_dict()`.
-    ///
-    /// The default domain is `Complexes`. Pass `Integers`, `Rationals`, or
-    /// `Reals` to keep only solutions in that domain. An empty list means that
-    /// the system has no solutions in the requested domain.
-    ///
-    /// Underdetermined systems return families of solutions. Inspect
-    /// `solution.free_variables()` to see which variables remain free and
-    /// `solution.conditions()` for restrictions such as a symbolic denominator
-    /// that must be nonzero. Variables later in `variables` are preferred as
-    /// free inputs when there is a choice.
-    ///
-    /// This method handles exact linear and polynomial systems, including
-    /// symbolic parameters, as well as many rational equations and rational
-    /// powers such as square roots. Use `nsolve` instead when you need a
-    /// numerical root from an initial guess or no exact solution is available.
+    /// An expression represents an equation equal to zero; a list asks for solutions
+    /// that satisfy every equation. The returned SolutionSet contains solution
+    /// branches. Each branch maps solved variables directly to Expressions and may
+    /// include conditions on when those assignments are valid.
     ///
     /// Examples
     /// --------
-    /// >>> from symbolica import Expression, Reals, S
-    /// >>> x, y = S("x", "y")
-    /// >>> solutions = Expression.solve([x+y, y**2-2], [x, y], domain=Reals)
-    /// >>> len(solutions)
+    /// Solve a linear system, then read an individual value or extract a dictionary:
+    ///
+    /// >>> from symbolica import Expression, S, Reals
+    /// >>> x, y, a = S("x", "y", "a")
+    /// >>> result = Expression.solve([x + y - 3, x - y - 1], [x, y])
+    /// >>> result[0][x]
     /// 2
-    /// >>> solutions[0][x] == -solutions[0][y]
+    /// >>> dict(result[0])
+    /// {x: 2, y: 1}
+    ///
+    /// Use ``eq`` to write a right-hand side. Python ``==`` tests equality immediately
+    /// instead of constructing an equation:
+    ///
+    /// >>> Expression.solve(x.eq(2), [x])[0][x]
+    /// 2
+    ///
+    /// Nonlinear systems can have several solutions. Iterate over the result to
+    /// collect them; their order is not guaranteed:
+    ///
+    /// >>> result = Expression.solve([x**2 + y**2 - 5, x*y - 2], [x, y])
+    /// >>> len(result)
+    /// 4
+    /// >>> points = [dict(branch) for branch in result]
+    /// >>> {x: 1, y: 2} in points
     /// True
     ///
-    /// Domain restrictions can remove otherwise valid solutions:
+    /// Solutions are complex by default. Choose Reals to keep only real solutions:
     ///
-    /// >>> Expression.solve([x**2+1], [x], domain=Reals)
-    /// []
+    /// >>> len(Expression.solve(x**2 + 1, [x]))
+    /// 2
+    /// >>> Expression.solve(x**2 + 1, [x], domain=Reals).is_empty()
+    /// True
+    /// >>> roots = Expression.solve(x**2 - 1, [x], domain=Reals)
+    /// >>> {branch[x] for branch in roots} == {-1, 1}
+    /// True
+    ///
+    /// A branch can describe a whole family. Free variables are omitted from its
+    /// dictionary and are available through ``free_variables()``:
+    ///
+    /// >>> family = Expression.solve(x + y - 1, [x, y])
+    /// >>> dict(family[0])
+    /// {x: 1-y}
+    /// >>> family[0].free_variables()
+    /// [y]
+    ///
+    /// Symbols outside the variables list act as parameters. A symbolic answer may
+    /// exclude some parameter values; inspect ``coverage_guard`` before substituting
+    /// values. Excluded values may need to be solved separately:
+    ///
+    /// >>> result = Expression.solve(a*x - 1, [x])
+    /// >>> result[0][x]
+    /// 1/a
+    /// >>> print(result.coverage_guard)
+    /// a != 0
+    ///
+    /// Other restrictions stay with the branch. For example, a denominator must
+    /// remain nonzero even when it no longer appears in the answer:
+    ///
+    /// >>> branch = Expression.solve(x/y, [x, y])[0]
+    /// >>> dict(branch)
+    /// {x: 0}
+    /// >>> print(branch.conditions()[0])
+    /// y != 0
     ///
     /// Parameters
     /// ----------
-    /// system: Sequence[Expression]
-    ///     Left-hand sides of equations, each understood to equal zero.
+    /// system: SolveInput | Sequence[SolveInput]
+    ///     Equation or equations to satisfy, written as expressions equal to zero
+    ///     or using ``eq``. Supports polynomial and rational equations and some
+    ///     equations involving rational powers. Inequalities and general Boolean
+    ///     combinations are not supported. True and an empty list impose no
+    ///     constraints; False has no solutions. Use exact coefficients, such as
+    ///     ``Expression.parse("1/10")`` instead of the Python float ``0.1``.
     /// variables: Sequence[Expression]
-    ///     Variables whose values should be returned. In an underdetermined
-    ///     system, variables later in this list are preferred as free inputs.
-    /// warn_if_underdetermined: bool
-    ///     Emit a warning when the returned solutions contain free variables.
+    ///     Variables to solve for. Earlier variables are solved for preferentially,
+    ///     leaving later ones free when possible. For ``x + y = 1``, ``[x, y]``
+    ///     gives x = 1 - y; ``[y, x]`` gives y = 1 - x. Symbols outside this list
+    ///     are parameters.
     /// domain: SolveDomain | None
-    ///     Keep only solutions in this domain. Defaults to `Complexes`.
-    ///
-    /// Returns
-    /// -------
-    /// list[Solution]
-    ///     Exact solution branches. Returns an empty list if there are none in
-    ///     the requested domain.
-    #[pyo3(signature = (system, variables, warn_if_underdetermined = true, domain = None))]
+    ///     Domain of variables and parameters: Complexes (default), Reals,
+    ///     Rationals, or Integers. Symbol attributes, such as ``is_integer=True``,
+    ///     can restrict individual symbols further. For example, Reals also treats
+    ///     parameters as real for this solve, without changing their attributes.
+    ///     Any domain restrictions that cannot be resolved remain in
+    ///     ``branch.conditions()``.
+    #[pyo3(signature = (system, variables, *, domain = None))]
     #[classmethod]
     pub fn solve(
         _cls: &Bound<'_, PyType>,
-        system: Vec<ConvertibleToExpression>,
+        system: ConvertibleToSolveInput,
         variables: Vec<PythonExpression>,
-        warn_if_underdetermined: bool,
         domain: Option<PythonSolveDomain>,
-    ) -> PyResult<Vec<PythonSolution>> {
-        let system = system
-            .into_iter()
-            .map(|expression| expression.to_expression().expr)
-            .collect::<Vec<_>>();
-        let variables = variables
-            .into_iter()
-            .map(|variable| variable.expr)
-            .collect::<Vec<_>>();
-
+    ) -> PyResult<PythonSolutionSet> {
         let domain = domain.unwrap_or(PythonSolveDomain::Complexes).into();
-
-        match AtomView::solve(&system).over(domain).wrt(&variables) {
-            Ok(solutions) => {
-                if warn_if_underdetermined && !solutions.is_empty() {
-                    let input_variables = variables
-                        .iter()
-                        .filter_map(|variable| {
-                            let polynomial_variable =
-                                PolyVariable::try_from(variable.clone()).ok()?;
-                            solutions
-                                .iter()
-                                .all(|solution| {
-                                    solution.get(&polynomial_variable) == Some(variable)
-                                })
-                                .then(|| variable.to_string())
-                        })
-                        .collect::<Vec<_>>();
-
-                    if !input_variables.is_empty() {
-                        warn!(
-                            "The system is underdetermined (dimension {}); treating {} as input {}",
-                            input_variables.len(),
-                            input_variables.join(", "),
-                            if input_variables.len() == 1 {
-                                "variable"
-                            } else {
-                                "variables"
-                            }
-                        );
-                    }
-                }
-
-                Ok(solutions.into_iter().map(Into::into).collect())
-            }
-            Err(error) => Err(exceptions::PyValueError::new_err(error.to_string())),
-        }
+        let mut builder = Atom::solve(&system.equations).over(domain);
+        builder.denominators = system.denominators;
+        Ok(PythonSolutionSet {
+            set: builder
+                .wrt(&variables.into_iter().map(|v| v.expr).collect::<Vec<_>>())
+                .map_err(solution::solve_error)?,
+        })
     }
 
     /// Find the root of an expression in `x` numerically over the reals using Newton's method.
@@ -8321,16 +8514,77 @@ impl PythonExpression {
     /// constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
     ///     The constant substitutions applied during evaluation.
     /// decimal_digit_precision: int | None
-    ///     If omitted, uses the f64 backend and returns a complex. If specified,
-    ///     uses arbitrary precision and returns a ComplexFloat.
+    ///     If omitted, evaluates at double precision and returns a complex.
+    ///     If specified, sets the working precision in decimal digits and returns a ComplexFloat.
     #[pyo3(signature = (constants, decimal_digit_precision = None))]
     #[gen_stub(override_return_type(type_repr = "complex | ComplexFloat"))]
     pub fn evaluate(
         &self,
         py: Python,
-        constants: HashMap<PythonExpression, PythonEvaluationValue>,
+        mut constants: HashMap<PythonExpression, PythonEvaluationValue>,
         decimal_digit_precision: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
+        // A root's polynomial is an unevaluated tag. Specialize its parameters
+        // before numerical root isolation, preserving the bound polynomial variable.
+        // Cache the value under the original root so other map keys keep their meaning.
+        if self.expr.contains_symbol(crate::transcendental::root()) && !constants.is_empty() {
+            let root_variable = crate::transcendental::root_var();
+            let replacements: Vec<_> = constants
+                .iter()
+                .filter(|(k, v)| {
+                    !k.expr.contains_symbol(root_variable)
+                        && crate::domains::float::SingleFloat::is_finite(&v.0.0)
+                })
+                .map(|(k, v)| {
+                    (
+                        k.expr.clone(),
+                        Atom::num(Complex::new(v.0.0.re.to_rational(), v.0.0.im.to_rational())),
+                    )
+                })
+                .collect();
+            let mut roots = Vec::new();
+            self.expr.visitor(&mut |atom| {
+                if constants.keys().any(|k| k.expr.as_view() == atom) {
+                    return false;
+                }
+                if let AtomView::Fun(f) = atom
+                    && f.get_symbol() == crate::transcendental::root()
+                    && replacements
+                        .iter()
+                        .any(|(key, _)| atom.contains(key.as_view()))
+                    && !roots.contains(&atom.to_owned())
+                {
+                    roots.push(atom.to_owned());
+                }
+                true
+            });
+            let prec = match decimal_digit_precision {
+                Some(digits) => Float::decimal_digits_to_bits(digits as f64)
+                    .map_err(exceptions::PyValueError::new_err)?,
+                None => 53,
+            };
+            for root in roots {
+                let specialized = root.as_view().replace_map_bottom_up(
+                    |atom, _, out| {
+                        if let Some((_, value)) =
+                            replacements.iter().find(|(key, _)| key.as_view() == atom)
+                        {
+                            **out = value.clone();
+                        }
+                    },
+                    true,
+                );
+                let empty: HashMap<Atom, Complex<Float>> = HashMap::default();
+                // Leave failures to normal evaluation: this root may belong to
+                // an unselected branch of `if`, whose arguments are evaluated lazily.
+                if let Ok(value) = specialized.evaluate_with_prec(&empty, prec) {
+                    constants.insert(
+                        root.into(),
+                        PythonEvaluationValue(PythonMultiPrecisionComplex(value)),
+                    );
+                }
+            }
+        }
         let Some(decimal_digit_precision) = decimal_digit_precision else {
             let constants: HashMap<AtomView, Complex<f64>> = constants
                 .iter()

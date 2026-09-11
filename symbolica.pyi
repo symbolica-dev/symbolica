@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal, Sequence, overload
+from typing import Any, Callable, Iterator, Literal, Sequence, Union, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -62,8 +62,8 @@ class Float:
         ----------
         value : Float, int, float, str, Decimal, optional
             Initial value; omitted or None means zero. Strings and Decimal values
-            avoid an intermediate native float. Use a string such as "0.1" when
-            the input should start from decimal notation rather than a rounded float.
+            are rounded directly to the requested binary precision. For decimal
+            input, use a string such as "0.1".
         precision : int, optional
             Working precision in bits. Mutually exclusive with decimal_digits.
         decimal_digits : int, optional
@@ -191,7 +191,7 @@ class Float:
     def __repr__(self) -> str:
         """Return a constructor expression that preserves the value and its precision."""
     def __format__(self, spec: str) -> str:
-        """Format with a Decimal-style specification, applied separately to complex components. An empty specification uses str(self).
+        """Format with a Decimal-style specification. An empty specification uses str(self).
 
         Parameters
         ----------
@@ -206,15 +206,14 @@ class Float:
     def __bool__(self) -> bool:
         """Return False for zero and True otherwise, including NaN."""
     def __copy__(self) -> Float:
-        """Return a copy preserving the value and component precisions."""
+        """Return a copy preserving the value and precision."""
     def __deepcopy__(self, memo: Any) -> Float:
-        """Return a copy preserving the value and component precisions.
+        """Return a copy preserving the value and precision.
 
         Parameters
         ----------
         memo : dict
-            Memo dictionary supplied by copy.deepcopy; accepted but not used for
-            this immutable scalar.
+            Memo dictionary supplied by copy.deepcopy.
         """
     def __eq__(self, other: object) -> bool:
         """Compare numeric values exactly across compatible scalar types; NaN is unequal to every value.
@@ -282,8 +281,7 @@ class Float:
         Parameters
         ----------
         exponent : Float, int, float or Decimal
-            Numeric exponent. Integer powers with ** may be negative; powf accepts
-            numeric exponents but not strings.
+            Numeric exponent. Use ** for signed integer powers.
         modulo : None, optional
             Must be None. Three-argument modular exponentiation is unsupported.
         """
@@ -481,7 +479,7 @@ class Float:
         """Return the inverse hyperbolic tangent. Inputs outside [-1, 1] yield NaN; +/-1 yield signed infinity."""
     @staticmethod
     def pi(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
-        """Construct pi with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+        """Construct pi with precision in bits or decimal_digits (default: 53 bits).
 
         Parameters
         ----------
@@ -495,7 +493,7 @@ class Float:
         """
     @staticmethod
     def e(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
-        """Construct Euler's number e with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+        """Construct Euler's number e with precision in bits or decimal_digits (default: 53 bits).
 
         Parameters
         ----------
@@ -509,7 +507,7 @@ class Float:
         """
     @staticmethod
     def euler(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
-        """Construct the Euler-Mascheroni constant with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+        """Construct the Euler-Mascheroni constant with precision in bits or decimal_digits (default: 53 bits).
 
         Parameters
         ----------
@@ -537,7 +535,7 @@ class Float:
         """
     @staticmethod
     def phi(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
-        """Construct the golden ratio (1+sqrt(5))/2 with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+        """Construct the golden ratio (1+sqrt(5))/2 with precision in bits or decimal_digits (default: 53 bits).
 
         Parameters
         ----------
@@ -579,9 +577,9 @@ class Float:
         """
     @staticmethod
     def i() -> Float | None:
-        """Return None: the imaginary unit is not real. Use ComplexFloat.i() instead."""
+        """Return None. Construct the imaginary unit with ComplexFloat.i()."""
     def conjugate(self) -> Float:
-        """Return the complex conjugate; a real Float is unchanged."""
+        """Return a copy with the same value and precision."""
     def to_f64(self) -> float:
         """Convert to a native binary64 float; alias for float(self). Precision can be lost and overflow yields infinity."""
     def round_to_nearest_integer(self) -> int:
@@ -593,11 +591,11 @@ class Float:
     def neg(self) -> Float:
         """Return the additive inverse, equivalent to -self."""
     def zero(self) -> Float:
-        """Return zero at this value's precision, preserving component precisions."""
+        """Return zero at this value's precision."""
     def one(self) -> Float:
-        """Return one at this value's precision, preserving component precisions."""
+        """Return one at this value's precision."""
     def nan(self) -> Float:
-        """Return NaN at this value's precision; both complex components become NaN."""
+        """Return NaN at this value's precision."""
     def inv(self) -> Float:
         """Return 1/self. Zero raises ZeroDivisionError."""
     def norm(self) -> Float:
@@ -605,9 +603,9 @@ class Float:
     def is_zero(self) -> bool:
         """Return whether the value is zero; signed zero also counts as zero."""
     def is_one(self) -> bool:
-        """Return whether the value equals one (1+0j for ComplexFloat)."""
+        """Return whether the value equals one."""
     def is_fully_zero(self) -> bool:
-        """Return whether the value is exactly zero in every component."""
+        """Return whether the value is exactly zero."""
     def fixed_precision(self) -> bool:
         """Return False: arithmetic dynamically tracks precision for these scalar types."""
     def get_precision(self) -> int:
@@ -645,8 +643,7 @@ class Float:
         """Sample uniformly from [0, 1) using the full working precision.
 
         rng must supply getrandbits(bits); omitted or None uses Python's random
-        module. Pass random.Random(seed) for reproducibility. Complex samples have
-        zero imaginary part and preserve the receiver's component precisions.
+        module. Pass random.Random(seed) for reproducibility.
 
         Parameters
         ----------
@@ -656,13 +653,12 @@ class Float:
             random.Random(seed) for reproducible samples.
         """
     def set_from(self, other: Float | int | float | str | Decimal) -> Float:
-        """Return a new value converted from other using constructor precision inference. The immutable receiver is unchanged.
+        """Return a new value converted from other, with precision inferred as in the constructor.
 
         Parameters
         ----------
         other : Float, int, float, str or Decimal
-            Value to copy or convert using constructor precision inference. The
-            receiver is unchanged.
+            Value to copy or convert using constructor precision inference.
         """
     def pow(self, exponent: int) -> Float:
         """Raise to an unsigned 64-bit integer exponent. Negative or out-of-range exponents raise OverflowError; use ** for signed integer powers.
@@ -674,13 +670,12 @@ class Float:
             zero base.
         """
     def powf(self, exponent: Float | int | float | Decimal) -> Float:
-        """Raise to a real numeric exponent with accuracy tracking. Strings are not operands. Zero to a negative power raises ZeroDivisionError; non-real results yield NaN.
+        """Raise to a real numeric exponent with accuracy tracking. Zero to a negative power raises ZeroDivisionError; non-real results yield NaN.
 
         Parameters
         ----------
         exponent : Float, int, float or Decimal
-            Numeric exponent. Integer powers with ** may be negative; powf accepts
-            numeric exponents but not strings.
+            Numeric exponent. Use ** for signed integer powers.
         """
     def atan2(self, x: Float | int | float | Decimal) -> Float:
         """Return the quadrant-aware angle atan2(self, x) in radians in [-pi, pi]. Accepts real numeric operands and preserves signed-zero quadrant conventions.
@@ -692,7 +687,7 @@ class Float:
             x).
         """
     def mul_add(self, a: Float | int | float | Decimal, b: Float | int | float | Decimal) -> Float:
-        """Return self*a+b with accuracy tracking. Accepts numeric operands; this operation does not guarantee fused rounding.
+        """Return self*a+b with accuracy tracking, rounding the multiplication and addition separately.
 
         Parameters
         ----------
@@ -711,12 +706,12 @@ class ComplexFloat:
     Each component tracks its own precision. The precision property reports
     the minimum; real.precision and imag.precision expose each component.
 
-    Arithmetic accepts real and complex numeric operands, but not strings or
-    pairs; construct a ComplexFloat from those first. Accuracy tracking may
-    change component precision. Values are immutable and unhashable. Equality
-    is supported; ordering comparisons raise TypeError. abs(z) and norm()
-    return a real Float. Elementary functions use the principal complex branch;
-    signed zero selects the side of a branch cut where applicable.
+    Arithmetic accepts Float, ComplexFloat, int, float, complex and Decimal
+    operands. Use the constructor to convert strings or (real, imag) pairs.
+    Accuracy tracking may change component precision. Values are immutable and
+    unhashable. Equality is supported; ordering comparisons raise TypeError.
+    abs(z) and norm() return a real Float. Elementary functions use the principal
+    complex branch; signed zero selects the side of a branch cut where applicable.
 
     Use complex(z) for a native complex value, as_tuple() for Float components,
     or to_decimal_tuple() for Decimal components. Decimal conversion is exact
@@ -812,7 +807,7 @@ class ComplexFloat:
     def is_nan(self) -> bool:
         """Return True if either component is NaN."""
     def conjugate(self) -> ComplexFloat:
-        """Return the complex conjugate; a real Float is unchanged."""
+        """Return the complex conjugate, negating the imaginary component."""
     def __str__(self) -> str:
         """Return a decimal display using significant digits appropriate to the precision."""
     def _repr_html_(self) -> str:
@@ -852,8 +847,7 @@ class ComplexFloat:
         Parameters
         ----------
         memo : dict
-            Memo dictionary supplied by copy.deepcopy; accepted but not used for
-            this immutable scalar.
+            Memo dictionary supplied by copy.deepcopy.
         """
     def __eq__(self, other: object) -> bool:
         """Compare numeric values exactly across compatible scalar types; NaN is unequal to every value.
@@ -885,9 +879,8 @@ class ComplexFloat:
         Parameters
         ----------
         exponent : Float, ComplexFloat, int, float, complex or Decimal
-            Numeric exponent. Integer powers with ** may be negative; powf accepts
-            numeric exponents but not strings. Non-integer powers use the principal
-            complex branch.
+            Numeric exponent. Use ** for signed integer powers. Non-integer powers
+            use the principal complex branch.
         modulo : None, optional
             Must be None. Three-argument modular exponentiation is unsupported.
         """
@@ -1212,13 +1205,13 @@ class ComplexFloat:
             random.Random(seed) for reproducible samples.
         """
     def set_from(self, other: ComplexFloat | Float | int | float | str | Decimal | complex | tuple[Float | int | float | str | Decimal, Float | int | float | str | Decimal]) -> ComplexFloat:
-        """Return a new value converted from other using constructor precision inference. The immutable receiver is unchanged.
+        """Return a new value converted from other, with precision inferred as in the constructor.
 
         Parameters
         ----------
         other : Float, ComplexFloat, int, float, complex, str, Decimal or tuple
-            Value to copy or convert using constructor precision inference. The
-            receiver is unchanged. A tuple supplies (real, imag).
+            Value to copy or convert using constructor precision inference.
+            A tuple supplies (real, imag).
         """
     def pow(self, exponent: int) -> ComplexFloat:
         """Raise to an unsigned 64-bit integer exponent. Negative or out-of-range exponents raise OverflowError; use ** for signed integer powers.
@@ -1230,14 +1223,13 @@ class ComplexFloat:
             zero base.
         """
     def powf(self, exponent: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
-        """Raise to a real or complex numeric exponent on the principal branch. Strings and pairs are not operands. Zero to a negative-real or non-real exponent raises ZeroDivisionError.
+        """Raise to a real or complex numeric exponent on the principal branch. Zero to a negative-real or non-real exponent raises ZeroDivisionError.
 
         Parameters
         ----------
         exponent : Float, ComplexFloat, int, float, complex or Decimal
-            Numeric exponent. Integer powers with ** may be negative; powf accepts
-            numeric exponents but not strings. Non-integer powers use the principal
-            complex branch.
+            Numeric exponent. Use ** for signed integer powers. Non-integer powers
+            use the principal complex branch.
         """
     def atan2(self, x: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
         """Return atan(self/x) for complex arguments; two real arguments use the usual quadrant-aware atan2. A zero complex denominator raises ZeroDivisionError.
@@ -1249,7 +1241,7 @@ class ComplexFloat:
             x). For non-real arguments, this is the divisor in atan(self/x).
         """
     def mul_add(self, a: Float | int | float | Decimal | ComplexFloat | complex, b: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
-        """Return self*a+b with accuracy tracking. Accepts numeric operands; this operation does not guarantee fused rounding.
+        """Return self*a+b with accuracy tracking, rounding the multiplication and addition separately.
 
         Parameters
         ----------
@@ -1834,83 +1826,213 @@ Rationals: SolveDomain
 Reals: SolveDomain
 Complexes: SolveDomain
 
+class SolveError(ValueError): ...
+class UnsupportedProblem(SolveError): ...
+class IncompleteCoverage(SolveError): ...
+
+SolveInput = Union[
+    "Expression", "Condition",
+    bool, int, float, complex, Float, ComplexFloat, Decimal,
+]
+
 class SolutionCondition:
-    """A condition under which an exact solution branch is valid."""
-
     @property
-    def kind(self) -> Literal["nonzero", "domain_membership"]:
-        """The condition kind."""
-
+    def kind(self) -> Literal["formula", "domain_membership"]: ...
     @property
-    def expression(self) -> Expression | None:
-        """Expression required to be nonzero for a ``nonzero`` condition."""
-
+    def formula(self) -> Condition | None: ...
     @property
     def variable(self) -> Expression | None:
-        """Variable whose domain membership could not be decided exactly."""
-
+        """The variable restricted by a domain-membership condition, otherwise None."""
     @property
     def value(self) -> Expression | None:
-        """Value whose domain membership could not be decided exactly."""
-
+        """The expression restricted by a domain-membership condition, otherwise None."""
     @property
     def domain(self) -> SolveDomain | None:
-        """Requested domain for a ``domain_membership`` condition."""
-
+        """The required domain for a domain-membership condition, otherwise None."""
     def __repr__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
 
 class Solution:
-    """
-    One branch of an exact solution.
+    """One equality-solution branch: Expression assignments and validity conditions.
 
-    A solution behaves as a read-only mapping from requested variables to
-    exact values and retains free-variable, condition, and domain metadata.
-    """
+    Index or iterate over the mapping to read assigned variables and their values.
+    Use ``free_variables()`` for the family's free coordinates and ``variables``
+    for all requested unknowns. All assignments hold simultaneously, subject to
+    ``conditions()``, which includes the parent set's coverage guard.
 
+    Examples
+    --------
+    >>> from symbolica import Expression, S
+    >>> x, y = S("x", "y")
+    >>> branch = Expression.solve(x + y - 1, [x, y])[0]
+    >>> branch[x] == 1 - y
+    True
+    >>> dict(branch) == {x: 1-y}
+    True
+    >>> branch.free_variables() == [y]
+    True
+    >>> y in branch
+    False
+    """
     def as_dict(self) -> dict[Expression, Expression]:
-        """Convert this branch to a plain dictionary."""
+        """Return assigned variables mapped directly to Expressions.
 
+        Use ``free_variables()`` for free coordinates and ``conditions()`` for the
+        restrictions under which these assignments are valid.
+        """
+    @property
+    def variables(self) -> list[Expression]:
+        """All requested unknowns in coordinate order, including free variables.
+        """
     def free_variables(self) -> list[Expression]:
-        """Variables treated as free inputs on this branch."""
-
+        """Return the unknowns that remain free within this branch.
+        """
     def conditions(self) -> list[SolutionCondition]:
-        """Conditions under which this branch is valid."""
-
+        """Return additional conditions that must hold for this branch to be valid.
+        """
     @property
     def domain(self) -> SolveDomain:
-        """Domain requested for this solve operation."""
-
-    def is_indeterminate(self) -> bool:
-        """Whether this branch has a free variable or unresolved domain membership."""
-
+        """The allowed domain of this branch's unknowns.
+        """
     def is_conditional(self) -> bool:
-        """Whether this branch has any validity conditions."""
+        """Return whether this branch has additional validity conditions.
+        """
+    def is_point(self) -> bool:
+        """Return whether all unknowns have assigned expressions, possibly subject to conditions.
+        """
+    def dimension(self) -> int | None:
+        """Return the number of independent coordinates in this branch, or None if unknown.
+        """
+    def codimension(self) -> int | None:
+        """Return the number of unknowns minus the dimension, or None if unknown.
+        """
+    def keys(self) -> list[Expression]:
+        """Return the assigned variables in coordinate order; free variables are omitted.
+        """
+    def values(self) -> list[Expression]:
+        """Return the assigned Expressions in the same order as ``keys()``.
+        """
+    def items(self) -> list[tuple[Expression, Expression]]:
+        """Return (variable, Expression) pairs, omitting free variables.
+        """
+    def get(self, variable: Expression) -> Expression | None:
+        """Return an assigned Expression, or None for a free or absent variable.
 
-    def is_parametric(self) -> bool:
-        """Whether this branch describes a family with free variables."""
+        Parameters
+        ----------
+        variable: Expression
+            Variable whose assignment to retrieve. ``branch[variable]`` raises
+            KeyError when the variable is free or absent.
+        """
+    def __getitem__(self, variable: Expression) -> Expression:
+        """Retrieve an assigned Expression; raise KeyError for a free or absent variable.
 
-    def is_underdetermined(self) -> bool:
-        """Whether this branch leaves any requested variables free."""
+        Parameters
+        ----------
+        variable: Expression
+            Variable whose assignment to retrieve.
+        """
+    def __contains__(self, variable: Expression) -> bool:
+        """Check whether a variable has an assignment in this branch.
 
-    def rank(self) -> int:
-        """Number of requested variables determined in terms of the free inputs."""
-
-    def dimension(self) -> int:
-        """Dimension of this branch, measured by its free inputs."""
-
-    def keys(self) -> list[Expression]: ...
-    def values(self) -> list[Expression]: ...
-    def items(self) -> list[tuple[Expression, Expression]]: ...
-    def get(self, variable: Expression) -> Expression | None: ...
-    def __getitem__(self, variable: Expression) -> Expression: ...
-    def __contains__(self, variable: Expression) -> bool: ...
-    def __len__(self) -> int: ...
+        Parameters
+        ----------
+        variable: Expression
+            Variable to look up; free variables are not mapping keys.
+        """
+    def __len__(self) -> int:
+        """Count assignments, excluding free variables.
+        """
     def __iter__(self) -> Iterator[Expression]: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def _repr_html_(self) -> str: ...
-    def _repr_latex_(self) -> str: ...
-    def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Display the assignments in IPython.
+
+        Parameters
+        ----------
+        pretty: object
+            IPython's pretty printer.
+        cycle: bool
+            Whether this object is already being displayed.
+        """
+
+class SolutionSet:
+    """Exact solutions returned by ``Expression.solve``.
+
+    Iterate or index this set to get Solution branches. Each branch describes
+    an alternative: a point, or a family of points with free variables.
+    ``len(result)`` counts branches, so a set of length one can still contain
+    infinitely many points. Branch order is not guaranteed.
+
+    For a generic result, the assignments apply where ``coverage_guard`` is true.
+    Solve again after substituting parameter values outside that guard.
+    Use ``dict(result[i])`` or ``result[i].as_dict()`` to extract assignments.
+    Use ``branch.free_variables()`` and ``branch.conditions()`` to inspect a
+    family's free coordinates and validity restrictions.
+
+    Printing a set shows each branch's assignments and restrictions; notebooks
+    display them as aligned equations. A branch with an empty mapping describes
+    a family in which all requested variables are free.
+
+    Examples
+    --------
+    >>> from symbolica import Expression, S, Reals
+    >>> x = S("x")
+    >>> result = Expression.solve(x.eq(2), [x], domain=Reals)
+    >>> print(result)
+    [0] {x = 2}
+    >>> dict(result[0]) == {x: 2}
+    True
+    >>> bool(Expression.solve(x**2 + 1, [x], domain=Reals))
+    False
+    """
+    @property
+    def variables(self) -> list[Expression]:
+        """The unknowns requested in the solve, in the original input order."""
+    @property
+    def parameters(self) -> list[Expression]:
+        """Symbols treated as fixed parameters during the solve."""
+    @property
+    def domain(self) -> SolveDomain:
+        """The solve domain, also used as the default domain of external parameters."""
+    @property
+    def coverage(self) -> Literal["complete", "generic"]:
+        """Whether the represented solutions are complete or generic."""
+    @property
+    def coverage_guard(self) -> Condition:
+        """The condition under which the coverage claim applies."""
+    def dimension(self) -> int | None:
+        """Return the largest branch dimension for fixed external parameter values.
+
+        A finite nonempty collection of points has dimension zero; a free line
+        has dimension one. Returns -1 for a complete empty set, or None if unknown.
+        """
+    def is_empty(self) -> bool:
+        """Return whether there are no solutions.
+
+        Raises IncompleteCoverage if completeness is not established or emptiness
+        depends on unresolved branch conditions. ``bool(result)`` is the opposite
+        of this check; use ``len(result)`` to count represented branches.
+        """
+    def __len__(self) -> int: ...
+    def __bool__(self) -> bool: ...
+    def __getitem__(self, index: int) -> Solution: ...
+    def __iter__(self) -> Iterator[Solution]: ...
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Display assignments using IPython's pretty printer.
+
+        Parameters
+        ----------
+        pretty: Any
+            IPython's pretty printer.
+        cycle: bool
+            Whether this object is already being displayed.
+        """
 
 class PrintMode(Enum):
     """Specifies the print mode."""
@@ -4906,50 +5028,103 @@ class Expression:
 
     @classmethod
     def solve(
-        _cls,
-        system: Sequence[Expression],
-        variables: Sequence[Expression],
-        warn_if_underdetermined: bool = True,
+        _cls, system: SolveInput | Sequence[SolveInput], variables: Sequence[Expression], *,
         domain: SolveDomain | None = None,
-    ) -> list[Solution]:
-        """
-        Solve a system exactly in the requested variables.
+    ) -> SolutionSet:
+        """Find exact solutions to an equation or a system of equations.
 
-        Linear systems use the linear-system solver. Polynomial nonlinear
-        systems over the rationals or rational functions in symbolic parameters
-        use a grevlex Gröbner basis, FGLM conversion to lex, and exact algebraic
-        roots. Rational powers such as ``sqrt(x+3)`` are polynomialized using
-        auxiliary variables, after which solutions on non-principal branches
-        are filtered out. For positive-dimensional systems, a maximal viable
-        set of requested variables is used as input. Rational denominators are
-        cleared and their nonvanishing requirements are retained as solution
-        conditions.
+        An expression represents an equation equal to zero; a list asks for solutions
+        that satisfy every equation. The returned SolutionSet contains solution
+        branches. Each branch maps solved variables directly to Expressions and may
+        include conditions on when those assignments are valid.
 
         Examples
         --------
-        >>> from symbolica import Expression, S
-        >>> x, y = S("x", "y")
-        >>> solutions = Expression.solve([x+y, y**2-2], [x, y])
-        >>> len(solutions)
+        Solve a linear system, then read an individual value or extract a dictionary:
+
+        >>> from symbolica import Expression, S, Reals
+        >>> x, y, a = S("x", "y", "a")
+        >>> result = Expression.solve([x + y - 3, x - y - 1], [x, y])
+        >>> result[0][x]
         2
+        >>> dict(result[0])
+        {x: 2, y: 1}
+
+        Use ``eq`` to write a right-hand side. Python ``==`` tests equality immediately
+        instead of constructing an equation:
+
+        >>> Expression.solve(x.eq(2), [x])[0][x]
+        2
+
+        Nonlinear systems can have several solutions. Iterate over the result to
+        collect them; their order is not guaranteed:
+
+        >>> result = Expression.solve([x**2 + y**2 - 5, x*y - 2], [x, y])
+        >>> len(result)
+        4
+        >>> points = [dict(branch) for branch in result]
+        >>> {x: 1, y: 2} in points
+        True
+
+        Solutions are complex by default. Choose Reals to keep only real solutions:
+
+        >>> len(Expression.solve(x**2 + 1, [x]))
+        2
+        >>> Expression.solve(x**2 + 1, [x], domain=Reals).is_empty()
+        True
+        >>> roots = Expression.solve(x**2 - 1, [x], domain=Reals)
+        >>> {branch[x] for branch in roots} == {-1, 1}
+        True
+
+        A branch can describe a whole family. Free variables are omitted from its
+        dictionary and are available through ``free_variables()``:
+
+        >>> family = Expression.solve(x + y - 1, [x, y])
+        >>> dict(family[0])
+        {x: 1-y}
+        >>> family[0].free_variables()
+        [y]
+
+        Symbols outside the variables list act as parameters. A symbolic answer may
+        exclude some parameter values; inspect ``coverage_guard`` before substituting
+        values. Excluded values may need to be solved separately:
+
+        >>> result = Expression.solve(a*x - 1, [x])
+        >>> result[0][x]
+        1/a
+        >>> print(result.coverage_guard)
+        a != 0
+
+        Other restrictions stay with the branch. For example, a denominator must
+        remain nonzero even when it no longer appears in the answer:
+
+        >>> branch = Expression.solve(x/y, [x, y])[0]
+        >>> dict(branch)
+        {x: 0}
+        >>> print(branch.conditions()[0])
+        y != 0
 
         Parameters
         ----------
-        system: Sequence[Expression]
-            Expressions that are each understood to equal zero.
+        system: SolveInput | Sequence[SolveInput]
+            Equation or equations to satisfy, written as expressions equal to zero
+            or using ``eq``. Supports polynomial and rational equations and some
+            equations involving rational powers. Inequalities and general Boolean
+            combinations are not supported. True and an empty list impose no
+            constraints; False has no solutions. Use exact coefficients, such as
+            ``Expression.parse("1/10")`` instead of the Python float ``0.1``.
         variables: Sequence[Expression]
-            Variables to solve for, in lexicographic elimination order.
-        warn_if_underdetermined: bool
-            Whether to warn when the system is underdetermined.
+            Variables to solve for. Earlier variables are solved for preferentially,
+            leaving later ones free when possible. For ``x + y = 1``, ``[x, y]``
+            gives x = 1 - y; ``[y, x]`` gives y = 1 - x. Symbols outside this list
+            are parameters.
         domain: SolveDomain | None
-            Restrict solutions to this domain. The default is ``Complexes``.
-
-        Returns
-        -------
-        list[Solution]
-            Exact solution branches. Each branch behaves as a read-only mapping
-            and exposes its free variables, validity conditions, rank, dimension,
-            and requested domain.
+            Domain of variables and parameters: Complexes (default), Reals,
+            Rationals, or Integers. Symbol attributes, such as ``is_integer=True``,
+            can restrict individual symbols further. For example, Reals also treats
+            parameters as real for this solve, without changing their attributes.
+            Any domain restrictions that cannot be resolved remain in
+            ``branch.conditions()``.
         """
 
     def nsolve(
@@ -4998,8 +5173,8 @@ class Expression:
         constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
         decimal_digit_precision: int | None
-            If omitted, uses the f64 backend and returns a complex. If specified,
-            uses arbitrary precision and returns a ComplexFloat.
+            If omitted, evaluates at double precision and returns a complex.
+            If specified, sets the working precision in decimal digits and returns a ComplexFloat.
         """
 
     @overload
@@ -5025,8 +5200,8 @@ class Expression:
         constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
         decimal_digit_precision: int
-            If omitted, uses the f64 backend and returns a complex. If specified,
-            uses arbitrary precision and returns a ComplexFloat.
+            If omitted, evaluates at double precision and returns a complex.
+            If specified, sets the working precision in decimal digits and returns a ComplexFloat.
         """
 
     def evaluator(
@@ -5329,6 +5504,7 @@ class Condition:
         """Evaluate, returning None for undecidable truth. Unbound Transformers need an execution input."""
 
     def __repr__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
     def __str__(self) -> str: ...
     def __bool__(self) -> bool:
         """Return known truth; raise TypeError when truth is undecidable."""

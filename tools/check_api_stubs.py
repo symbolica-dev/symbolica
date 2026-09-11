@@ -5,10 +5,12 @@ Runtime and static example tests separately check whether these calls are usable
 """
 import argparse
 import ast
+import re
 from pathlib import Path
 
 
 TARGETS = {
+    ("Expression", "solve"), ("Solution", "as_dict"), ("SolutionSet", "dimension"),
     (None, "S"), ("Expression", "symbol"), ("Expression", "to_polynomial"),
     ("Series", "get_coefficient"), ("Evaluator", "load"),
     ("Evaluator", "evaluate_complex_with_prec"), ("Evaluator", "evaluate_with_prec"),
@@ -67,10 +69,12 @@ def signatures(path):
             if args.kwarg:
                 parameters.append((args.kwarg.arg, "kwargs", False))
             # Keyword-only argument order has no effect on valid calls.
+            return_type = ast.unparse(node.returns).replace("decimal.", "").replace("typing.", "").replace("builtins.", "")
+            return_type = re.sub(r"^Optional\[(.*)\]$", r"\1 | None", return_type)
             signature = (
                 tuple(p for p in parameters if p[1] != "keyword"),
                 tuple(sorted(p for p in parameters if p[1] == "keyword")),
-                ast.unparse(node.returns).replace("decimal.", "").replace("typing.", "").replace("builtins.", ""),
+                return_type,
             )
             found.setdefault(key, set()).add(signature)
     return found

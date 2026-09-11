@@ -19,9 +19,9 @@ pub(super) fn match_callback_decision(value: &Bound<'_, PyAny>) -> PyResult<Cond
     }
 }
 
-/// The matcher currently has an infallible callback interface. Keep its existing
-/// error reporting, but never turn a failed callback into a proven false value:
-/// negating the restriction must not make a failure into a successful match.
+/// Log callback errors and return an inconclusive decision. The matcher's
+/// predicate interface returns a truth value; Inconclusive distinguishes a
+/// failed callback from a proven false restriction, including under negation.
 pub(super) fn report_match_callback_result(result: PyResult<ConditionResult>) -> ConditionResult {
     match result {
         Ok(decision) => decision,

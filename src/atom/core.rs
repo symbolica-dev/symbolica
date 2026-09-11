@@ -790,26 +790,11 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::nsolve_system(system, vars, init, prec, max_iterations)
     }
 
-    /// Find the exact solutions of a system of equations.
+    /// Solve a system of exact equations, with each expression understood to equal zero.
     ///
-    /// Write each equation as an expression equal to zero, then specify the
-    /// variables with [`SolveBuilder::wrt`](crate::solve::SolveBuilder::wrt).
-    /// By default, solutions may be complex. Use
-    /// [`SolveBuilder::over`](crate::solve::SolveBuilder::over) to request only
-    /// integer, rational, or real solutions.
-    ///
-    /// The result contains one [`Solution`](crate::solve::Solution) per solution
-    /// branch. An empty vector means that there are no solutions in the requested
-    /// domain. A branch can describe a family of solutions when the system is
-    /// underdetermined; use [`Solution::free_variables`](crate::solve::Solution::free_variables)
-    /// and [`Solution::conditions`](crate::solve::Solution::conditions) before
-    /// substituting values from such a branch.
-    ///
-    /// `solve` handles exact linear and polynomial systems, including systems
-    /// with symbolic parameters. It also supports many rational equations and
-    /// rational powers such as square roots. Use [`AtomCore::nsolve`] or
-    /// [`AtomCore::nsolve_system`] when you need a numerical root from an initial
-    /// guess, or when an exact solution is not available.
+    /// Each returned branch maps assigned variables directly to expressions.
+    /// Free variables and validity conditions are available as branch metadata.
+    /// Specify the domain with `over` and the unknowns with `wrt`.
     ///
     /// # Examples
     ///
@@ -827,7 +812,7 @@ pub trait AtomCore: private::Sealed + Sized {
     ///     .unwrap();
     ///
     /// assert_eq!(solutions.len(), 2);
-    /// assert!(solutions.iter().all(|solution| !solution.is_parametric()));
+    /// assert!(solutions.iter().all(|solution| solution.is_point()));
     /// ```
     ///
     /// Restricting the domain can remove otherwise valid solutions:
@@ -840,9 +825,12 @@ pub trait AtomCore: private::Sealed + Sized {
     ///     .over(Reals)
     ///     .wrt(std::slice::from_ref(&x))
     ///     .unwrap();
-    /// assert!(real_solutions.is_empty());
+    /// assert!(real_solutions.is_empty().unwrap());
     /// ```
-    fn solve<T: AtomCore>(system: &[T]) -> crate::solve::SolveBuilder<'_, T> {
+    fn solve<T>(system: &[T]) -> crate::solve::SolveBuilder
+    where
+        T: AtomCore,
+    {
         crate::solve::SolveBuilder::new(system)
     }
 
