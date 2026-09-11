@@ -138,6 +138,33 @@ impl<'lib> EvaluatorFunctionsRealf64<'lib> {
 
 type L = std::sync::Arc<libloading::Library>;
 
+/// Dynamic loaders may reuse an old handle even after the file has changed.
+fn warn_if_library_changed(path: &Path) {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    static LOADED: LazyLock<Mutex<std::collections::HashMap<PathBuf, (SystemTime, u64)>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let fingerprint = (modified, metadata.len());
+    let previous = LOADED.lock().unwrap().insert(path.clone(), fingerprint);
+    if previous.is_some_and(|previous| previous != fingerprint) {
+        crate::warn!(
+            "Library '{}' was previously loaded and may have changed. Reloading may reuse the old code; use a different library filename or restart the process.",
+            path.display()
+        );
+    }
+}
+
 self_cell!(
     struct LibraryRealf64 {
         owner: L,
@@ -1640,6 +1667,7 @@ impl CompiledRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsRealf64::new(lib, function_name)
             })?;
@@ -1811,6 +1839,7 @@ impl CompiledComplexEvaluator {
                     .map_err(|e| e.to_string())?,
             };
 
+            warn_if_library_changed(path.as_ref());
             let library = LibraryComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsComplexf64::new(lib, function_name)
             })?;
@@ -2037,6 +2066,7 @@ impl CompiledSimdRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibrarySimdRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsSimdRealf64::new(lib, function_name)
             })?;
@@ -2341,6 +2371,7 @@ impl CompiledSimdComplexEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibrarySimdComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsSimdComplexf64::new(lib, function_name)
             })?;
@@ -2647,6 +2678,7 @@ impl CompiledCudaRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryCudaRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsCudaRealf64::new(lib, function_name)
             })?;
@@ -2779,6 +2811,7 @@ impl CompiledCudaComplexEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryCudaComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsCudaComplexf64::new(lib, function_name)
             })?;
