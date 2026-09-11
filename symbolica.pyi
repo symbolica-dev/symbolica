@@ -10218,11 +10218,11 @@ class CompiledRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10230,10 +10230,6 @@ class CompiledRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
@@ -10254,11 +10250,11 @@ class CompiledComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10266,10 +10262,6 @@ class CompiledComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
@@ -10290,11 +10282,11 @@ class CompiledSimdRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledSimdRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10302,10 +10294,6 @@ class CompiledSimdRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
@@ -10326,11 +10314,11 @@ class CompiledSimdComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledSimdComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10338,10 +10326,6 @@ class CompiledSimdComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
@@ -10362,13 +10346,13 @@ class CompiledCudaRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
-        cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256,
+        number_of_evaluations: int,
+        block_size: int = 512,
     ) -> CompiledCudaRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10376,13 +10360,9 @@ class CompiledCudaRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
-        cuda_number_of_evaluations: int
+        number_of_evaluations: int
             The number of evaluations to batch per CUDA kernel launch.
-        cuda_block_size: int | None
+        block_size: int
             The CUDA thread block size used by the compiled kernel.
         """
 
@@ -10404,13 +10384,13 @@ class CompiledCudaComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
-        cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256,
+        number_of_evaluations: int,
+        block_size: int = 512,
     ) -> CompiledCudaComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -10418,13 +10398,9 @@ class CompiledCudaComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
-        cuda_number_of_evaluations: int
+        number_of_evaluations: int
             The number of evaluations to batch per CUDA kernel launch.
-        cuda_block_size: int | None
+        block_size: int
             The CUDA thread block size used by the compiled kernel.
         """
 

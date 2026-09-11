@@ -1535,8 +1535,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             "complex" => PythonCompiledComplexExpressionEvaluator {
@@ -1561,8 +1559,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             "real_4x" => PythonCompiledSimdRealExpressionEvaluator {
@@ -1587,8 +1583,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             "complex_4x" => PythonCompiledSimdComplexExpressionEvaluator {
@@ -1613,8 +1607,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             "cuda_real" => PythonCompiledCudaRealExpressionEvaluator {
@@ -1642,8 +1634,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             "cuda_complex" => PythonCompiledCudaComplexExpressionEvaluator {
@@ -1671,8 +1661,6 @@ impl PythonExpressionEvaluator {
                     .map_err(|e| {
                         exceptions::PyValueError::new_err(format!("Library loading error: {}", e))
                     })?,
-                input_len: self.eval_complex.get_input_len(),
-                output_len: self.eval_complex.get_output_len(),
             }
             .into_py_any(py),
             _ => Err(exceptions::PyValueError::new_err(format!(
@@ -2352,8 +2340,6 @@ cuda_block_size: int | None
 #[derive(Clone)]
 pub struct PythonCompiledRealExpressionEvaluator {
     pub eval: CompiledRealEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2361,20 +2347,12 @@ pub struct PythonCompiledRealExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledRealExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[classmethod]
-    fn load(
-        _cls: &Bound<'_, PyType>,
-        filename: &str,
-        function_name: &str,
-        input_len: usize,
-        output_len: usize,
-    ) -> PyResult<Self> {
+    fn load(_cls: &Bound<'_, PyType>, filename: &str, function_name: &str) -> PyResult<Self> {
         Ok(Self {
             eval: CompiledRealEvaluator::load(filename, function_name)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2392,10 +2370,11 @@ impl PythonCompiledRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             self.eval.evaluate(
                 i.as_slice().ok_or_else(|| {
@@ -2422,8 +2401,6 @@ impl PythonCompiledRealExpressionEvaluator {
 #[derive(Clone)]
 pub struct PythonCompiledSimdRealExpressionEvaluator {
     pub eval: CompiledSimdRealEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2431,20 +2408,12 @@ pub struct PythonCompiledSimdRealExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledSimdRealExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[classmethod]
-    fn load(
-        _cls: &Bound<'_, PyType>,
-        filename: &str,
-        function_name: &str,
-        input_len: usize,
-        output_len: usize,
-    ) -> PyResult<Self> {
+    fn load(_cls: &Bound<'_, PyType>, filename: &str, function_name: &str) -> PyResult<Self> {
         Ok(Self {
             eval: CompiledSimdRealEvaluator::load(filename, function_name)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2462,10 +2431,11 @@ impl PythonCompiledSimdRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
 
         self.eval
             .evaluate_batch(
@@ -2494,8 +2464,6 @@ impl PythonCompiledSimdRealExpressionEvaluator {
 #[derive(Clone)]
 pub struct PythonCompiledCudaRealExpressionEvaluator {
     pub eval: CompiledCudaRealEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2503,16 +2471,14 @@ pub struct PythonCompiledCudaRealExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledCudaRealExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[pyo3(signature =
-        (filename, function_name, input_len, output_len, number_of_evaluations, block_size = 512))]
+        (filename, function_name, number_of_evaluations, block_size = 512))]
     #[classmethod]
     fn load(
         _cls: &Bound<'_, PyType>,
         filename: &str,
         function_name: &str,
-        input_len: usize,
-        output_len: usize,
         number_of_evaluations: usize,
         block_size: usize,
     ) -> PyResult<Self> {
@@ -2526,8 +2492,6 @@ impl PythonCompiledCudaRealExpressionEvaluator {
                 },
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2545,10 +2509,11 @@ impl PythonCompiledCudaRealExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
 
         self.eval
             .evaluate(
@@ -2576,8 +2541,6 @@ impl PythonCompiledCudaRealExpressionEvaluator {
 #[derive(Clone)]
 pub struct PythonCompiledCudaComplexExpressionEvaluator {
     pub eval: CompiledCudaComplexEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2585,16 +2548,14 @@ pub struct PythonCompiledCudaComplexExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledCudaComplexExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[pyo3(signature =
-        (filename, function_name, input_len, output_len, number_of_evaluations, block_size = 512))]
+        (filename, function_name, number_of_evaluations, block_size = 512))]
     #[classmethod]
     fn load(
         _cls: &Bound<'_, PyType>,
         filename: &str,
         function_name: &str,
-        input_len: usize,
-        output_len: usize,
         number_of_evaluations: usize,
         block_size: usize,
     ) -> PyResult<Self> {
@@ -2608,8 +2569,6 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
                 },
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2627,10 +2586,11 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
 
         let sc = unsafe {
             std::mem::transmute::<&[Complex64], &[Complex<f64>]>(arr.as_slice().ok_or_else(
@@ -2664,8 +2624,6 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
 #[derive(Clone)]
 pub struct PythonCompiledComplexExpressionEvaluator {
     pub eval: CompiledComplexEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2673,20 +2631,12 @@ pub struct PythonCompiledComplexExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledComplexExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[classmethod]
-    fn load(
-        _cls: &Bound<'_, PyType>,
-        filename: &str,
-        function_name: &str,
-        input_len: usize,
-        output_len: usize,
-    ) -> PyResult<Self> {
+    fn load(_cls: &Bound<'_, PyType>, filename: &str, function_name: &str) -> PyResult<Self> {
         Ok(Self {
             eval: CompiledComplexEvaluator::load(filename, function_name)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2704,10 +2654,11 @@ impl PythonCompiledComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
             let sc = unsafe {
                 std::mem::transmute::<&[Complex64], &[Complex<f64>]>(i.as_slice().ok_or_else(
@@ -2740,8 +2691,6 @@ impl PythonCompiledComplexExpressionEvaluator {
 #[derive(Clone)]
 pub struct PythonCompiledSimdComplexExpressionEvaluator {
     pub eval: CompiledSimdComplexEvaluator,
-    pub input_len: usize,
-    pub output_len: usize,
 }
 
 #[cfg(feature = "native_code_generation")]
@@ -2749,20 +2698,12 @@ pub struct PythonCompiledSimdComplexExpressionEvaluator {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonCompiledSimdComplexExpressionEvaluator {
-    /// Load a compiled library, previously generated with `compile`.
+    /// Load a compiled library, previously generated with `Evaluator.compile`.
     #[classmethod]
-    fn load(
-        _cls: &Bound<'_, PyType>,
-        filename: &str,
-        function_name: &str,
-        input_len: usize,
-        output_len: usize,
-    ) -> PyResult<Self> {
+    fn load(_cls: &Bound<'_, PyType>, filename: &str, function_name: &str) -> PyResult<Self> {
         Ok(Self {
             eval: CompiledSimdComplexEvaluator::load(filename, function_name)
                 .map_err(|e| exceptions::PyValueError::new_err(format!("Load error: {}", e)))?,
-            input_len,
-            output_len,
         })
     }
 
@@ -2780,10 +2721,11 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
         inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
-        let arr = reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.input_len)?;
+        let arr =
+            reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
         let n_inputs = arr.shape()[0];
-        let mut out = ArrayD::zeros(&[n_inputs, self.output_len][..]);
+        let mut out = ArrayD::zeros(&[n_inputs, self.eval.get_output_len()][..]);
 
         let sc = unsafe {
             std::mem::transmute::<&[Complex64], &[Complex<f64>]>(arr.as_slice().ok_or_else(

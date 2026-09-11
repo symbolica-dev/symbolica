@@ -113,7 +113,55 @@ type CudaDestroyDataType<'a> =
     libloading::Symbol<'a, unsafe extern "C" fn(data: *const CudaEvaluationData) -> i32>;
 type GetBufferLenType<'a> = libloading::Symbol<'a, unsafe extern "C" fn() -> c_ulong>;
 
+/// Dimensions of one evaluation, read once from the compiled entry point.
+struct CompiledDimensions {
+    input_len: usize,
+    output_len: usize,
+}
+
+impl CompiledDimensions {
+    fn load(lib: &libloading::Library, function_name: &str) -> Result<Self, String> {
+        let get_len = |suffix: &str| -> Result<usize, String> {
+            let name = format!("{function_name}_get_{suffix}_len");
+            unsafe {
+                let get: libloading::Symbol<'_, unsafe extern "C" fn() -> usize> =
+                    lib.get(name.as_bytes()).map_err(|e| {
+                        format!("Cannot load evaluator dimensions ({name}): {e}. Re-export and recompile the evaluator with this version of Symbolica.")
+                    })?;
+                Ok(get())
+            }
+        };
+        Ok(Self {
+            input_len: get_len("input")?,
+            output_len: get_len("output")?,
+        })
+    }
+
+    #[inline]
+    fn check_batch(
+        &self,
+        batch_size: usize,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<(), String> {
+        if self.input_len.checked_mul(batch_size) != Some(input_len) {
+            return Err(format!(
+                "Expected {} inputs per evaluation for {batch_size} evaluations, got {input_len} inputs",
+                self.input_len
+            ));
+        }
+        if self.output_len.checked_mul(batch_size) != Some(output_len) {
+            return Err(format!(
+                "Expected {} outputs per evaluation for {batch_size} evaluations, got {output_len} outputs",
+                self.output_len
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct EvaluatorFunctionsRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, f64>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -129,6 +177,7 @@ impl<'lib> EvaluatorFunctionsRealf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -175,6 +224,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsSimdRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, wide::f64x4>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -190,6 +240,7 @@ impl<'lib> EvaluatorFunctionsSimdRealf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsSimdRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -207,6 +258,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsSimdComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, Complex<wide::f64x4>>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -222,6 +274,7 @@ impl<'lib> EvaluatorFunctionsSimdComplexf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsSimdComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -239,6 +292,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, Complex<f64>>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -254,6 +308,7 @@ impl<'lib> EvaluatorFunctionsComplexf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -271,6 +326,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsCudaRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: CudaEvalType<'lib, f64>,
     init_data: CudaInitDataType<'lib>,
     destroy_data: CudaDestroyDataType<'lib>,
@@ -290,6 +346,7 @@ impl<'lib> EvaluatorFunctionsCudaRealf64<'lib> {
                 .get(format!("{}_destroy_data", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsCudaRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 init_data,
                 destroy_data,
@@ -308,6 +365,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsCudaComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: CudaEvalType<'lib, Complex<f64>>,
     init_data: CudaInitDataType<'lib>,
     destroy_data: CudaDestroyDataType<'lib>,
@@ -327,6 +385,7 @@ impl<'lib> EvaluatorFunctionsCudaComplexf64<'lib> {
                 .get(format!("{}_destroy_data", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsCudaComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 init_data,
                 destroy_data,
@@ -1538,25 +1597,18 @@ impl BatchEvaluator<f64> for CompiledRealEvaluator {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
+        for row in 0..batch_size {
+            self.evaluate(
+                &params[row * n_params..(row + 1) * n_params],
+                &mut out[row * n_out..(row + 1) * n_out],
+            );
         }
 
         Ok(())
@@ -1599,25 +1651,18 @@ impl BatchEvaluator<Complex<f64>> for CompiledComplexEvaluator {
         params: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
+        for row in 0..batch_size {
+            self.evaluate(
+                &params[row * n_params..(row + 1) * n_params],
+                &mut out[row * n_out..(row + 1) * n_out],
+            );
         }
 
         Ok(())
@@ -1643,6 +1688,16 @@ impl EvaluatorLoader<f64> for CompiledRealEvaluator {
 }
 
 impl CompiledRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     pub fn load_new_function(&self, function_name: &str) -> Result<CompiledRealEvaluator, String> {
         let library = LibraryRealf64::try_new(self.library.borrow_owner().clone(), |lib| {
             EvaluatorFunctionsRealf64::new(lib, function_name)
@@ -1683,8 +1738,21 @@ impl CompiledRealEvaluator {
         }
     }
     /// Evaluate the compiled code with double-precision floating point numbers.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -1808,6 +1876,16 @@ impl<Context> bincode::Decode<Context> for CompiledComplexEvaluator {
 }
 
 impl CompiledComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     /// Load a new function from the same library.
     pub fn load_new_function(
         &self,
@@ -1855,8 +1933,21 @@ impl CompiledComplexEvaluator {
         }
     }
     /// Evaluate the compiled code.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -1927,32 +2018,23 @@ impl BatchEvaluator<f64> for CompiledSimdRealEvaluator {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
 
         self.batch_input_buffer
             .resize(batch_size.div_ceil(4) * n_params, wide::f64x4::ZERO);
 
-        for (dest, i) in self
-            .batch_input_buffer
-            .chunks_mut(n_params)
-            .zip(params.chunks(4 * n_params))
-        {
+        for batch in 0..batch_size.div_ceil(4) {
+            let dest = &mut self.batch_input_buffer[batch * n_params..(batch + 1) * n_params];
+            let i = &params[batch * 4 * n_params..((batch + 1) * 4).min(batch_size) * n_params];
+            if n_params == 0 {
+                continue;
+            }
             if i.len() / n_params == 4 {
                 for (j, d) in dest.iter_mut().enumerate() {
                     *d = wide::f64x4::from([
@@ -1992,15 +2074,18 @@ impl BatchEvaluator<f64> for CompiledSimdRealEvaluator {
         let param_buffer = std::mem::take(&mut self.batch_input_buffer);
         let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
 
-        for (o, i) in output_buffer
-            .chunks_mut(n_out)
-            .zip(param_buffer.chunks(n_params))
-        {
-            self.evaluate(i, o);
+        for batch in 0..batch_size.div_ceil(4) {
+            self.evaluate(
+                &param_buffer[batch * n_params..(batch + 1) * n_params],
+                &mut output_buffer[batch * n_out..(batch + 1) * n_out],
+            );
         }
 
-        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
-            o.copy_from_slice(&i.as_array()[..o.len()]);
+        for row in 0..batch_size {
+            for column in 0..n_out {
+                out[row * n_out + column] =
+                    output_buffer[(row / 4) * n_out + column].as_array()[row % 4];
+            }
         }
 
         self.batch_input_buffer = param_buffer;
@@ -2035,6 +2120,16 @@ impl EvaluatorLoader<wide::f64x4> for CompiledSimdRealEvaluator {
 }
 
 impl CompiledSimdRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2086,11 +2181,23 @@ impl CompiledSimdRealEvaluator {
     }
 
     /// Evaluate the compiled code with 4 double-precision floating point numbers.
-    /// The `args` must be of length `number_of_evaluations * input`, where `input` is the number of inputs to the function.
-    /// The `out` must be of length `number_of_evaluations * output`,
-    /// where `output` is the number of outputs of the function.
+    /// Each input/output slot contains four independent values. The slice lengths must
+    /// equal `get_input_len()` and `get_output_len()`, respectively.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[wide::f64x4], out: &mut [wide::f64x4]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -2201,34 +2308,25 @@ impl BatchEvaluator<Complex<f64>> for CompiledSimdComplexEvaluator {
         params: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
 
         self.batch_input_buffer.resize(
             batch_size.div_ceil(4) * n_params,
             Complex::new(wide::f64x4::ZERO, wide::f64x4::ZERO),
         );
 
-        for (dest, i) in self
-            .batch_input_buffer
-            .chunks_mut(n_params)
-            .zip(params.chunks(4 * n_params))
-        {
+        for batch in 0..batch_size.div_ceil(4) {
+            let dest = &mut self.batch_input_buffer[batch * n_params..(batch + 1) * n_params];
+            let i = &params[batch * 4 * n_params..((batch + 1) * 4).min(batch_size) * n_params];
+            if n_params == 0 {
+                continue;
+            }
             if i.len() / n_params == 4 {
                 for (j, d) in dest.iter_mut().enumerate() {
                     d.re = wide::f64x4::from([
@@ -2294,17 +2392,18 @@ impl BatchEvaluator<Complex<f64>> for CompiledSimdComplexEvaluator {
         let param_buffer = std::mem::take(&mut self.batch_input_buffer);
         let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
 
-        for (o, i) in output_buffer
-            .chunks_mut(n_out)
-            .zip(param_buffer.chunks(n_params))
-        {
-            self.evaluate(i, o);
+        for batch in 0..batch_size.div_ceil(4) {
+            self.evaluate(
+                &param_buffer[batch * n_params..(batch + 1) * n_params],
+                &mut output_buffer[batch * n_out..(batch + 1) * n_out],
+            );
         }
 
-        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
-            for (j, d) in o.iter_mut().enumerate() {
-                d.re = i.re.as_array()[j];
-                d.im = i.im.as_array()[j];
+        for row in 0..batch_size {
+            for column in 0..n_out {
+                let value = &output_buffer[(row / 4) * n_out + column];
+                out[row * n_out + column] =
+                    Complex::new(value.re.as_array()[row % 4], value.im.as_array()[row % 4]);
             }
         }
 
@@ -2340,6 +2439,16 @@ impl EvaluatorLoader<Complex<wide::f64x4>> for CompiledSimdComplexEvaluator {
 }
 
 impl CompiledSimdComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2391,11 +2500,23 @@ impl CompiledSimdComplexEvaluator {
     }
 
     /// Evaluate the compiled code with 4 double-precision floating point numbers.
-    /// The `args` must be of length `number_of_evaluations * input`, where `input` is the number of inputs to the function.
-    /// The `out` must be of length `number_of_evaluations * output`,
-    /// where `output` is the number of outputs of the function.
+    /// Each input/output slot contains four independent values. The slice lengths must
+    /// equal `get_input_len()` and `get_output_len()`, respectively.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<wide::f64x4>], out: &mut [Complex<wide::f64x4>]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -2642,6 +2763,16 @@ impl BatchEvaluator<f64> for CompiledCudaRealEvaluator {
 }
 
 impl CompiledCudaRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2775,6 +2906,16 @@ impl BatchEvaluator<Complex<f64>> for CompiledCudaComplexEvaluator {
 }
 
 impl CompiledCudaComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -3147,3 +3288,6 @@ impl Default for InlineASM {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

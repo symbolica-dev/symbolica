@@ -477,6 +477,16 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         F::export_cpp(self, &function_name, settings)
     }
 
+    /// Export scalar input/output dimensions for this entry point, independent of batch size.
+    fn export_dimensions_cpp(&self, function_name: &str) -> String {
+        format!(
+            "#include <cstddef>\n\nextern \"C\" std::size_t {function_name}_get_input_len() {{ return {input_len}; }}\n\
+             extern \"C\" std::size_t {function_name}_get_output_len() {{ return {output_len}; }}\n\n",
+            input_len = self.param_count,
+            output_len = self.result_indices.len(),
+        )
+    }
+
     pub fn export_simd_str(
         &self,
         function_name: &str,
@@ -510,6 +520,8 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                     function_name,
                     self.stack.len()
                 );
+
+                res += &self.export_dimensions_cpp(function_name);
 
                 if complex {
                     res += &format!(
@@ -606,6 +618,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += "typedef double Number;\n";
         }
         res += &self.export_external_cpps_cuda();
+        res += &self.export_dimensions_cpp(function_name);
 
         res += &format!(
             "\n__device__ void {}(CudaNumber* params, CudaNumber* out, size_t index) {{\n",
@@ -815,6 +828,8 @@ extern "C" {{
             self.stack.len()
         );
 
+        res += &self.export_dimensions_cpp(function_name);
+
         res += &format!(
             "\ntemplate<typename T>\nvoid {function_name}_gen(T* params, T* Z, T* out) {{\n"
         );
@@ -1002,6 +1017,8 @@ extern "C" {{
             self.stack.len()
         );
 
+        res += &self.export_dimensions_cpp(function_name);
+
         if self.stack.iter().all(|x| x.is_real()) {
             res += &format!(
                 "static const double {}_CONSTANTS_double[{}] = {{{}}};\n\n",
@@ -1057,6 +1074,8 @@ extern "C" {{
             function_name,
             self.stack.len()
         );
+
+        res += &self.export_dimensions_cpp(function_name);
 
         res += &format!(
             "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",

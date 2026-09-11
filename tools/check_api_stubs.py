@@ -12,6 +12,11 @@ TARGETS = {
     (None, "S"), ("Expression", "symbol"), ("Expression", "to_polynomial"),
     ("Series", "get_coefficient"), ("Evaluator", "load"),
     ("Evaluator", "evaluate_complex_with_prec"),
+    *((name, "load") for name in (
+        "CompiledRealEvaluator", "CompiledComplexEvaluator",
+        "CompiledSimdRealEvaluator", "CompiledSimdComplexEvaluator",
+        "CompiledCudaRealEvaluator", "CompiledCudaComplexEvaluator",
+    )),
 }
 
 
