@@ -1061,7 +1061,7 @@ mod test {
             "series_custom_function::f",
             series = |args| {
                 let [arg] = args else { unreachable!() };
-                let point = arg.coefficient(0.into());
+                let point = arg.coefficient(0.into())?;
                 let delta = arg.to_atom() - &point;
                 Some((Atom::num(1), Atom::num(1) / (Atom::num(1) - &delta)))
             }

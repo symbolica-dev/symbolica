@@ -3018,7 +3018,8 @@ class Expression:
         depth_is_absolute: bool = True,
     ) -> Series:
         """
-        Series expand in `x` around `expansion_point` to depth `depth`.
+        Series expand in `x` around `expansion_point`, including powers through
+        `depth / depth_denom`. The remainder starts at `Series.get_absolute_order()`.
 
         Examples
         --------
@@ -3026,7 +3027,7 @@ class Expression:
         >>> p = E('cos(x)/(x+1)')
         >>> print(p.series(S('x'), 0, 3))
 
-        yields `-1-x-1/2*x^2-1/2*x^3+𝒪(x^4)`
+        yields `1-x+1/2*x^2-1/2*x^3+𝒪(x^4)`
 
         Parameters
         ----------
@@ -5536,7 +5537,9 @@ class Series:
 
     def __getitem__(self, expr: Expression | int) -> Expression:
         """
-        Get the coefficient of the term with exponent `exp`
+        Get the coefficient of `(x - expansion_point)**exp`.
+        Known absent terms return zero. Raises IndexError at or above the
+        absolute order, where the coefficient is unknown.
 
         Parameters
         ----------
@@ -5546,7 +5549,8 @@ class Series:
 
     def get_coefficient(self, exp: Expression | int) -> Expression:
         """
-        Get the coefficient of the term with exponent `exp`.  Alternatively, use `series[exp]`.
+        Get the coefficient of the term with exponent `exp`. Alternatively, use `series[exp]`.
+        Known absent terms return zero. Raises IndexError at or above the absolute order.
 
         Parameters
         ----------

@@ -644,19 +644,25 @@ impl<F: Ring> Series<F> {
         self
     }
 
-    /// Get the coefficient of the series at a given exponent.
-    pub fn coefficient(&self, exponent: Rational) -> F::Element {
+    /// Get the coefficient of `(variable - expansion_point)^exponent`.
+    ///
+    /// Returns `None` at or above [`Self::absolute_order`], where the remainder
+    /// is unknown. Below that order, absent terms (including exponents outside
+    /// the ramification grid) have coefficient `Some(0)`.
+    pub fn coefficient(&self, exponent: Rational) -> Option<F::Element> {
+        if exponent >= self.absolute_order() {
+            return None;
+        }
         let r = exponent * &Rational::from(self.ramification as i64);
         if !r.is_integer() {
-            return self.field.zero();
+            return Some(self.field.zero());
         }
 
-        let i = r.numerator().to_i64().unwrap() - self.shift as i64;
-
-        if i >= 0 && i < self.coefficients.len() as i64 {
-            self.coefficients[i as usize].clone()
+        let i = r - Rational::from(self.shift as i64);
+        if i >= 0 && i < Rational::from(self.coefficients.len() as i64) {
+            Some(self.coefficients[i.numerator().to_i64().unwrap() as usize].clone())
         } else {
-            self.field.zero()
+            Some(self.field.zero())
         }
     }
 
@@ -1470,6 +1476,7 @@ impl Series<AtomField> {
         Ok(r.mul_coeff(&c.pow(pow)).mul_exp_units(shift))
     }
 
+    /// Return the stored terms as an expression, discarding the unknown remainder.
     pub fn to_atom(&self) -> Atom {
         let mut a = Atom::new();
         self.to_atom_into(&mut a);
@@ -1501,6 +1508,49 @@ mod tests {
         poly::series::SeriesDepth,
         symbol,
     };
+
+    #[test]
+    fn coefficient_distinguishes_unknown_from_zero() {
+        let x = symbol!("coefficient_range_x");
+        let s = parse!("exp(coefficient_range_x)").series(x, 0, 2).unwrap();
+        assert_eq!(s.coefficient(2.into()), Some(Atom::num((1, 2))));
+        assert_eq!(s.coefficient(3.into()), None);
+        assert_eq!(s.coefficient((7, 2).into()), None);
+        assert_eq!(s.coefficient((-1).into()), Some(Atom::Zero));
+        assert_eq!(s.coefficient((1, 2).into()), Some(Atom::Zero));
+        let huge: crate::domains::rational::Rational = parse!("1000000000000000000000000000000000")
+            .try_into()
+            .unwrap();
+        assert_eq!(s.coefficient(huge.clone()), None);
+        assert_eq!(s.coefficient(-huge), Some(Atom::Zero));
+
+        let sparse = parse!("coefficient_range_x^2").series(x, 0, 4).unwrap();
+        assert_eq!(sparse.coefficient(0.into()), Some(Atom::Zero));
+        assert_eq!(sparse.coefficient(4.into()), Some(Atom::Zero));
+        assert_eq!(sparse.coefficient(5.into()), None);
+        let zero = &sparse - &sparse;
+        assert_eq!(zero.coefficient(4.into()), Some(Atom::Zero));
+        assert_eq!(zero.coefficient(5.into()), None);
+    }
+
+    #[test]
+    fn coefficient_handles_laurent_and_puiseux_remainders() {
+        let x = symbol!("coefficient_fraction_x");
+        let s = parse!("1/coefficient_fraction_x+sqrt(coefficient_fraction_x)")
+            .series(x, 0, SeriesDepth::absolute((3, 2)))
+            .unwrap();
+        assert_eq!(s.coefficient((-1).into()), Some(Atom::num(1)));
+        assert_eq!(s.coefficient((1, 2).into()), Some(Atom::num(1)));
+        assert_eq!(s.coefficient((1, 3).into()), Some(Atom::Zero));
+        assert_eq!(s.coefficient((3, 2).into()), Some(Atom::Zero));
+        assert_eq!(s.coefficient(s.absolute_order()), None);
+        let pole = parse!("1/coefficient_fraction_x^3")
+            .series(x, 0, -2)
+            .unwrap();
+        assert_eq!(pole.coefficient((-3).into()), Some(Atom::num(1)));
+        assert_eq!(pole.coefficient((-2).into()), Some(Atom::Zero));
+        assert_eq!(pole.coefficient(0.into()), None);
+    }
 
     #[test]
     fn map_coeff() {

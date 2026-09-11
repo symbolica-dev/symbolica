@@ -333,7 +333,7 @@ impl SpecialSymbols {
                 .with_series_function(
                     move |args| {
                         let [arg] = args else { return None; };
-                        let point = arg.coefficient(0.into());
+                        let point = arg.coefficient(0.into())?;
                         let Ok(pole) = Integer::try_from(&point) else {
                             return None;
                         };
@@ -407,8 +407,8 @@ impl SpecialSymbols {
                 })
                 .with_series_function(move |args| {
                     let [n, arg] = args else { return None; };
-                    let order = u32::try_from(n.coefficient(0.into())).ok()?;
-                    let point = arg.coefficient(0.into());
+                    let order = u32::try_from(n.coefficient(0.into())?).ok()?;
+                    let point = arg.coefficient(0.into())?;
                     let Ok(pole) = Integer::try_from(&point) else {
                         return None;
                     };
@@ -623,7 +623,7 @@ impl SpecialSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     if point != Coefficient::one() {
                         return None;
                     }
@@ -825,7 +825,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     if !is_tan_pole(point.as_view()) {
                         return None;
                     }
@@ -869,7 +869,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     if !is_cot_csc_pole(point.as_view()) {
                         return None;
                     }
@@ -913,7 +913,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     let residue = sec_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
@@ -958,7 +958,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     let residue = csc_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((
@@ -1071,7 +1071,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     if !is_tanh_sech_pole(point.as_view()) {
                         return None;
                     }
@@ -1115,7 +1115,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     if !is_coth_csch_pole(point.as_view()) {
                         return None;
                     }
@@ -1160,7 +1160,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     let residue = sech_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
@@ -1203,7 +1203,7 @@ impl GeometricSymbols {
                 })
                 .with_series_function(move |args| {
                     let [arg] = args else { return None; };
-                    let point = arg.coefficient(0.into());
+                    let point = arg.coefficient(0.into())?;
                     let residue = csch_residue(point.as_view())?;
                     let delta = arg.to_atom() - &point;
                     Some((Atom::num(1) / &delta, residue * &delta / function!(sinh, delta)))
