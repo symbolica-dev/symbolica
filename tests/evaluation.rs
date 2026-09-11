@@ -14,6 +14,149 @@ use symbolica::{
 };
 
 #[test]
+fn create_evaluator_with_1000_variables() {
+    const VARIABLE_COUNT: usize = 1000;
+
+    let variable_names = (0..VARIABLE_COUNT)
+        .map(|i| format!("x{i}"))
+        .collect::<Vec<_>>();
+    let expression =
+        (parse!(&variable_names.join("+")) * parse!(&variable_names[..100].join("+"))).expand();
+
+    println!(
+        "{}",
+        expression
+            .evaluate(
+                &variable_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| (parse!(x), i as f64))
+                    .collect()
+            )
+            .unwrap()
+    );
+
+    let params = variable_names.iter().map(|x| parse!(x)).collect::<Vec<_>>();
+
+    let start = std::time::Instant::now();
+    let evaluator = expression
+        .evaluator(&params)
+        .direct_translation(true)
+        //.max_horner_scheme_variables(10)
+        // .cpe_iterations(Some(0))
+        //.max_common_pair_cache_entries(10)
+        .horner_iterations(1)
+        .verbose(true)
+        .build()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    eprintln!("created evaluator with {VARIABLE_COUNT} variables in {elapsed:?}");
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+
+    println!(
+        "{}",
+        evaluator.evaluate_single(&(0..VARIABLE_COUNT).map(|i| i as f64).collect::<Vec<_>>())
+    )
+
+    // assert_eq!(
+    //     evaluator.evaluate_single(&vec![1.0; VARIABLE_COUNT]),
+    //     VARIABLE_COUNT as f64
+    // );
+}
+
+#[test]
+fn common_pair_elimination_edits_the_same_instruction_multiple_times() {
+    let expressions = [parse!("if(q,a+b+c+d,g)"), parse!("a+b+e"), parse!("c+d+f")];
+    let params = [
+        parse!("q"),
+        parse!("a"),
+        parse!("b"),
+        parse!("c"),
+        parse!("d"),
+        parse!("e"),
+        parse!("f"),
+        parse!("g"),
+    ];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // Both (a, b) and (c, d) are extracted in one CPE pass. The first
+    // expression is safely rewritten twice, reducing seven additions to five.
+    assert_eq!(evaluator.count_operations().additions, 5);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 3];
+    evaluator.evaluate(&[1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &mut output);
+    assert_eq!(output, [10.0, 8.0, 13.0]);
+
+    evaluator.evaluate(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &mut output);
+    assert_eq!(output, [7.0, 8.0, 13.0]);
+}
+
+#[test]
+fn common_pair_elimination_revalidates_overlapping_candidates() {
+    let expressions = [parse!("a+b+c"), parse!("a+b+d"), parse!("a+c+e")];
+    let params = [
+        parse!("a"),
+        parse!("b"),
+        parse!("c"),
+        parse!("d"),
+        parse!("e"),
+    ];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // Whichever pair is extracted first consumes an operand in the first
+    // expression. The other candidate then has only one current use and must
+    // not produce a redundant temporary instruction.
+    assert_eq!(evaluator.count_operations().additions, 5);
+    assert_eq!(evaluator.export_instructions().instructions.len(), 4);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 3];
+    evaluator.evaluate(&[1.0, 2.0, 3.0, 4.0, 5.0], &mut output);
+    assert_eq!(output, [6.0, 7.0, 9.0]);
+}
+
+#[test]
+fn common_pair_elimination_tracks_known_pairs_after_cache_limit() {
+    let expressions = [parse!("a+b+c"), parse!("a+b+d")];
+    let params = [parse!("a"), parse!("b"), parse!("c"), parse!("d")];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .max_common_pair_cache_entries(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // The cache admits (a, b), then refuses new candidates. Its occurrence
+    // on the second line must still be collected and extracted.
+    assert_eq!(evaluator.count_operations().additions, 3);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 2];
+    evaluator.evaluate(&[1.0, 2.0, 3.0, 4.0], &mut output);
+    assert_eq!(output, [6.0, 7.0]);
+}
+
+#[test]
 fn evaluator_in_finite_field_ring() {
     let params = vec![parse!("x"), parse!("y")];
     let field = Zp::new(7);
