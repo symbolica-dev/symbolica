@@ -40,10 +40,13 @@
 use std::{
     collections::HashMap,
     env,
+    sync::atomic::{AtomicBool, Ordering::Relaxed},
+};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     process::abort,
-    sync::atomic::{AtomicBool, Ordering::Relaxed},
     thread::ThreadId,
     time::{Duration, SystemTime},
 };
@@ -124,12 +127,17 @@ pub mod prelude {
         },
     };
 
+    #[cfg(feature = "native_code_generation")]
     pub use crate::evaluate::{
         BatchEvaluator, CompileOptions, CompiledCode, CompiledComplexEvaluator, CompiledNumber,
-        CompiledRealEvaluator, CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, Dualizer,
-        EvaluationDomain, EvaluationFn, EvaluatorBuilder, EvaluatorLoader, ExportNumber,
-        ExportSettings, ExportedCode, ExportedInstructions, ExpressionEvaluator, ExternalFunction,
-        FunctionMap, InlineASM, JITCompilationSettings, OptimizationSettings, Vectorize,
+        CompiledRealEvaluator, CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator,
+        EvaluatorLoader, ExportNumber, ExportSettings, ExportedCode, InlineASM,
+        JITCompilationSettings,
+    };
+    pub use crate::evaluate::{
+        Dualizer, EvaluationDomain, EvaluationFn, EvaluatorBuilder, ExportedInstructions,
+        ExpressionEvaluator, ExternalFunction, FunctionMap, Instruction, OptimizationSettings,
+        Vectorize,
     };
 
     pub use crate::id::{
@@ -263,6 +271,7 @@ impl std::fmt::Display for OperationCount {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::printer::AnsiWrap;
 
 #[cfg(feature = "faster_alloc")]
@@ -270,6 +279,7 @@ use crate::printer::AnsiWrap;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 static LICENSE_KEY: OnceCell<String> = OnceCell::new();
+#[cfg(not(target_arch = "wasm32"))]
 static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
 
@@ -354,18 +364,39 @@ macro_rules! info {
 /// Manage the license of the Symbolica instance.
 #[allow(dead_code)]
 pub struct LicenseManager {
+    #[cfg(not(target_arch = "wasm32"))]
     lock: Option<TcpListener>,
+    #[cfg(not(target_arch = "wasm32"))]
     core_limit: Option<usize>,
+    #[cfg(not(target_arch = "wasm32"))]
     pid: u32,
+    #[cfg(not(target_arch = "wasm32"))]
     thread_id: ThreadId,
     has_license: bool,
 }
 
+/// Runtime capabilities that depend on the current target and enabled features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionCapabilities {
+    /// Whether this build requires a Symbolica license before unrestricted use.
+    pub license_required: bool,
+    /// Whether this instance is currently considered licensed.
+    pub is_licensed: bool,
+    /// Maximum number of worker threads Symbolica should use for licensed-gated parallel paths.
+    pub max_threads: usize,
+    /// Whether native code generation and shared-library evaluator loading are available.
+    pub native_code_generation: bool,
+    /// Whether the built-in license server networking path is available.
+    pub license_networking: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 const MULTIPLE_INSTANCE_WARNING: &str = "┌───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ Cannot start new unlicensed Symbolica instance since there is already another one running on the machine. │
 └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 ;
 
+#[cfg(not(target_arch = "wasm32"))]
 const RESOLVE_ERROR: &str = "
 ┌───────────────────────────────────────────────────────────┐
 │ Could not resolve the IP of the Symbolica license server. │
@@ -373,6 +404,7 @@ const RESOLVE_ERROR: &str = "
 │ Please check your DNS configuration.                      │
 └───────────────────────────────────────────────────────────┘";
 
+#[cfg(not(target_arch = "wasm32"))]
 const CONNECTION_ERROR: &str = "
 ┌────────────────────────────────────────────────┐
 │ Could not connect to Symbolica license server. │
@@ -381,6 +413,7 @@ const CONNECTION_ERROR: &str = "
 │ Consider switching networks or using a VPN.    │
 └────────────────────────────────────────────────┘";
 
+#[cfg(not(target_arch = "wasm32"))]
 const NETWORK_ERROR: &str = "
 ┌───────────────────────────────────────────────────┐
 │ Connection to Symbolica license server timed out. │
@@ -388,11 +421,13 @@ const NETWORK_ERROR: &str = "
 │ Please check your network configuration.          │
 └───────────────────────────────────────────────────┘";
 
+#[cfg(not(target_arch = "wasm32"))]
 const ACTIVATION_ERROR: &str = "
 ┌──────────────────────────────────────────┐
 │ Could not activate the Symbolica license │
 └──────────────────────────────────────────┘";
 
+#[cfg(not(target_arch = "wasm32"))]
 const MISSING_LICENSE_ERROR: &str = "
 ┌───────────────────────────────┐
 │ Symbolica license key missing │
@@ -404,6 +439,7 @@ impl Default for LicenseManager {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const OEM_LICENSE_KEY: Option<&str> = option_env!("SYMBOLICA_OEM_LICENSE");
 
 /// Activate an OEM license key. Regular users should call [LicenseManager::set_license_key] instead.
@@ -429,6 +465,14 @@ macro_rules! activate_oem_license {
 
 impl LicenseManager {
     /// Create a new license manager.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new() -> LicenseManager {
+        LICENSED.store(true, Relaxed);
+        LicenseManager { has_license: true }
+    }
+
+    /// Create a new license manager.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn new() -> LicenseManager {
         let pid = std::process::id();
         let thread_id = std::thread::current().id();
@@ -528,6 +572,13 @@ impl LicenseManager {
         AtomicBool::new(false)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn check_license_key() -> Result<(), String> {
+        LICENSED.store(true, Relaxed);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn check_license_key() -> Result<(), String> {
         let key = LICENSE_KEY
             .get()
@@ -604,6 +655,7 @@ impl LicenseManager {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn connect() -> Result<TcpStream, String> {
         let mut ip = ("symbolica.io", 12012)
             .to_socket_addrs()
@@ -629,6 +681,7 @@ impl LicenseManager {
         Ok(stream)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn check_registration(key: String) -> Result<(), String> {
         let mut stream = Self::connect()?;
 
@@ -681,6 +734,13 @@ Error: {status}",
     }
 
     #[inline(always)]
+    #[cfg(target_arch = "wasm32")]
+    fn check() {
+        LICENSED.store(true, Relaxed);
+    }
+
+    #[inline(always)]
+    #[cfg(not(target_arch = "wasm32"))]
     fn check() {
         if LICENSED.load(Relaxed) {
             return;
@@ -689,6 +749,7 @@ Error: {status}",
         Self::check_impl();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn check_impl() {
         let manager = LICENSE_MANAGER.get_or_init(LicenseManager::new);
 
@@ -715,6 +776,17 @@ Error: {status}",
     }
 
     /// Activate an OEM license key. Should not be called directly, use [activate_oem_license] instead.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_oem_license_key(
+        _key1: &'static str,
+        _key2: &'static [u32; 6],
+    ) -> Result<(), &'static str> {
+        LICENSED.store(true, Relaxed);
+        Ok(())
+    }
+
+    /// Activate an OEM license key. Should not be called directly, use [activate_oem_license] instead.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_oem_license_key(
         key1: &'static str,
         key2: &'static [u32; 6],
@@ -758,8 +830,44 @@ Error: {status}",
     }
 
     /// Returns `true` iff this instance has a valid license key set.
+    #[cfg(target_arch = "wasm32")]
+    pub fn is_licensed() -> bool {
+        LICENSED.store(true, Relaxed);
+        true
+    }
+
+    /// Returns `true` iff this instance has a valid license key set.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_licensed() -> bool {
         LICENSED.load(Relaxed) || Self::check_license_key().is_ok()
+    }
+
+    /// Clamp a requested worker-thread count to what the current target and license allow.
+    pub fn max_threads(requested: usize) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return requested.min(1);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if Self::is_licensed() {
+                requested
+            } else {
+                requested.min(1)
+            }
+        }
+    }
+
+    /// Return target and licensing capabilities without requiring callers to know cfg details.
+    pub fn execution_capabilities() -> ExecutionCapabilities {
+        ExecutionCapabilities {
+            license_required: !cfg!(target_arch = "wasm32"),
+            is_licensed: Self::is_licensed(),
+            max_threads: Self::max_threads(usize::MAX),
+            native_code_generation: cfg!(feature = "native_code_generation"),
+            license_networking: !cfg!(target_arch = "wasm32"),
+        }
     }
 
     /// Get the current Symbolica version.
@@ -767,6 +875,12 @@ Error: {status}",
         env!("SYMBOLICA_VERSION")
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn request_license_email(_data: HashMap<String, JsonValue>) -> Result<(), String> {
+        Err("No Symbolica license key is required for WASM builds.".to_owned())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn request_license_email(data: HashMap<String, JsonValue>) -> Result<(), String> {
         let mut stream = Self::connect()?;
         let mut v = JsonValue::from(data).stringify().unwrap();

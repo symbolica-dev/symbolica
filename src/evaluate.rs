@@ -4,25 +4,32 @@
 use ahash::{AHasher, HashMap, HashMapExt, HashSet};
 use dyn_clone::DynClone;
 use rand::Rng;
+#[cfg(feature = "native_code_generation")]
 use self_cell::self_cell;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, hash_map::Entry},
     hash::{Hash, Hasher},
-    os::raw::{c_ulong, c_void},
     panic,
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+#[cfg(feature = "native_code_generation")]
+use std::{
+    os::raw::{c_ulong, c_void},
+    path::{Path, PathBuf},
+};
+#[cfg(feature = "native_code_generation")]
 use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
+#[cfg(feature = "native_code_generation")]
 mod backend;
 mod domain;
 mod dual;
 mod evaluator;
+#[cfg(feature = "native_code_generation")]
 mod export;
 mod external;
 mod function_map;
@@ -30,10 +37,12 @@ mod instruction;
 mod optimize;
 mod tree;
 
+#[cfg(feature = "native_code_generation")]
 pub use backend::*;
 pub use domain::*;
 pub use dual::*;
 pub use evaluator::*;
+#[cfg(feature = "native_code_generation")]
 pub use export::*;
 pub use external::*;
 pub use function_map::*;

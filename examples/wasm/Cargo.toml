@@ -1,0 +1,28 @@
+[package]
+name = "symbolica-wasm-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "symbolica_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+getrandom = "0.3"
+symbolica = { path = "../..", default-features = false, features = ["wasm"] }
+tinyjson = "2.5"
+wasm-bindgen = "0.2"
+
+# Keep this example independent from Symbolica's workspace so it can be copied
+# out and built on its own.
+[workspace]
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+
+[patch.crates-io]
+graphica = { path = "../../lib/graphica" }
+numerica = { path = "../../lib/numerica" }
