@@ -59,6 +59,7 @@ use crate::{
         rational::{Q, Rational, RationalField},
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
     },
+    state::Workspace,
     tensors::matrix::{Matrix, MatrixError},
     transcendental::{TranscendentalFunctions, root_var},
 };
@@ -239,6 +240,27 @@ impl<E: PositiveExponent> ParametricExtension<E> {
     /// Polynomials that must remain nonzero for the generic solution to apply.
     pub fn generic_conditions(&self) -> &[MultivariatePolynomial<IntegerRing, E>] {
         &self.generic_conditions
+    }
+
+    fn coefficient_to_atom(coefficient: &RationalPolynomial<IntegerRing, E>) -> Atom {
+        let zero = Atom::Zero;
+        let mut temporary_values = HashMap::default();
+        for (index, variable) in coefficient.get_variables().iter().enumerate() {
+            if matches!(variable, PolyVariable::Temporary(_)) {
+                assert!(
+                    coefficient.numerator.degree(index) == E::zero()
+                        && coefficient.denominator.degree(index) == E::zero(),
+                    "An active internal variable leaked into a parametric coefficient"
+                );
+                temporary_values.insert(variable.clone(), zero.as_view());
+            }
+        }
+
+        let mut result = Atom::default();
+        Workspace::get_local().with(|workspace| {
+            coefficient.to_expression_with_map(workspace, &temporary_values, &mut result)
+        });
+        result
     }
 
     fn parameter_point(
@@ -444,7 +466,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
                 let root_variable: Atom = root_var().into();
                 let mut defining_polynomial = Atom::Zero;
                 for term in self.polynomial() {
-                    let coefficient = term.coefficient.to_expression();
+                    let coefficient = Self::coefficient_to_atom(term.coefficient);
                     if term.exponents[0] == 0 {
                         defining_polynomial += coefficient;
                     } else {
@@ -488,7 +510,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
     ) -> Atom {
         let mut result = Atom::Zero;
         for term in value.poly() {
-            let coefficient = term.coefficient.to_expression();
+            let coefficient = Self::coefficient_to_atom(term.coefficient);
             if term.exponents[0] == 0 {
                 result += coefficient;
             } else {
@@ -1622,6 +1644,15 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
     ///     .all(|solution| solution.field().poly().degree(0) == 2));
     /// ```
     pub fn solve(&self) -> Result<Vec<PolynomialSolution<RationalField>>, String> {
+        self.solve_in_base_field(false)
+    }
+
+    /// Solve the basis, optionally retaining only roots arising from linear
+    /// factors over the rational base field.
+    pub(crate) fn solve_in_base_field(
+        &self,
+        rational_roots_only: bool,
+    ) -> Result<Vec<PolynomialSolution<RationalField>>, String> {
         if self.system.is_empty() {
             return Err(
                 "Cannot enumerate the solutions of an empty, positive-dimensional basis"
@@ -1684,6 +1715,10 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                     values,
                     atom_values,
                 });
+                continue;
+            }
+
+            if rational_roots_only {
                 continue;
             }
 
@@ -1755,6 +1790,10 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
                             child.atom_values.insert(variables[target].clone(), atom);
                             child.values.insert(variables[target].clone(), root);
                             children.push(child);
+                            continue;
+                        }
+
+                        if rational_roots_only {
                             continue;
                         }
 
@@ -1884,6 +1923,35 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
         }
 
         let quotient = polynomial.ring.clone();
+        if quotient.poly().degree(0) == 1 {
+            let base_field = quotient.poly().ring.clone();
+            let mut base_polynomial = MultivariatePolynomial::new(
+                &base_field,
+                Some(polynomial.nterms()),
+                polynomial.variables.clone(),
+            );
+            for term in polynomial {
+                if !term.coefficient.poly().is_constant() {
+                    return Err(
+                        "A degree-one parametric quotient contained its formal generator"
+                            .to_string(),
+                    );
+                }
+                base_polynomial
+                    .append_monomial(term.coefficient.poly().get_constant(), term.exponents);
+            }
+
+            return Ok(Self::parametric_univariate_factors(&base_polynomial, 0)?
+                .into_iter()
+                .map(|factor| {
+                    factor.map_coeff(
+                        |coefficient| quotient.constant(coefficient.clone()),
+                        quotient.clone(),
+                    )
+                })
+                .collect());
+        }
+
         let extension = quotient.as_extension();
         let mut result = Vec::new();
         for (square_free, _) in Self::quotient_square_free_factors(polynomial) {
@@ -2147,6 +2215,15 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
     /// select a cached analytic embedding, and obtain a [`PolynomialSolution`]
     /// over `Q`.
     pub fn solve_parametric(&self) -> Result<Vec<ParametricSolution<E>>, String> {
+        self.solve_parametric_in_base_field(false)
+    }
+
+    /// Solve the basis, optionally retaining only roots arising from linear
+    /// factors over `Q(parameters)` and its current rational quotient field.
+    pub(crate) fn solve_parametric_in_base_field(
+        &self,
+        rational_roots_only: bool,
+    ) -> Result<Vec<ParametricSolution<E>>, String> {
         if self.system.is_empty() {
             return Err(
                 "Cannot enumerate the solutions of an empty, positive-dimensional basis"
@@ -2219,6 +2296,10 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                 continue;
             }
 
+            if rational_roots_only {
+                continue;
+            }
+
             let field = AlgebraicQuotient::new(factor);
             let extension = Arc::new(Self::parametric_extension(
                 field,
@@ -2286,6 +2367,10 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                             let mut solved = branch.clone();
                             solved.values.insert(variables[target].clone(), root);
                             children.push(solved);
+                            continue;
+                        }
+
+                        if rational_roots_only {
                             continue;
                         }
 
