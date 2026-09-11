@@ -1539,7 +1539,7 @@ impl PythonPolynomial {
     ///
     /// Computes using double-precision floating-point arithmetic unless `decimal_digit_precision`
     /// is provided, in which case it uses arbitrary precision and returns roots as
-    /// `(real, imaginary)` Decimal pairs.
+    /// `ComplexFloat` values.
     ///
     /// Examples
     /// --------
@@ -1549,8 +1549,8 @@ impl PythonPolynomial {
     /// >>>     print(r, m)
     ///
     /// >>> p = E('x^2-2').to_polynomial()
-    /// >>> for ((r, i), m) in p.approximate_roots(1000, 1e-10, 100):
-    /// >>>     print(r, i, m)
+    /// >>> for (r, m) in p.approximate_roots(1000, 1e-10, 100):
+    /// >>>     print(r.real, r.imag, m)
     ///
     /// Parameters
     /// ----------
@@ -1561,7 +1561,9 @@ impl PythonPolynomial {
     /// decimal_digit_precision: int | None
     ///     The decimal precision of the numerical type used for root finding.
     #[pyo3(signature = (max_iterations, tolerance, decimal_digit_precision = None))]
-    #[gen_stub(override_return_type(type_repr = "list[tuple[complex, int]] | list[tuple[tuple[decimal.Decimal, decimal.Decimal], int]]", imports = ("decimal")))]
+    #[gen_stub(override_return_type(
+        type_repr = "list[tuple[complex, int]] | list[tuple[ComplexFloat, int]]"
+    ))]
     pub fn approximate_roots(
         &self,
         max_iterations: usize,
@@ -1582,17 +1584,15 @@ impl PythonPolynomial {
             return roots.into_py_any(py);
         };
 
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
         let tolerance = Float::with_val(prec, tolerance);
 
         uni.approximate_roots::<Float>(max_iterations, &tolerance)
             .unwrap_or_else(|e| e)
             .into_iter()
-            .map(|(r, p)| ((r.re.into(), r.im.into()), p))
-            .collect::<Vec<(
-                (PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
-                usize,
-            )>>()
+            .map(|(r, p)| (PythonMultiPrecisionComplex(r), p))
+            .collect::<Vec<_>>()
             .into_py_any(py)
     }
 

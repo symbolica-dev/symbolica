@@ -70,7 +70,11 @@ use crate::{
         atom::AtomField,
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
-        float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
+        float::{
+            Complex, DoubleFloat, F64, Float, PythonComplexFloat, PythonFloat,
+            PythonMultiPrecisionComplex, PythonMultiPrecisionFloat, RealLike,
+            register_python_floats,
+        },
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -748,6 +752,7 @@ impl PythonFormattedOutput {
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
+    register_python_floats(m)?;
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
@@ -1527,19 +1532,19 @@ fn python_evaluation_fingerprint(eval: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 ///
 ///     For arbitrary precision evaluation of constant functions, register a function that
 ///     maps the tags and the requested decimal precision to a number:
-///     - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+///     - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 ///
 ///     Evaluators for non-constant functions when `tag_count = 0`:
 ///     - `float`: Sequence[float] -> float
 ///     - `complex`: Sequence[complex] -> complex
-///     - `decimal`: Sequence[Decimal] -> Decimal
-///     - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+///     - `decimal`: Sequence[Float] -> Float
+///     - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 ///
 ///     Evaluators for non-constant functions when `tag_count > 0` are generators:
 ///     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
 ///     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-///     - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-///     - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+///     - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+///     - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
 /// data: str | int | Expression | bytes | list | dict | None = None
 ///     Custom user data to associate with the symbol.
 fn symbol_shorthand(
@@ -1678,7 +1683,7 @@ impl PythonEvalSpec {
                 Python::attach(|py| {
                     let f = Self::python_eval_callable(py, &f, tags, tag_count)?;
                     let decimal_prec = Self::decimal_digits_from_binary_prec(prec);
-                    let args = Vec::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>::new();
+                    let args = Vec::<PythonMultiPrecisionComplex>::new();
                     let value = f.call1(py, (args.into_py_any(py)?, decimal_prec))?;
                     Self::extract_python_constant(py, value)
                 })
@@ -1838,16 +1843,12 @@ impl PythonEvalSpec {
                     match Python::attach(|py| {
                         let args = args
                             .iter()
-                            .map(|x| (x.re.clone().into(), x.im.clone().into()))
-                            .collect::<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>>(
-                            );
-                        let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
-                            PythonMultiPrecisionFloat,
-                            PythonMultiPrecisionFloat,
-                        )>(
-                            py
-                        )?;
-                        Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
+                            .cloned()
+                            .map(PythonMultiPrecisionComplex)
+                            .collect::<Vec<_>>();
+                        f.call1(py, (args.into_py_any(py)?,))?
+                            .extract::<PythonMultiPrecisionComplex>(py)
+                            .map(|x| x.0)
                     }) {
                         Ok(value) => value,
                         Err(err) => {
@@ -1879,18 +1880,12 @@ impl PythonEvalSpec {
                         match Python::attach(|py| {
                             let args = args
                                 .iter()
-                                .map(|x| (x.re.clone().into(), x.im.clone().into()))
-                                .collect::<Vec<(
-                                    PythonMultiPrecisionFloat,
-                                    PythonMultiPrecisionFloat,
-                                )>>();
-                            let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
-                                PythonMultiPrecisionFloat,
-                                PythonMultiPrecisionFloat,
-                            )>(
-                                py
-                            )?;
-                            Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
+                                .cloned()
+                                .map(PythonMultiPrecisionComplex)
+                                .collect::<Vec<_>>();
+                            f.call1(py, (args.into_py_any(py)?,))?
+                                .extract::<PythonMultiPrecisionComplex>(py)
+                                .map(|x| x.0)
                         }) {
                             Ok(value) => value,
                             Err(err) => {
@@ -1951,14 +1946,8 @@ impl PythonEvalSpec {
             && let Ok(re_f) = Float::try_from(&re.expr)
         {
             Ok(re_f.into())
-        } else if let Ok((re, im)) =
-            value.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>(py)
-        {
-            Ok(Complex::new(re.0, im.0))
-        } else if let Ok(re) = value.extract::<PythonMultiPrecisionFloat>(py) {
-            Ok(re.0.into())
-        } else if let Ok(value) = value.extract::<Complex<f64>>(py) {
-            Ok(Complex::new(value.re.into(), value.im.into()))
+        } else if let Ok(value) = value.extract::<PythonMultiPrecisionComplex>(py) {
+            Ok(value.0)
         } else {
             Err(exceptions::PyTypeError::new_err(
                 "eval['constant'] must return a number or a (real, imag) tuple",
@@ -2501,19 +2490,19 @@ eval: dict[str, Any] | None:
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
-    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
     Evaluators for non-constant functions when `tag_count = 0`:
     - `float`: Sequence[float] -> float
     - `complex`: Sequence[complex] -> complex
-    - `decimal`: Sequence[Decimal] -> Decimal
-    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    - `decimal`: Sequence[Float] -> Float
+    - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
     Evaluators for non-constant functions when `tag_count > 0` are generators:
     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
 data: str | int | Expression | bytes | list | dict | None = None
     Custom user data to associate with the symbol."#,
             module: Some("symbolica.core"),
@@ -2548,7 +2537,7 @@ data: str | int | Expression | bytes | list | dict | None = None
 ///
 /// Parameters
 /// ----------
-/// num: int | float | complex | str | Decimal
+/// num: int | float | complex | str | Float | ComplexFloat | Decimal
 ///     The value to convert into a Symbolica number.
 /// relative_error: float | None
 ///     The maximum relative error used when converting floating-point input to a rational number.
@@ -2559,7 +2548,7 @@ data: str | int | Expression | bytes | list | dict | None = None
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pyfunction(name = "N", signature = (num,relative_error=None))]
 fn number_shorthand(
-    #[gen_stub(override_type(type_repr = "int | float | complex | str | decimal.Decimal", imports = ("decimal")))]
+    #[gen_stub(override_type(type_repr = "int | float | complex | str | Float | ComplexFloat | decimal.Decimal", imports = ("decimal")))]
     num: Py<PyAny>,
     relative_error: Option<f64>,
     py: Python,

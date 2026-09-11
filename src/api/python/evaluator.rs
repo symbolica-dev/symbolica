@@ -472,8 +472,8 @@ impl PythonExpressionEvaluator {
 
     fn evaluate_double_float_complex(
         &mut self,
-        inputs: Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>,
-    ) -> PyResult<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>> {
+        inputs: Vec<PythonMultiPrecisionComplex>,
+    ) -> PyResult<Vec<PythonMultiPrecisionComplex>> {
         if self.eval_double_float_complex.is_none() {
             self.eval_double_float_complex = Some(
                 self.eval_complex
@@ -487,7 +487,7 @@ impl PythonExpressionEvaluator {
 
         let inputs = inputs
             .into_iter()
-            .map(|x| Complex::new(x.0.0.to_double_float(), x.1.0.to_double_float()))
+            .map(|x| Complex::new(x.0.re.to_double_float(), x.0.im.to_double_float()))
             .collect::<Vec<_>>();
         let mut out =
             vec![Complex::from(DoubleFloat::from(0.)); self.eval_complex.get_output_len()];
@@ -495,7 +495,9 @@ impl PythonExpressionEvaluator {
             .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         Ok(out
             .into_iter()
-            .map(|x| (Float::from(x.re).into(), Float::from(x.im).into()))
+            .map(|x| {
+                PythonMultiPrecisionComplex(Complex::new(Float::from(x.re), Float::from(x.im)))
+            })
             .collect())
     }
 }
@@ -1040,11 +1042,10 @@ impl PythonExpressionEvaluator {
     ///
     /// Parameters
     /// ----------
-    /// inputs: Sequence[float | str | Decimal]
+    /// inputs: Sequence[Float | int | float | str | Decimal]
     ///     The input values or batches to evaluate.
     /// decimal_digit_precision: int
     ///     Positive decimal precision. Invalid precision or input counts raise ValueError.
-    #[gen_stub(override_return_type(type_repr = "list[decimal.Decimal]", imports = ("decimal")))]
     fn evaluate_with_prec<'py>(
         &mut self,
         inputs: Vec<PythonMultiPrecisionFloat>,
@@ -1230,20 +1231,19 @@ impl PythonExpressionEvaluator {
     /// >>> print(ev.evaluate_complex_with_prec(
     /// >>>     [(Decimal('1.234567890121223456789981273238947212312338947923'), Decimal('3.434567890121223356789981273238947212312338947923'))], 50))
     ///
-    /// Yields `[(Decimal('-10.27209871653338252296233957800668637617803672307'), Decimal('8.480414467170121512062583245527383392798704790330'))]`
+    /// Returns a list of ComplexFloat values. Use `to_decimal_tuple()` for Decimal components.
     ///
     /// Parameters
     /// ----------
-    /// inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]]
+    /// inputs: Sequence[ComplexFloat | complex | tuple[Float | float | str | Decimal, Float | float | str | Decimal]]
     ///     The input values or batches to evaluate.
     /// decimal_digit_precision: int
     ///     Positive decimal precision. Invalid precision or input counts raise ValueError.
-    #[gen_stub(override_return_type(type_repr = "list[tuple[decimal.Decimal, decimal.Decimal]]", imports = ("decimal")))]
     fn evaluate_complex_with_prec<'py>(
         &mut self,
-        inputs: Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>,
+        inputs: Vec<PythonMultiPrecisionComplex>,
         decimal_digit_precision: u32,
-    ) -> PyResult<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>> {
+    ) -> PyResult<Vec<PythonMultiPrecisionComplex>> {
         if decimal_digit_precision == 32 {
             return self.evaluate_double_float_complex(inputs);
         }
@@ -1276,20 +1276,14 @@ impl PythonExpressionEvaluator {
 
         let eval = &mut self.eval_arb_prec_complex.as_mut().unwrap().1;
 
-        let inputs = inputs
-            .into_iter()
-            .map(|x| Complex::new(x.0.0, x.1.0))
-            .collect::<Vec<_>>();
+        let inputs = inputs.into_iter().map(|x| x.0).collect::<Vec<_>>();
         let mut out = vec![
             Complex::new(Float::with_val(prec, 0), Float::with_val(prec, 0));
             self.eval_complex.get_output_len()
         ];
         eval.try_evaluate(&inputs, &mut out)
             .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(out
-            .into_iter()
-            .map(|x| (x.re.into(), x.im.into()))
-            .collect())
+        Ok(out.into_iter().map(PythonMultiPrecisionComplex).collect())
     }
 
     /// Dualize the evaluator to support hyper-dual numbers with the given shape,

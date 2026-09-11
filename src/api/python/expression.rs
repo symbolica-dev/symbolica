@@ -202,7 +202,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __add__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -216,7 +216,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __radd__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__add__(rhs)
@@ -226,7 +226,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __sub__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__add__(ConvertibleToPattern::Held(rhs.to_pattern()?.__neg__()?))
@@ -236,7 +236,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rsub__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         rhs.to_pattern()?
@@ -247,7 +247,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __mul__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -261,7 +261,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rmul__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__mul__(rhs)
@@ -271,7 +271,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __truediv__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -285,7 +285,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rtruediv__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         rhs.to_pattern()?
@@ -296,7 +296,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// exponent: HeldExpression | Expression | int | float | complex | Decimal
+    /// exponent: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The exponent.
     pub fn __pow__(
         &self,
@@ -320,7 +320,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// base: HeldExpression | Expression | int | float | complex | Decimal
+    /// base: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The base expression.
     pub fn __rpow__(
         &self,
@@ -1139,12 +1139,12 @@ impl PythonTransformer {
     ///
     /// Parameters
     /// ----------
-    /// f: Callable[[Expression], Expression | int | float | complex | Decimal]
+    /// f: Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | Decimal]
     ///     The callback or function to apply.
     pub fn map(
         &self,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[Expression], Expression | int | float | complex | decimal.Decimal]"
+            type_repr = "typing.Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal]"
         ))]
         f: Py<PyAny>,
     ) -> PyResult<PythonTransformer> {
@@ -1800,7 +1800,7 @@ impl PythonTransformer {
     /// ----------
     /// x: Expression
     ///     The variable around which the series is expanded.
-    /// expansion_point: Expression | int | float | complex | Decimal
+    /// expansion_point: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The point around which the series should be expanded.
     /// depth: int
     ///     The numerator of the expansion depth.
@@ -2599,76 +2599,29 @@ impl PythonSymbol {
     }
 }
 
-pub enum PythonEvaluationValue {
-    Real(PythonMultiPrecisionFloat),
-    Complex(Complex<f64>),
-    DecimalComplex(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
-}
+pub struct PythonEvaluationValue(PythonMultiPrecisionComplex);
 
 impl PythonEvaluationValue {
     fn to_complex_f64(&self) -> Complex<f64> {
-        match self {
-            PythonEvaluationValue::Real(r) => Complex::new(r.0.to_f64(), 0.),
-            PythonEvaluationValue::Complex(c) => *c,
-            PythonEvaluationValue::DecimalComplex(re, im) => {
-                Complex::new(re.0.to_f64(), im.0.to_f64())
-            }
-        }
+        Complex::new(self.0.0.re.to_f64(), self.0.0.im.to_f64())
     }
-
     fn to_complex_float(&self, prec: u32) -> Complex<Float> {
-        match self {
-            PythonEvaluationValue::Real(r) => {
-                let mut re = r.0.clone();
-                re.set_prec(prec);
-                Complex::new(re, Float::new(prec))
-            }
-            PythonEvaluationValue::Complex(c) => {
-                Complex::new(Float::with_val(prec, c.re), Float::with_val(prec, c.im))
-            }
-            PythonEvaluationValue::DecimalComplex(re, im) => {
-                let mut re = re.0.clone();
-                let mut im = im.0.clone();
-                re.set_prec(prec);
-                im.set_prec(prec);
-                Complex::new(re, im)
-            }
-        }
+        let mut value = self.0.0.clone();
+        value.re.set_prec(prec);
+        value.im.set_prec(prec);
+        value
     }
 }
-
 impl<'py> FromPyObject<'_, 'py> for PythonEvaluationValue {
     type Error = PyErr;
-
     fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
-        if let Ok((re, im)) = ob.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>()
-        {
-            Ok(PythonEvaluationValue::DecimalComplex(re, im))
-        } else if let Ok(r) = ob.extract::<PythonMultiPrecisionFloat>() {
-            Ok(PythonEvaluationValue::Real(r))
-        } else if let Ok(c) = ob.extract::<Complex<f64>>() {
-            Ok(PythonEvaluationValue::Complex(c))
-        } else {
-            Err(exceptions::PyTypeError::new_err(
-                "Expected int, float, complex, Decimal or tuple[Decimal, Decimal]",
-            ))
-        }
+        ob.extract::<PythonMultiPrecisionComplex>().map(Self)
     }
 }
-
 #[cfg(feature = "python_stubgen")]
 impl PyStubType for PythonEvaluationValue {
     fn type_output() -> TypeInfo {
-        TypeInfo {
-            name:
-                "int | float | complex | decimal.Decimal | tuple[decimal.Decimal, decimal.Decimal]"
-                    .into(),
-            import: {
-                let mut h = std::collections::HashSet::default();
-                h.insert("decimal".into());
-                h
-            },
-        }
+        PythonMultiPrecisionComplex::type_input()
     }
 }
 
@@ -2970,10 +2923,8 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
             ))
         } else if let Ok(f) = ob.extract::<PythonMultiPrecisionFloat>() {
             Ok(ConvertibleToExpression(Atom::num(f.0).into()))
-        } else if let Ok(num) = ob.extract::<Complex<f64>>() {
-            Ok(ConvertibleToExpression(
-                Atom::num(Complex::<Float>::new(num.re.into(), num.im.into())).into(),
-            ))
+        } else if let Ok(num) = ob.extract::<PythonMultiPrecisionComplex>() {
+            Ok(ConvertibleToExpression(Atom::num(num.0).into()))
         } else {
             Err(exceptions::PyTypeError::new_err(
                 "Cannot convert to expression",
@@ -2984,7 +2935,8 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
 
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(
-    ConvertibleToExpression = PythonExpression | PyInt | PythonMultiPrecisionFloat | Complex64
+    ConvertibleToExpression =
+        PythonExpression | PyInt | PythonMultiPrecisionFloat | PythonMultiPrecisionComplex
 );
 
 impl<'py> FromPyObject<'_, 'py> for Symbol {
@@ -3449,19 +3401,19 @@ impl PythonExpression {
     ///
     ///     For arbitrary precision evaluation of constant functions, register a function that
     ///     maps the tags and the requested decimal precision to a number:
-    ///     - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    ///     - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
     ///
     ///     Evaluators for non-constant functions when `tag_count = 0`:
     ///     - `float`: Sequence[float] -> float
     ///     - `complex`: Sequence[complex] -> complex
-    ///     - `decimal`: Sequence[Decimal] -> Decimal
-    ///     - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    ///     - `decimal`: Sequence[Float] -> Float
+    ///     - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
     ///
     ///     Evaluators for non-constant functions when `tag_count > 0` are generators:
     ///     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     ///     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    ///     - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    ///     - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    ///     - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    ///     - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
     /// data: str | int | Expression | bytes | list | dict | None = None
     ///     Custom user data to associate with the symbol.
     #[gen_stub(skip)]
@@ -3797,7 +3749,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// num: int | float | complex | str | Decimal
+    /// num: int | float | complex | str | Float | ComplexFloat | Decimal
     ///     The value to convert into a Symbolica number.
     /// relative_error: float | None
     ///     The maximum relative error used when converting floating-point input to a rational number.
@@ -3807,7 +3759,7 @@ impl PythonExpression {
         _cls: &Bound<'_, PyType>,
         py: Python,
         #[gen_stub(override_type(
-            type_repr = "int | float | complex | str | decimal.Decimal",
+            type_repr = "int | float | complex | str | decimal.Decimal | Float | ComplexFloat",
             imports = ("decimal")
         ))]
         num: Py<PyAny>,
@@ -3832,20 +3784,20 @@ impl PythonExpression {
             } else {
                 Ok(Atom::num(f.0).into())
             }
-        } else if let Ok(f) = num.extract::<Complex<f64>>(py) {
+        } else if let Ok(f) = num.extract::<PythonMultiPrecisionComplex>(py) {
             if let Some(relative_error) = relative_error {
                 let err = relative_error
                     .try_into()
                     .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?;
-                let r = Rational::try_from(f.re)
+                let r = Rational::try_from(f.0.re)
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
-                let i = Rational::try_from(f.im)
+                let i = Rational::try_from(f.0.im)
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
                 Ok(Atom::num(Complex::new(r, i)).into())
             } else {
-                Ok(Atom::num(Complex::<Float>::new(f.re.into(), f.im.into())).into())
+                Ok(Atom::num(f.0).into())
             }
         } else {
             Err(exceptions::PyValueError::new_err("Not a valid number"))
@@ -5030,7 +4982,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __add__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -5041,7 +4993,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __radd__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__add__(rhs)
@@ -5051,7 +5003,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __sub__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__add__(ConvertibleToExpression(rhs.to_expression().__neg__()?))
@@ -5061,7 +5013,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rsub__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         rhs.to_expression()
@@ -5072,7 +5024,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __mul__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -5083,7 +5035,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rmul__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__mul__(rhs)
@@ -5093,7 +5045,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __truediv__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -5104,7 +5056,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rtruediv__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         rhs.to_expression()
@@ -5115,7 +5067,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// exponent: Expression | int | float | complex | Decimal
+    /// exponent: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The exponent.
     pub fn __pow__(
         &self,
@@ -5136,7 +5088,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// base: Expression | int | float | complex | Decimal
+    /// base: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The base expression.
     pub fn __rpow__(
         &self,
@@ -5240,7 +5192,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// args: HeldExpression | Expression | int | float | complex | Decimal
+    /// args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The arguments passed to the expression or transformer call.
     #[gen_stub(skip)]
     #[pyo3(signature = (*args,))]
@@ -5641,15 +5593,15 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The first alternative.
-    /// others: Expression | int | float | complex | Decimal
+    /// others: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     Additional alternatives.
     #[pyo3(signature = (other, *others))]
     pub fn alt(
         &self,
         other: ConvertibleToExpression,
-        #[gen_stub(override_type(type_repr = "Expression | int | float | complex | decimal.Decimal", imports = ("decimal")))]
+        #[gen_stub(override_type(type_repr = "Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal", imports = ("decimal")))]
         others: &Bound<'_, PyTuple>,
     ) -> PyResult<PythonExpression> {
         let mut alternatives = Vec::with_capacity(others.len() + 2);
@@ -6158,7 +6110,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -6188,7 +6140,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -6218,7 +6170,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -6248,7 +6200,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -6452,7 +6404,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     /// cmp_fn: Callable[[Expression, Expression], bool | None | Condition]
     ///     The comparison callback applied to the matched values.
@@ -7139,7 +7091,7 @@ impl PythonExpression {
     ///
     /// x : Expression
     ///     The variable to expand in.
-    /// expansion_point : Expression | int | float | complex | Decimal
+    /// expansion_point : Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The point around which to expand.
     /// depth : int
     ///     The depth of the expansion.
@@ -7797,7 +7749,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// lhs: Expression | int | float | complex | Decimal
+    /// lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The expression to match against.
     /// cond: PatternRestriction | Condition | None
     ///     An additional restriction that a match or replacement must satisfy.
@@ -8228,13 +8180,13 @@ impl PythonExpression {
     /// ----------
     /// variable: Expression
     ///     The variable to solve for.
-    /// init: Decimal
+    /// init: Float | int | float | str | Decimal
     ///     The initial guess for Newton's method.
     /// prec: float
     ///     The numerical tolerance for the Newton iteration.
     /// max_iterations: int
     ///     The maximum number of Newton iterations.
-    #[gen_stub(override_return_type(type_repr = "decimal.Decimal", imports = ("decimal")))]
+    #[gen_stub(override_return_type(type_repr = "Float"))]
     #[pyo3(signature =
         (variable,
         init,
@@ -8260,7 +8212,7 @@ impl PythonExpression {
                 .map_err(|e| {
                     exceptions::PyValueError::new_err(format!("Could not solve system: {e}"))
                 })?;
-            r.into_inner().into_py_any(py)
+            PythonMultiPrecisionFloat(Float::from(r.into_inner())).into_py_any(py)
         } else {
             PythonMultiPrecisionFloat(
                 self.expr
@@ -8293,7 +8245,7 @@ impl PythonExpression {
     ///     The equations or polynomials that define the system.
     /// variables: Sequence[Expression]
     ///     The variables to solve for, in order.
-    /// init: Sequence[Decimal]
+    /// init: Sequence[Float | int | float | str | Decimal]
     ///     The initial guess for Newton's method.
     /// prec: float
     ///     The numerical tolerance for the Newton iteration.
@@ -8366,13 +8318,13 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
+    /// constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
     ///     The constant substitutions applied during evaluation.
     /// decimal_digit_precision: int | None
     ///     If omitted, uses the f64 backend and returns a complex. If specified,
-    ///     uses arbitrary precision and returns (real, imaginary) as Decimals.
+    ///     uses arbitrary precision and returns a ComplexFloat.
     #[pyo3(signature = (constants, decimal_digit_precision = None))]
-    #[gen_stub(override_return_type(type_repr = "complex | tuple[decimal.Decimal, decimal.Decimal]", imports = ("decimal")))]
+    #[gen_stub(override_return_type(type_repr = "complex | ComplexFloat"))]
     pub fn evaluate(
         &self,
         py: Python,
@@ -8391,7 +8343,8 @@ impl PythonExpression {
             return PyComplex::from_doubles(py, r.re, r.im).into_py_any(py);
         };
 
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
         let constants: HashMap<AtomView, Complex<Float>> = constants
             .iter()
             .map(|(k, v)| (k.expr.as_view(), v.to_complex_float(prec)))
@@ -8403,11 +8356,7 @@ impl PythonExpression {
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
             })?;
-        (
-            PythonMultiPrecisionFloat(r.re),
-            PythonMultiPrecisionFloat(r.im),
-        )
-            .into_py_any(py)
+        PythonMultiPrecisionComplex(r).into_py_any(py)
     }
 
     /// Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
@@ -9146,19 +9095,19 @@ eval: dict[str, Any] | None:
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
-    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
     Evaluators for non-constant functions when `tag_count = 0`:
     - `float`: Sequence[float] -> float
     - `complex`: Sequence[complex] -> complex
-    - `decimal`: Sequence[Decimal] -> Decimal
-    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    - `decimal`: Sequence[Float] -> Float
+    - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
     Evaluators for non-constant functions when `tag_count > 0` are generators:
     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
 data: str | int | Expression | bytes | list | dict | None = None
     Custom user data to associate with the symbol."#,
             is_async: false,
@@ -9559,7 +9508,7 @@ Examples
 
 Parameters
 ----------
-args: Expression | int | float | complex | Decimal
+args: Expression | int | float | complex | Float | ComplexFloat | Decimal
     The arguments passed to the expression call."#,
                 is_async: false,
                 deprecated: None,
@@ -9589,7 +9538,7 @@ Examples
 
 Parameters
 ----------
-args: HeldExpression | Expression | int | float | complex | Decimal
+args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     The arguments passed to the expression or transformer call."#,
                 is_async: false,
                 deprecated: None,

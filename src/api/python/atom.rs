@@ -347,7 +347,7 @@ pub struct ReplaceFunction;
 impl PyStubType for ReplaceFunction {
     fn type_output() -> TypeInfo {
         TypeInfo {
-            name: "typing.Callable[[dict[Expression, Expression]], Expression] | int | float | complex | decimal.Decimal".into(),
+            name: "typing.Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Float | ComplexFloat | decimal.Decimal".into(),
             import: {
                 let mut h = std::collections::HashSet::default();
                 h.insert("decimal".into());

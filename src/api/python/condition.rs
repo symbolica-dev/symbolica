@@ -163,6 +163,22 @@ pub(super) fn expression_eq(
         }
         return Ok(Some(lhs.expr == other.expr));
     }
+    if rhs.is_instance_of::<PythonFloat>() || rhs.is_instance_of::<PythonComplexFloat>() {
+        let value = rhs.extract::<PythonMultiPrecisionComplex>()?.0;
+        let Some((lr, li)) = left else {
+            return Ok(Some(false));
+        };
+        let component = |f: Float| -> PyResult<Bound<'_, PyAny>> {
+            if let Some(r) = f.try_to_rational() {
+                rational_to_python(r, py)
+            } else {
+                f.to_f64().into_bound_py_any(py)
+            }
+        };
+        return Ok(Some(
+            lr.eq(component(value.re)?)? && li.eq(component(value.im)?)?,
+        ));
+    }
     if !rhs.is_instance(&py.import("numbers")?.getattr("Number")?)?
         && !rhs.is_instance(&py.import("decimal")?.getattr("Decimal")?)?
     {
