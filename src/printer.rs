@@ -1391,6 +1391,8 @@ impl FormattedPrintMul for MulView<'_> {
 
             if opts.mode.is_latex() {
                 f.write_fmt(format_args!("\\frac{{"))?;
+            } else if opts.mode.is_typst() {
+                f.write_fmt(format_args!("frac("))?;
             } else {
                 f.write_char('(')?;
             }
@@ -1539,6 +1541,12 @@ impl FormattedPrintMul for MulView<'_> {
                     if den_count == 1 {
                         print_state.in_product = false;
                     }
+                } else if opts.mode.is_typst() {
+                    f.write_char(',')?;
+
+                    if den_count == 1 {
+                        print_state.in_product = false;
+                    }
                 } else {
                     f.write_char(')')?;
                 }
@@ -1567,11 +1575,11 @@ impl FormattedPrintMul for MulView<'_> {
                 char_count += 2;
             }
 
-            if !opts.mode.is_latex() {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() {
                 f.write_char('/')?;
             }
 
-            if !opts.mode.is_latex() && den_count > 1 {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() && den_count > 1 {
                 AtomPrinter::format_bracket('(', f, opts, print_state)?;
                 print_state.bracket_level += 1;
             }
@@ -1691,13 +1699,15 @@ impl FormattedPrintMul for MulView<'_> {
                 }
             }
 
-            if !opts.mode.is_latex() && den_count > 1 {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() && den_count > 1 {
                 print_state.bracket_level -= 1;
                 AtomPrinter::format_bracket(')', f, opts, print_state)?;
             }
 
             if opts.mode.is_latex() {
                 f.write_str("}")?;
+            } else if opts.mode.is_typst() {
+                f.write_str(")")?;
             }
         }
 
@@ -1717,9 +1727,11 @@ impl FormattedPrintMul for MulView<'_> {
     }
 }
 
-impl FormattedPrintFn for FunView<'_> {
-    fn fmt_output<W: std::fmt::Write>(
+impl FunView<'_> {
+    /// Format the function, potentially with a custom head.
+    pub fn format<W: std::fmt::Write>(
         &self,
+        custom_head: Option<&str>,
         f: &mut W,
         opts: &PrintOptions,
         mut print_state: PrintState,
@@ -1741,7 +1753,9 @@ impl FormattedPrintFn for FunView<'_> {
         }
 
         let id = self.get_symbol();
-        if let Some(custom_print) = &id.get_global_data().custom_print
+
+        if custom_head.is_none()
+            && let Some(custom_print) = &id.get_global_data().custom_print
             && let Some(s) = custom_print(self.as_view(), opts, &print_state)
         {
             f.write_str(&s)?;
@@ -1807,7 +1821,9 @@ impl FormattedPrintFn for FunView<'_> {
             return Ok(false);
         }
 
-        if opts.mode.is_typst() {
+        if let Some(custom_head) = custom_head {
+            f.write_str(custom_head)?;
+        } else if opts.mode.is_typst() {
             f.write_str("op(")?;
             id.format(opts, print_state, f)?;
             f.write_str(")")?;
@@ -1976,6 +1992,17 @@ impl FormattedPrintFn for FunView<'_> {
 
         Ok(false)
     }
+}
+
+impl FormattedPrintFn for FunView<'_> {
+    fn fmt_output<W: std::fmt::Write>(
+        &self,
+        f: &mut W,
+        opts: &PrintOptions,
+        print_state: PrintState,
+    ) -> Result<bool, Error> {
+        self.format(None, f, opts, print_state)
+    }
 
     fn fmt_debug(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("{:?}", self))
@@ -2049,7 +2076,7 @@ impl FormattedPrintPow for PowView<'_> {
                 if opts.mode.is_latex() {
                     f.write_str("\\frac{1}{")?;
                 } else {
-                    f.write_str("1/")?;
+                    f.write_str("frac(1,")?;
                 }
             }
 
@@ -2089,8 +2116,12 @@ impl FormattedPrintPow for PowView<'_> {
                 }
             }
 
-            if r < 0 && opts.mode.is_latex() {
-                f.write_str("}")?;
+            if r < 0 {
+                if opts.mode.is_latex() {
+                    f.write_str("}")?;
+                } else {
+                    f.write_str(")")?;
+                }
             }
         } else {
             // detect denominator
@@ -2110,6 +2141,9 @@ impl FormattedPrintPow for PowView<'_> {
                 if opts.mode.is_latex() {
                     print_state.in_exp_base = !exp.is_one();
                     f.write_str("\\frac{1}{")?;
+                } else if opts.mode.is_typst() {
+                    print_state.in_exp_base = !exp.is_one();
+                    f.write_str("frac(1,")?;
                 } else {
                     f.write_str("1/")?;
                 }
@@ -2154,6 +2188,8 @@ impl FormattedPrintPow for PowView<'_> {
 
                 if opts.mode.is_latex() {
                     f.write_str("}")?;
+                } else if opts.mode.is_typst() {
+                    f.write_str(")")?;
                 }
             } else {
                 b.format(f, opts, print_state)?;
