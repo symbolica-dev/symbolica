@@ -1329,6 +1329,9 @@ where
             let exp = d.p_adic_expansion(&p);
             let p_rat = Self::from_univariate(p);
             for (pow, d_exp) in exp.into_iter().enumerate() {
+                if d_exp.is_zero() {
+                    continue;
+                }
                 hs.push((
                     &Self::from_univariate(d_exp) * &constant,
                     p_rat.clone(),
@@ -1772,6 +1775,26 @@ mod test {
     };
 
     use super::{FromNumeratorAndDenominator, RationalPolynomialField};
+
+    #[test]
+    fn sparse_partial_fractions_preserve_maps_and_skip_zero_terms() {
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("unused").into()]);
+        let input: RationalPolynomial<_, u16> = parse!("1+1/(x+1)^3+1/(x+1)+1/(x+2)")
+            .to_rational_polynomial(&Q, &Z, Some(variables.clone()));
+        let terms = input.apart_factored_denominators(0);
+        assert_eq!(terms.len(), 4);
+        let mut sum: RationalPolynomial<_, u16> = input.numerator.zero().into();
+        for (num, den, power) in terms {
+            assert!(!num.is_zero());
+            for term in [&num, &den] {
+                assert!(variables.iter().all(|v| term.get_variables().contains(v)));
+            }
+            sum = &sum + &(&num / &den.pow(power as u64));
+        }
+        let mut expected = input;
+        sum.unify_variables(&mut expected);
+        assert_eq!(sum, expected);
+    }
 
     #[test]
     fn integer_content_is_removed_from_disjoint_variables() {

@@ -2042,13 +2042,16 @@ impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
 }
 
 impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
-    /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
+    /// Compute the univariate GCD using Euclid's algorithm. A nonzero result is monic.
     pub fn univariate_gcd(&self, b: &Self) -> Self {
+        if self.is_zero() && b.is_zero() {
+            return self.clone();
+        }
         if self.is_zero() {
-            return b.clone();
+            return b.clone().make_monic();
         }
         if b.is_zero() {
-            return self.clone();
+            return self.clone().make_monic();
         }
 
         let dense = DenseUnivariateGcdContext::new(self, b);
@@ -8286,6 +8289,18 @@ mod tests {
     use crate::domains::finite_field::{Z2, Zp};
     use crate::parse;
     use crate::poly::PolyVariable;
+
+    #[test]
+    fn gcd_with_zero_is_monic_over_extensions() {
+        let field = crate::domains::algebraic::AlgebraicExtension::new(
+            parse!("a^3+a+1").to_polynomial::<_, u16>(&Z2, None),
+        );
+        let monic = parse!("x^2+x+1").to_polynomial::<_, u16>(&field, None);
+        let scaled = monic.clone().mul_coeff(field.generator());
+        assert_eq!(scaled.univariate_gcd(&scaled.zero()), monic);
+        assert_eq!(scaled.zero().univariate_gcd(&scaled), monic);
+        assert!(scaled.zero().univariate_gcd(&scaled.zero()).is_zero());
+    }
 
     fn hu_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
         let variables = ["x", "y", "z"]
