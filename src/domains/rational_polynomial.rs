@@ -1622,8 +1622,8 @@ where
 
             let b = h.clone() - p.derivative().mul_coeff(&t);
 
-            // TODO: use resultant_prs instead?
-            let r = p.resultant(&b);
+            // TODO: use resultant_brown instead?
+            let r = p.resultant_euclidean(&b);
 
             // drop the denominator as it is constant in x
             let mut sqf = r.numerator.square_free_factorization();

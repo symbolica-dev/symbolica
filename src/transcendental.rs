@@ -4213,7 +4213,12 @@ mod tests {
         assert_eq!(parse!("gamma(5)"), Atom::num(24));
         assert_eq!(parse!("gamma(1/2)"), parse!("pi^(1/2)"));
         assert_eq!(parse!("gamma(-5/2)"), parse!("-8/15*pi^(1/2)"));
-        assert_eq!(parse!("gamma(0.3)"), parse!("2.991568987687591"));
+        // Match the 53-bit input precision explicitly: the reference literal
+        // contains enough decimal digits to infer a higher precision.
+        assert_eq!(
+            parse!("gamma(0.3)"),
+            Atom::num(Float::parse("2.991568987687591", Some(53)).unwrap())
+        );
         assert_eq!(
             parse!("gamma(0)"),
             Atom::num(Coefficient::complex_infinity())

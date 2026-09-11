@@ -290,6 +290,31 @@ fn algebraic_polynomial_to_expression() {
 }
 
 #[test]
+fn factor_with_large_unrelated_extension() {
+    let lll_before = crate::poly::factor::LLL_RECOMBINATION_SUCCESSES.with(|count| count.get());
+    let expression = crate::parse!("x^6-2");
+    let extensions = [crate::parse!("sqrt(2)"), crate::parse!("root(x^24-7,0)")];
+    let (context, polynomial) = expression
+        .to_polynomial_in_algebraic_extension::<u16>(symbol!("x"), &extensions)
+        .unwrap();
+
+    let factors = polynomial
+        .factor()
+        .into_iter()
+        .map(|(factor, exponent)| {
+            assert_eq!(exponent, 1);
+            factor.to_expression_with_context(&context).unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(factors.len(), 2);
+    assert!(factors.contains(&crate::parse!("x^3-sqrt(2)")));
+    assert!(factors.contains(&crate::parse!("x^3+sqrt(2)")));
+    let lll_after = crate::poly::factor::LLL_RECOMBINATION_SUCCESSES.with(|count| count.get());
+    assert!(lll_after > lll_before);
+}
+
+#[test]
 fn algebraic_context_preserves_integer_powers() {
     for expression in [
         crate::parse!("(1/2-1/2*13^(1/2))^2"),

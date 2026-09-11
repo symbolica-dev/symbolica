@@ -1,6 +1,5 @@
 //! The field of general expressions.
 
-use crate::domains::SampleableRing;
 use crate::{
     atom::{Atom, AtomCore, AtomView},
     domains::{RingOps, Set},
@@ -8,7 +7,8 @@ use crate::{
 };
 
 use super::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, integer::Integer,
+    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing, SelfRing,
+    integer::Integer,
 };
 
 use dyn_clone::DynClone;
@@ -275,6 +275,18 @@ impl Ring for AtomField {
     }
 }
 
+impl SampleableRing for AtomField {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        self.sample_small_integer(rng, policy.clone())
+    }
+}
+
 impl SelfRing for Atom {
     fn is_zero(&self) -> bool {
         !self.as_view().zero_test(10, f64::EPSILON).is_false()
@@ -344,16 +356,5 @@ impl Derivable for AtomField {
             PolyVariable::Symbol(s) => e.derivative(*s),
             _ => panic!("Cannot take derivative of non-symbol"),
         }
-    }
-}
-
-impl SampleableRing for AtomField {
-    type SamplingPolicy = std::ops::RangeInclusive<i64>;
-    fn sample<G: rand::RngCore + ?Sized>(
-        &self,
-        rng: &mut G,
-        policy: &Self::SamplingPolicy,
-    ) -> Self::Element {
-        self.sample_small_integer(rng, policy.clone())
     }
 }

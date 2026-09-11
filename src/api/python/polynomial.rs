@@ -1049,7 +1049,7 @@ impl PythonPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -1060,7 +1060,7 @@ impl PythonPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -2632,7 +2632,7 @@ impl PythonFiniteFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -2643,7 +2643,7 @@ impl PythonFiniteFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -3780,7 +3780,7 @@ impl PythonPrimeTwoPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -3791,7 +3791,7 @@ impl PythonPrimeTwoPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -4774,7 +4774,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -4785,7 +4785,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -5742,7 +5742,7 @@ impl PythonGaloisFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -5753,7 +5753,7 @@ impl PythonGaloisFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -6762,7 +6762,7 @@ impl PythonNumberFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -6773,7 +6773,7 @@ impl PythonNumberFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_ducos(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }

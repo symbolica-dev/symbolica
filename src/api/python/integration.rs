@@ -355,6 +355,11 @@ impl PythonNumericalIntegrator {
         bins: Vec<usize>,
         continuous_grid: PythonNumericalIntegrator,
     ) -> PyResult<PythonNumericalIntegrator> {
+        if bins.contains(&0) {
+            return Err(exceptions::PyValueError::new_err(
+                "Uniform grid layers must contain at least one bin",
+            ));
+        }
         if let Grid::Continuous(g) = continuous_grid.grid {
             Ok(PythonNumericalIntegrator {
                 grid: Grid::Uniform(bins, g),
