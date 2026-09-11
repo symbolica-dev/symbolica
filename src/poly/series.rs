@@ -27,7 +27,7 @@ use crate::{
         integer::Integer,
         rational::{Q, Rational},
     },
-    printer::{PrintOptions, PrintState},
+    printer::{AtomPrinter, PrintOptions, PrintState},
 };
 
 use super::PolyVariable;
@@ -736,6 +736,44 @@ impl<F: Ring> SelfRing for Series<F> {
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
+        fn format_exponent<W: std::fmt::Write>(
+            exponent: &Rational,
+            opts: &PrintOptions,
+            state: PrintState,
+            f: &mut W,
+        ) -> std::fmt::Result {
+            let superscript =
+                opts.mode.is_symbolica() && opts.num_exp_as_superscript && exponent.is_integer();
+            if !superscript {
+                f.write_char('^')?;
+            }
+            if opts.mode.is_latex() {
+                f.write_char('{')?;
+            }
+
+            if superscript {
+                if exponent.is_negative() {
+                    f.write_char('⁻')?;
+                }
+
+                let mut exponent_state = state.step(false, false, true, false);
+                exponent_state.superscript = true;
+                AtomPrinter::format_digits(
+                    exponent.numerator_ref().abs().to_string(),
+                    opts,
+                    &exponent_state,
+                    f,
+                )?;
+            } else {
+                Q.format(exponent, opts, state.step(false, false, true, false), f)?;
+            }
+
+            if opts.mode.is_latex() {
+                f.write_char('}')?;
+            }
+            Ok(())
+        }
+
         let v = if self.field.is_zero(&self.expansion_point) {
             self.variable.format_string(
                 opts,
@@ -760,8 +798,8 @@ impl<F: Ring> SelfRing for Series<F> {
             if opts.mode.is_latex() {
                 write!(f, "\\mathcal{{O}}\\left({v}^{{{o}}}\\right)")?;
             } else {
-                write!(f, "𝒪({v}^")?;
-                Q.format(&o, opts, state.step(false, false, true, false), f)?;
+                write!(f, "𝒪({v}")?;
+                format_exponent(&o, opts, state, f)?;
                 f.write_char(')')?;
             }
             return Ok(false);
@@ -804,18 +842,9 @@ impl<F: Ring> SelfRing for Series<F> {
             if e.is_one() {
                 write!(f, "{v}")?;
             } else if !e.is_zero() {
-                write!(f, "{v}^")?;
+                write!(f, "{v}")?;
                 state.suppress_one = false;
-
-                if opts.mode.is_latex() {
-                    f.write_char('{')?;
-                }
-
-                Q.format(&e, opts, state.step(false, false, true, false), f)?;
-
-                if opts.mode.is_latex() {
-                    f.write_char('}')?;
-                }
+                format_exponent(&e, opts, state, f)?;
             }
 
             state.in_sum = true;
@@ -826,8 +855,8 @@ impl<F: Ring> SelfRing for Series<F> {
         if opts.mode.is_latex() {
             write!(f, "+\\mathcal{{O}}\\left({v}^{{{o}}}\\right)")?;
         } else {
-            write!(f, "+𝒪({v}^")?;
-            Q.format(&o, opts, state.step(false, false, true, false), f)?;
+            write!(f, "+𝒪({v}")?;
+            format_exponent(&o, opts, state, f)?;
             f.write_char(')')?;
         }
 

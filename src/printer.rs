@@ -2086,7 +2086,6 @@ impl FormattedPrintPow for PowView<'_> {
                     print_state.bracket_level += 1;
                 }
 
-                print_state.in_exp_base = false;
                 if opts.mode.is_latex() {
                     f.write_str("\\frac{1}{")?;
                 } else {
@@ -2094,6 +2093,7 @@ impl FormattedPrintPow for PowView<'_> {
                 }
             }
 
+            print_state.in_exp_base = false;
             if opts.mode.is_latex() {
                 f.write_str("\\sqrt")?;
 
