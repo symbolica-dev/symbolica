@@ -6,8 +6,9 @@ use symbolica::prelude::{Zp, Zp64};
 
 use support::cases::{
     EXACT_DIVISION_CASES, ExactDivisionCase, FINITE_FIELD_MULTIPLICATION_CASES, FINITE_FIELDS,
-    FiniteFieldMultiplicationCase, GENERATED_GCD_CASES, GcdCaseConfig,
-    INTEGER_MULTIPLICATION_CASES, IntegerMultiplicationCase, RESULTANT_CASES, ResultantCase,
+    FactorizationCase, FiniteFieldCase, FiniteFieldMultiplicationCase, GENERATED_FACTOR_CASES,
+    GENERATED_GCD_CASES, GcdCaseConfig, INTEGER_MULTIPLICATION_CASES, IntegerMultiplicationCase,
+    RESULTANT_CASES, ResultantCase, U32_ACCUMULATION_FIELDS, U32_ACCUMULATION_MULTIPLICATION_CASE,
 };
 use support::polybench_cases::{
     POLYBENCH_FACTOR_CASES, POLYBENCH_GCD_CASES, POLYBENCH_SEED, POLYBENCH_SOURCE_COMMIT,
@@ -73,6 +74,20 @@ mod finite_field_64_multiplication {
     }
 }
 
+#[divan::bench_group(sample_count = 20, sample_size = 1, skip_ext_time)]
+mod finite_field_u32_accumulation_multiplication {
+    use super::*;
+
+    #[divan::bench(args = U32_ACCUMULATION_FIELDS)]
+    fn symbolica(bencher: divan::Bencher, field: FiniteFieldCase) {
+        symbolica_bench::benchmark_finite_multiplication(
+            bencher,
+            &Zp::new(u32::try_from(field.modulus).unwrap()),
+            U32_ACCUMULATION_MULTIPLICATION_CASE,
+        );
+    }
+}
+
 #[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
 mod resultants {
     use super::*;
@@ -130,6 +145,26 @@ mod generated_gcd_regimes {
     #[divan::bench(args = GENERATED_GCD_CASES)]
     fn gcd(bencher: divan::Bencher, case: GcdCaseConfig) {
         symbolica_bench::benchmark_gcd_for(bencher, GcdAlgorithm::Auto, case);
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod generated_factor_products {
+    use super::*;
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: FactorizationCase) {
+        symbolica_bench::benchmark_factor_product(bencher, case);
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod generated_factorization {
+    use super::*;
+
+    #[divan::bench(args = GENERATED_FACTOR_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: FactorizationCase) {
+        symbolica_bench::benchmark_factorization(bencher, case);
     }
 }
 

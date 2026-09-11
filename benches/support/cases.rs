@@ -5,6 +5,9 @@
 use std::{fmt, fmt::Write};
 
 pub const X_VARIABLES: [&str; 1] = ["x"];
+pub const X1_VARIABLES: [&str; 1] = ["x1"];
+pub const X1_TO_X2_VARIABLES: [&str; 2] = ["x1", "x2"];
+pub const X1_TO_X3_VARIABLES: [&str; 3] = ["x1", "x2", "x3"];
 pub const XYZ_VARIABLES: [&str; 3] = ["x", "y", "z"];
 pub const XY1Y2_VARIABLES: [&str; 3] = ["x", "y1", "y2"];
 pub const X1_TO_X5_VARIABLES: [&str; 5] = ["x1", "x2", "x3", "x4", "x5"];
@@ -164,6 +167,68 @@ pub const EXACT_DIVISION_CASES: [ExactDivisionCase; 3] = [
     },
 ];
 
+/// A reducible integer polynomial constructed as the product of two powered polynomials.
+#[derive(Clone, Copy, Debug)]
+pub struct FactorizationCase {
+    pub name: &'static str,
+    pub variables: &'static [&'static str],
+    pub left: PoweredPolynomial,
+    pub right: PoweredPolynomial,
+    pub default_samples: usize,
+}
+
+impl fmt::Display for FactorizationCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.name)
+    }
+}
+
+/// Low-dimensional factorization cases with comparable dense powered inputs.
+pub const GENERATED_FACTOR_CASES: [FactorizationCase; 6] = [
+    FactorizationCase {
+        name: "dense 1-variable degrees 32/31",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 32, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
+        default_samples: 4,
+    },
+    FactorizationCase {
+        name: "dense 2-variable degrees 10/9",
+        variables: &X1_TO_X2_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1+5*x2", 10, -1),
+        right: PoweredPolynomial::with_constant("1-3*x1+5*x2", 9, 1),
+        default_samples: 4,
+    },
+    FactorizationCase {
+        name: "dense 3-variable degrees 6/5",
+        variables: &X1_TO_X3_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1+5*x2+7*x3", 6, -1),
+        right: PoweredPolynomial::with_constant("1-3*x1+5*x2-7*x3", 5, 1),
+        default_samples: 4,
+    },
+    FactorizationCase {
+        name: "dense high-height 1-variable degrees 17/16 total 33",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+65537*x1", 17, -1),
+        right: PoweredPolynomial::with_constant("1-65539*x1", 16, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/31 total 64",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 31, 1),
+        default_samples: 2,
+    },
+    FactorizationCase {
+        name: "dense 1-variable degrees 33/32 total 65",
+        variables: &X1_VARIABLES,
+        left: PoweredPolynomial::with_constant("1+3*x1", 33, -1),
+        right: PoweredPolynomial::with_constant("1-5*x1", 32, 1),
+        default_samples: 2,
+    },
+];
+
 /// A prime field used by every finite-field multiplication input.
 #[derive(Clone, Copy, Debug)]
 pub struct FiniteFieldCase {
@@ -185,6 +250,18 @@ pub const FINITE_FIELDS: [FiniteFieldCase; 2] = [
     FiniteFieldCase {
         name: "GF(18446744073709551557)",
         modulus: 18_446_744_073_709_551_557,
+    },
+];
+
+/// Prime fields that exercise the 32-bit finite-field accumulator boundaries.
+pub const U32_ACCUMULATION_FIELDS: [FiniteFieldCase; 2] = [
+    FiniteFieldCase {
+        name: "GF(65000011)",
+        modulus: 65_000_011,
+    },
+    FiniteFieldCase {
+        name: "GF(500000003)",
+        modulus: 500_000_003,
     },
 ];
 
@@ -334,6 +411,22 @@ pub const FINITE_FIELD_MULTIPLICATION_CASES: [FiniteFieldMultiplicationCase; 6] 
     },
 ];
 
+/// An unbalanced convolution whose worst-case sum over all product pairs exceeds `u64` while the
+/// worst-case sum contributing to any one output coefficient still fits.
+pub const U32_ACCUMULATION_MULTIPLICATION_CASE: FiniteFieldMultiplicationCase =
+    FiniteFieldMultiplicationCase {
+        name: "dense univariate degrees 128/64 accumulator-bound multiplication",
+        variables: &X_VARIABLES,
+        input: FiniteFieldMultiplicationInput::DenseUnivariate {
+            left_degree: 128,
+            right_degree: 64,
+            left_stride: 499_999_937,
+            right_stride: 271_828_183,
+            coefficient_period: 500_000_002,
+        },
+        default_samples: 200,
+    };
+
 /// Two integer polynomials and the variable eliminated by the resultant.
 #[derive(Clone, Copy, Debug)]
 pub struct ResultantCase {
@@ -468,7 +561,28 @@ impl Default for GcdCaseConfig {
 
 /// Fixed generated cases that exercise support shape, dimension, exponent span,
 /// and coefficient height independently of the imported polybench fixtures.
-pub const GENERATED_GCD_CASES: [GcdCaseConfig; 11] = [
+pub const GENERATED_GCD_CASES: [GcdCaseConfig; 14] = [
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 1,
+        degree: 32,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 2,
+        degree: 5,
+        gap: 10,
+        coefficient_bits: 30,
+    },
+    GcdCaseConfig {
+        kind: GcdCaseKind::Dense,
+        variable_count: 3,
+        degree: 7,
+        gap: 10,
+        coefficient_bits: 30,
+    },
     GcdCaseConfig {
         kind: GcdCaseKind::Dense,
         variable_count: 5,
@@ -550,8 +664,8 @@ pub const GENERATED_GCD_CASES: [GcdCaseConfig; 11] = [
 
 impl GcdCaseConfig {
     pub fn validate(self) -> Result<(), String> {
-        if !(2..=8).contains(&self.variable_count) {
-            return Err("GCD variable count must be between 2 and 8".to_owned());
+        if !(1..=8).contains(&self.variable_count) {
+            return Err("GCD variable count must be between 1 and 8".to_owned());
         }
         if self.degree == 0 || self.degree > u16::MAX as u32 {
             return Err(format!("GCD degree must be between 1 and {}", u16::MAX));

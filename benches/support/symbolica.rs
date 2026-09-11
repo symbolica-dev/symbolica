@@ -12,8 +12,9 @@ use symbolica::coefficient::ConvertToRing;
 use symbolica::prelude::*;
 
 use super::cases::{
-    ExactDivisionCase, FiniteFieldMultiplicationCase, FiniteFieldMultiplicationInput,
-    GcdCaseConfig, GcdCaseKind, IntegerMultiplicationCase, PoweredPolynomial, ResultantCase,
+    ExactDivisionCase, FactorizationCase, FiniteFieldMultiplicationCase,
+    FiniteFieldMultiplicationInput, GcdCaseConfig, GcdCaseKind, IntegerMultiplicationCase,
+    PoweredPolynomial, ResultantCase,
 };
 use super::polybench_cases::{PolybenchFactorCase, PolybenchGcdCase, PolybenchGcdConstruction};
 
@@ -28,14 +29,6 @@ pub const BENCHMARK_NAMESPACE: &str = "polynomial_benchmark";
 /// whether the source workspace has uncommitted changes.
 pub fn workspace_version_label() -> String {
     let repository = env!("CARGO_MANIFEST_DIR");
-    let revision = Command::new("git")
-        .current_dir(repository)
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|revision| revision.trim().to_owned());
     let dirty = Command::new("git")
         .current_dir(repository)
         .args(["status", "--porcelain"])
@@ -43,18 +36,12 @@ pub fn workspace_version_label() -> String {
         .ok()
         .filter(|output| output.status.success())
         .is_some_and(|output| !output.stdout.is_empty());
-
-    match revision {
-        Some(revision) => format!(
-            "workspace {} ({revision}{})",
-            env!("CARGO_PKG_VERSION"),
-            if dirty { "+dirty" } else { "" }
-        ),
-        None => format!(
-            "workspace {} (Git revision unavailable)",
-            env!("CARGO_PKG_VERSION")
-        ),
-    }
+    format!(
+        "workspace {} ({}{dirty_suffix})",
+        env!("CARGO_PKG_VERSION"),
+        env!("SYMBOLICA_VERSION"),
+        dirty_suffix = if dirty { "+dirty" } else { "" }
+    )
 }
 
 /// Configures Rayon's global worker pool before any benchmark input is constructed.
@@ -308,9 +295,75 @@ pub fn benchmark_polybench_factorization(
     bencher.bench_local(|| input.factor());
 }
 
+/// Constructs the reducible integer polynomial for a generated factorization case.
+pub fn factorization_input(case: FactorizationCase) -> IntegerPolynomial {
+    let [left, right] = factorization_factors(case);
+    &left * &right
+}
+
+/// Constructs the two powered factors using the variable order declared by the benchmark case.
+pub fn factorization_factors(case: FactorizationCase) -> [IntegerPolynomial; 2] {
+    let variables: Arc<Vec<PolyVariable>> = Arc::new(
+        case.variables
+            .iter()
+            .map(|name| PolyVariable::Symbol(symbol!(name)))
+            .collect(),
+    );
+    [
+        powered_polynomial_with_variable_map(&Z, case.left, Some(variables.clone())),
+        powered_polynomial_with_variable_map(&Z, case.right, Some(variables)),
+    ]
+}
+
+/// Verifies that a generated factorization expands to its original polynomial.
+pub fn validate_factorization(input: &IntegerPolynomial, factors: &[(IntegerPolynomial, usize)]) {
+    let nonconstant_multiplicity = factors
+        .iter()
+        .filter(|(factor, _)| !factor.is_constant())
+        .map(|(_, power)| *power)
+        .sum::<usize>();
+    assert!(
+        nonconstant_multiplicity >= 2,
+        "the known reducible generated input was not split"
+    );
+    let expanded = factors
+        .iter()
+        .fold(input.one(), |product, (factor, power)| {
+            product * &factor.pow(*power)
+        });
+    assert_eq!(expanded, *input);
+}
+
+/// Measures the multiplication used to construct a generated factorization input.
+pub fn benchmark_factor_product(bencher: divan::Bencher<'_, '_>, case: FactorizationCase) {
+    let [left, right] = factorization_factors(case);
+    bencher.bench_local(|| &left * &right);
+}
+
+/// Measures automatic integer factorization of a generated low-dimensional input.
+pub fn benchmark_factorization(bencher: divan::Bencher<'_, '_>, case: FactorizationCase) {
+    configure_factorization_auto();
+    let input = factorization_input(case);
+    let factors = input.factor();
+    validate_factorization(&input, &factors);
+    drop(factors);
+    bencher.bench_local(|| input.factor());
+}
+
 pub fn powered_polynomial<R>(
     ring: &R,
     polynomial: PoweredPolynomial,
+) -> MultivariatePolynomial<R, u16>
+where
+    R: EuclideanDomain + ConvertToRing,
+{
+    powered_polynomial_with_variable_map(ring, polynomial, None)
+}
+
+fn powered_polynomial_with_variable_map<R>(
+    ring: &R,
+    polynomial: PoweredPolynomial,
+    variables: Option<Arc<Vec<PolyVariable>>>,
 ) -> MultivariatePolynomial<R, u16>
 where
     R: EuclideanDomain + ConvertToRing,
@@ -321,7 +374,7 @@ where
         ParseSettings::default(),
     )
     .unwrap()
-    .to_polynomial(ring, None)
+    .to_polynomial(ring, variables)
     .pow(polynomial.power as usize);
     if polynomial.constant != 0 {
         result = result.add_constant(ring.nth(Integer::from(polynomial.constant)));
