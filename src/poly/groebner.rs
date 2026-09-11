@@ -969,6 +969,9 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                 self.print_stats,
             );
 
+            // perform simplifications using a copy of the current basis, as the basis may be modified in-place
+            let simplification_basis = basis.clone();
+
             // construct new polynomials
             for m in &matrix {
                 let lmi = sorted_monomial_indices[m[0].1];
@@ -992,7 +995,7 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                 } else {
                     // update entries in the tab with simpler polynomials
                     let mut diff = vec![E::zero(); nvars];
-                    'bf: for (g_ind, g) in &basis {
+                    'bf: for (g_ind, g) in &simplification_basis {
                         if poly
                             .last_exponents()
                             .iter()
@@ -3490,5 +3493,31 @@ mod test {
 
         let empty: Vec<MultivariatePolynomial<_, u16>> = Vec::new();
         assert!(GroebnerBasis::new(&empty, false).solve().is_err());
+    }
+
+    #[test]
+    fn prevent_live_basis_update() {
+        let field = Zp::new(65_521);
+        let variables = Arc::new(vec![
+            PolyVariable::from(symbol!("x")),
+            PolyVariable::from(symbol!("y")),
+            PolyVariable::from(symbol!("z")),
+        ]);
+        let ideal: Vec<MultivariatePolynomial<_, u16, GrevLexOrder>> =
+            ["206*x*z+942*y", "422*x^2+422*x*y"]
+                .iter()
+                .map(|polynomial| {
+                    parse!(polynomial)
+                        .to_polynomial::<_, u16>(&field, Some(variables.clone()))
+                        .reorder::<GrevLexOrder>()
+                })
+                .collect();
+
+        let basis = GroebnerBasis::new(&ideal, false);
+
+        assert!(
+            GroebnerBasis::is_groebner_basis(&basis.system),
+            "F4 returned an incomplete basis"
+        );
     }
 }
