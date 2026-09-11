@@ -14,7 +14,7 @@
 //!
 //! let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin() + x[1];
 //!
-//! let mut grid = Grid::Continuous(ContinuousGrid::new(2, 128, 100, None, false));
+//! let mut grid = Grid::Continuous(ContinuousGrid::new(2, 128, 100, None, false).unwrap());
 //!
 //! let mut rng = MonteCarloRng::new(0, 0);
 //!
@@ -433,7 +433,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Sample<T> {
 
     /// Transform the sample to a continuous, used for recycling memory.
     fn to_continuous_grid(&mut self) -> (&mut T, &mut Vec<T>) {
-        if let Sample::Continuous(..) = self {
+        if let Sample::Discrete(..) = self {
             *self = Sample::Continuous(T::new_zero(), vec![])
         } else if let Sample::Uniform(_, _, g) = self {
             *self = Sample::Continuous(T::new_zero(), std::mem::take(g))
@@ -501,7 +501,7 @@ pub enum Probe<T: Real + Constructible + Copy + RealLike + PartialOrd> {
 ///
 /// let f = |x: &[f64]| (x[0] * std::f64::consts::PI).sin() + x[1];
 ///
-/// let mut grid = Grid::Continuous(ContinuousGrid::new(2, 128, 100, None, false));
+/// let mut grid = Grid::Continuous(ContinuousGrid::new(2, 128, 100, None, false).unwrap());
 ///
 /// let mut rng = MonteCarloRng::new(0, 0);
 ///
@@ -740,6 +740,7 @@ pub struct DiscreteGrid<T: Real + Constructible + Copy + RealLike + PartialOrd> 
 impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
     /// Create a new discrete grid with `bins.len()` number of bins, where
     /// each bin may have a sub-grid.
+    /// Returns an error if `bins` is empty.
     ///
     /// Also set the maximal probability ratio between bins, `max_prob_ratio`,
     /// that prevents one bin from getting oversampled.
@@ -749,9 +750,12 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
         bins: Vec<Option<Grid<T>>>,
         max_prob_ratio: T,
         train_on_avg: bool,
-    ) -> DiscreteGrid<T> {
+    ) -> Result<DiscreteGrid<T>, String> {
+        if bins.is_empty() {
+            return Err("A discrete grid must contain at least one bin".into());
+        }
         let pdf = T::new_from_usize(1) / T::new_from_usize(bins.len());
-        DiscreteGrid {
+        Ok(DiscreteGrid {
             bins: bins
                 .into_iter()
                 .map(|s| Bin {
@@ -763,7 +767,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
             accumulator: StatisticsAccumulator::new(),
             max_prob_ratio,
             train_on_avg,
-        }
+        })
     }
 
     /// Sample a bin from all bins based on the bin pdfs.
@@ -1031,6 +1035,8 @@ pub struct ContinuousGrid<T: Real + Constructible + Copy + RealLike + PartialOrd
 impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
     /// Create a new grid with `n_dims` dimensions and `n_bins` bins
     /// per dimension.
+    /// Returns an error for zero dimensions, zero bins, or an empty or
+    /// zero-containing bin-number evolution.
     ///
     /// With `min_samples_for_update` grid updates can be prevented if
     /// there are too few samples in a certain bin. With `bin_number_evolution`
@@ -1046,7 +1052,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
         min_samples_for_update: usize,
         bin_number_evolution: Option<Vec<usize>>,
         train_on_avg: bool,
-    ) -> ContinuousGrid<T> {
+    ) -> Result<ContinuousGrid<T>, String> {
         Self::new_with_min_probability_density(
             n_dims,
             n_bins,
@@ -1055,10 +1061,11 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
             train_on_avg,
             T::new_zero(),
         )
-        .expect("a zero minimum probability density is valid")
     }
 
     /// Create a new grid with a lower bound on its joint sampling probability density.
+    /// Dimensions and bin counts must be positive. A supplied bin-number
+    /// evolution must be nonempty and contain only positive counts.
     ///
     /// For `min_probability_density = epsilon`, sampling uses the mixture
     /// `q = (1 - epsilon) * q_adaptive + epsilon * q_uniform`. Since the continuous
@@ -1073,6 +1080,17 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
         train_on_avg: bool,
         min_probability_density: T,
     ) -> Result<ContinuousGrid<T>, String> {
+        if n_dims == 0 || n_bins == 0 {
+            return Err("A continuous grid must have at least one dimension and one bin".into());
+        }
+        if bin_number_evolution
+            .as_ref()
+            .is_some_and(|bins| bins.is_empty() || bins.contains(&0))
+        {
+            return Err(
+                "Bin number evolution must be nonempty and contain only positive bin counts".into(),
+            );
+        }
         if !min_probability_density.is_finite()
             || min_probability_density < T::new_zero()
             || min_probability_density > T::new_one()
@@ -1707,16 +1725,17 @@ mod test {
 
         let mut grid = DiscreteGrid::new(
             vec![
-                Some(Grid::Continuous(ContinuousGrid::new(
-                    1, 10, 1000, None, false,
-                ))),
-                Some(Grid::Continuous(ContinuousGrid::new(
-                    1, 10, 1000, None, false,
-                ))),
+                Some(Grid::Continuous(
+                    ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+                )),
+                Some(Grid::Continuous(
+                    ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+                )),
             ],
             0.01,
             false,
-        );
+        )
+        .unwrap();
 
         let mut rng = MonteCarloRng::new(0, 0);
 
@@ -1746,7 +1765,10 @@ mod test {
     fn uniform() {
         let fs = [|x: f64| (x * PI).sin(), |x: f64| x * x, |x| x];
 
-        let mut grid = Grid::Uniform(vec![3, 10], ContinuousGrid::new(1, 10, 1000, None, false));
+        let mut grid = Grid::Uniform(
+            vec![3, 10],
+            ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+        );
 
         let mut rng = MonteCarloRng::new(0, 0);
 
@@ -1774,30 +1796,33 @@ mod test {
 
     #[test]
     fn probe() {
-        let mut channel0 = ContinuousGrid::new(3, 3, 1, None, false);
+        let mut channel0 = ContinuousGrid::new(3, 3, 1, None, false).unwrap();
         channel0.continuous_dimensions[0].partitioning = vec![0.0, 0.1, 0.5, 1.0];
         channel0.continuous_dimensions[1].partitioning = vec![0.0, 0.3, 0.8, 1.0];
         channel0.continuous_dimensions[2].partitioning = vec![0.0, 0.2, 0.6, 1.0];
 
-        let mut channel1 = ContinuousGrid::new(3, 3, 1, None, false);
+        let mut channel1 = ContinuousGrid::new(3, 3, 1, None, false).unwrap();
         channel1.continuous_dimensions[0].partitioning = vec![0.0, 0.25, 0.4, 1.0];
         channel1.continuous_dimensions[1].partitioning = vec![0.0, 0.15, 0.7, 1.0];
         channel1.continuous_dimensions[2].partitioning = vec![0.0, 0.05, 0.9, 1.0];
 
-        let mut channel2 = ContinuousGrid::new(3, 3, 1, None, false);
+        let mut channel2 = ContinuousGrid::new(3, 3, 1, None, false).unwrap();
         channel2.continuous_dimensions[0].partitioning = vec![0.0, 0.35, 0.65, 1.0];
         channel2.continuous_dimensions[1].partitioning = vec![0.0, 0.2, 0.45, 1.0];
         channel2.continuous_dimensions[2].partitioning = vec![0.0, 0.4, 0.75, 1.0];
 
-        let mut grid = Grid::Discrete(DiscreteGrid::new(
-            vec![
-                Some(Grid::Continuous(channel0)),
-                Some(Grid::Continuous(channel1)),
-                Some(Grid::Continuous(channel2)),
-            ],
-            0.01,
-            false,
-        ));
+        let mut grid = Grid::Discrete(
+            DiscreteGrid::new(
+                vec![
+                    Some(Grid::Continuous(channel0)),
+                    Some(Grid::Continuous(channel1)),
+                    Some(Grid::Continuous(channel2)),
+                ],
+                0.01,
+                false,
+            )
+            .unwrap(),
+        );
 
         let Grid::Discrete(discrete) = &mut grid else {
             unreachable!()
@@ -1900,7 +1925,7 @@ mod test {
 
     #[test]
     fn zero_continuous_min_probability_density_preserves_sampling_sequence() {
-        let mut original: ContinuousGrid<f64> = ContinuousGrid::new(3, 10, 1, None, false);
+        let mut original: ContinuousGrid<f64> = ContinuousGrid::new(3, 10, 1, None, false).unwrap();
         let mut configured =
             ContinuousGrid::new_with_min_probability_density(3, 10, 1, None, false, 0.0).unwrap();
         let mut original_rng = MonteCarloRng::new(1234, 0);
@@ -1927,7 +1952,7 @@ mod test {
 
     #[test]
     fn continuous_grids_with_different_probability_floors_do_not_merge() {
-        let original = ContinuousGrid::new(1, 10, 1, None, false);
+        let original = ContinuousGrid::new(1, 10, 1, None, false).unwrap();
         let configured =
             ContinuousGrid::new_with_min_probability_density(1, 10, 1, None, false, 0.01).unwrap();
 

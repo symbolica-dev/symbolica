@@ -1,29 +1,154 @@
 use crate::domains::backend::integer::MultiPrecisionInteger;
 
-#[cfg(feature = "gmp")]
+/// The rounding direction for a `Float` operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundingDirection {
+    /// Round to the nearest representable value, breaking ties toward an even
+    /// significand.
+    Nearest,
+    /// Round toward positive infinity.
+    Up,
+    /// Round toward negative infinity.
+    Down,
+}
+
+#[cfg(feature = "float-mpfr")]
 pub use rug::{
     Assign, Float as MultiPrecisionFloat, Rational as BackendRational,
     float::Constant,
     ops::{CompleteRound, Pow},
 };
 
-pub trait BackendRationalExt {
-    fn from_integer_ratio(num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self;
-    fn into_integer_ratio(self) -> (MultiPrecisionInteger, MultiPrecisionInteger);
+pub(crate) trait MultiPrecisionFloatRounding {
+    fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
+    fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
 }
 
-#[cfg(feature = "gmp")]
-impl BackendRationalExt for BackendRational {
-    fn from_integer_ratio(num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
-        Self::from((num, den))
-    }
+/// Integer operations shared by independently selected integer and float backends.
+pub(crate) trait MultiPrecisionFloatInteger {
+    fn add_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn mul_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn div_integer(self, value: MultiPrecisionInteger) -> Self;
+    fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self;
+    fn to_integer_exact(&self) -> Option<MultiPrecisionInteger>;
+}
 
-    fn into_integer_ratio(self) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
-        self.into_numer_denom()
+/// Exact rational operations shared by the independently selected integer and float backends.
+pub(crate) trait MultiPrecisionFloatRational {
+    fn mul_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self;
+    fn div_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self;
+    fn from_integer_ratio_round(
+        num: MultiPrecisionInteger,
+        den: MultiPrecisionInteger,
+        prec: u32,
+        direction: RoundingDirection,
+    ) -> Self;
+    fn to_integer_ratio(&self) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)>;
+}
+
+#[cfg(feature = "float-mpfr")]
+fn rug_rounding_direction(direction: RoundingDirection) -> rug::float::Round {
+    match direction {
+        RoundingDirection::Nearest => rug::float::Round::Nearest,
+        RoundingDirection::Up => rug::float::Round::Up,
+        RoundingDirection::Down => rug::float::Round::Down,
     }
 }
 
-#[cfg(feature = "no_gmp")]
+#[cfg(feature = "float-mpfr")]
+impl MultiPrecisionFloatRounding for MultiPrecisionFloat {
+    fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self + rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self - rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self * rhs, rug_rounding_direction(direction)).0
+    }
+
+    fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+        Self::with_val_round(prec, self / rhs, rug_rounding_direction(direction)).0
+    }
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-gmp"))]
+fn rug_integer_from_backend(value: MultiPrecisionInteger) -> rug::Integer {
+    value.into_raw()
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-malachite"))]
+fn rug_integer_from_backend(value: MultiPrecisionInteger) -> rug::Integer {
+    value.to_string().parse().unwrap()
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-gmp"))]
+fn backend_integer_from_rug(value: rug::Integer) -> MultiPrecisionInteger {
+    MultiPrecisionInteger::from_raw(value)
+}
+
+#[cfg(all(feature = "float-mpfr", feature = "integer-malachite"))]
+fn backend_integer_from_rug(value: rug::Integer) -> MultiPrecisionInteger {
+    value.to_string().parse().unwrap()
+}
+
+#[cfg(feature = "float-mpfr")]
+impl MultiPrecisionFloatInteger for MultiPrecisionFloat {
+    fn add_integer(self, value: MultiPrecisionInteger) -> Self {
+        self + rug_integer_from_backend(value)
+    }
+
+    fn mul_integer(self, value: MultiPrecisionInteger) -> Self {
+        self * rug_integer_from_backend(value)
+    }
+
+    fn div_integer(self, value: MultiPrecisionInteger) -> Self {
+        self / rug_integer_from_backend(value)
+    }
+
+    fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self {
+        Self::with_val(prec, rug_integer_from_backend(value))
+    }
+
+    fn to_integer_exact(&self) -> Option<MultiPrecisionInteger> {
+        self.to_integer().map(backend_integer_from_rug)
+    }
+}
+
+#[cfg(feature = "float-mpfr")]
+impl MultiPrecisionFloatRational for MultiPrecisionFloat {
+    fn mul_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
+        self * rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)))
+    }
+
+    fn div_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
+        self / rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)))
+    }
+
+    fn from_integer_ratio_round(
+        num: MultiPrecisionInteger,
+        den: MultiPrecisionInteger,
+        prec: u32,
+        direction: RoundingDirection,
+    ) -> Self {
+        let value =
+            rug::Rational::from((rug_integer_from_backend(num), rug_integer_from_backend(den)));
+        Self::with_val_round(prec, value, rug_rounding_direction(direction)).0
+    }
+
+    fn to_integer_ratio(&self) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
+        self.to_rational().map(|value| {
+            let (num, den) = value.into_numer_denom();
+            (backend_integer_from_rug(num), backend_integer_from_rug(den))
+        })
+    }
+}
+
+#[cfg(feature = "float-astro")]
 mod astro {
     use std::{
         cell::RefCell,
@@ -36,7 +161,7 @@ mod astro {
     use astro_float::{BigFloat, Consts, INF_NEG, INF_POS, NAN, Radix, RoundingMode, Sign};
     use malachite_q::Rational as MalachiteRational;
 
-    use super::BackendRationalExt;
+    use super::RoundingDirection;
     use crate::domains::backend::integer::MultiPrecisionInteger;
 
     pub type BackendRational = MalachiteRational;
@@ -76,18 +201,35 @@ mod astro {
         }
     }
 
-    #[derive(Clone, PartialEq)]
+    #[derive(Clone)]
     pub struct MultiPrecisionFloat {
         value: BigFloat,
         prec: u32,
+    }
+
+    impl PartialEq for MultiPrecisionFloat {
+        fn eq(&self, other: &Self) -> bool {
+            (self.is_nan() && other.is_nan()) || self.value == other.value
+        }
     }
 
     impl Eq for MultiPrecisionFloat {}
 
     impl Hash for MultiPrecisionFloat {
         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-            self.prec.hash(state);
-            self.value.to_string().hash(state);
+            if self.is_nan() {
+                state.write_u64(0x7ff8000000000000);
+            } else if self.is_zero() {
+                state.write_u64(0);
+            } else {
+                self.is_sign_negative().hash(state);
+                self.get_exp().hash(state);
+                if let Some((words, _, _, _, _)) = self.value.as_raw_parts() {
+                    // Equal values can have extra low zero words at higher precision.
+                    let first = words.iter().position(|&word| word != 0).unwrap();
+                    words[first..].hash(state);
+                }
+            }
         }
     }
 
@@ -117,6 +259,14 @@ mod astro {
     }
 
     const ROUNDING_MODE: RoundingMode = RoundingMode::ToEven;
+
+    fn rounding_mode(direction: RoundingDirection) -> RoundingMode {
+        match direction {
+            RoundingDirection::Nearest => RoundingMode::ToEven,
+            RoundingDirection::Up => RoundingMode::Up,
+            RoundingDirection::Down => RoundingMode::Down,
+        }
+    }
 
     fn precision(prec: u32) -> usize {
         prec.max(1) as usize
@@ -244,8 +394,118 @@ mod astro {
         num.div(&den, p, ROUNDING_MODE)
     }
 
+    impl super::MultiPrecisionFloatRounding for MultiPrecisionFloat {
+        fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .add(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .sub(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn mul_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .mul(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn div_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self {
+            MultiPrecisionFloat {
+                value: self
+                    .value
+                    .div(&rhs.value, precision(prec), rounding_mode(direction)),
+                prec,
+            }
+        }
+    }
+
+    impl super::MultiPrecisionFloatInteger for MultiPrecisionFloat {
+        fn add_integer(self, value: MultiPrecisionInteger) -> Self {
+            self + value
+        }
+
+        fn mul_integer(self, value: MultiPrecisionInteger) -> Self {
+            self * value
+        }
+
+        fn div_integer(self, value: MultiPrecisionInteger) -> Self {
+            self / value
+        }
+
+        fn from_integer(prec: u32, value: MultiPrecisionInteger) -> Self {
+            Self::with_val(prec, value)
+        }
+
+        fn to_integer_exact(&self) -> Option<MultiPrecisionInteger> {
+            self.to_integer()
+        }
+    }
+
+    impl super::MultiPrecisionFloatRational for MultiPrecisionFloat {
+        fn mul_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
+            self * rational_from_integer_ratio(num, den)
+        }
+
+        fn div_integer_ratio(self, num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
+            self / rational_from_integer_ratio(num, den)
+        }
+
+        fn from_integer_ratio_round(
+            num: MultiPrecisionInteger,
+            den: MultiPrecisionInteger,
+            prec: u32,
+            direction: RoundingDirection,
+        ) -> Self {
+            let p = precision(prec);
+            let work_precision = guard_precision(prec)
+                .max(num.significant_bits() as usize)
+                .max(den.significant_bits() as usize);
+            let num = parse_integer_at_precision(num, work_precision);
+            let den = parse_integer_at_precision(den, work_precision);
+            MultiPrecisionFloat {
+                value: num.div(&den, p, rounding_mode(direction)),
+                prec,
+            }
+        }
+
+        fn to_integer_ratio(&self) -> Option<(MultiPrecisionInteger, MultiPrecisionInteger)> {
+            finite_to_rational(&self.value).map(rational_into_integer_ratio)
+        }
+    }
+
     fn integer_to_float(value: impl Display, prec: u32) -> BigFloat {
         parse_integer_at_precision(value, precision(prec))
+    }
+
+    fn rational_from_integer_ratio(
+        num: MultiPrecisionInteger,
+        den: MultiPrecisionInteger,
+    ) -> MalachiteRational {
+        format!("{num}/{den}").parse().unwrap()
+    }
+
+    fn rational_into_integer_ratio(
+        value: MalachiteRational,
+    ) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
+        let value = value.to_string();
+        if let Some((num, den)) = value.split_once('/') {
+            (num.parse().unwrap(), den.parse().unwrap())
+        } else {
+            (value.parse().unwrap(), MultiPrecisionInteger::from(1))
+        }
     }
 
     fn finite_to_rational(value: &BigFloat) -> Option<MalachiteRational> {
@@ -263,13 +523,13 @@ mod astro {
         let shift = exponent - (words.len() * astro_float::WORD_BIT_SIZE) as i32;
         if shift >= 0 {
             let num = mantissa << shift as usize;
-            Some(MalachiteRational::from_integer_ratio(
+            Some(rational_from_integer_ratio(
                 num,
                 MultiPrecisionInteger::from(1),
             ))
         } else {
             let den = MultiPrecisionInteger::from(1) << (-shift) as usize;
-            Some(MalachiteRational::from_integer_ratio(mantissa, den))
+            Some(rational_from_integer_ratio(mantissa, den))
         }
     }
 
@@ -349,9 +609,13 @@ mod astro {
         pub(crate) fn parse_at_prec_radix(s: &[u8], radix: u8, prec: u32) -> Result<Self, String> {
             let s = std::str::from_utf8(s).map_err(|e| e.to_string())?;
             let radix = self::radix(radix)?;
-            let value = with_constants(|constants| {
+            let mut value = with_constants(|constants| {
                 BigFloat::parse(s, radix, precision(prec), ROUNDING_MODE, constants)
             });
+            // Astro normalizes parsed zeroes; retain the literal sign.
+            if value.is_zero() && s.starts_with('-') {
+                value.set_sign(Sign::Neg);
+            }
             if value.is_nan() {
                 Err(format!("failed to parse float `{s}`"))
             } else {
@@ -367,16 +631,33 @@ mod astro {
             } else if value == f64::NEG_INFINITY {
                 INF_NEG
             } else {
-                let mut value =
-                    BigFloat::from_f64(value, precision(prec).max(f64::MANTISSA_DIGITS as usize));
+                let negative = value.is_sign_negative();
+                // Astro 0.9 misinterprets the exponent of subnormal f64s.
+                // Normalize exactly before conversion, then restore the exponent.
+                let subnormal = value.is_subnormal();
+                let normalized = if subnormal {
+                    value * 4503599627370496.0
+                } else {
+                    value
+                };
+                let mut value = BigFloat::from_f64(
+                    normalized,
+                    precision(prec).max(f64::MANTISSA_DIGITS as usize),
+                );
+                if subnormal {
+                    value.set_exponent(value.exponent().unwrap() - 52);
+                }
                 let _ = value.set_precision(precision(prec), ROUNDING_MODE);
+                if value.is_zero() && negative {
+                    value.set_sign(Sign::Neg);
+                }
                 value
             };
             Self { value, prec }
         }
 
         pub(crate) fn from_rational(prec: u32, value: MalachiteRational) -> Self {
-            let (num, den) = value.into_integer_ratio();
+            let (num, den) = rational_into_integer_ratio(value);
             let value = ratio_to_float(num, den, prec);
             Self { value, prec }
         }
@@ -413,6 +694,8 @@ mod astro {
                 f64::INFINITY
             } else if self.value.is_inf_neg() {
                 f64::NEG_INFINITY
+            } else if self.value.is_zero() {
+                if self.is_sign_negative() { -0.0 } else { 0.0 }
             } else {
                 format_value(&self.value, Radix::Dec)
                     .parse::<f64>()
@@ -470,6 +753,43 @@ mod astro {
 
         pub fn pow(&self, rhs: &Self) -> Self {
             let prec = self.prec;
+            // Astro's general power can loop while trying to prove rounding of
+            // exact roots (for example 4**0.5). Small dyadic exponents can be
+            // evaluated directly by square roots and integer exponentiation.
+            if !self.is_sign_negative()
+                && self.is_finite()
+                && rhs.get_exp().is_some_and(|e| (-32..=64).contains(&e))
+                && let Some(ratio) = finite_to_rational(&rhs.value)
+            {
+                let (num, den) = rational_into_integer_ratio(ratio);
+                let num = if rhs.is_sign_negative() { -num } else { num };
+                if let (Some(mut power), Some(den)) = (num.to_u64(), den.to_u64())
+                    && den.is_power_of_two()
+                    && den.trailing_zeros() <= 32
+                {
+                    let work = guard_precision(prec).saturating_add(64);
+                    let mut base = self.value.clone();
+                    let _ = base.set_precision(work, ROUNDING_MODE);
+                    for _ in 0..den.trailing_zeros() {
+                        base = base.sqrt(work, ROUNDING_MODE);
+                    }
+                    let mut value = BigFloat::from_u8(1, work);
+                    while power != 0 {
+                        if power & 1 != 0 {
+                            value = value.mul(&base, work, ROUNDING_MODE);
+                        }
+                        power >>= 1;
+                        if power != 0 {
+                            base = base.mul(&base, work, ROUNDING_MODE);
+                        }
+                    }
+                    if rhs.is_sign_negative() {
+                        value = value.reciprocal(work, ROUNDING_MODE);
+                    }
+                    let _ = value.set_precision(precision(prec), ROUNDING_MODE);
+                    return Self { value, prec };
+                }
+            }
             let value = with_constants(|constants| {
                 self.value
                     .pow(&rhs.value, precision(prec), ROUNDING_MODE, constants)
@@ -516,7 +836,13 @@ mod astro {
         }
 
         pub fn get_exp(&self) -> Option<i32> {
-            self.value.exponent()
+            // Match MPFR: zero has no significant-bit exponent. Treating it as
+            // an ordinary exponent discards precision when adding an exact zero.
+            if self.is_zero() || !self.is_finite() {
+                None
+            } else {
+                self.value.exponent()
+            }
         }
 
         pub fn get_significand(&self) -> Option<String> {
@@ -529,7 +855,7 @@ mod astro {
 
         pub fn to_integer(&self) -> Option<MultiPrecisionInteger> {
             let value = finite_to_rational(&self.value)?;
-            let (num, den) = value.into_integer_ratio();
+            let (num, den) = rational_into_integer_ratio(value);
             Some(num / den)
         }
 
@@ -583,26 +909,66 @@ mod astro {
 
         pub fn atan2(self, rhs: &Self) -> Self {
             let prec = self.prec.min(rhs.prec);
+            if self.is_nan() || rhs.is_nan() {
+                return Self::from_f64(prec, f64::NAN);
+            }
+            if !self.is_finite() || !rhs.is_finite() {
+                let quarters = if !self.is_finite() {
+                    if !rhs.is_finite() {
+                        if rhs.is_sign_negative() { 3 } else { 1 }
+                    } else {
+                        2
+                    }
+                } else if rhs.is_sign_negative() {
+                    4
+                } else {
+                    0
+                };
+                let angle = if quarters == 0 {
+                    Self::new(prec)
+                } else {
+                    Self::with_val(prec, Constant::Pi) * quarters as i64 / 4i64
+                };
+                return if self.is_sign_negative() {
+                    -angle
+                } else {
+                    angle
+                };
+            }
             let x_cmp = rhs.cmp_zero();
             let y_cmp = self.cmp_zero();
 
             if x_cmp == Some(Ordering::Equal) {
                 let pi = Self::with_val(prec, Constant::Pi);
-                let half_pi = pi / 2i64;
+                let half_pi = pi.clone() / 2i64;
                 return if y_cmp == Some(Ordering::Less) {
                     -half_pi
                 } else if y_cmp == Some(Ordering::Greater) {
                     half_pi
                 } else {
-                    Self::new(prec)
+                    let angle = if rhs.is_sign_negative() {
+                        pi
+                    } else {
+                        Self::new(prec)
+                    };
+                    if self.is_sign_negative() {
+                        -angle
+                    } else {
+                        angle
+                    }
                 };
             }
 
             if y_cmp == Some(Ordering::Equal) {
-                return if x_cmp == Some(Ordering::Less) {
+                let angle = if x_cmp == Some(Ordering::Less) {
                     Self::with_val(prec, Constant::Pi)
                 } else {
                     Self::new(prec)
+                };
+                return if self.is_sign_negative() {
+                    -angle
+                } else {
+                    angle
                 };
             }
 
@@ -803,21 +1169,6 @@ mod astro {
     impl<T: IntoMultiPrecisionFloat> Assign<T> for MultiPrecisionFloat {
         fn assign_into(prec: u32, val: T) -> MultiPrecisionFloat {
             val.into_float(prec)
-        }
-    }
-
-    impl super::BackendRationalExt for BackendRational {
-        fn from_integer_ratio(num: MultiPrecisionInteger, den: MultiPrecisionInteger) -> Self {
-            format!("{num}/{den}").parse().unwrap()
-        }
-
-        fn into_integer_ratio(self) -> (MultiPrecisionInteger, MultiPrecisionInteger) {
-            let value = self.to_string();
-            if let Some((num, den)) = value.split_once('/') {
-                (num.parse().unwrap(), den.parse().unwrap())
-            } else {
-                (value.parse().unwrap(), MultiPrecisionInteger::from(1))
-            }
         }
     }
 
@@ -1222,7 +1573,7 @@ mod astro {
     }
 }
 
-#[cfg(feature = "no_gmp")]
+#[cfg(feature = "float-astro")]
 pub use astro::{
     Assign, BackendRational, CompleteRound, Constant, IntoMultiPrecisionFloat, MultiPrecisionFloat,
     Pow,

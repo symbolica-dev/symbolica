@@ -143,6 +143,20 @@ impl DoubleFloat {
 }
 
 impl FloatLike for DoubleFloat {
+    fn nan(&self) -> Option<Self> {
+        Some(f64::NAN.into())
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.0.hi().is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -454,6 +468,20 @@ impl Constructible for DoubleFloat {
 
 impl Real for DoubleFloat {
     #[inline(always)]
+    fn log1p(&self) -> Self {
+        self.0.ln_1p().into()
+    }
+
+    #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        if sign.0.hi().is_sign_negative() {
+            -self.norm()
+        } else {
+            self.norm()
+        }
+    }
+
+    #[inline(always)]
     fn pi(&self) -> Self {
         Df64::pi().into()
     }
@@ -680,7 +708,8 @@ impl PartialOrd for DoubleFloat {
 
 impl InternalOrdering for DoubleFloat {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.is_nan().cmp(&other.is_nan()))
     }
 }
 
@@ -716,6 +745,10 @@ impl Hash for DoubleFloat {
         }
 
         state.write_u64(self.0.hi().to_bits());
-        state.write_u64(self.0.lo().to_bits());
+        state.write_u64(if self.0.lo() == 0. {
+            0
+        } else {
+            self.0.lo().to_bits()
+        });
     }
 }
