@@ -36,7 +36,7 @@
 //! .iter()
 //! .map(|x| {
 //!     let a = parse!(x);
-//!     a.to_polynomial(&Zp::new(13), ideal[0].variables.clone())
+//!     a.to_polynomial(&Zp::new(13), ideal[0].variables().clone())
 //! })
 //! .collect();
 //!
@@ -326,7 +326,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
         let mut result = MultivariatePolynomial::new(
             &Q,
             Some(polynomial.nterms()),
-            polynomial.variables.clone(),
+            polynomial.variables().clone(),
         );
         for term in polynomial {
             let coefficient = Self::evaluate_coefficient(term.coefficient, values)?;
@@ -361,7 +361,7 @@ impl<E: PositiveExponent> ParametricExtension<E> {
         let mut result = MultivariatePolynomial::new(
             field,
             Some(polynomial.nterms()),
-            polynomial.variables.clone(),
+            polynomial.variables().clone(),
         );
         for term in polynomial {
             let coefficient_polynomial =
@@ -778,7 +778,7 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
     ///
     fn f4(&mut self) {
         let nvars = self.system[0].nvars();
-        let field = self.system[0].ring.clone();
+        let field = self.system[0].ring().clone();
 
         let mut simplifications = vec![];
         let mut basis = vec![];
@@ -1032,7 +1032,7 @@ impl<R: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         &self,
         gs: &[MultivariatePolynomial<R, E, O>],
     ) -> MultivariatePolynomial<R, E, O> {
-        if gs.iter().any(|x| self.variables != x.variables) {
+        if gs.iter().any(|x| self.variables() != x.variables()) {
             let mut sys: Vec<_> = gs.to_vec();
             sys.push(self.clone());
             Self::unify_variables_list(&mut sys);
@@ -1063,7 +1063,7 @@ impl<R: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                     *e = *e1 - *e2;
                 }
 
-                let ratio = g.ring.div(r.max_coeff(), g.max_coeff());
+                let ratio = g.ring().div(r.max_coeff(), g.max_coeff());
                 r = r - g.clone().mul_exp(&monom).mul_coeff(ratio);
 
                 if r.is_zero() {
@@ -1177,7 +1177,7 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
             lead_reduced.swap(0, i);
             let h = lead_reduced[0].reduce(&lead_reduced[1..]);
             if !h.is_zero() {
-                let i = h.ring.inv(h.max_coeff());
+                let i = h.ring().inv(h.max_coeff());
                 basis.push(h.mul_coeff(i));
             }
         }
@@ -1215,11 +1215,11 @@ impl<R: Field, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
                 let new_f1 = p1
                     .clone()
                     .mul_exp(&extra_factor_f1)
-                    .mul_coeff(p1.ring.div(p2.max_coeff(), p1.max_coeff()));
+                    .mul_coeff(p1.ring().div(p2.max_coeff(), p1.max_coeff()));
                 let new_f2 = p2
                     .clone()
                     .mul_exp(&extra_factor_f2)
-                    .mul_coeff(p1.ring.div(p1.max_coeff(), p2.max_coeff()));
+                    .mul_coeff(p1.ring().div(p1.max_coeff(), p2.max_coeff()));
 
                 let s = new_f1 - new_f2;
 
@@ -1296,13 +1296,13 @@ impl<R: Field, E: PositiveExponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
         if self
             .system
             .iter()
-            .any(|polynomial| polynomial.variables != self.system[0].variables)
+            .any(|polynomial| polynomial.variables() != self.system[0].variables())
         {
             return Err("FGLM requires a unified variable map".to_string());
         }
 
-        let field = self.system[0].ring.clone();
-        let variables = self.system[0].variables.clone();
+        let field = self.system[0].ring().clone();
+        let variables = self.system[0].variables().clone();
         let nvars = variables.len();
 
         if self
@@ -1668,14 +1668,14 @@ impl<E: PositiveExponent> GroebnerBasis<RationalField, E, LexOrder> {
             return Ok(Vec::new());
         }
 
-        let variables = self.system[0].variables.clone();
+        let variables = self.system[0].variables().clone();
         if variables.is_empty() {
             return Err("The Gröbner basis has no variables".to_string());
         }
         if self
             .system
             .iter()
-            .any(|polynomial| polynomial.variables != variables)
+            .any(|polynomial| polynomial.variables() != &variables)
         {
             return Err("The Gröbner basis does not have a unified variable map".to_string());
         }
@@ -1868,7 +1868,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                 .to_polynomial(std::slice::from_ref(&root_variable), false)
                 .map_err(str::to_owned)?;
             let mut converted = MultivariatePolynomial::new(
-                &factor.ring,
+                factor.ring(),
                 Some(factor.nterms()),
                 Arc::new(vec![root_variable.clone()]),
             );
@@ -1922,13 +1922,13 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
             return Err("Expected a univariate polynomial over a parametric quotient".into());
         }
 
-        let quotient = polynomial.ring.clone();
+        let quotient = polynomial.ring().clone();
         if quotient.poly().degree(0) == 1 {
-            let base_field = quotient.poly().ring.clone();
+            let base_field = quotient.poly().ring().clone();
             let mut base_polynomial = MultivariatePolynomial::new(
                 &base_field,
                 Some(polynomial.nterms()),
-                polynomial.variables.clone(),
+                polynomial.variables().clone(),
             );
             for term in polynomial {
                 if !term.coefficient.poly().is_constant() {
@@ -1974,7 +1974,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                 + shifted
                     .variable(&extension.poly().get_vars_ref()[0])
                     .unwrap()
-                    * &shifted.constant(shifted.ring.nth((shift as u64).into()));
+                    * &shifted.constant(shifted.ring().nth((shift as u64).into()));
 
             for norm_factor in norm_factors {
                 let mut norm_factor = norm_factor.to_number_field(&extension);
@@ -2010,7 +2010,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
         old_generator: &AlgebraicNumber<ParameterField<E>>,
     ) -> AlgebraicNumber<ParameterField<E>> {
         let mut coefficients =
-            vec![element.poly().ring.zero(); element.poly().degree(0) as usize + 1];
+            vec![element.poly().ring().zero(); element.poly().degree(0) as usize + 1];
         for term in element.poly() {
             coefficients[term.exponents[0] as usize] = term.coefficient.clone();
         }
@@ -2096,8 +2096,11 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                     .map(|index| polynomial.get_vars_ref()[*index].clone())
                     .collect(),
             );
-            let mut result =
-                MultivariatePolynomial::new(&polynomial.ring, Some(polynomial.nterms()), variables);
+            let mut result = MultivariatePolynomial::new(
+                polynomial.ring(),
+                Some(polynomial.nterms()),
+                variables,
+            );
             for term in polynomial {
                 let exponents = active
                     .iter()
@@ -2132,7 +2135,7 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
 
         let solve_variables: HashSet<PolyVariable> = system
             .first()
-            .map(|polynomial| polynomial.variables.iter().cloned().collect())
+            .map(|polynomial| polynomial.variables().iter().cloned().collect())
             .unwrap_or_default();
         let mut parameters = HashSet::default();
         let mut conditions = HashSet::default();
@@ -2238,14 +2241,14 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
             return Ok(Vec::new());
         }
 
-        let variables = self.system[0].variables.clone();
+        let variables = self.system[0].variables().clone();
         if variables.is_empty() {
             return Err("The Gröbner basis has no variables".to_string());
         }
         if self
             .system
             .iter()
-            .any(|polynomial| polynomial.variables != variables)
+            .any(|polynomial| polynomial.variables() != &variables)
         {
             return Err("The Gröbner basis does not have a unified variable map".to_string());
         }
@@ -2274,11 +2277,11 @@ impl<E: PositiveExponent> GroebnerBasis<RationalPolynomialField<IntegerRing, E>,
                 continue;
             }
             if degree == 1 {
-                let field = AlgebraicQuotient::trivial(factor.ring.clone());
+                let field = AlgebraicQuotient::trivial(factor.ring().clone());
                 let root = field.constant(
                     factor
-                        .ring
-                        .neg(&factor.ring.div(&factor.get_constant(), &factor.lcoeff())),
+                        .ring()
+                        .neg(&factor.ring().div(&factor.get_constant(), &factor.lcoeff())),
                 );
                 let extension = Arc::new(Self::parametric_extension(
                     field,
@@ -2920,7 +2923,7 @@ mod test {
             .iter()
             .map(|x| {
                 let a = parse!(x).expand();
-                a.to_polynomial(&Zp::new(13), ideal[0].variables.clone())
+                a.to_polynomial(&Zp::new(13), ideal[0].variables().clone())
             })
             .collect();
 
@@ -2944,7 +2947,7 @@ mod test {
             .iter()
             .map(|x| {
                 let a = parse!(x).expand();
-                a.to_polynomial(&Zp::new(13), ideal[0].variables.clone())
+                a.to_polynomial(&Zp::new(13), ideal[0].variables().clone())
                     .reorder::<GrevLexOrder>()
             })
             .collect();

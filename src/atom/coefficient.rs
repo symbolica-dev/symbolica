@@ -258,7 +258,7 @@ impl PackedRationalNumberWriter for Coefficient {
                         }
                         Integer::Double(d) => {
                             dest.put_u8(2);
-                            dest.put_i128_le(i128::from(*d));
+                            dest.put_i128_le(d.get());
                         }
                         Integer::Large(l) => {
                             if l.is_negative() {

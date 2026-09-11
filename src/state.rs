@@ -48,6 +48,7 @@ pub(crate) struct VariableListIndex(pub(crate) usize);
 
 /// A mapping from one state to the other. Used during importing
 /// for merging a state on file with the current state.
+#[derive(Default)]
 pub struct StateMap {
     pub(crate) symbols: HashMap<u32, Symbol>,
     pub(crate) finite_fields: HashMap<FiniteFieldIndex, FiniteFieldIndex>,
