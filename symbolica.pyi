@@ -138,7 +138,7 @@ def S(
     is_positive: bool | None = None,
     tags: Sequence[str] | None = None,
     aliases: Sequence[str] | None = None,
-    normalization: Transformer | None = None,
+    normalization: Transformer | Callable[[Expression], Expression] | None = None,
     print: Callable[..., str | None] | None = None,
     derivative: Callable[[Expression, int], Expression] | None = None,
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
@@ -925,7 +925,7 @@ class Expression:
         is_positive: bool | None = None,
         tags: Sequence[str] | None = None,
         aliases: Sequence[str] | None = None,
-        normalization: Transformer | None = None,
+        normalization: Transformer | Callable[[Expression], Expression] | None = None,
         print: Callable[..., str | None] | None = None,
         derivative: Callable[[Expression, int], Expression] | None = None,
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]

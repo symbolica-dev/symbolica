@@ -55,7 +55,7 @@ use crate::{
     parser::{ParseSettings, Token},
     poly::series::Series,
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions, PrintState},
-    state::{RecycledAtom, State, SymbolData, Workspace},
+    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
     warn,
@@ -792,6 +792,7 @@ pub struct SymbolBuilder {
     derivative_function: Option<DerivativeFunction>,
     series_function: Option<Box<SeriesExpansionFunction>>,
     evaluation_function: Option<EvaluationInfo>,
+    custom_function_keys: CustomFunctionDefinitionKeys,
     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
     user_data: Option<UserData>,
 }
@@ -810,6 +811,7 @@ impl SymbolBuilder {
             derivative_function: None,
             series_function: None,
             evaluation_function: None,
+            custom_function_keys: CustomFunctionDefinitionKeys::default(),
             generator: None,
             user_data: None,
         }
@@ -879,6 +881,18 @@ impl SymbolBuilder {
         normalization_function: impl Fn(AtomView, &mut Settable<Atom>) + Send + Sync + 'static,
     ) -> Self {
         self.normalization_function = Some(Box::new(normalization_function));
+        self.custom_function_keys.normalization = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_normalization_function(
+        mut self,
+        normalization_function: impl Fn(AtomView, &mut Settable<Atom>) + Send + Sync + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.normalization_function = Some(Box::new(normalization_function));
+        self.custom_function_keys.normalization = Some(key);
         self
     }
 
@@ -901,6 +915,21 @@ impl SymbolBuilder {
         + 'static,
     ) -> Self {
         self.print_function = Some(Box::new(print_function));
+        self.custom_function_keys.print = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_print_function(
+        mut self,
+        print_function: impl Fn(AtomView, &PrintOptions, &PrintState) -> Option<String>
+        + Send
+        + Sync
+        + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.print_function = Some(Box::new(print_function));
+        self.custom_function_keys.print = Some(key);
         self
     }
 
@@ -924,6 +953,18 @@ impl SymbolBuilder {
         derivative_function: impl Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync + 'static,
     ) -> Self {
         self.derivative_function = Some(Box::new(derivative_function));
+        self.custom_function_keys.derivative = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_derivative_function(
+        mut self,
+        derivative_function: impl Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.derivative_function = Some(Box::new(derivative_function));
+        self.custom_function_keys.derivative = Some(key);
         self
     }
 
@@ -936,12 +977,39 @@ impl SymbolBuilder {
         + 'static,
     ) -> Self {
         self.series_function = Some(Box::new(series_function));
+        self.custom_function_keys.series = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_series_function(
+        mut self,
+        series_function: impl for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)>
+        + Send
+        + Sync
+        + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.series_function = Some(Box::new(series_function));
+        self.custom_function_keys.series = Some(key);
         self
     }
 
     /// Add evaluation info.
     pub fn with_evaluation_info(mut self, evaluation_info: EvaluationInfo) -> Self {
         self.evaluation_function = Some(evaluation_info);
+        self.custom_function_keys.evaluation = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_evaluation_info(
+        mut self,
+        evaluation_info: EvaluationInfo,
+        key: Vec<u8>,
+    ) -> Self {
+        self.evaluation_function = Some(evaluation_info);
+        self.custom_function_keys.evaluation = Some(key);
         self
     }
 
@@ -1060,6 +1128,7 @@ impl SymbolBuilder {
                 self.derivative_function,
                 self.series_function,
                 self.evaluation_function,
+                self.custom_function_keys,
                 self.tags,
                 self.aliases,
                 self.user_data,

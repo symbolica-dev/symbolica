@@ -1,5 +1,5 @@
 use super::*;
-use crate::atom::FunctionBuilder;
+use crate::atom::{FunctionBuilder, NormalizationFunction};
 use crate::utils::Settable;
 
 /// Operations that transform an expression.
@@ -322,6 +322,217 @@ impl PythonHeldExpression {
 #[derive(Clone)]
 pub struct PythonTransformer {
     pub chain: Vec<Transformer>,
+}
+
+pub enum PythonNormalization {
+    Transformer(PythonTransformer),
+    Callable(Py<PyAny>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for PythonNormalization {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(transformer) = ob.extract::<PythonTransformer>() {
+            Ok(Self::Transformer(transformer))
+        } else if ob.is_callable() {
+            Ok(Self::Callable(ob.extract::<Py<PyAny>>()?))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "normalization must be a Transformer or callable",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+impl PyStubType for PythonNormalization {
+    fn type_output() -> TypeInfo {
+        TypeInfo::unqualified("Transformer | typing.Callable[[Expression], Expression]")
+    }
+}
+
+fn condition_has_opaque_callback<T>(condition: &Condition<T>, leaf: fn(&T) -> bool) -> bool {
+    match condition {
+        Condition::And(conditions) | Condition::Or(conditions) => {
+            condition_has_opaque_callback(&conditions.0, leaf)
+                || condition_has_opaque_callback(&conditions.1, leaf)
+        }
+        Condition::Not(condition) => condition_has_opaque_callback(condition, leaf),
+        Condition::Yield(value) => leaf(value),
+        Condition::True | Condition::False => false,
+    }
+}
+
+fn restriction_has_opaque_callback(restriction: &PatternRestriction) -> bool {
+    match restriction {
+        PatternRestriction::MatchStack(_) => true,
+        PatternRestriction::Wildcard((_, restriction)) => matches!(
+            restriction,
+            WildcardRestriction::Filter(_) | WildcardRestriction::Cmp(_, _)
+        ),
+    }
+}
+
+fn relation_has_opaque_callback(relation: &Relation) -> bool {
+    match relation {
+        Relation::Eq(lhs, rhs)
+        | Relation::Ne(lhs, rhs)
+        | Relation::Gt(lhs, rhs)
+        | Relation::Ge(lhs, rhs)
+        | Relation::Lt(lhs, rhs)
+        | Relation::Le(lhs, rhs)
+        | Relation::Contains(lhs, rhs) => {
+            pattern_has_opaque_callback(lhs) || pattern_has_opaque_callback(rhs)
+        }
+        Relation::IsType(pattern, _) => pattern_has_opaque_callback(pattern),
+        Relation::Matches(lhs, rhs, condition, _) => {
+            pattern_has_opaque_callback(lhs)
+                || pattern_has_opaque_callback(rhs)
+                || condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+        }
+    }
+}
+
+fn pattern_has_opaque_callback(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Literal(_) | Pattern::Wildcard(_, _) => false,
+        Pattern::Fn(_, arguments)
+        | Pattern::Mul(arguments)
+        | Pattern::Add(arguments)
+        | Pattern::Alternative(arguments) => arguments.iter().any(pattern_has_opaque_callback),
+        Pattern::Pow(arguments) => arguments.iter().any(pattern_has_opaque_callback),
+        Pattern::Transformer(transformer) => {
+            transformer
+                .0
+                .as_ref()
+                .is_some_and(pattern_has_opaque_callback)
+                || transformer_chain_has_opaque_callback(&transformer.1)
+        }
+    }
+}
+
+fn replace_with_has_opaque_callback(replacement: &ReplaceWith<'_>) -> bool {
+    match replacement {
+        ReplaceWith::Pattern(pattern) => pattern_has_opaque_callback(pattern),
+        ReplaceWith::Map(_) => true,
+    }
+}
+
+fn transformer_has_opaque_callback(transformer: &Transformer) -> bool {
+    match transformer {
+        Transformer::IfElse(condition, if_block, else_block) => {
+            condition_has_opaque_callback(condition, relation_has_opaque_callback)
+                || transformer_chain_has_opaque_callback(if_block)
+                || transformer_chain_has_opaque_callback(else_block)
+        }
+        Transformer::IfChanged(condition, if_block, else_block) => {
+            transformer_chain_has_opaque_callback(condition)
+                || transformer_chain_has_opaque_callback(if_block)
+                || transformer_chain_has_opaque_callback(else_block)
+        }
+        Transformer::Collect(_, key_map, coefficient_map)
+        | Transformer::CollectSymbol(_, key_map, coefficient_map) => {
+            transformer_chain_has_opaque_callback(key_map)
+                || transformer_chain_has_opaque_callback(coefficient_map)
+        }
+        Transformer::ReplaceAll(pattern, replacement, condition, _, _) => {
+            pattern_has_opaque_callback(pattern)
+                || replace_with_has_opaque_callback(replacement)
+                || condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+        }
+        Transformer::ReplaceAllMultiple(replacements, _) => {
+            replacements.iter().any(|replacement| {
+                pattern_has_opaque_callback(&replacement.pat)
+                    || replace_with_has_opaque_callback(&replacement.rhs)
+                    || replacement.conditions.as_ref().is_some_and(|condition| {
+                        condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+                    })
+            })
+        }
+        Transformer::Map(_) => true,
+        Transformer::ForEach(chain)
+        | Transformer::MapTerms(chain, _)
+        | Transformer::Repeat(chain)
+        | Transformer::Stats(_, chain) => transformer_chain_has_opaque_callback(chain),
+        _ => false,
+    }
+}
+
+fn transformer_chain_has_opaque_callback(chain: &[Transformer]) -> bool {
+    chain.iter().any(transformer_has_opaque_callback)
+}
+
+fn python_transformer_fingerprint(transformer: &PythonTransformer) -> Option<Vec<u8>> {
+    if transformer_chain_has_opaque_callback(&transformer.chain) {
+        None
+    } else {
+        let mut fingerprint = b"symbolica-python-transformer-v1\0".to_vec();
+        fingerprint.extend(format!("{:?}", transformer.chain).into_bytes());
+        Some(fingerprint)
+    }
+}
+
+fn transformer_normalization_function(chain: Vec<Transformer>) -> NormalizationFunction {
+    Box::new(move |input: AtomView<'_>, out: &mut Settable<Atom>| {
+        let _ = Workspace::get_local()
+            .with(|ws| {
+                Transformer::execute_chain(
+                    input,
+                    &chain,
+                    ws,
+                    &TransformerState::default(),
+                    &mut *out,
+                )
+            })
+            .unwrap();
+    })
+}
+
+fn callable_normalization_function(function: Py<PyAny>) -> NormalizationFunction {
+    Box::new(move |input: AtomView<'_>, out: &mut Settable<Atom>| {
+        match Python::attach(|py| -> PyResult<PythonExpression> {
+            Ok(function
+                .call1(py, (PythonExpression::from(input.to_owned()),))?
+                .extract::<ConvertibleToExpression>(py)?
+                .to_expression())
+        }) {
+            Ok(value) => **out = value.expr,
+            Err(err) => {
+                error!("Python custom normalization callback failed: {err}");
+                **out = input.to_owned();
+            }
+        }
+    })
+}
+
+impl PythonNormalization {
+    fn fingerprint(&self, py: Python<'_>) -> PyResult<Option<Vec<u8>>> {
+        match self {
+            Self::Transformer(transformer) => Ok(python_transformer_fingerprint(transformer)),
+            Self::Callable(function) => {
+                let mut fingerprint = b"symbolica-python-normalization-callable-v1\0".to_vec();
+                fingerprint.extend(python_callable_fingerprint(function.bind(py))?);
+                Ok(Some(fingerprint))
+            }
+        }
+    }
+
+    fn into_function(self) -> NormalizationFunction {
+        match self {
+            Self::Transformer(transformer) => transformer_normalization_function(transformer.chain),
+            Self::Callable(function) => callable_normalization_function(function),
+        }
+    }
+
+    fn clone_function(&self, py: Python<'_>) -> NormalizationFunction {
+        match self {
+            Self::Transformer(transformer) => {
+                transformer_normalization_function(transformer.chain.clone())
+            }
+            Self::Callable(function) => callable_normalization_function(function.clone_ref(py)),
+        }
+    }
 }
 
 impl PythonTransformer {
@@ -3191,10 +3402,11 @@ impl PythonExpression {
     ///     A list of tags to associate with the symbol.
     /// aliases: Sequence[str] | None
     ///     A list of aliases to associate with the symbol.
-    /// normalization : Transformer | None
-    ///     A transformer that is called after every normalization. Note that the symbol
-    ///     name cannot be used in the transformer as this will lead to a definition of the
-    ///     symbol. Use a wildcard with the same attributes instead.
+    /// normalization : Transformer | Callable[[Expression], Expression] | None
+    ///     A transformer or callable that is applied after every normalization. A callable
+    ///     receives the normalized function and returns its replacement. The symbol name
+    ///     cannot be used in a transformer, as this would define the symbol recursively;
+    ///     use a wildcard with the same attributes instead.
     /// print : Callable[..., str | None] | None:
     ///     A function that is called when printing the variable/function, which is provided as its first argument.
     ///     This function should return a string, or `None` if the default print function should be used.
@@ -3244,7 +3456,7 @@ impl PythonExpression {
         is_positive: Option<bool>,
         tags: Option<Vec<String>>,
         aliases: Option<Vec<String>>,
-        normalization: Option<PythonTransformer>,
+        normalization: Option<PythonNormalization>,
         print: Option<Py<PyAny>>,
         derivative: Option<Py<PyAny>>,
         series: Option<Py<PyAny>>,
@@ -3358,28 +3570,46 @@ impl PythonExpression {
             let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
             let name = namespace.attach_namespace(&name);
 
+            let print = print
+                .map(|function| {
+                    let key = python_callable_fingerprint(function.bind(py))?;
+                    Ok::<_, PyErr>((function, key))
+                })
+                .transpose()?;
+            let derivative = derivative
+                .map(|function| {
+                    let key = python_callable_fingerprint(function.bind(py))?;
+                    Ok::<_, PyErr>((function, key))
+                })
+                .transpose()?;
+            let series = series
+                .map(|function| {
+                    let key = python_callable_fingerprint(function.bind(py))?;
+                    Ok::<_, PyErr>((function, key))
+                })
+                .transpose()?;
+            let eval = eval
+                .map(|definition| {
+                    let key = python_evaluation_fingerprint(definition.bind(py))?;
+                    let spec = PythonEvalSpec::from_py(py, definition)?;
+                    Ok::<_, PyErr>((spec, key))
+                })
+                .transpose()?;
+
             let mut symbol = SymbolBuilder::new(name).with_attributes(opts);
 
             if let Some(f) = normalization {
-                symbol = symbol.with_normalization_function(Box::new(
-                    move |input: AtomView<'_>, out: &mut Settable<Atom>| {
-                        let _ = Workspace::get_local()
-                            .with(|ws| {
-                                Transformer::execute_chain(
-                                    input,
-                                    &f.chain,
-                                    ws,
-                                    &TransformerState::default(),
-                                    &mut *out,
-                                )
-                            })
-                            .unwrap();
-                    },
-                ))
+                let key = f.fingerprint(py)?;
+                let normalization_function = f.into_function();
+                symbol = if let Some(key) = key {
+                    symbol.with_keyed_normalization_function(normalization_function, key)
+                } else {
+                    symbol.with_normalization_function(normalization_function)
+                };
             }
 
-            if let Some(f) = print {
-                symbol = symbol.with_print_function(Box::new(
+            if let Some((f, key)) = print {
+                symbol = symbol.with_keyed_print_function(
                     move |input: AtomView<'_>, opts: &PrintOptions, state: &PrintState| {
                         match Python::attach(|py| {
                             let kwargs = print_options_to_dict(opts, state, py)?;
@@ -3397,11 +3627,12 @@ impl PythonExpression {
                             }
                         }
                     },
-                ))
+                    key,
+                )
             }
 
-            if let Some(f) = derivative {
-                symbol = symbol.with_derivative_function(Box::new(
+            if let Some((f, key)) = derivative {
+                symbol = symbol.with_keyed_derivative_function(
                     move |input: AtomView<'_>, arg: usize, out: &mut Settable<Atom>| {
                         match Python::attach(|py| -> PyResult<PythonExpression> {
                             Ok(
@@ -3416,13 +3647,14 @@ impl PythonExpression {
                             }
                         }
                     },
-                ))
+                    key,
+                )
             }
 
-            if let Some(f) = series {
-                symbol =
-                    symbol.with_series_function(Box::new(move |args: &[Series<AtomField>]| {
-                        match Python::attach(|py| -> PyResult<Option<(Atom, Atom)>> {
+            if let Some((f, key)) = series {
+                symbol = symbol.with_keyed_series_function(
+                    move |args: &[Series<AtomField>]| match Python::attach(
+                        |py| -> PyResult<Option<(Atom, Atom)>> {
                             let args = args
                                 .iter()
                                 .cloned()
@@ -3433,20 +3665,20 @@ impl PythonExpression {
                                 .extract::<Option<(PythonExpression, PythonExpression)>>(py)?;
                             Ok(value
                                 .map(|(singular, regularized)| (singular.expr, regularized.expr)))
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python custom series callback failed: {err}");
-                                None
-                            }
+                        },
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python custom series callback failed: {err}");
+                            None
                         }
-                    }))
+                    },
+                    key,
+                )
             }
 
-            if let Some(eval) = eval {
-                symbol = symbol.with_evaluation_info(
-                    PythonEvalSpec::from_py(py, eval)?.into_evaluation_info(),
-                );
+            if let Some((eval, key)) = eval {
+                symbol = symbol.with_keyed_evaluation_info(eval.into_evaluation_info(), key);
             }
 
             if let Some(t) = tags {
@@ -3485,22 +3717,13 @@ impl PythonExpression {
                 let mut symbol = SymbolBuilder::new(name).with_attributes(opts.clone());
 
                 if let Some(f) = &normalization {
-                    let t = f.chain.clone();
-                    symbol = symbol.with_normalization_function(Box::new(
-                        move |input: AtomView<'_>, out: &mut Settable<Atom>| {
-                            let _ = Workspace::get_local()
-                                .with(|ws| {
-                                    Transformer::execute_chain(
-                                        input,
-                                        &t,
-                                        ws,
-                                        &TransformerState::default(),
-                                        &mut *out,
-                                    )
-                                })
-                                .unwrap();
-                        },
-                    ))
+                    let key = f.fingerprint(py)?;
+                    let normalization_function = f.clone_function(py);
+                    symbol = if let Some(key) = key {
+                        symbol.with_keyed_normalization_function(normalization_function, key)
+                    } else {
+                        symbol.with_normalization_function(normalization_function)
+                    };
                 }
 
                 if let Some(t) = tags.as_ref() {
@@ -8762,7 +8985,7 @@ PyMethodsInfo {
                     name: "normalization",
                     kind: ParameterKind::PositionalOrKeyword,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || Option::<PythonTransformer>::type_input(),
+                    type_info: || Option::<PythonNormalization>::type_input(),
                 },
                 ParameterInfo {
                     name: "print",
@@ -8896,10 +9119,11 @@ tags: Sequence[str] | None
     A list of tags to associate with the symbol.
 aliases: Sequence[str] | None
     A list of aliases to associate with the symbol.
-normalization : Transformer | None
-    A transformer that is called after every normalization. Note that the symbol
-    name cannot be used in the transformer as this will lead to a definition of the
-    symbol. Use a wildcard with the same attributes instead.
+normalization : Transformer | Callable[[Expression], Expression] | None
+    A transformer or callable that is applied after every normalization. A callable
+    receives the normalized function and returns its replacement. The symbol name
+    cannot be used in a transformer, as this would define the symbol recursively;
+    use a wildcard with the same attributes instead.
 print : Callable[..., str | None] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
