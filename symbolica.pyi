@@ -792,6 +792,10 @@ class Symbol:
     ALT: Expression
     """The built-in alternative-pattern function."""
 
+    @classmethod
+    def get(_cls, name: str) -> Expression | None:
+        """Returns the variable with the given name, if it exists."""
+
 class Expression:
     """
     A Symbolica expression.

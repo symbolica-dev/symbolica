@@ -2268,6 +2268,24 @@ impl PythonSymbol {
     pub fn alt() -> PythonExpression {
         Atom::var(Symbol::ALT).into()
     }
+
+    /// Returns the variable with the given name, if it exists.
+    #[classmethod]
+    pub fn get(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        py: Python<'_>,
+    ) -> PyResult<Option<PythonExpression>> {
+        let namespace = DefaultNamespace {
+            namespace: get_namespace(py)?.into(),
+            data: "",
+            file: "".into(),
+            line: 0,
+        };
+
+        let name = namespace.attach_namespace(name);
+        Ok(Symbol::get_symbol(name).map(|s| Atom::var(s).into()))
+    }
 }
 
 pub enum PythonEvaluationValue {

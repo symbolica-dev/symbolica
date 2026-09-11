@@ -200,11 +200,34 @@ pub struct DefaultNamespace<T> {
 
 impl<T> DefaultNamespace<T> {
     /// Parse a string into a namespaced string, not checking if the name is built-in.
+    pub(crate) fn attach_namespace_no_builtin(&self, s: &str) -> NamespacedSymbol {
+        if let Some(mut s) = NamespacedSymbol::try_parse(s) {
+            s.file = self.file.clone();
+            s.line = self.line;
+            s
+        } else {
+            NamespacedSymbol {
+                symbol: format!("{}::{}", self.namespace, s).into(),
+                namespace: self.namespace.clone(),
+                file: self.file.clone(),
+                line: self.line,
+            }
+        }
+    }
+
+    /// Parse a string into a namespaced string.
     pub fn attach_namespace(&self, s: &str) -> NamespacedSymbol {
         if let Some(mut s) = NamespacedSymbol::try_parse(s) {
             s.file = self.file.clone();
             s.line = self.line;
             s
+        } else if State::is_builtin(s) {
+            NamespacedSymbol {
+                symbol: format!("symbolica::{}", s).into(),
+                namespace: "symbolica".into(),
+                file: self.file.clone(),
+                line: self.line,
+            }
         } else {
             NamespacedSymbol {
                 symbol: format!("{}::{}", self.namespace, s).into(),
@@ -1136,7 +1159,7 @@ impl Symbol {
     }
 
     /// Looks up a symbol by its namespaced name without creating it.
-    /// Use the [get_symbol!](crate::get_symbol) macro instead to define symbols in the current namespace.
+    /// Use the [get_symbol!](crate::get_symbol) macro instead to get symbols in the current namespace.
     pub fn get_symbol(name: NamespacedSymbol) -> Option<Symbol> {
         State::get_global_state()
             .read()
