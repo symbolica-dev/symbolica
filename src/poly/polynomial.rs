@@ -5191,6 +5191,157 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
 }
 
 impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Find blocks of terms with the same exponent of the first variable.
+    /// Binary search avoids scanning the (potentially much larger) blocks.
+    fn first_variable_blocks(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let mut start = 0;
+        std::iter::from_fn(move || {
+            if start == self.nterms() {
+                return None;
+            }
+            let degree = self.exponents(start)[0];
+            let mut low = start + 1;
+            let mut high = self.nterms();
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if self.exponents(middle)[0] == degree {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            let block = (start, low);
+            start = low;
+            Some(block)
+        })
+    }
+
+    /// Extract a coefficient polynomial in variable 0. With no specified
+    /// monomial in variables 1..n, select the lexicographically largest one.
+    fn coefficient_in_first_variable(&self, monomial: Option<&[E]>) -> Self {
+        let mut coefficient = self.zero();
+        let mut largest = None;
+        let mut exponents: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); self.nvars()];
+        for (start, end) in self.first_variable_blocks() {
+            let index = if let Some(monomial) = monomial {
+                let mut low = start;
+                let mut high = end;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    if &self.exponents(middle)[1..] < monomial {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                if low == end || &self.exponents(low)[1..] != monomial {
+                    continue;
+                }
+                low
+            } else {
+                // Only the last term of each sorted block can be largest.
+                let index = end - 1;
+                let tail = &self.exponents(index)[1..];
+                if largest.is_none_or(|i| tail > &self.exponents(i)[1..]) {
+                    largest = Some(index);
+                    coefficient.coefficients.clear();
+                    coefficient.exponents.clear();
+                }
+                if tail != &self.exponents(largest.unwrap())[1..] {
+                    continue;
+                }
+                index
+            };
+            exponents[0] = self.exponents(index)[0];
+            coefficient.append_monomial(self.coefficients[index].clone(), &exponents);
+        }
+        coefficient
+    }
+
+    /// Necessary divisibility checks that do not scan the full operands.
+    fn division_coefficient_precheck(&self, div: &Self) -> bool {
+        if self
+            .last_exponents()
+            .iter()
+            .zip(div.last_exponents())
+            .any(|(a, b)| a < b)
+            || self
+                .exponents(0)
+                .iter()
+                .zip(div.exponents(0))
+                .any(|(a, b)| a < b)
+            || self
+                .ring()
+                .try_div(&self.coefficients[0], &div.coefficients[0])
+                .is_none()
+        {
+            return false;
+        }
+
+        // A = B Q implies lc(A) = lc(B) lc(Q) when the other variables
+        // are ordered first. This often rejects speculative divisions using
+        // only a small univariate coefficient, before degree scans and heaps.
+        // Bound both extraction and division work; sparse, high-degree inputs
+        // should continue through the ordinary checks.
+        if self.nvars() > 1 && !div.is_constant() {
+            let degree = self.last_exponents()[0].to_i32();
+            if (1..=64).contains(&degree)
+                && div.last_exponents()[0].to_i32() <= 64
+                && self.nterms() >= 256.max(4 * (degree as usize + 1))
+            {
+                // For a divisor in variable 0 alone, every coefficient in the
+                // remaining variables must divide. Interior coefficients avoid
+                // extra factors often shared by structured boundary terms.
+                if div
+                    .exponents_iter()
+                    .all(|e| e[1..].iter().all(|e| e.is_zero()))
+                {
+                    for index in [self.nterms() / 2, self.nterms() / 4] {
+                        let coefficient =
+                            self.coefficient_in_first_variable(Some(&self.exponents(index)[1..]));
+                        if !coefficient.quot_rem_impl(div, true, false).1.is_zero() {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                let divisor_coefficient = div.coefficient_in_first_variable(None);
+                if !divisor_coefficient.is_constant()
+                    || self
+                        .ring()
+                        .try_inv(&divisor_coefficient.coefficients[0])
+                        .is_none()
+                {
+                    let coefficient = self.coefficient_in_first_variable(None);
+                    // Bypass try_div to avoid recursively applying this precheck.
+                    if !coefficient
+                        .quot_rem_impl(&divisor_coefficient, true, false)
+                        .1
+                        .is_zero()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Compute all nonnegative degree bounds together for division dispatch.
+    /// Reuse these bounds after the divisibility prechecks instead of scanning
+    /// each variable again in quotient/remainder dispatch and exponent packing.
+    fn division_degrees(&self) -> SmallVec<[E; INLINED_EXPONENTS]> {
+        let mut degrees: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); self.nvars()];
+        if self.nvars() != 0 {
+            for exponents in self.exponents_iter() {
+                for (maximum, exponent) in degrees.iter_mut().zip(exponents) {
+                    *maximum = (*maximum).max(*exponent);
+                }
+            }
+        }
+        degrees
+    }
+
     /// Divide `self` by `div` if there is no remainder, else return `None`.
     pub fn try_div(
         &self,
@@ -5207,7 +5358,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return c1.try_div(&c2);
         }
 
-        if self.is_zero() {
+        if self.is_zero() || div.is_one() {
             return Some(self.clone());
         }
 
@@ -5240,43 +5391,41 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return Some(r.mul_exp(&degrees));
         }
 
-        if !self.is_polynomial() {
+        if !self.division_coefficient_precheck(div) {
             return None;
         }
 
-        if (0..self.nvars()).any(|v| self.degree(v) < div.degree(v)) {
+        let degrees = self.division_degrees();
+        let divisor_degrees = div.division_degrees();
+        if degrees.iter().zip(&divisor_degrees).any(|(a, b)| a < b) {
             return None;
         }
 
         if self.ring().characteristic().is_zero() {
-            // test division of constant term (evaluation at x_i = 0)
-            let c = div.get_constant();
-            if !self.ring().is_zero(&c)
-                && !self.ring().is_one(&c)
-                && self.ring().try_div(&self.get_constant(), &c).is_none()
-            {
-                return None;
-            }
-
             // test division at x_i = 1
-            let mut num = self.ring().zero();
-            for c in &self.coefficients {
-                self.ring().add_assign(&mut num, c);
-            }
             let mut den = self.ring().zero();
             for c in &div.coefficients {
                 self.ring().add_assign(&mut den, c);
             }
-
-            if !self.ring().is_zero(&den)
-                && !self.ring().is_one(&den)
-                && self.ring().try_div(&num, &den).is_none()
-            {
-                return None;
+            // A zero value or a unit cannot reject division. In particular,
+            // many kinematic denominator factors vanish at the all-ones point.
+            if !self.ring().is_zero(&den) && self.ring().try_inv(&den).is_none() {
+                let mut num = self.ring().zero();
+                for c in &self.coefficients {
+                    self.ring().add_assign(&mut num, c);
+                }
+                if self.ring().try_div(&num, &den).is_none() {
+                    return None;
+                }
             }
         }
 
-        let (a, b) = self.clone().quot_rem_impl(div, true, false);
+        let (a, b) = self.clone().quot_rem_impl_with_degrees(
+            div,
+            true,
+            false,
+            Some((&degrees, &divisor_degrees)),
+        );
         if b.nterms() == 0 { Some(a) } else { None }
     }
 
@@ -5295,7 +5444,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.try_div_owned(&div);
         }
 
-        if self.is_zero() {
+        if self.is_zero() || div.is_one() {
             return Some(self);
         }
 
@@ -5322,44 +5471,40 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return Some(quotient.mul_exp(&quotient_shift));
         }
 
-        if (0..self.nvars()).any(|variable| self.degree(variable) < div.degree(variable)) {
+        if !self.division_coefficient_precheck(div) {
+            return None;
+        }
+
+        let degrees = self.division_degrees();
+        let divisor_degrees = div.division_degrees();
+        if degrees.iter().zip(&divisor_degrees).any(|(a, b)| a < b) {
             return None;
         }
 
         if self.ring().characteristic().is_zero() {
-            // Test division after evaluating every variable at zero.
-            let divisor_constant = div.get_constant();
-            if !self.ring().is_zero(&divisor_constant)
-                && !self.ring().is_one(&divisor_constant)
-                && self
-                    .ring()
-                    .try_div(&self.get_constant(), &divisor_constant)
-                    .is_none()
-            {
-                return None;
-            }
-
             // Test division after evaluating every variable at one.
-            let mut numerator_value = self.ring().zero();
-            for coefficient in &self.coefficients {
-                self.ring().add_assign(&mut numerator_value, coefficient);
-            }
             let mut divisor_value = self.ring().zero();
             for coefficient in &div.coefficients {
                 self.ring().add_assign(&mut divisor_value, coefficient);
             }
-            if !self.ring().is_zero(&divisor_value)
-                && !self.ring().is_one(&divisor_value)
-                && self
+            if !self.ring().is_zero(&divisor_value) && self.ring().try_inv(&divisor_value).is_none()
+            {
+                let mut numerator_value = self.ring().zero();
+                for coefficient in &self.coefficients {
+                    self.ring().add_assign(&mut numerator_value, coefficient);
+                }
+                if self
                     .ring()
                     .try_div(&numerator_value, &divisor_value)
                     .is_none()
-            {
-                return None;
+                {
+                    return None;
+                }
             }
         }
 
-        let (quotient, remainder) = self.quot_rem_impl(div, true, false);
+        let (quotient, remainder) =
+            self.quot_rem_impl_with_degrees(div, true, false, Some((&degrees, &divisor_degrees)));
         remainder.is_zero().then_some(quotient)
     }
 
@@ -5374,10 +5519,20 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     ///
     /// The input must not have negative exponents.
     fn quot_rem_impl(
+        self,
+        div: &MultivariatePolynomial<F, E, LexOrder>,
+        abort_on_remainder: bool,
+        assume_exact: bool,
+    ) -> (Self, Self) {
+        self.quot_rem_impl_with_degrees(div, abort_on_remainder, assume_exact, None)
+    }
+
+    fn quot_rem_impl_with_degrees(
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
         assume_exact: bool,
+        degrees: Option<(&[E], &[E])>,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -5450,13 +5605,23 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return (q, remainder);
         }
 
-        // check if the division is univariate with the same variable
-        let degree_sum: Vec<_> = (0..self.nvars())
-            .map(|i| self.degree(i).to_i32() as usize + div.degree(i).to_i32() as usize)
-            .collect();
-
-        if div.ring().is_one(&div.lcoeff()) && degree_sum.iter().filter(|x| **x > 0).count() == 1 {
-            return self.quot_rem_univariate_monic(div);
+        let computed_degrees;
+        let (degrees, divisor_degrees) = if let Some(degrees) = degrees {
+            degrees
+        } else {
+            computed_degrees = (self.division_degrees(), div.division_degrees());
+            (computed_degrees.0.as_slice(), computed_degrees.1.as_slice())
+        };
+        if div.ring().is_one(&div.lcoeff()) {
+            if degrees
+                .iter()
+                .zip(divisor_degrees)
+                .filter(|(a, b)| !a.is_zero() || !b.is_zero())
+                .count()
+                == 1
+            {
+                return self.quot_rem_univariate_monic(div);
+            }
         }
 
         // Checked division is frequently speculative, notably when cancelling factors in a
@@ -5468,10 +5633,28 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return self.dense_division(div, &bases, total, assume_exact);
         }
 
+        // An exact quotient cannot exceed these coordinate-wise degrees.
+        // Reject impossible quotient terms before producing their heap products.
+        // General quotient/remainder division must not use this bound: its
+        // remainder can cancel terms above the dividend's coordinate degrees.
+        let quotient_bounds: Option<SmallVec<[E; INLINED_EXPONENTS]>> =
+            if abort_on_remainder && !assume_exact {
+                let Some(bounds) = degrees
+                    .iter()
+                    .zip(divisor_degrees)
+                    .map(|(a, b)| (*a >= *b).then(|| *a - *b))
+                    .collect::<Option<_>>()
+                else {
+                    return (self.zero(), self.one());
+                };
+                Some(bounds)
+            } else {
+                None
+            };
         let mut pack_u8 = true;
         if self.nvars() <= 8
-            && (0..self.nvars()).all(|i| {
-                let deg = self.degree(i).to_i32() as u32;
+            && degrees.iter().all(|degree| {
+                let deg = degree.to_i32() as u32;
                 if deg > 127 {
                     pack_u8 = false;
                 }
@@ -5479,9 +5662,20 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 deg <= 127 || self.nvars() <= 4 && deg <= 32767
             })
         {
-            self.heap_division_packed_exp(div, abort_on_remainder, pack_u8, assume_exact)
+            self.heap_division_packed_exp(
+                div,
+                abort_on_remainder,
+                pack_u8,
+                assume_exact,
+                quotient_bounds.as_deref(),
+            )
         } else {
-            self.heap_division(div, abort_on_remainder, assume_exact)
+            self.heap_division(
+                div,
+                abort_on_remainder,
+                assume_exact,
+                quotient_bounds.as_deref(),
+            )
         }
     }
 
@@ -5683,6 +5877,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         div: &MultivariatePolynomial<F, E, LexOrder>,
         abort_on_remainder: bool,
         assume_exact: bool,
+        quotient_bounds: Option<&[E]>,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -5822,6 +6017,14 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             }
 
             if div.last_exponents().iter().zip(&m).all(|(ge, me)| me >= ge) {
+                if quotient_bounds.is_some_and(|bounds| {
+                    m.iter()
+                        .zip(div.last_exponents())
+                        .zip(bounds)
+                        .any(|((m, d), bound)| *m - *d > *bound)
+                }) {
+                    return (q, self.one());
+                }
                 let quotient_coefficient = if assume_exact {
                     self.ring()
                         .exact_div_owned(c, div.coefficients.last().unwrap())
@@ -5943,6 +6146,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         abort_on_remainder: bool,
         pack_u8: bool,
         assume_exact: bool,
+        quotient_bounds: Option<&[E]>,
     ) -> (
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
@@ -5963,6 +6167,14 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         } else {
             div.exponents_iter().map(|c| E::pack_u16(c)).collect()
         };
+
+        let packed_quotient_bounds = quotient_bounds.map(|bounds| {
+            if pack_u8 {
+                E::pack(bounds)
+            } else {
+                E::pack_u16(bounds)
+            }
+        });
 
         let mut div_monomial_in_heap = vec![false; div.nterms()];
         let mut merged_index_of_div_monomial_in_quotient = vec![0; div.nterms()];
@@ -6089,6 +6301,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
             let q_e = divides(m, pack_div[pack_div.len() - 1], pack_u8);
             if let Some(q_e) = q_e {
+                if packed_quotient_bounds
+                    .is_some_and(|bounds| divides(bounds, q_e, pack_u8).is_none())
+                {
+                    return (q, self.one());
+                }
                 let quotient_coefficient = if assume_exact {
                     self.ring()
                         .exact_div_owned(c, div.coefficients.last().unwrap())
@@ -8384,6 +8601,212 @@ mod test {
         // evaluation filters and exercises the checked polynomial-division path.
         let perturbation = parse!("x-y").to_polynomial::<_, u8>(&Z, dividend.variables().clone());
         assert!((dividend + perturbation).try_div_owned(&divisor).is_none());
+    }
+
+    #[test]
+    fn division_coefficient_extraction_matches_full_scan() {
+        let variables = Arc::new(vec![
+            symbol!("d").into(),
+            symbol!("x").into(),
+            symbol!("y").into(),
+        ]);
+        for text in [
+            "d^20*x+d^7*y^2+3*d^2*y^2+x^3",
+            "(d^4+2*d+1)*x^2*y+(d^7+3)*x^4+d^9*y^7",
+            "d^200*x+d^3*y+2*y",
+            "x+y",
+            "1",
+        ] {
+            let p = parse!(text).to_polynomial::<_, u16>(&Z, variables.clone());
+            let largest = p.exponents_iter().map(|e| &e[1..]).max().unwrap();
+            let mut expected = p.zero();
+            for term in &p {
+                if &term.exponents[1..] == largest {
+                    expected.append_monomial(term.coefficient.clone(), &[term.exponents[0], 0, 0]);
+                }
+            }
+            assert_eq!(p.coefficient_in_first_variable(None), expected, "{text}");
+            for monomial in [
+                &p.exponents(0)[1..],
+                &p.exponents(p.nterms() / 2)[1..],
+                &p.last_exponents()[1..],
+                &[17, 23],
+            ] {
+                let mut expected = p.zero();
+                for term in &p {
+                    if &term.exponents[1..] == monomial {
+                        expected
+                            .append_monomial(term.coefficient.clone(), &[term.exponents[0], 0, 0]);
+                    }
+                }
+                assert_eq!(
+                    p.coefficient_in_first_variable(Some(monomial)),
+                    expected,
+                    "{text} at {monomial:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn division_boundary_checks_agree_with_full_division() {
+        let variables = Arc::new(vec![
+            symbol!("d").into(),
+            symbol!("x").into(),
+            symbol!("y").into(),
+        ]);
+        let quotient = parse!("(d+x+y+1)^10").to_polynomial::<_, u16>(&Z, variables.clone());
+        let perturbation = parse!("(d-1)*(x+y+1)^5").to_polynomial::<_, u16>(&Z, variables.clone());
+        for text in [
+            "d-4",
+            "2*d+3",
+            "d^2+d+1",
+            "d+x",
+            "(d+2)*x+y",
+            "x+y",
+            "x-1",
+            "3",
+        ] {
+            let divisor = parse!(text).to_polynomial::<_, u16>(&Z, variables.clone());
+            let exact = &quotient * &divisor;
+            assert!(exact.division_coefficient_precheck(&divisor), "{text}");
+            assert_eq!(exact.try_div(&divisor), Some(quotient.clone()), "{text}");
+            assert_eq!(
+                exact.clone().try_div_owned(&divisor),
+                Some(quotient.clone())
+            );
+            for dividend in [
+                exact.clone().add_constant(Integer::one()),
+                &exact + &perturbation,
+            ] {
+                let (q, r) = dividend.clone().quot_rem_impl(&divisor, true, false);
+                let expected = r.is_zero().then_some(q);
+                assert_eq!(dividend.try_div(&divisor), expected, "{text}");
+                assert_eq!(dividend.try_div_owned(&divisor), expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn division_coefficient_check_rejects_when_scalar_checks_pass() {
+        let variables = Arc::new(vec![
+            symbol!("d").into(),
+            symbol!("x").into(),
+            symbol!("y").into(),
+        ]);
+        let a = parse!("(d-8)*(d+x+y+1)^10+d*(d-1)*(d+1)*(x+y+1)^10")
+            .to_polynomial::<_, u16>(&Z, variables.clone());
+        let b = parse!("d-8").to_polynomial::<_, u16>(&Z, variables.clone());
+        assert!(Z.try_div(&a.lcoeff(), &b.lcoeff()).is_some());
+        assert!(Z.try_div(&a.coefficients[0], &b.coefficients[0]).is_some());
+        assert!(Z.try_div(&a.get_constant(), &b.get_constant()).is_some());
+        let sum = a.coefficients.iter().fold(Integer::zero(), |s, c| s + c);
+        assert!(Z.try_div(&sum, &Integer::from(-7)).is_some());
+        assert!(!a.division_coefficient_precheck(&b));
+        assert!(a.try_div(&b).is_none());
+        assert!(a.try_div_owned(&b).is_none());
+
+        // The coefficient argument also holds over fields, where scalar
+        // divisibility alone cannot reject any nonzero divisor.
+        let field = Zp::new(101);
+        let q = parse!("(d+x+y+1)^10").to_polynomial::<_, u16>(&field, variables.clone());
+        let b = parse!("d-8").to_polynomial::<_, u16>(&field, variables.clone());
+        let exact = &q * &b;
+        assert_eq!(exact.try_div(&b), Some(q.clone()));
+        assert_eq!(exact.try_div_owned(&b), Some(q));
+        let a = parse!("(d-8)*(d+x+y+1)^10+d*(d-1)*(d+1)*(x+y+1)^10")
+            .to_polynomial::<_, u16>(&field, variables);
+        assert!(!a.division_coefficient_precheck(&b));
+        assert!(a.try_div(&b).is_none());
+        assert!(a.try_div_owned(&b).is_none());
+    }
+
+    #[test]
+    fn division_boundary_checks_reject_without_constant_terms() {
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("y").into()]);
+        for (a, b) in [
+            ("x^2+y", "x+y^2"),
+            ("x^2+y^3", "x*y+y^2"),
+            ("x^2+3*y", "x+2*y"),
+        ] {
+            let a = parse!(a).to_polynomial::<_, u16>(&Z, variables.clone());
+            let b = parse!(b).to_polynomial::<_, u16>(&Z, variables.clone());
+            assert!(!a.division_coefficient_precheck(&b));
+            assert!(a.try_div(&b).is_none());
+            assert!(a.try_div_owned(&b).is_none());
+        }
+    }
+
+    #[test]
+    fn checked_division_bounds_do_not_restrict_general_remainders() {
+        for (power, variables) in [(40, 2), (200, 2), (200, 5)] {
+            let vars = Arc::new(
+                (0..variables)
+                    .map(|i| symbol!(&format!("bound_{i}")).into())
+                    .collect(),
+            );
+            let mut dividend = MultivariatePolynomial::<IntegerRing, u16>::new(&Z, None, vars);
+            let mut exponent = vec![0; variables];
+            exponent[1] = 1;
+            dividend.append_monomial(Integer::one(), &exponent);
+            exponent[1] = 0;
+            exponent[0] = power;
+            dividend.append_monomial(Integer::one(), &exponent);
+            let mut divisor = dividend.zero();
+            exponent[0] = 0;
+            exponent[1] = 1;
+            divisor.append_monomial(Integer::from(-1), &exponent);
+            exponent[1] = 0;
+            exponent[0] = 1;
+            divisor.append_monomial(Integer::one(), &exponent);
+
+            // Exact division must fail as soon as a quotient term contains y.
+            assert!(dividend.try_div(&divisor).is_none());
+            assert!(dividend.clone().try_div_owned(&divisor).is_none());
+            // Ordinary division is allowed to generate y^(power-1) in the
+            // quotient, cancelled by y^power+y in the remainder.
+            let (q, r) = dividend.quot_rem(&divisor, false);
+            assert_eq!(q.degree(1), power - 1);
+            assert_eq!(r.degree(1), power);
+            assert_eq!(&q * &divisor + r, dividend);
+        }
+    }
+
+    #[test]
+    fn checked_division_preserves_zero_and_unit_evaluation_cases() {
+        let quotient = parse!("(x+2*y+3*z+1)^4").to_polynomial::<_, u16>(&Z, None);
+        for text in ["x-y", "x-y+1", "x-y-1", "2*x-y+1", "2*x+2*y"] {
+            let divisor = parse!(text).to_polynomial::<_, u16>(&Z, quotient.variables().clone());
+            let dividend = &quotient * &divisor;
+            assert_eq!(dividend.try_div(&divisor), Some(quotient.clone()), "{text}");
+            assert_eq!(
+                dividend.clone().try_div_owned(&divisor),
+                Some(quotient.clone()),
+                "{text}"
+            );
+            let inexact = dividend.add_constant(Integer::one());
+            assert!(inexact.try_div(&divisor).is_none(), "{text}");
+            assert!(inexact.try_div_owned(&divisor).is_none(), "{text}");
+        }
+        assert_eq!(quotient.try_div(&quotient.one()), Some(quotient.clone()));
+        assert_eq!(
+            quotient.clone().try_div_owned(&quotient.one()),
+            Some(quotient)
+        );
+    }
+
+    #[test]
+    fn checked_division_reuses_degrees_with_unused_variables_and_wide_exponents() {
+        let variables = Arc::new(vec![
+            symbol!("unused").into(),
+            symbol!("x").into(),
+            symbol!("y").into(),
+        ]);
+        let quotient = parse!("x^180+y^200+x*y+1").to_polynomial::<_, u16>(&Z, variables);
+        let divisor = parse!("2*x+3*y+1").to_polynomial::<_, u16>(&Z, quotient.variables().clone());
+        let dividend = &quotient * &divisor;
+        assert_eq!(dividend.try_div(&divisor), Some(quotient.clone()));
+        assert_eq!(dividend.try_div_owned(&divisor), Some(quotient));
     }
 
     #[test]
