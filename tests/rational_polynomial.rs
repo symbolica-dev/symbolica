@@ -2,12 +2,37 @@ use std::sync::Arc;
 
 use symbolica::{
     atom::AtomCore,
-    domains::{integer::Z, rational::Q, rational_polynomial::RationalPolynomial},
+    domains::{
+        Ring,
+        integer::Z,
+        rational::Q,
+        rational_polynomial::{RationalPolynomial, RationalPolynomialField},
+    },
     parse,
     parser::{ParseSettings, Token},
     poly::{PolyVariable, polynomial::MultivariatePolynomial},
     symbol,
 };
+
+#[test]
+fn rational_polynomial_power_uses_exact_binary_exponentiation() {
+    let variables = Arc::new(vec![PolyVariable::Symbol(symbol!("x"))]);
+    let value: RationalPolynomial<_> =
+        parse!("(x+1)/(x-2)").to_rational_polynomial(&Z, &Z, Some(variables.clone()));
+
+    let one = value.pow(0);
+    assert!(one.numerator.is_one());
+    assert!(one.denominator.is_one());
+    assert_eq!(one.get_variables(), &variables);
+    assert_eq!(value.pow(1), value);
+
+    let expected: RationalPolynomial<_> =
+        parse!("(x+1)^13/(x-2)^13").to_rational_polynomial(&Z, &Z, Some(variables));
+    assert_eq!(value.pow(13), expected);
+
+    let field = RationalPolynomialField::from_poly(&value.numerator);
+    assert_eq!(field.pow(&value, 13), expected);
+}
 
 #[test]
 fn integer_factors_in_non_polynomial_exponents() {
