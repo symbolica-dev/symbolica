@@ -1056,6 +1056,15 @@ where
             return &a + &b;
         }
 
+        if self.denominator == other.denominator {
+            return RationalPolynomial::from_num_den(
+                &self.numerator + &other.numerator,
+                self.denominator.clone(),
+                self.numerator.ring(),
+                true,
+            );
+        }
+
         let denom_gcd = self.denominator.gcd(&other.denominator);
 
         let mut a_denom_red = Cow::Borrowed(&self.denominator);
@@ -1197,14 +1206,20 @@ where
         }
 
         let dn = self.numerator.derivative(var);
-        let dd = self.denominator.derivative(var);
-
         let a = RationalPolynomial::from_num_den(
             dn,
             self.denominator.clone(),
             self.numerator.ring(),
             true, // derivative may expose scalar content
         );
+        if self.denominator.degree(var) == E::zero() {
+            // A parameter-only denominator contributes no quotient-rule
+            // term. Keep the normalization above: differentiation can
+            // expose scalar or polynomial factors in the numerator.
+            return a;
+        }
+
+        let dd = self.denominator.derivative(var);
         let b = RationalPolynomial::from_num_den(
             &self.numerator * &dd,
             &self.denominator * &self.denominator,

@@ -421,7 +421,9 @@ fn prepare_denominators<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExpone
     let mut remaining = Vec::new();
     for (d, power) in std::mem::take(dens) {
         for (base, multiplicity) in d.factor() {
-            let mut power = power * multiplicity;
+            let mut power = power
+                .checked_mul(multiplicity)
+                .expect("denominator factor exponent overflow");
             while power != 0 {
                 let gcd = num.gcd(&base);
                 if gcd.is_one() {
@@ -448,7 +450,9 @@ fn merge_denominators<R: Ring, E: PositiveExponent>(
     let mut merged: Vec<(MultivariatePolynomial<R, E>, usize)> = Vec::new();
     for (base, power) in std::mem::take(dens) {
         if let Some((_, existing_power)) = merged.iter_mut().find(|(d, _)| *d == base) {
-            *existing_power += power;
+            *existing_power = existing_power
+                .checked_add(power)
+                .expect("denominator factor exponent overflow");
         } else {
             merged.push((base, power));
         }

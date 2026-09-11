@@ -4086,7 +4086,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// Remove the monomial that divides every term and return its exponent in
     /// each variable together with the remaining polynomial.
     fn remove_common_monomial(mut self) -> (Vec<E>, Self) {
-        if self.is_zero() {
+        if self.is_constant() {
             return (vec![E::zero(); self.nvars()], self);
         }
 
