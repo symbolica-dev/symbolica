@@ -4,7 +4,7 @@ use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        algebraic_number::{AlgebraicExtension, AlgebraicNumber, Root},
+        algebraic::{AlgebraicExtension, AlgebraicNumber, Root},
         backend::float::Constant,
         float::{
             Complex, ErrorPropagatingFloat, Float, FloatField, FloatLike, Real, RealLike,
@@ -719,7 +719,7 @@ fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, Str
             poly.degree()
         ));
     };
-    let location = root.location();
+    let location = root.classify_location();
 
     let mut value = root.to_float_center(prec);
     if matches!(location, RootLocation::Imaginary | RootLocation::Zero) {
@@ -741,7 +741,7 @@ fn algebraic_complex_to_complex_rational(c: &AlgebraicNumber<RationalField>) -> 
 fn polynomial_tag_to_univariate_complex(
     poly_tag: &AtomView,
 ) -> Result<UnivariatePolynomial<FloatField<Complex<Rational>>>, String> {
-    let algebraic_field = AlgebraicExtension::new_complex(Q);
+    let algebraic_field = AlgebraicExtension::complex(Q);
     let poly = poly_tag
         .try_to_polynomial::<_, u16>(&algebraic_field, None)
         .map_err(|e| {

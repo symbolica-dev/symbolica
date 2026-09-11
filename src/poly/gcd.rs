@@ -10,7 +10,7 @@ use std::mem;
 use std::ops::Add;
 use tracing::{debug, instrument};
 
-use crate::domains::algebraic_number::{AlgebraicExtension, GaloisField};
+use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
     SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp64,
@@ -3791,9 +3791,7 @@ where
                 // upgrade to a Galois field that is large enough
                 // TODO: start at a better bound?
                 // TODO: run with Zp[var]/m_i instead and use CRT
-                let field = a
-                    .ring()
-                    .upgrade(a.ring().get_extension_degree() as usize + 1);
+                let field = a.ring().upgrade(a.ring().extension_degree() as usize + 1);
                 let ag = a.map_coeff(|c| a.ring().upgrade_element(c, &field), field.clone());
                 let bg = b.map_coeff(|c| a.ring().upgrade_element(c, &field), field.clone());
                 let g = PolynomialGCD::gcd(&ag, &bg, vars, bounds);
@@ -3967,7 +3965,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                 .coefficients
                 .iter()
                 .map(|x| {
-                    a_integer.to_element(
+                    a_integer.element_from_polynomial(
                         gp.ring()
                             .mul(x, &lcoeff_factor)
                             .poly
@@ -4150,7 +4148,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                     }
 
                     nc.exponents.clone_from(&c.poly.exponents);
-                    gc.coefficients.push(a.ring().to_element(nc));
+                    gc.coefficients.push(a.ring().element_from_polynomial(nc));
                 }
 
                 gc.exponents.clone_from(&gm.exponents);

@@ -81,17 +81,17 @@ impl PythonIsolatedRoot {
                 "Root refinement tolerance must be positive",
             ));
         }
-        Ok(self.root.clone().refine(&tolerance).into())
+        Ok(self.root.clone().refined(&tolerance).into())
     }
 
     /// Resolve and cache the root's exact relationship to the coordinate axes.
     pub fn location(&mut self) -> PythonRootLocation {
-        self.root.location().into()
+        self.root.classify_location().into()
     }
 
     /// Determine whether this root lies on the positive real axis.
     pub fn is_positive(&mut self) -> bool {
-        self.root.is_positive()
+        self.root.is_positive_real()
     }
 
     fn __repr__(&self) -> String {
@@ -1940,12 +1940,14 @@ impl PythonPolynomial {
     ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
         let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
@@ -3222,12 +3224,14 @@ impl PythonFiniteFieldPolynomial {
     ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
         let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
@@ -7191,8 +7195,12 @@ impl PythonNumberFieldPolynomial {
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         Ok(self
             .poly
-            .to_expression_with_coeff_map(|_, element, out| {
-                element.poly.to_expression_into(out);
+            .to_expression_with_coeff_map(|field, element, out| {
+                if matches!(field.poly().get_vars_ref()[0], PolyVariable::Temporary(_)) {
+                    *out = field.element_to_atom_simplified(element);
+                } else {
+                    element.poly.to_expression_into(out);
+                }
             })
             .into())
     }

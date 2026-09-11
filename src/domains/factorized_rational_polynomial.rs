@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    domains::{RingOps, Set, algebraic_number::AlgebraicExtension},
+    domains::{RingOps, Set, algebraic::AlgebraicExtension},
     poly::{
         PolyVariable, PositiveExponent, factor::Factorize, gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,

@@ -109,7 +109,7 @@ pub mod prelude {
 
     pub use crate::domains::{
         EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, Set,
-        algebraic_number::{
+        algebraic::{
             AlgebraicContext, AlgebraicExtension, AlgebraicNumber, AlgebraicQuotient, Root,
         },
         atom::AtomField,
@@ -154,8 +154,8 @@ pub mod prelude {
     pub use crate::parser::{ParseMode, ParseSettings, Token};
 
     pub use crate::poly::{
-        Exponent, GrevLexOrder, IntoVariableMap, LexOrder, MonomialOrder, PolyVariable,
-        PositiveExponent,
+        CoefficientToExpression, Exponent, GrevLexOrder, IntoVariableMap, LexOrder, MonomialOrder,
+        PolyVariable, PositiveExponent,
         factor::Factorize,
         gcd::PolynomialGCD,
         groebner::{

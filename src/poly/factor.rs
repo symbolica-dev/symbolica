@@ -13,7 +13,7 @@ use crate::{
     combinatorics::CombinationIterator,
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set,
-        algebraic_number::{AlgebraicExtension, GaloisField},
+        algebraic::{AlgebraicExtension, GaloisField},
         finite_field::{
             FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField,
             Zp, Zp64,
@@ -546,7 +546,7 @@ impl<E: PositiveExponent> Factorize
                 continue;
             }
 
-            let (v, s, g, n) = f.norm_impl();
+            let (v, s, g, n) = f.norm_with_shift_data();
 
             let mut factors = n.factor();
             factors.retain(|(f, _)| !f.is_constant());
@@ -971,7 +971,7 @@ where
             }
 
             let b = if self.ring().characteristic() == 2 {
-                let max = self.ring().get_extension_degree() as usize * d;
+                let max = self.ring().extension_degree() as usize * d;
 
                 let mut b = random_poly.clone();
                 let mut vcur = b.clone();
@@ -1145,11 +1145,11 @@ where
             if self.ring().size() == Some(i.into()) {
                 let field = self
                     .ring()
-                    .upgrade(self.ring().get_extension_degree().to_u64().unwrap() as usize + 1);
+                    .upgrade(self.ring().extension_degree().to_u64().unwrap() as usize + 1);
 
                 debug!(
                     "Upgrading to Galois field with exponent {}",
-                    field.get_extension_degree()
+                    field.extension_degree()
                 );
 
                 let s_l = self.map_coeff(|c| self.ring().upgrade_element(c, &field), field.clone());
@@ -1612,11 +1612,11 @@ where
                 // the field is too small, upgrade
                 let field = self
                     .ring()
-                    .upgrade(self.ring().get_extension_degree().to_u64().unwrap() as usize + 1);
+                    .upgrade(self.ring().extension_degree().to_u64().unwrap() as usize + 1);
 
                 debug!(
                     "Upgrading to Galois field with exponent {}",
-                    field.get_extension_degree()
+                    field.extension_degree()
                 );
 
                 let s_l = self.map_coeff(|c| self.ring().upgrade_element(c, &field), field.clone());
@@ -4925,7 +4925,7 @@ mod test {
         atom::AtomCore,
         domains::{
             InternalOrdering,
-            algebraic_number::AlgebraicExtension,
+            algebraic::AlgebraicExtension,
             finite_field::{Z2, Zp},
             integer::{Integer, Z},
             rational::Q,
