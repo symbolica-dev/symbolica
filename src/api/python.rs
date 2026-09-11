@@ -351,6 +351,8 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonIntegrationStep>()?;
     m.add_class::<PythonHeldExpression>()?;
     m.add_class::<PythonTransformer>()?;
+    m.add_class::<PythonRootLocation>()?;
+    m.add_class::<PythonIsolatedRoot>()?;
     m.add_class::<PythonPolynomial>()?;
     m.add_class::<PythonFiniteFieldPolynomial>()?;
     m.add_class::<PythonNumberFieldPolynomial>()?;

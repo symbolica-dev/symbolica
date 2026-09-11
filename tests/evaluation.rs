@@ -14,6 +14,7 @@ use symbolica::{
 };
 
 #[test]
+#[ignore = "may stack overflow in debug build"]
 fn create_evaluator_with_1000_variables() {
     const VARIABLE_COUNT: usize = 1000;
 

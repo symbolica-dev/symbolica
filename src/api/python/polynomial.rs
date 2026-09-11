@@ -1,4 +1,110 @@
 use super::*;
+use crate::poly::univariate::{IsolatedRoot, RootLocation, UnivariatePolynomial};
+
+/// Proven location of an isolated root relative to the coordinate axes.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "RootLocation",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PythonRootLocation {
+    Complex,
+    Real,
+    Imaginary,
+    Zero,
+}
+
+impl From<RootLocation> for PythonRootLocation {
+    fn from(location: RootLocation) -> Self {
+        match location {
+            RootLocation::Complex => Self::Complex,
+            RootLocation::Real => Self::Real,
+            RootLocation::Imaginary => Self::Imaginary,
+            RootLocation::Zero => Self::Zero,
+        }
+    }
+}
+
+/// A certified isolated root in the complex plane.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(from_py_object, name = "IsolatedRoot", module = "symbolica.core")]
+#[derive(Clone)]
+pub struct PythonIsolatedRoot {
+    root: IsolatedRoot,
+}
+
+impl From<IsolatedRoot> for PythonIsolatedRoot {
+    fn from(root: IsolatedRoot) -> Self {
+        Self { root }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonIsolatedRoot {
+    /// Canonical index of this root within its defining polynomial.
+    #[getter]
+    pub fn index(&self) -> usize {
+        self.root.index()
+    }
+
+    /// Center of the certified complex disk as exact real and imaginary parts.
+    #[getter]
+    pub fn center(&self) -> (PythonExpression, PythonExpression) {
+        (
+            Atom::num(self.root.enclosure().center().re.clone()).into(),
+            Atom::num(self.root.enclosure().center().im.clone()).into(),
+        )
+    }
+
+    /// Radius of the certified complex disk.
+    #[getter]
+    pub fn radius(&self) -> PythonExpression {
+        Atom::num(self.root.enclosure().radius().clone()).into()
+    }
+
+    /// Convert this isolated root to an exact expression.
+    pub fn to_expression(&self) -> PythonExpression {
+        self.root.to_atom().into()
+    }
+
+    /// Return a new root whose cached enclosure has at most `tolerance` radius.
+    pub fn refine(&self, tolerance: PythonMultiPrecisionFloat) -> PyResult<Self> {
+        let tolerance = tolerance.0.to_rational();
+        if tolerance <= Rational::zero() {
+            return Err(exceptions::PyValueError::new_err(
+                "Root refinement tolerance must be positive",
+            ));
+        }
+        Ok(self.root.clone().refine(&tolerance).into())
+    }
+
+    /// Resolve and cache the root's exact relationship to the coordinate axes.
+    pub fn location(&mut self) -> PythonRootLocation {
+        self.root.location().into()
+    }
+
+    /// Determine whether this root lies on the positive real axis.
+    pub fn is_positive(&mut self) -> bool {
+        self.root.is_positive()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IsolatedRoot(index={}, center=({}, {}), radius={}, polynomial={})",
+            self.root.index(),
+            self.root.enclosure().center().re,
+            self.root.enclosure().center().im,
+            self.root.enclosure().radius(),
+            self.root.defining_polynomial()
+        )
+    }
+}
 
 /// A multivariate polynomial with rational coefficients.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
@@ -20,6 +126,24 @@ impl_stub_type!(&mut PythonPolynomial = PythonPolynomial);
 impl_stub_type!(OneOrMultiple<PythonExpression> = PythonExpression | Vec<PythonExpression>);
 
 impl PythonPolynomial {
+    fn as_univariate(&self) -> PyResult<UnivariatePolynomial<RationalField>> {
+        let var = if self.poly.nvars() == 1 {
+            0
+        } else {
+            let variables: Vec<_> = (0..self.poly.nvars())
+                .filter(|variable| self.poly.degree(*variable) > 0)
+                .collect();
+            if variables.len() != 1 {
+                return Err(exceptions::PyValueError::new_err(
+                    "Polynomial is not univariate",
+                ));
+            }
+            variables[0]
+        };
+
+        Ok(self.poly.to_univariate_from_univariate(var))
+    }
+
     fn format_latex_with_options(
         &self,
         max_line_length: Option<usize>,
@@ -1364,56 +1488,47 @@ impl PythonPolynomial {
         Ok(Self { poly: e })
     }
 
-    /// Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-    /// and the multiplicity of that root. Optionally, the intervals can be refined to a given precision.
+    /// Return one root from the canonical ordering, counting multiplicity.
+    pub fn root(&self, index: usize) -> PyResult<Option<PythonIsolatedRoot>> {
+        Ok(self.as_univariate()?.root(index).map(Into::into))
+    }
+
+    /// Isolate all distinct roots in the complex plane, together with their
+    /// multiplicities.
     ///
     /// Examples
     /// --------
     /// >>> from symbolica import *
-    /// >>> p = E('2016+5808*x+5452*x^2+1178*x^3+-753*x^4+-232*x^5+41*x^6').to_polynomial()
-    /// >>> for a, b, n in p.isolate_roots():
-    /// >>>     print('({},{}): {}'.format(a, b, n))
-    ///
-    /// yields
-    /// ```
-    /// (-56/45,-77/62): 1
-    /// (-98/79,-119/96): 1
-    /// (-119/96,-21/17): 1
-    /// (-7/6,0): 1
-    /// (0,6): 1
-    /// (6,12): 1
-    /// ```
-    ///
-    /// Parameters
-    /// ----------
-    /// refine: float | Decimal | None
-    ///     The optional interval refinement tolerance.
-    #[pyo3(signature = (refine = None))]
-    pub fn isolate_roots(
+    /// >>> p = E('(x-1)^2*(x^2+1)').to_polynomial()
+    /// >>> for root, multiplicity in p.isolate_roots():
+    /// ...     print(root.center, multiplicity)
+    pub fn isolate_roots(&self) -> PyResult<Vec<(PythonIsolatedRoot, usize)>> {
+        Ok(self
+            .as_univariate()?
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, multiplicity)| (root.into(), multiplicity))
+            .collect())
+    }
+
+    /// Isolate all distinct real roots, together with their multiplicities.
+    pub fn isolate_real_roots(&self) -> PyResult<Vec<(PythonIsolatedRoot, usize)>> {
+        Ok(self
+            .as_univariate()?
+            .isolate_real_roots()
+            .into_iter()
+            .map(|(root, multiplicity)| (root.into(), multiplicity))
+            .collect())
+    }
+
+    /// Isolate the real roots as rational intervals containing exactly one
+    /// distinct root, together with their multiplicities.
+    pub fn isolate_real_root_intervals(
         &self,
-        refine: Option<PythonMultiPrecisionFloat>,
     ) -> PyResult<Vec<(PythonExpression, PythonExpression, usize)>> {
-        let refine = refine.map(|x| x.0.to_rational());
-
-        let var = if self.poly.nvars() == 1 {
-            0
-        } else {
-            let degs: Vec<_> = (0..self.poly.nvars())
-                .filter(|x| self.poly.degree(*x) > 0)
-                .collect();
-            if degs.len() > 1 || degs.is_empty() {
-                Err(exceptions::PyValueError::new_err(
-                    "Polynomial is not univariate",
-                ))?
-            } else {
-                degs[0]
-            }
-        };
-
-        let uni = self.poly.to_univariate_from_univariate(var);
-
-        Ok(uni
-            .isolate_roots(refine)
+        Ok(self
+            .as_univariate()?
+            .isolate_real_root_intervals()
             .into_iter()
             .map(|(l, r, m)| (Atom::num(l).into(), Atom::num(r).into(), m))
             .collect())
@@ -1454,22 +1569,7 @@ impl PythonPolynomial {
         decimal_digit_precision: Option<u32>,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
-        let var = if self.poly.nvars() == 1 {
-            0
-        } else {
-            let degs: Vec<_> = (0..self.poly.nvars())
-                .filter(|x| self.poly.degree(*x) > 0)
-                .collect();
-            if degs.len() > 1 || degs.is_empty() {
-                Err(exceptions::PyValueError::new_err(
-                    "Polynomial is not univariate",
-                ))?
-            } else {
-                degs[0]
-            }
-        };
-
-        let uni = self.poly.to_univariate_from_univariate(var);
+        let uni = self.as_univariate()?;
 
         let Some(decimal_digit_precision) = decimal_digit_precision else {
             let roots: Vec<_> = uni

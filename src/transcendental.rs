@@ -15,7 +15,10 @@ use crate::{
         rational_polynomial::RationalPolynomialField,
     },
     function, get_symbol,
-    poly::{PolyVariable, univariate::UnivariatePolynomial},
+    poly::{
+        PolyVariable,
+        univariate::{RootLocation, UnivariatePolynomial},
+    },
     state::{State, StateInitializer},
     symbol,
     utils::Settable,
@@ -710,25 +713,19 @@ fn root_numeric_eval(tags: &[AtomView], prec: u32) -> Result<Complex<Float>, Str
         ));
     }
 
-    let roots = poly.isolate_complex_roots(None);
-    let mut seen = 0;
-    let Some(root) = roots.into_iter().find(|root| {
-        let multiplicity = root.multiplicity().unwrap_or(1);
-        let selected = index < seen + multiplicity;
-        seen += multiplicity;
-        selected
-    }) else {
+    let Some(mut root) = poly.root(index) else {
         return Err(format!(
             "root index {index} is out of bounds for polynomial of degree {}",
             poly.degree()
         ));
     };
+    let location = root.location();
 
     let mut value = root.to_float_center(prec);
-    if root.is_imaginary() {
+    if matches!(location, RootLocation::Imaginary | RootLocation::Zero) {
         value.re = Float::new(prec);
     }
-    if root.is_real() {
+    if matches!(location, RootLocation::Real | RootLocation::Zero) {
         value.im = Float::new(prec);
     }
     Ok(value)

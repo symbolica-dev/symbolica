@@ -2,15 +2,15 @@
 
 use crate::domains::SampleableRing;
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
-use numerica::domains::float::{Float, RealLike};
 use rand::Rng;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, representation::FunView},
+    atom::{Atom, AtomCore, AtomView},
     coefficient::ConvertToRing,
     combinatorics::CombinationIterator,
     domains::{
@@ -26,7 +26,10 @@ use crate::{
         factor::Factorize,
         gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
-        univariate::{ComplexRootInterval, UnivariatePolynomial},
+        univariate::{
+            RootImage, RootLocation, match_certified_root_images,
+            rational_polynomial_value_has_positive_real_part,
+        },
     },
     symbol,
     tensors::matrix::Matrix,
@@ -34,61 +37,11 @@ use crate::{
 };
 
 use super::{
-    EuclideanDomain, Field, InternalOrdering, Ring, SelfRing,
+    EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SelfRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
-    float::{Complex, FloatField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
 };
-
-#[derive(Clone)]
-struct AlgebraicBall {
-    center: Complex<Rational>,
-    radius: Rational,
-}
-
-impl AlgebraicBall {
-    fn from_root(root: &ComplexRootInterval) -> Self {
-        Self {
-            center: root.center().clone(),
-            radius: root.radius().clone(),
-        }
-    }
-
-    fn zero() -> Self {
-        Self {
-            center: Complex::new(Rational::zero(), Rational::zero()),
-            radius: Rational::zero(),
-        }
-    }
-
-    fn norm_upper_bound(center: &Complex<Rational>) -> Rational {
-        center.re.abs() + center.im.abs()
-    }
-
-    fn add_rational(mut self, value: Rational) -> Self {
-        self.center.re += value;
-        self
-    }
-
-    fn mul(self, other: &Self) -> Self {
-        let center = &self.center * &other.center;
-        let self_center_norm = Self::norm_upper_bound(&self.center);
-        let other_center_norm = Self::norm_upper_bound(&other.center);
-        let radius = &self.radius * &other.radius
-            + &self.radius * &other_center_norm
-            + &other.radius * &self_center_norm;
-
-        Self { center, radius }
-    }
-
-    fn is_disjoint(&self, other: &Self) -> bool {
-        let distance = (&self.center.re - &other.center.re)
-            .abs()
-            .max((&self.center.im - &other.center.im).abs());
-        distance > &self.radius + &other.radius
-    }
-}
 
 /// A Galois field `GF(p,n)` is a finite field with `p^n` elements.
 /// It provides methods to upgrade and downgrade to Galois fields with the
@@ -204,6 +157,59 @@ pub struct AlgebraicQuotient<R: Ring> {
 pub struct Root<R: Ring> {
     polynomial: MultivariatePolynomial<R, u16>,
     index: usize,
+}
+
+impl TryFrom<AtomView<'_>> for Root<Q> {
+    type Error = String;
+
+    // TODO: also support Pow!
+    fn try_from(value: AtomView<'_>) -> Result<Self, Self::Error> {
+        if let AtomView::Pow(pow) = value {
+            let (b, e) = pow.get_base_exp();
+
+            if let Ok(_r) = Rational::try_from(e) {
+                // TODO: create new poly x^r_d
+                return Self::from_atom(b, 1);
+            }
+        }
+
+        let AtomView::Fun(f) = value else {
+            return Err("expected function tag".to_string());
+        };
+        if f.get_symbol() != root() {
+            return Err("expected root function".to_string());
+        }
+
+        if f.get_nargs() != 2 && f.get_nargs() != 3 {
+            return Err("expected 2 or 3 arguments".to_string());
+        }
+
+        let mut i = f.iter();
+        let poly = i.next().unwrap();
+
+        let mut var_or_index = i.next().unwrap();
+        let mut var = None;
+
+        if f.get_nargs() == 3 {
+            if let AtomView::Var(variable) = var_or_index {
+                var = Some(variable.get_symbol());
+            } else {
+                return Err("expected variable tag".to_string());
+            };
+
+            var_or_index = i.next().unwrap();
+        };
+
+        let Ok(index) = usize::try_from(var_or_index) else {
+            return Err("expected index tag".to_string());
+        };
+
+        if let Some(variable) = var {
+            Self::from_atom_with_variable(poly, variable.into(), index)
+        } else {
+            Self::from_atom(poly, index)
+        }
+    }
 }
 
 impl<R: Ring> Root<R> {
@@ -581,45 +587,14 @@ where
 
 fn positive_real_root_index(poly: &MultivariatePolynomial<Q, u16>) -> Option<usize> {
     let poly = poly.to_univariate_from_univariate(0);
-    let mut binary_precision = 32u32;
-
-    for _ in 0..10 {
-        let tolerance = Rational::from((
-            Integer::one(),
-            Integer::from(2).pow(binary_precision as u64),
-        ));
-        let roots = poly.isolate_complex_roots(Some(tolerance));
-        let mut unresolved_real_root = false;
-
-        for (index, root) in roots.iter().enumerate() {
-            if !root.is_real() {
-                continue;
-            }
-
-            if &root.center().re - root.radius() > Rational::zero() {
-                return Some(index);
-            }
-
-            if &root.center().re + root.radius() >= Rational::zero() {
-                unresolved_real_root = true;
-            }
+    let mut index = 0;
+    for (mut root, multiplicity) in poly.isolate_roots() {
+        if root.is_positive() {
+            return Some(index);
         }
-
-        if !unresolved_real_root {
-            return None;
-        }
-
-        binary_precision *= 2;
+        index += multiplicity;
     }
-
     None
-}
-
-fn rational_exponent_parts(exponent: AtomView<'_>) -> Option<(i64, usize)> {
-    let exponent = Rational::try_from(exponent).ok()?;
-    let numerator = exponent.numerator().to_i64()?;
-    let denominator = usize::try_from(exponent.denominator().to_i64()?).ok()?;
-    Some((numerator, denominator))
 }
 
 fn imaginary_unit_polynomial() -> MultivariatePolynomial<Q, u16> {
@@ -637,102 +612,16 @@ fn has_exact_imaginary_part(number: crate::coefficient::CoefficientView<'_>) -> 
     }
 }
 
-fn root_descriptor(
-    function: &FunView<'_>,
-) -> Result<(MultivariatePolynomial<Q, u16>, usize), String> {
-    if function.get_nargs() != 2 {
-        return Err(format!(
-            "root expects 2 arguments, got {}",
-            function.get_nargs()
-        ));
-    }
-
-    let polynomial_atom = function.get(0);
-    let requested_index = usize::try_from(function.get(1))
-        .map_err(|_| "root index is not a non-negative integer".to_string())?;
-    let polynomial = polynomial_atom
-        .try_to_polynomial::<_, u16>(&Q, None)
-        .map_err(|error| format!("could not convert root polynomial: {error}"))?;
-
-    if polynomial.nvars() != 1 || polynomial.degree(0) == 0 {
-        return Err("root expects a non-constant univariate polynomial over Q".to_string());
-    }
-
-    let univariate = polynomial.to_univariate_from_univariate(0);
-    if requested_index >= univariate.degree() {
-        return Err(format!(
-            "root index {requested_index} is out of bounds for polynomial of degree {}",
-            univariate.degree()
-        ));
-    }
-
-    let factors = polynomial.factor();
-    let mut binary_precision = 32u32;
-    for _ in 0..10 {
-        let tolerance = Rational::from((
-            Integer::one(),
-            Integer::from(2).pow(binary_precision as u64),
-        ));
-        let requested_root = univariate
-            .isolate_complex_root(requested_index, binary_precision)
-            .ok_or_else(|| "could not isolate requested root".to_string())?;
-        let requested_root = AlgebraicBall::from_root(&requested_root);
-        let mut matches = Vec::new();
-
-        for (factor, _) in &factors {
-            let roots = factor
-                .to_univariate_from_univariate(0)
-                .isolate_complex_roots(Some(tolerance.clone()));
-            for (index, candidate) in roots.iter().enumerate() {
-                if !requested_root.is_disjoint(&AlgebraicBall::from_root(candidate)) {
-                    matches.push((factor.clone(), index));
-                }
-            }
-        }
-
-        if matches.len() == 1 {
-            let (mut factor, embedding) = matches.pop().unwrap();
-            factor.variables = Arc::new(vec![PolyVariable::Temporary(0)]);
-            return Ok((factor, embedding));
-        }
-
-        binary_precision *= 2;
-    }
-
-    Err(format!(
-        "could not identify root {requested_index} of {polynomial}"
-    ))
-}
-
-fn initial_embedding_field(atom: AtomView<'_>) -> Option<AlgebraicExtension<Q>> {
-    match atom {
-        AtomView::Num(number) => has_exact_imaginary_part(number.get_coeff_view())
-            .then(|| AlgebraicExtension::new_complex(Q)),
-        AtomView::Var(_) => None,
-        AtomView::Fun(function) => {
-            if function.get_symbol() == root() {
-                atom.get_embedding_field_impl(None)
-            } else {
-                None
-            }
-        }
-        AtomView::Pow(power) => {
-            let (base, exponent) = power.get_base_exp();
-            initial_embedding_field(base)
-                .or_else(|| initial_embedding_field(exponent))
-                .or_else(|| atom.get_embedding_field_impl(None))
-        }
-        AtomView::Mul(product) => product.into_iter().find_map(initial_embedding_field),
-        AtomView::Add(sum) => sum.into_iter().find_map(initial_embedding_field),
-    }
-}
-
 fn is_extension_generator(atom: AtomView<'_>) -> bool {
     match atom {
         AtomView::Fun(function) => function.get_symbol() == root(),
         AtomView::Pow(power) => {
             let (_, exponent) = power.get_base_exp();
-            rational_exponent_parts(exponent).is_some_and(|(_, denominator)| denominator > 1)
+            if let Ok(r) = Rational::try_from(exponent) {
+                !r.denominator_ref().is_one()
+            } else {
+                false
+            }
         }
         AtomView::Num(number) => has_exact_imaginary_part(number.get_coeff_view()),
         _ => false,
@@ -748,17 +637,10 @@ impl AlgebraicContext {
     }
 
     /// Build a context and convert every algebraic subexpression in `atom`.
-    ///
-    /// `Ok(None)` means that the atom contains no supported algebraic
-    /// extension and can be represented over `Q`.
-    pub fn from_atom(atom: AtomView<'_>) -> Result<Option<Self>, String> {
-        let Some(field) = initial_embedding_field(atom) else {
-            return Ok(None);
-        };
-
-        let mut context = Self::new(field);
-        context.prepare_atom(atom)?;
-        Ok(Some(context))
+    pub fn from_atom(atom: AtomView<'_>) -> Result<Self, String> {
+        let mut context = Self::new(AlgebraicExtension::trivial(Q));
+        context.extend(atom)?;
+        Ok(context)
     }
 
     /// Build a context from explicit algebraic generators.
@@ -767,13 +649,7 @@ impl AlgebraicContext {
             return Err("At least one algebraic generator is required".to_string());
         }
 
-        let field = generators
-            .iter()
-            .find_map(|generator| initial_embedding_field(generator.as_view()))
-            .ok_or_else(|| {
-                "The supplied generators do not define an algebraic extension".to_string()
-            })?;
-        let mut context = Self::new(field);
+        let mut context = Self::new(AlgebraicExtension::trivial(Q));
         context.adjoin_generators(generators)?;
         Ok(context)
     }
@@ -794,6 +670,11 @@ impl AlgebraicContext {
 
     pub fn field(&self) -> &AlgebraicExtension<Q> {
         &self.field
+    }
+
+    /// Return whether this context still represents the base field `Q`.
+    pub fn is_trivial(&self) -> bool {
+        self.field.poly.degree(0) <= 1
     }
 
     pub fn images(&self) -> &HashMap<Atom, AlgebraicNumber<Q>> {
@@ -904,14 +785,21 @@ impl AlgebraicContext {
     }
 
     fn ensure_field_for(&mut self, atom: AtomView<'_>) -> Result<(), String> {
-        let field = atom
-            .get_embedding_field_impl(Some(self.field.clone()))
-            .ok_or_else(|| format!("Could not construct an embedding field for {atom}"))?;
-        self.replace_field(field)
+        if self.is_trivial() {
+            if let Some(field) = atom.get_embedding_field_impl(None) {
+                self.replace_field(field)?;
+            }
+            Ok(())
+        } else {
+            let field = atom
+                .get_embedding_field_impl(Some(self.field.clone()))
+                .ok_or_else(|| format!("Could not construct an embedding field for {atom}"))?;
+            self.replace_field(field)
+        }
     }
 
     /// Discover and cache every supported algebraic subexpression in `atom`.
-    pub fn prepare_atom(&mut self, atom: AtomView<'_>) -> Result<(), String> {
+    pub fn extend(&mut self, atom: AtomView<'_>) -> Result<(), String> {
         let key = atom.to_owned();
         if self.images.contains_key(&key) {
             return Ok(());
@@ -933,7 +821,7 @@ impl AlgebraicContext {
             }
             AtomView::Pow(power) => {
                 let (base, exponent) = power.get_base_exp();
-                self.prepare_atom(base)?;
+                self.extend(base)?;
                 if !self.images.contains_key(&base.to_owned())
                     || Rational::try_from(exponent).is_err()
                 {
@@ -947,7 +835,7 @@ impl AlgebraicContext {
             AtomView::Mul(product) => {
                 let factors = product.into_iter().collect::<Vec<_>>();
                 for factor in &factors {
-                    self.prepare_atom(*factor)?;
+                    self.extend(*factor)?;
                 }
 
                 let mut result = self.field.one();
@@ -962,7 +850,7 @@ impl AlgebraicContext {
             AtomView::Add(sum) => {
                 let terms = sum.into_iter().collect::<Vec<_>>();
                 for term in &terms {
-                    self.prepare_atom(*term)?;
+                    self.extend(*term)?;
                 }
 
                 let mut result = self.field.zero();
@@ -981,7 +869,7 @@ impl AlgebraicContext {
 
     /// Convert an algebraic atom to its image in the context's current field.
     pub fn convert_atom(&mut self, atom: AtomView<'_>) -> Result<AlgebraicNumber<Q>, String> {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         self.images
             .get(&atom.to_owned())
             .cloned()
@@ -1198,7 +1086,7 @@ impl AlgebraicContext {
         atom: AtomView<'_>,
         var_map: impl IntoVariableMap,
     ) -> Result<MultivariatePolynomial<AlgebraicExtension<Q>, E>, String> {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         let var_map = var_map
             .into_var_map()?
             .unwrap_or_else(|| Arc::new(Vec::new()));
@@ -1216,7 +1104,7 @@ impl AlgebraicContext {
         RationalPolynomial<AlgebraicExtension<Q>, E>:
             FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
     {
-        self.prepare_atom(atom)?;
+        self.extend(atom)?;
         let var_map = var_map
             .into_var_map()?
             .unwrap_or_else(|| Arc::new(Vec::new()));
@@ -1314,6 +1202,9 @@ fn to_alg() {
 
 #[test]
 fn algebraic_context_conversion() {
+    let trivial = AlgebraicContext::from_atom(crate::parse!("x+1").as_view()).unwrap();
+    assert!(trivial.is_trivial());
+
     let expression = crate::parse!("x+sqrt(2)+sqrt(3)");
     let (context, polynomial) = expression
         .as_view()
@@ -1375,6 +1266,19 @@ fn algebraic_context_conversion() {
 }
 
 #[test]
+fn algebraic_context_preserves_integer_powers() {
+    for expression in [
+        crate::parse!("(1/2-1/2*13^(1/2))^2"),
+        crate::parse!("root(-2+x^4,1)^2"),
+        crate::parse!("root(1+4*x^3+x^6,1)^3"),
+    ] {
+        let context = AlgebraicContext::from_atom(expression.as_view()).unwrap();
+        assert!(!context.is_trivial());
+        assert!(context.images().contains_key(&expression));
+    }
+}
+
+#[test]
 fn factor_in_extension() {
     let factorization = crate::parse!("x^2+1")
         .factor_in_extension(&[Atom::i()])
@@ -1429,9 +1333,7 @@ fn factor_in_extension() {
         .as_view()
         .factor_in_extension(&[crate::parse!("sqrt(3)")])
         .unwrap();
-    let mut context = AlgebraicContext::from_atom(expression.as_view())
-        .unwrap()
-        .unwrap();
+    let mut context = AlgebraicContext::from_atom(expression.as_view()).unwrap();
     context
         .adjoin_generators(&[crate::parse!("sqrt(3)")])
         .unwrap();
@@ -1468,8 +1370,8 @@ impl AtomView<'_> {
             }
             AtomView::Fun(f) => {
                 if f.get_symbol() == root() {
-                    let (polynomial, embedding) = root_descriptor(f)?;
-                    ring.embedded_rational_root(&polynomial, embedding)
+                    let r = Root::<Q>::try_from(*self)?;
+                    ring.embedded_rational_root(r.polynomial(), r.index)
                 } else {
                     Err("function atoms cannot be converted to algebraic numbers".to_string())
                 }
@@ -1478,9 +1380,12 @@ impl AtomView<'_> {
                 let (b, e) = p.get_base_exp();
                 let base_converted = b.to_algebraic(&ring)?;
 
-                if let Some((numerator, denominator)) = rational_exponent_parts(e) {
-                    if denominator == 1 {
-                        if numerator < 0 {
+                if let Ok(r) = Rational::try_from(e)
+                    && let Ok(numerator) = i64::try_from(r.numerator())
+                    && let Ok(denominator) = u64::try_from(r.denominator())
+                {
+                    if r.is_integer() {
+                        if r.is_negative() {
                             return Ok(
                                 ring.inv(&ring.pow(&base_converted, numerator.unsigned_abs()))
                             );
@@ -1494,7 +1399,7 @@ impl AtomView<'_> {
                         None,
                         Arc::new(vec![var.clone()]),
                     );
-                    poly = poly.variable(&var).unwrap().pow(denominator)
+                    poly = poly.variable(&var).unwrap().pow(denominator as usize)
                         - poly.constant(base_converted);
 
                     let f = poly.factor();
@@ -1555,14 +1460,12 @@ impl AtomView<'_> {
     /// will subsequently be converted, so that the computed atom images are
     /// retained.
     pub fn get_embedding_field(&self) -> Option<AlgebraicExtension<Q>> {
-        self.get_algebraic_context()
-            .ok()
-            .flatten()
-            .map(|context| context.field)
+        let context = self.get_algebraic_context().ok()?;
+        (!context.is_trivial()).then_some(context.field)
     }
 
     /// Build a live algebraic context for the atom.
-    pub fn get_algebraic_context(&self) -> Result<Option<AlgebraicContext>, String> {
+    pub fn get_algebraic_context(&self) -> Result<AlgebraicContext, String> {
         AlgebraicContext::from_atom(*self)
     }
 
@@ -1588,14 +1491,11 @@ impl AtomView<'_> {
     /// assert_eq!(factorization, parse!("(x-sqrt(2))*(x+sqrt(2))"));
     /// ```
     pub fn factor_in_extension(&self, generators: &[Atom]) -> Result<Atom, String> {
-        let mut context = match AlgebraicContext::from_atom(*self)? {
-            Some(mut context) => {
-                context.adjoin_generators(generators)?;
-                context
-            }
-            None if generators.is_empty() => return Ok(self.factor()),
-            None => AlgebraicContext::from_generators(generators)?,
-        };
+        let mut context = AlgebraicContext::from_atom(*self)?;
+        if context.is_trivial() && generators.is_empty() {
+            return Ok(self.factor());
+        }
+        context.adjoin_generators(generators)?;
         let rational = context.to_rational_polynomial::<u16>(*self, None)?;
         if rational.is_zero() {
             return Ok(Atom::num(0));
@@ -1619,9 +1519,10 @@ impl AtomView<'_> {
         )>,
         String,
     > {
-        let Some(mut context) = self.get_algebraic_context()? else {
+        let mut context = self.get_algebraic_context()?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let polynomial = context.to_polynomial(*self, var_map)?;
         Ok(Some((context, polynomial)))
     }
@@ -1642,9 +1543,10 @@ impl AtomView<'_> {
         RationalPolynomial<AlgebraicExtension<Q>, E>:
             FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
     {
-        let Some(mut context) = self.get_algebraic_context()? else {
+        let mut context = self.get_algebraic_context()?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let polynomial = context.to_rational_polynomial(*self, var_map)?;
         Ok(Some((context, polynomial)))
     }
@@ -1668,13 +1570,13 @@ impl AtomView<'_> {
             AtomView::Var(_) => cur,
             AtomView::Fun(f) => {
                 if f.get_symbol() == root() {
-                    let (polynomial, embedding) = root_descriptor(f).ok()?;
+                    let (poly, index) = Root::try_from(*self).ok()?.into_parts();
                     if let Some(c) = cur {
-                        c.with_adjoined_rational_root(&polynomial, embedding)
+                        c.with_adjoined_rational_root(&poly, index)
                     } else {
                         Some(AlgebraicExtension {
-                            poly: Arc::new(polynomial),
-                            embedding,
+                            poly: Arc::new(poly),
+                            embedding: index,
                         })
                     }
                 } else {
@@ -1686,7 +1588,8 @@ impl AtomView<'_> {
                 cur = b.get_embedding_field_impl(cur);
                 cur = e.get_embedding_field_impl(cur);
 
-                if let Some((_, denominator)) = rational_exponent_parts(e)
+                if let Ok(r) = Rational::try_from(e)
+                    && let Ok(denominator) = u64::try_from(r.denominator())
                     && denominator > 1
                 {
                     if let Some(c) = cur {
@@ -1702,7 +1605,7 @@ impl AtomView<'_> {
                             None,
                             Arc::new(vec![var.clone()]),
                         );
-                        poly = poly.variable(&var).unwrap().pow(denominator)
+                        poly = poly.variable(&var).unwrap().pow(denominator as usize)
                             - poly.constant(base_converted);
 
                         let factors = poly.factor();
@@ -1730,7 +1633,7 @@ impl AtomView<'_> {
                                     continue;
                                 }
 
-                                if c.count_positive_real_roots(&factor).ok()? > 0 {
+                                if factor.count_positive_real_roots().ok()? > 0 {
                                     if selected_factor.is_some() {
                                         return None;
                                     }
@@ -1762,7 +1665,7 @@ impl AtomView<'_> {
                         poly = poly
                             .variable(&PolyVariable::Temporary(0))
                             .unwrap()
-                            .pow(denominator)
+                            .pow(denominator as usize)
                             - poly.constant(rat_base);
 
                         let mut selected = None;
@@ -2046,9 +1949,6 @@ impl<R: Ring> std::fmt::Display for AlgebraicExtension<R> {
 pub struct AlgebraicNumber<R: Ring> {
     pub(crate) poly: MultivariatePolynomial<R, u16>,
 }
-
-// can we use AlgebraicNumber directly the same as Root?
-// index specifies the index of the root of the minimal polynomial
 
 impl<R: Ring> InternalOrdering for AlgebraicNumber<R> {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -2871,18 +2771,12 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
 }
 
 impl AlgebraicExtension<Q> {
-    fn evaluate_at_root(element: &AlgebraicNumber<Q>, root: &ComplexRootInterval) -> AlgebraicBall {
+    fn element_coefficients(element: &AlgebraicNumber<Q>) -> Vec<Rational> {
         let mut coefficients = vec![Rational::zero(); element.poly.degree(0) as usize + 1];
         for term in element.poly() {
             coefficients[term.exponents[0] as usize] = term.coefficient.clone();
         }
-
-        let root = AlgebraicBall::from_root(root);
-        let mut value = AlgebraicBall::zero();
-        for coefficient in coefficients.into_iter().rev() {
-            value = value.mul(&root).add_rational(coefficient);
-        }
-        value
+        coefficients
     }
 
     pub(crate) fn is_positive_real(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
@@ -2894,85 +2788,33 @@ impl AlgebraicExtension<Q> {
         }
 
         let poly = self.poly.to_univariate_from_univariate(0);
-        let primitive_root = poly
-            .isolate_complex_root(self.embedding, 32)
-            .ok_or_else(|| {
-                format!(
-                    "Embedding index {} is out of bounds for polynomial of degree {}",
-                    self.embedding,
-                    poly.degree()
-                )
-            })?;
+        let mut primitive_root = poly.root(self.embedding).unwrap();
+        let primitive_location = primitive_root.location();
 
-        if !primitive_root.is_real() {
+        if !matches!(primitive_location, RootLocation::Real | RootLocation::Zero) {
             let minimal_field = self.simplify(element);
             let element_embedding = minimal_field.embedding;
             let minimal_polynomial = minimal_field.poly.to_univariate_from_univariate(0);
-            let mut binary_precision = 32u32;
-
-            for _ in 0..10 {
-                let root = minimal_polynomial
-                    .isolate_complex_root(element_embedding, binary_precision)
-                    .ok_or_else(|| {
-                        format!(
-                            "Embedding index {} is out of bounds for polynomial of degree {}",
-                            element_embedding,
-                            minimal_polynomial.degree()
-                        )
-                    })?;
-                if !root.is_real() {
-                    return Ok(false);
-                }
-                if &root.center().re - root.radius() > Rational::zero() {
-                    return Ok(true);
-                }
-                if &root.center().re + root.radius() < Rational::zero() {
-                    return Ok(false);
-                }
-
-                binary_precision *= 2;
-            }
-
-            return Err(format!(
-                "Could not determine the sign of {} in {}",
-                element, self
-            ));
-        }
-
-        let mut binary_precision = 32u32;
-        for _ in 0..10 {
-            let root = poly
-                .isolate_complex_root(self.embedding, binary_precision)
-                .ok_or_else(|| {
-                    format!(
-                        "Embedding index {} is out of bounds for polynomial of degree {}",
-                        self.embedding,
-                        poly.degree()
-                    )
-                })?;
-
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
-                return Ok(true);
-            }
-            if &value.center.re + &value.radius < Rational::zero() {
+            let mut root = minimal_polynomial.root(element_embedding).unwrap();
+            let location = root.location();
+            if !matches!(location, RootLocation::Real | RootLocation::Zero) {
                 return Ok(false);
             }
-
-            binary_precision *= 2;
+            return Ok(root.is_positive());
         }
 
-        Err(format!(
-            "Could not determine the sign of {} in {}",
-            element, self
-        ))
+        rational_polynomial_value_has_positive_real_part(
+            &primitive_root,
+            &Self::element_coefficients(element),
+        )
+        .map_err(|_| format!("Could not determine the sign of {} in {}", element, self))
     }
 
     /// Determine the sign of the real part at this field's embedding without
     /// first constructing a minimal polynomial for `element`.
     ///
-    /// A non-real value whose real part is numerically indistinguishable from
-    /// zero is classified as not positive.
+    /// Returns an error if interval refinement cannot certify the sign of the
+    /// real part.
     pub(crate) fn has_positive_real_part(
         &self,
         element: &AlgebraicNumber<Q>,
@@ -2983,68 +2825,17 @@ impl AlgebraicExtension<Q> {
         }
 
         let polynomial = self.poly.to_univariate_from_univariate(0);
-        if let Some(root) = polynomial.get_root(self.embedding) {
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
-                return Ok(true);
-            }
-            if &value.center.re + &value.radius < Rational::zero() {
-                return Ok(false);
-            }
-
-            // A wide certified ball can make interval evaluation pessimistic
-            // for a high-degree expression. Refine its center numerically
-            // (without refining/re-sorting the entire algebraic root set) and
-            // use it when the sign is far from the numerical error scale.
-            let binary_precision = 128;
-            let root = root.to_float_center(binary_precision);
-            let field = FloatField::from_rep(Complex::new(
-                Float::with_val(binary_precision, 1),
-                Float::new(binary_precision),
-            ));
-            let element = element
-                .poly
-                .to_univariate_from_univariate(0)
-                .map_coeff(
-                    |coefficient| coefficient.to_multi_prec_float(binary_precision).into(),
-                    field,
-                )
-                .evaluate(&root);
-            let real = element.re.to_f64();
-            let imaginary = element.im.to_f64();
-            if real.abs() > 1e-30 {
-                return Ok(real > 0.0);
-            }
-            if imaginary.abs() > 1e-30 {
-                return Ok(false);
-            }
-        }
-
-        let mut binary_precision = 32u32;
-        for _ in 0..10 {
-            let root = polynomial
-                .isolate_complex_root(self.embedding, binary_precision)
-                .ok_or_else(|| {
-                    format!(
-                        "Embedding index {} is out of bounds for polynomial of degree {}",
-                        self.embedding,
-                        polynomial.degree()
-                    )
-                })?;
-            let value = Self::evaluate_at_root(element, &root);
-            if &value.center.re - &value.radius > Rational::zero() {
-                return Ok(true);
-            }
-            if &value.center.re + &value.radius < Rational::zero() {
-                return Ok(false);
-            }
-            binary_precision *= 2;
-        }
-
-        Err(format!(
-            "Could not determine the sign of the real part of {} in {}",
-            element, self
-        ))
+        let root = polynomial.root(self.embedding).unwrap();
+        rational_polynomial_value_has_positive_real_part(
+            &root,
+            &Self::element_coefficients(element),
+        )
+        .map_err(|_| {
+            format!(
+                "Could not determine the sign of the real part of {} in {}",
+                element, self
+            )
+        })
     }
 
     fn root_index_of_element(
@@ -3054,43 +2845,22 @@ impl AlgebraicExtension<Q> {
     ) -> Result<usize, String> {
         let extension_polynomial = self.poly.to_univariate_from_univariate(0);
         let polynomial = polynomial.to_univariate_from_univariate(0);
-        let mut binary_precision = 32u32;
-
-        for _ in 0..10 {
-            let tolerance = Rational::from((
-                Integer::one(),
-                Integer::from(2).pow(binary_precision as u64),
-            ));
-            let extension_root = extension_polynomial
-                .isolate_complex_root(self.embedding, binary_precision)
-                .ok_or_else(|| {
-                    format!(
-                        "Embedding index {} is out of bounds for polynomial of degree {}",
-                        self.embedding,
-                        extension_polynomial.degree()
-                    )
-                })?;
-            let value = Self::evaluate_at_root(element, &extension_root);
-            let roots = polynomial.isolate_complex_roots(Some(tolerance));
-            let matches = roots
-                .iter()
-                .enumerate()
-                .filter_map(|(index, root)| {
-                    (!value.is_disjoint(&AlgebraicBall::from_root(root))).then_some(index)
-                })
-                .collect::<Vec<_>>();
-
-            if matches.len() == 1 {
-                return Ok(matches[0]);
-            }
-
-            binary_precision *= 2;
-        }
-
-        Err(format!(
-            "Could not identify {} as a root of {}",
-            element, polynomial
-        ))
+        let extension_root = extension_polynomial.root(self.embedding).unwrap();
+        let mut roots = polynomial
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let coefficients = Self::element_coefficients(element);
+        match_certified_root_images(
+            &extension_root,
+            RootImage::RationalPolynomial(&coefficients),
+            &mut roots,
+            RootImage::Identity,
+            1,
+        )
+        .map(|matches| matches[0])
+        .map_err(|_| format!("Could not identify {} as a root of {}", element, polynomial))
     }
 
     fn embedded_rational_root(
@@ -3164,73 +2934,6 @@ impl AlgebraicExtension<Q> {
 
     pub(crate) fn imaginary_unit(&self) -> Result<AlgebraicNumber<Q>, String> {
         self.embedded_rational_root(&imaginary_unit_polynomial(), 1)
-    }
-
-    fn sign_at_embedding(&self, element: &AlgebraicNumber<Q>) -> Result<i8, String> {
-        if self.is_zero(element) {
-            Ok(0)
-        } else if self.is_positive_real(element)? {
-            Ok(1)
-        } else {
-            Ok(-1)
-        }
-    }
-
-    /// Count the positive real roots of a square-free polynomial whose
-    /// coefficients lie in this embedded real number field.
-    fn count_positive_real_roots(
-        &self,
-        poly: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
-    ) -> Result<usize, String> {
-        let mut previous = poly.to_univariate_from_univariate(0);
-        let mut current = previous.derivative();
-        let mut sturm_sequence: Vec<UnivariatePolynomial<AlgebraicExtension<Q>>> =
-            vec![previous.clone()];
-
-        if !current.is_zero() {
-            sturm_sequence.push(current.clone());
-        }
-
-        while !current.is_zero() {
-            let remainder = -previous.rem(&current);
-            previous = current;
-            current = remainder;
-            if !current.is_zero() {
-                sturm_sequence.push(current.clone());
-            }
-        }
-
-        let sign_variations = |at_positive_infinity: bool| -> Result<usize, String> {
-            let mut previous_sign = 0;
-            let mut variations = 0;
-
-            for polynomial in &sturm_sequence {
-                let value = if at_positive_infinity {
-                    polynomial.lcoeff()
-                } else {
-                    polynomial.get_constant()
-                };
-                let sign = self.sign_at_embedding(&value)?;
-                if sign == 0 {
-                    continue;
-                }
-                if previous_sign != 0 && sign != previous_sign {
-                    variations += 1;
-                }
-                previous_sign = sign;
-            }
-
-            Ok(variations)
-        };
-
-        let at_zero = sign_variations(false)?;
-        let at_positive_infinity = sign_variations(true)?;
-        at_zero.checked_sub(at_positive_infinity).ok_or_else(|| {
-            format!(
-                "Invalid Sturm sequence while counting positive roots of {}",
-                poly
-            )
-        })
     }
 
     /// Adjoin the embedded extension `self[b]` and preserve the selected
@@ -3330,6 +3033,47 @@ impl AlgebraicExtension<Q> {
 
         let extension_degree = polynomial.degree(0) as usize;
 
+        if self.poly.degree(0) == 1 {
+            let mut rational_polynomial = polynomial.map_coeff(
+                |coefficient| {
+                    assert!(
+                        coefficient.poly.is_constant(),
+                        "an element of a degree-one extension must be constant"
+                    );
+                    coefficient.poly.get_constant()
+                },
+                Q,
+            );
+            if let Some(new_symbol) = new_symbol {
+                let active_variable = (0..rational_polynomial.nvars())
+                    .find(|&variable| rational_polynomial.degree(variable) > 0)
+                    .expect("the adjoined polynomial must be non-constant");
+                let old_symbol = rational_polynomial.get_vars_ref()[active_variable].clone();
+                rational_polynomial.rename_variable(&old_symbol, &new_symbol);
+            }
+
+            let extension = AlgebraicExtension::new(rational_polynomial);
+            let old_value = Q.neg(&Q.div(&self.poly.get_constant(), &self.poly.lcoeff()));
+            let old_generator = extension.constant(old_value);
+            let new_generator = extension.generator();
+            let new_generator_minimal_poly = extension.poly.as_ref().clone();
+            let extensions = (0..extension_degree)
+                .map(|embedding| {
+                    let mut field = extension.clone();
+                    field.embedding = embedding;
+                    field
+                })
+                .collect();
+
+            return (
+                extensions,
+                old_generator,
+                new_generator,
+                new_generator_minimal_poly,
+                (0..extension_degree).collect(),
+            );
+        }
+
         let (extension, old_generator, new_generator) = self.adjoin(polynomial, new_symbol);
 
         // The minimal polynomial of the image of b lets us reuse the rational
@@ -3340,115 +3084,153 @@ impl AlgebraicExtension<Q> {
         let extension_poly = extension.poly.to_univariate_from_univariate(0);
         let new_generator_poly = new_generator_minimal_poly.to_univariate_from_univariate(0);
 
-        let mut binary_precision = 32u32;
-        for _ in 0..10 {
-            let tolerance = Rational::from((
-                Integer::one(),
-                Integer::from(2).pow(binary_precision as u64),
-            ));
+        let old_root = old_poly.root(self.embedding).unwrap();
+        let mut extension_roots = extension_poly
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let mut new_generator_roots = new_generator_poly
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let old_generator_coefficients = Self::element_coefficients(&old_generator);
+        let candidates = match_certified_root_images(
+            &old_root,
+            RootImage::Identity,
+            &mut extension_roots,
+            RootImage::RationalPolynomial(&old_generator_coefficients),
+            extension_degree,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "Could not select embeddings while adjoining roots of {}: {}",
+                polynomial, error
+            )
+        });
 
-            // All three calls go through ROOT_CACHE. In particular, increasing
-            // the precision refines the cached intervals instead of isolating
-            // the same roots from scratch.
-            let old_root = old_poly
-                .isolate_complex_root(self.embedding, binary_precision)
-                .unwrap_or_else(|| {
+        let new_generator_coefficients = Self::element_coefficients(&new_generator);
+        let mut ordered_candidates = candidates
+            .into_iter()
+            .map(|candidate| {
+                let new_generator_embedding = match_certified_root_images(
+                    &extension_roots[candidate],
+                    RootImage::RationalPolynomial(&new_generator_coefficients),
+                    &mut new_generator_roots,
+                    RootImage::Identity,
+                    1,
+                )
+                .map(|matches| matches[0])
+                .unwrap_or_else(|error| {
                     panic!(
-                        "Embedding index {} is out of bounds for polynomial of degree {}",
-                        self.embedding,
-                        old_poly.degree()
+                        "Could not order an embedding while adjoining roots of {}: {}",
+                        polynomial, error
                     )
                 });
-            let old_root = AlgebraicBall::from_root(&old_root);
-            let extension_roots = extension_poly.isolate_complex_roots(Some(tolerance.clone()));
-
-            let candidates = extension_roots
-                .iter()
-                .enumerate()
-                .filter_map(|(index, root)| {
-                    let image = Self::evaluate_at_root(&old_generator, root);
-                    (!image.is_disjoint(&old_root)).then_some(index)
-                })
-                .collect::<Vec<_>>();
-
-            if candidates.len() != extension_degree {
-                binary_precision *= 2;
-                continue;
-            }
-
-            let new_generator_roots = new_generator_poly.isolate_complex_roots(Some(tolerance));
-            let mut ordered_candidates = Vec::with_capacity(candidates.len());
-            let mut all_unique = true;
-
-            for candidate in candidates {
-                let image = Self::evaluate_at_root(&new_generator, &extension_roots[candidate]);
-                let matching_roots = new_generator_roots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, root)| {
-                        let root = AlgebraicBall::from_root(root);
-                        (!image.is_disjoint(&root)).then_some(index)
-                    })
-                    .collect::<Vec<_>>();
-
-                if matching_roots.len() != 1 {
-                    all_unique = false;
-                    break;
-                }
-                ordered_candidates.push((matching_roots[0], candidate));
-            }
-
-            if !all_unique {
-                binary_precision *= 2;
-                continue;
-            }
-
-            ordered_candidates.sort_unstable();
-            if ordered_candidates
+                (new_generator_embedding, candidate)
+            })
+            .collect::<Vec<_>>();
+        ordered_candidates.sort_unstable();
+        assert!(
+            !ordered_candidates
                 .windows(2)
-                .any(|pair| pair[0].0 == pair[1].0)
-            {
-                binary_precision *= 2;
-                continue;
-            }
-
-            let (new_generator_embeddings, extensions): (Vec<_>, Vec<_>) = ordered_candidates
-                .into_iter()
-                .map(|(new_generator_embedding, embedding)| {
-                    let mut field = extension.clone();
-                    field.embedding = embedding;
-                    (new_generator_embedding, field)
-                })
-                .unzip();
-            return (
-                extensions,
-                old_generator,
-                new_generator,
-                new_generator_minimal_poly,
-                new_generator_embeddings,
-            );
-        }
-
-        panic!(
-            "Could not distinguish all embeddings while adjoining roots of {}",
-            polynomial
+                .any(|pair| pair[0].0 == pair[1].0),
+            "two extension embeddings map to the same new-generator embedding"
         );
+
+        let (new_generator_embeddings, extensions): (Vec<_>, Vec<_>) = ordered_candidates
+            .into_iter()
+            .map(|(new_generator_embedding, embedding)| {
+                let mut field = extension.clone();
+                field.embedding = embedding;
+                (new_generator_embedding, field)
+            })
+            .unzip();
+        (
+            extensions,
+            old_generator,
+            new_generator,
+            new_generator_minimal_poly,
+            new_generator_embeddings,
+        )
     }
 
     /// Determine if the algebraic number is negative.
     /// This requires the embedding information to be set.
     pub fn is_negative(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
-        if self.is_zero(element) {
-            Ok(false)
-        } else {
-            self.is_positive(element).map(|b| !b)
-        }
+        self.try_sign(element).map(Ordering::is_lt)
     }
 
     /// Determine if the algebraic number is positive.
     /// This requires the embedding information to be set.
     pub fn is_positive(&self, element: &AlgebraicNumber<Q>) -> Result<bool, String> {
-        self.is_positive_real(element)
+        self.try_sign(element).map(Ordering::is_gt)
+    }
+}
+
+impl RealEmbedding for AlgebraicExtension<Q> {
+    type Error = String;
+
+    fn try_sign(&self, element: &AlgebraicNumber<Q>) -> Result<Ordering, Self::Error> {
+        if self.is_zero(element) {
+            return Ok(Ordering::Equal);
+        }
+        if element.poly.is_constant() {
+            return Ok(OrderedRing::cmp(
+                &Q,
+                &element.poly.get_constant(),
+                &Rational::zero(),
+            ));
+        }
+
+        let polynomial = self.poly.to_univariate_from_univariate(0);
+        let mut primitive_root = polynomial.root(self.embedding).unwrap();
+        let primitive_location = primitive_root.location();
+
+        if matches!(primitive_location, RootLocation::Real | RootLocation::Zero) {
+            return self.is_positive_real(element).map(|positive| {
+                if positive {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            });
+        }
+
+        let minimal_field = self.simplify(element);
+        let minimal_polynomial = minimal_field.poly.to_univariate_from_univariate(0);
+        let mut root = minimal_polynomial.root(minimal_field.embedding).unwrap();
+        let location = root.location();
+        if !matches!(location, RootLocation::Real | RootLocation::Zero) {
+            return Err(format!(
+                "{} does not have a real image in {}",
+                element, self
+            ));
+        }
+
+        minimal_field
+            .is_positive_real(&minimal_field.generator())
+            .map(|positive| {
+                if positive {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            })
+    }
+
+    fn try_cmp(
+        &self,
+        a: &AlgebraicNumber<Q>,
+        b: &AlgebraicNumber<Q>,
+    ) -> Result<Ordering, Self::Error> {
+        // Unlike a genuinely ordered ring, this extension may contain
+        // non-real elements. Require both operands, rather than merely their
+        // difference, to have real images.
+        self.try_sign(a)?;
+        self.try_sign(b)?;
+        self.try_sign(&self.sub(a, b))
     }
 }
 
@@ -3486,16 +3268,14 @@ impl Root<Q> {
     /// the selected root. Root isolation is served by the shared root cache.
     pub fn simplify(&self) -> Result<Self, String> {
         let polynomial = self.polynomial.to_univariate_from_univariate(0);
-        let isolated = polynomial.get_root(self.index).ok_or_else(|| {
+        let isolated = polynomial.root(self.index).ok_or_else(|| {
             format!(
                 "root index {} is out of bounds for polynomial of degree {}",
                 self.index,
                 polynomial.degree()
             )
         })?;
-        let Some(minimal_polynomial) = isolated.poly() else {
-            return Ok(self.clone());
-        };
+        let minimal_polynomial = isolated.defining_polynomial();
         if minimal_polynomial.degree() >= polynomial.degree() {
             return Ok(self.clone());
         }
@@ -3511,9 +3291,7 @@ impl Root<Q> {
             minimal_polynomial.map_coeff(|coefficient| coefficient.re.clone(), Q);
         Root::new(
             minimal_polynomial.to_multivariate::<u16>(),
-            isolated
-                .index()
-                .ok_or_else(|| "an isolated algebraic root has no root index".to_string())?,
+            isolated.index(),
         )
     }
 
@@ -3707,9 +3485,43 @@ struct AlgebraicRootCandidate {
     order: Option<usize>,
 }
 
+struct AlgebraicRootCacheEntry {
+    roots: OnceLock<Result<Vec<Root<Q>>, String>>,
+}
+
+impl AlgebraicRootCacheEntry {
+    fn new() -> Self {
+        Self {
+            roots: OnceLock::new(),
+        }
+    }
+}
+
 static ALGEBRAIC_ROOT_CACHE: LazyLock<
-    RwLock<HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Vec<Root<Q>>>>,
+    RwLock<
+        HashMap<MultivariatePolynomial<AlgebraicExtension<Q>, u16>, Arc<AlgebraicRootCacheEntry>>,
+    >,
 > = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn algebraic_root_cache_entry(
+    polynomial: &MultivariatePolynomial<AlgebraicExtension<Q>, u16>,
+) -> Arc<AlgebraicRootCacheEntry> {
+    if let Some(entry) = ALGEBRAIC_ROOT_CACHE
+        .read()
+        .unwrap()
+        .get(polynomial)
+        .cloned()
+    {
+        return entry;
+    }
+
+    ALGEBRAIC_ROOT_CACHE
+        .write()
+        .unwrap()
+        .entry(polynomial.clone())
+        .or_insert_with(|| Arc::new(AlgebraicRootCacheEntry::new()))
+        .clone()
+}
 
 const MAX_GAUSSIAN_ROOT_NORMALIZATION_DEGREE: usize = 4;
 
@@ -3720,25 +3532,28 @@ impl AlgebraicRootCandidate {
         multiplicity: usize,
     ) -> Result<Self, String> {
         let minimal_polynomial = field.minimal_polynomial_of_element(value);
-        Self::new_with_minimal(field, value, &minimal_polynomial, multiplicity)
+        let embedding = field.root_index_of_element(value, &minimal_polynomial)?;
+        Ok(Self::new_with_minimal(
+            &minimal_polynomial,
+            embedding,
+            multiplicity,
+        ))
     }
 
     fn new_with_minimal(
-        field: &AlgebraicExtension<Q>,
-        value: &AlgebraicNumber<Q>,
         minimal_polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
         multiplicity: usize,
-    ) -> Result<Self, String> {
-        let embedding = field.root_index_of_element(value, minimal_polynomial)?;
+    ) -> Self {
         let mut polynomial = minimal_polynomial.clone();
         let variable = polynomial.get_vars_ref()[0].clone();
         polynomial.rename_variable(&variable, &PolyVariable::Temporary(0));
-        Ok(Self {
+        Self {
             polynomial,
             embedding,
             multiplicity,
             order: None,
-        })
+        }
     }
 
     fn to_root(&self) -> Result<Root<Q>, String> {
@@ -3771,9 +3586,10 @@ impl Root<AlgebraicExtension<Q>> {
         variable: Option<PolyVariable>,
         index: usize,
     ) -> Result<Option<Self>, String> {
-        let Some(mut context) = AlgebraicContext::from_atom(polynomial)? else {
+        let mut context = AlgebraicContext::from_atom(polynomial)?;
+        if context.is_trivial() {
             return Ok(None);
-        };
+        }
         let variables = variable.map(|variable| Arc::new(vec![variable]));
         let polynomial = context.to_polynomial::<u16>(polynomial, variables)?;
         Root::new(polynomial, index).map(Some)
@@ -3792,16 +3608,20 @@ impl Root<AlgebraicExtension<Q>> {
             return Ok(None);
         }
 
-        if let Some(root) = ALGEBRAIC_ROOT_CACHE
-            .read()
-            .unwrap()
-            .get(&self.polynomial)
-            .and_then(|roots| roots.get(self.index))
-            .cloned()
-        {
-            return Ok(Some(root));
-        }
+        let entry = algebraic_root_cache_entry(&self.polynomial);
+        let roots = entry.roots.get_or_init(|| self.simplify_all_roots());
+        let roots = roots.as_ref().map_err(Clone::clone)?;
+        let result = roots.get(self.index).cloned().ok_or_else(|| {
+            format!(
+                "root index {} is out of bounds for a polynomial of degree {}",
+                self.index,
+                self.polynomial.degree(0)
+            )
+        })?;
+        Ok(Some(result))
+    }
 
+    fn simplify_all_roots(&self) -> Result<Vec<Root<Q>>, String> {
         let base_field = self.polynomial.ring.clone();
         let mut candidates = Vec::new();
         for (factor, multiplicity) in self.polynomial.factor() {
@@ -3822,16 +3642,14 @@ impl Root<AlgebraicExtension<Q>> {
             }
 
             let variable = base_field.get_new_var();
-            let (fields, _, generator) =
-                base_field.adjoin_with_all_embeddings(&factor, Some(variable));
-            let minimal_polynomial = fields[0].minimal_polynomial_of_element(&generator);
-            for field in fields {
+            let (_, _, _, minimal_polynomial, embeddings) =
+                base_field.adjoin_with_all_embeddings_and_generator_data(&factor, Some(variable));
+            for embedding in embeddings {
                 candidates.push(AlgebraicRootCandidate::new_with_minimal(
-                    &field,
-                    &generator,
                     &minimal_polynomial,
+                    embedding,
                     multiplicity,
-                )?);
+                ));
             }
         }
 
@@ -3844,6 +3662,26 @@ impl Root<AlgebraicExtension<Q>> {
                 "Factorization produced {counted_degree} roots for a polynomial of degree {}",
                 self.polynomial.degree(0)
             ));
+        }
+
+        // When all candidates have the same rational minimal polynomial,
+        // their embedding indices already provide their canonical global
+        // order. In particular, adjoin_with_all_embeddings computed these
+        // indices while ordering the primitive extension. Re-isolating the
+        // degree-d product below would rediscover exactly the same ordering.
+        if candidates
+            .windows(2)
+            .all(|pair| pair[0].polynomial == pair[1].polynomial)
+        {
+            candidates.sort_by_key(|candidate| candidate.embedding);
+            let mut roots = Vec::with_capacity(self.polynomial.degree(0) as usize);
+            for candidate in candidates {
+                let root = candidate.to_root()?;
+                for _ in 0..candidate.multiplicity {
+                    roots.push(root.clone());
+                }
+            }
+            return Ok(roots);
         }
 
         // Candidate minimal polynomials contain conjugates that need not be
@@ -3869,51 +3707,36 @@ impl Root<AlgebraicExtension<Q>> {
         }
         let union = union.to_univariate_from_univariate(0);
 
-        let mut binary_precision = 32u32;
-        for _ in 0..10 {
-            let tolerance = Rational::from((
-                Integer::one(),
-                Integer::from(2).pow(binary_precision as u64),
-            ));
-            let union_roots = union.isolate_complex_roots(Some(tolerance));
-            let mut all_identified = true;
-
-            for candidate in &mut candidates {
-                let root = candidate
-                    .polynomial
-                    .to_univariate_from_univariate(0)
-                    .isolate_complex_root(candidate.embedding, binary_precision)
-                    .ok_or_else(|| {
-                        format!(
-                            "Could not isolate root {} of {}",
-                            candidate.embedding, candidate.polynomial
-                        )
-                    })?;
-                let root = AlgebraicBall::from_root(&root);
-                let matches = union_roots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, union_root)| {
-                        (!root.is_disjoint(&AlgebraicBall::from_root(union_root))).then_some(index)
-                    })
-                    .collect::<Vec<_>>();
-                if matches.len() == 1 {
-                    candidate.order = Some(matches[0]);
-                } else {
-                    candidate.order = None;
-                    all_identified = false;
-                }
-            }
-
-            if all_identified {
-                break;
-            }
-            binary_precision *= 2;
-        }
-
-        if candidates.iter().any(|candidate| candidate.order.is_none()) {
-            return Err(
-                "Could not canonically order roots with algebraic coefficients".to_string(),
+        let mut union_roots = union
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        for candidate in &mut candidates {
+            let candidate_polynomial = candidate.polynomial.to_univariate_from_univariate(0);
+            let root = candidate_polynomial
+                .root(candidate.embedding)
+                .ok_or_else(|| {
+                    format!(
+                        "Could not isolate root {} of {}",
+                        candidate.embedding, candidate.polynomial
+                    )
+                })?;
+            candidate.order = Some(
+                match_certified_root_images(
+                    &root,
+                    RootImage::Identity,
+                    &mut union_roots,
+                    RootImage::Identity,
+                    1,
+                )
+                .map(|matches| matches[0])
+                .map_err(|_| {
+                    format!(
+                        "Could not canonically place root {} of {}",
+                        candidate.embedding, candidate.polynomial
+                    )
+                })?,
             );
         }
         candidates.sort_by_key(|candidate| candidate.order.unwrap());
@@ -3925,47 +3748,22 @@ impl Root<AlgebraicExtension<Q>> {
                 roots.push(root.clone());
             }
         }
-        let result = roots.get(self.index).cloned().ok_or_else(|| {
-            format!(
-                "root index {} is out of bounds for a polynomial of degree {}",
-                self.index,
-                self.polynomial.degree(0)
-            )
-        })?;
-        ALGEBRAIC_ROOT_CACHE
-            .write()
-            .unwrap()
-            .insert(self.polynomial.clone(), roots);
-        Ok(Some(result))
+        Ok(roots)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use crate::atom::AtomCore;
     use crate::domains::algebraic_number::{AlgebraicExtension, Root};
     use crate::domains::finite_field::{PrimeIteratorU64, Z2, Zp};
     use crate::domains::integer::{IntegerRing, Z};
     use crate::domains::rational::Q;
     use crate::domains::rational_polynomial::RationalPolynomialField;
-    use crate::domains::{Ring, RingOps};
+    use crate::domains::{RealEmbedding, Ring, RingOps};
     use crate::{parse, symbol};
-
-    // #[test]
-    // fn is_algebraic_number_positive() {
-    //     let ring = parse!("a^3 + 3a^2 - 46*a + 1").to_polynomial(&Q, None);
-    //     let ring = AlgebraicExtension::new_with_embedding(
-    //         ring.clone(),
-    //         RootInfo::from_index(2, &ring.to_univariate_from_univariate(0)),
-    //     );
-
-    //     let a = parse!("1/5a^2-a-1/10").to_polynomial::<_, u16>(&Q, None);
-    //     let a = ring.to_element(a);
-
-    //     assert_eq!(ring.is_positive(&a), Ok(true));
-    // }
-    //
-    //
 
     #[test]
     fn simplify_parametric_root_struct() {
@@ -3975,6 +3773,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(root.simplify().unwrap(), parse!("-a^(1/2)"));
+    }
+
+    #[test]
+    fn normalize_degree_twenty_extension_without_rediscovering_embeddings() {
+        // Use a non-canonical presentation of Q(i) so that Root::simplify is
+        // forced to collapse the degree-ten polynomial to degree twenty over Q.
+        let gaussian =
+            AlgebraicExtension::new_with_embedding(parse!("u^2+1").to_polynomial(&Q, None), 1);
+        assert_ne!(gaussian, AlgebraicExtension::new_complex(Q));
+
+        let polynomial = parse!("x^10+(2+1i)*x^7-3").to_polynomial::<_, u16>(&gaussian, None);
+        let simplified = Root::new(polynomial, 3)
+            .unwrap()
+            .simplify()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(simplified.polynomial().degree(0), 20);
+        assert_eq!(simplified.index(), 6);
     }
 
     #[test]
@@ -4024,6 +3841,28 @@ mod tests {
             assert_eq!(sqrt23.embedding, expected_embedding);
             assert_eq!(sqrt23.mul(&r1, &r1), sqrt23.nth(2.into()));
             assert_eq!(sqrt23.mul(&r2, &r2), sqrt23.nth(3.into()));
+        }
+    }
+
+    #[test]
+    fn adjoin_with_all_embeddings_from_degree_one_extension() {
+        let base = AlgebraicExtension::new(parse!("a-2").to_polynomial(&Q, None));
+        let polynomial = parse!("b^3-3")
+            .to_polynomial(&Q, None)
+            .to_number_field(&base);
+        let gamma = symbol!("gamma");
+        let (extensions, old_generator, new_generator) =
+            base.adjoin_with_all_embeddings(&polynomial, Some(gamma.into()));
+
+        assert_eq!(extensions.len(), 3);
+        for (embedding, extension) in extensions.iter().enumerate() {
+            assert_eq!(extension.embedding(), embedding);
+            assert_eq!(
+                extension.poly().get_vars_ref(),
+                &[crate::poly::PolyVariable::from(gamma)]
+            );
+            assert_eq!(&old_generator, &extension.nth(2.into()));
+            assert_eq!(extension.pow(&new_generator, 3), extension.nth(3.into()));
         }
     }
 
@@ -4173,6 +4012,31 @@ mod tests {
             assert_eq!(simplified.poly(), &parse!("x^2-2").to_polynomial(&Q, None));
             assert_eq!(simplified.embedding(), expected_embedding);
         }
+    }
+
+    #[test]
+    fn certified_ball_determines_real_sign() {
+        let field =
+            AlgebraicExtension::new_with_embedding(parse!("x^2-2").to_polynomial(&Q, None), 1);
+        let generator = field.generator();
+        let negative_generator = field.neg(&generator);
+
+        assert_eq!(field.is_positive_real(&generator), Ok(true));
+        assert_eq!(field.is_positive_real(&negative_generator), Ok(false));
+        assert_eq!(field.has_positive_real_part(&generator), Ok(true));
+        assert_eq!(field.try_sign(&generator), Ok(Ordering::Greater));
+        assert_eq!(
+            field.try_cmp(&negative_generator, &generator),
+            Ok(Ordering::Less)
+        );
+
+        let complex = AlgebraicExtension::new_complex(Q);
+        assert!(complex.try_sign(&complex.generator()).is_err());
+        assert!(
+            complex
+                .try_cmp(&complex.generator(), &complex.generator())
+                .is_err()
+        );
     }
 
     #[test]
