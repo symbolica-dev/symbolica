@@ -1,0 +1,3 @@
+# name	operation	nvars	left	right	left_terms	right_terms	result_terms
+control_bounded_dense	mul	3	456b3e839bc38e204b2b2fad531d240e96d7a6ba3aacf062165c33addacd4b1a.txt.br	1d3f5a6f860ed4d4de4218cce127a2fb1c57eaa84697dc5a0bd04690dbab94a1.txt.br	1771	1540	11480
+control_nonhomogeneous_oversized	mul	3	50862d56b446b74b8b798b0647f673a6f13d969e640c4bf3a29ccb2e68978aaa.txt.br	1abd987b041d698109562c83df5d8b2ae12df419d80986b0e90bd0fdfaddc8c6.txt.br	1026	1026	3075

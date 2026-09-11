@@ -86,6 +86,8 @@ serde = ["dep:serde", "rug?/serde", "numerica/serde"]
 bincode = ["dep:bincode", "dep:bincode-trait-derive", "numerica/bincode"]
 # Build the Symbolica-only polynomial benchmark harness.
 symbolica_benchmarks = ["dep:divan"]
+# Opt-in operand capture for diagnosing slow polynomial operations. No hooks in normal builds.
+polynomial_benchmark_capture = []
 # Build the Rust benchmark harness that compares Symbolica with FLINT.
 flint_benchmarks = ["symbolica_benchmarks", "dep:flint3-sys"]
 # Link the benchmark harness to a pkg-config-provided FLINT 3.6 installation.
@@ -142,6 +144,11 @@ required-features = ["flint_benchmarks"]
 
 [[bench]]
 name = "symbolica_polynomial"
+harness = false
+required-features = ["symbolica_benchmarks"]
+
+[[bench]]
+name = "slow_fac_operations"
 harness = false
 required-features = ["symbolica_benchmarks"]
 

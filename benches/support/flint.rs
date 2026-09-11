@@ -274,6 +274,23 @@ impl<'context> FmpzMPoly<'context> {
         result
     }
 
+    /// Multiplies using FLINT's Johnson heap algorithm, bypassing automatic routing.
+    pub fn mul_johnson(&self, right: &Self) -> Self {
+        self.assert_same_context(right);
+        let mut result = Self::zero(self.context);
+        // SAFETY: All three initialized polynomials share the same live context;
+        // the fresh output aliases neither input.
+        unsafe {
+            ffi::fmpz_mpoly_mul_johnson(
+                result.raw.as_mut(),
+                self.raw.as_ref(),
+                right.raw.as_ref(),
+                self.context.as_ptr(),
+            );
+        }
+        result
+    }
+
     /// Divides by `divisor` when the quotient is exact.
     pub fn exact_div(&self, divisor: &Self) -> Result<Self, FlintError> {
         self.assert_same_context(divisor);

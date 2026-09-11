@@ -1,5 +1,7 @@
 //! Defines polynomials and series.
 
+#[cfg(feature = "polynomial_benchmark_capture")]
+mod benchmark_capture;
 pub mod factor;
 pub mod gcd;
 pub mod groebner;

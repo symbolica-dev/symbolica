@@ -1905,6 +1905,8 @@ impl<'a, F: Ring, E: Exponent> Mul<&'a MultivariatePolynomial<F, E, LexOrder>>
 
     #[inline]
     fn mul(self, rhs: &'a MultivariatePolynomial<F, E, LexOrder>) -> Self::Output {
+        #[cfg(feature = "polynomial_benchmark_capture")]
+        let _capture = super::benchmark_capture::Capture::start("mul", self, rhs);
         assert_eq!(self.ring(), rhs.ring());
 
         if self.nterms() == 0 || rhs.nterms() == 0 {
@@ -5347,6 +5349,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         &self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        #[cfg(feature = "polynomial_benchmark_capture")]
+        let _capture = super::benchmark_capture::Capture::start("try_div", self, div);
         if div.is_zero() {
             return None;
         }
