@@ -1,5 +1,7 @@
 //! Multivariate polynomial structures and methods.
 
+mod homogeneous;
+
 use ahash::{HashMap, HashMapExt};
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::cmp::{Ordering, Reverse};
@@ -1936,6 +1938,8 @@ impl<'a, F: Ring, E: Exponent> Mul<&'a MultivariatePolynomial<F, E, LexOrder>>
         }
 
         if let Some(r) = self.try_preferred_total_degree_mul_before_mixed_radix(rhs) {
+            r
+        } else if let Some(r) = self.try_homogeneous_dense_mul(rhs) {
             r
         } else if let Some(r) = self.mul_dense(rhs) {
             r
