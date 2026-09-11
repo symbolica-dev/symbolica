@@ -606,7 +606,8 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
     }
 
-    /// Map the coefficients to a different type.
+    /// Map the coefficients to a different type with a known precision.
+    /// Use [Self::map_coeff_with_prec] to specify a custom precision.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(
         self,
         f: &F,

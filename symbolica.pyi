@@ -2436,11 +2436,13 @@ class Expression:
 
     def req(
         self,
-        filter_fn: Callable[[Expression], bool | Condition],
+        filter_fn: Callable[[Expression], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a new pattern restriction that calls the function `filter_fn` with the matched
-        atom that should return a boolean. If true, the pattern matches.
+        Restrict a wildcard using a callback receiving its matched expression.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        A returned `Condition` is evaluated explicitly and may also be undecidable.
+        Unknown decisions stay unknown under negation and do not complete a match.
 
         Examples
         --------
@@ -2452,18 +2454,20 @@ class Expression:
 
         Parameters
         ----------
-        filter_fn: Callable[[Expression], bool | Condition]
-            A callback that filters partially constructed graphs.
+        filter_fn: Callable[[Expression], bool | None | Condition]
+            A callback deciding whether the wildcard value is accepted.
         """
 
     def req_cmp(
         self,
         other: Expression | int | float | complex | Decimal,
-        cmp_fn: Callable[[Expression, Expression], bool | Condition],
+        cmp_fn: Callable[[Expression, Expression], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a new pattern restriction that calls the function `cmp_fn` with another the matched
-        atom and the match atom of the `other` wildcard that should return a boolean. If true, the pattern matches.
+        Restrict two wildcards using a callback receiving their matched expressions.
+        The callback runs only once both wildcards have values.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        A returned `Condition` is evaluated explicitly and may also be undecidable.
 
         Examples
         --------
@@ -2477,7 +2481,7 @@ class Expression:
         ----------
         other: Expression | int | float | complex | Decimal
             The other operand to combine or compare with.
-        cmp_fn: Callable[[Expression, Expression], bool | Condition]
+        cmp_fn: Callable[[Expression, Expression], bool | None | Condition]
             The comparison callback applied to the matched values.
         """
 
@@ -2692,7 +2696,16 @@ class Expression:
     def __eq__(self, other: object) -> bool:
         """Compare structural equality and exact scalar values. Use .eq() for a deferred Condition."""
 
-    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred equality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
@@ -2701,22 +2714,67 @@ class Expression:
     def __ne__(self, other: object) -> bool:
         """Compare structural equality and exact scalar values. Use .ne() for a deferred Condition."""
 
-    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __lt__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+    def __lt__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
         """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-    def __le__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+    def __le__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
         """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-    def __gt__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+    def __gt__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
         """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-    def __ge__(self, other: Expression | int | float | complex | Decimal | Transformer | HeldExpression) -> Condition:
+    def __ge__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
         """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
     def compare_structure(self, other: Expression) -> int:
@@ -4124,42 +4182,31 @@ class PatternRestriction:
 
     @classmethod
     def req_matches(
-        _cls, match_fn: Callable[[dict[Expression, Expression]], int]
+        _cls,
+        match_fn: Callable[[dict[Expression, Expression]], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a pattern restriction based on the current matched variables.
-        `match_fn` is a Python function that takes a dictionary of wildcards and their matched values
-        and should return an integer. If the integer is less than 0, the restriction is false.
-        If the integer is 0, the restriction is inconclusive.
-        If the integer is greater than 0, the restriction is true.
-
-        If your pattern restriction cannot decide if it holds since not all the required variables
-        have been matched, it should return inclusive (0).
+        Create a restriction from a callback receiving the currently matched wildcards.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        The dictionary may be incomplete: return `None` until the required wildcards
+        are present. A completed match is accepted only when the restriction is true.
+        A returned `Condition` is evaluated using the same three-valued contract.
 
         Examples
         --------
         >>> from symbolica import *
         >>> f, x_, y_, z_ = S('f', 'x_', 'y_', 'z_')
-        >>>
-        >>> def filter(m: dict[Expression, Expression]) -> int:
-        >>>    if x_ in m and y_ in m:
-        >>>        if m[x_] > m[y_]:
-        >>>            return -1  # no match
-        >>>        if z_ in m:
-        >>>            if m[y_] > m[z_]:
-        >>>                return -1
-        >>>            return 1  # match
-        >>>
-        >>>    return 0  # inconclusive
-        >>>
-        >>>
+        >>> def ordered(m: dict[Expression, Expression]) -> bool | None:
+        ...     if x_ not in m or y_ not in m:
+        ...         return None
+        ...     if m[x_] <= m[y_] is False:
+        ...         return False
+        ...     if z_ not in m:
+        ...         return None
+        ...     return (m[x_] <= m[y_]) & (m[y_] <= m[z_])
         >>> e = f(1, 2, 3).replace(f(x_, y_, z_), 1,
-        >>>         PatternRestriction.req_matches(filter))
-
-        Parameters
-        ----------
-        match_fn: Callable[[dict[Expression, Expression]], int]
-            The callback evaluated on each match.
+        ...     PatternRestriction.req_matches(ordered))
+        >>> assert e == 1
         """
 
 class Condition:
@@ -4170,7 +4217,6 @@ class Condition:
 
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
-
     def __bool__(self) -> bool:
         """Return known truth; raise TypeError when truth is undecidable."""
 
@@ -4225,7 +4271,16 @@ class HeldExpression:
     def __eq__(self, other: object) -> bool:
         """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
 
-    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred equality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
@@ -4234,14 +4289,30 @@ class HeldExpression:
     def __ne__(self, other: object) -> bool:
         """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
 
-    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
     def __lt__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> Condition:
         """
         Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
@@ -4253,7 +4324,14 @@ class HeldExpression:
         """
 
     def __le__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> Condition:
         """
         Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
@@ -4265,7 +4343,14 @@ class HeldExpression:
         """
 
     def __gt__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> Condition:
         """
         Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
@@ -4277,7 +4362,14 @@ class HeldExpression:
         """
 
     def __ge__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> Condition:
         """
         Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
@@ -4343,7 +4435,14 @@ class HeldExpression:
         """
 
     def __add__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
@@ -4355,7 +4454,14 @@ class HeldExpression:
         """
 
     def __radd__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
@@ -4367,7 +4473,14 @@ class HeldExpression:
         """
 
     def __sub__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Subtract `other` from this transformer, returning the result.
@@ -4379,7 +4492,14 @@ class HeldExpression:
         """
 
     def __rsub__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Subtract this transformer from `other`, returning the result.
@@ -4391,7 +4511,14 @@ class HeldExpression:
         """
 
     def __mul__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
@@ -4403,7 +4530,14 @@ class HeldExpression:
         """
 
     def __rmul__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
@@ -4415,7 +4549,14 @@ class HeldExpression:
         """
 
     def __truediv__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Divide this transformer by `other`, returning the result.
@@ -4427,7 +4568,14 @@ class HeldExpression:
         """
 
     def __rtruediv__(
-        self, other: HeldExpression | Transformer | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Decimal,
     ) -> HeldExpression:
         """
         Divide `other` by this transformer, returning the result.
@@ -5442,7 +5590,16 @@ class Transformer:
     def __eq__(self, other: object) -> bool:
         """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
 
-    def eq(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred equality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
@@ -5451,7 +5608,16 @@ class Transformer:
     def __ne__(self, other: object) -> bool:
         """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
 
-    def ne(self, other: Expression | HeldExpression | Transformer | int | float | complex | Decimal) -> Condition:
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Decimal,
+    ) -> Condition:
         """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
         Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.

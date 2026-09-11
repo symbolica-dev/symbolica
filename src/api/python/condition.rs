@@ -1,6 +1,37 @@
 //! Shared comparison, Condition, and numeric hashing helpers.
 use super::*;
 
+/// Decode a predicate decision without invoking arbitrary Python truth conversion.
+pub(super) fn match_callback_decision(value: &Bound<'_, PyAny>) -> PyResult<ConditionResult> {
+    if value.is_none() {
+        Ok(ConditionResult::Inconclusive)
+    } else if let Ok(value) = value.cast::<pyo3::types::PyBool>() {
+        Ok(value.extract::<bool>()?.into())
+    } else if let Ok(value) = value.extract::<PythonCondition>() {
+        value
+            .condition
+            .evaluate(&None)
+            .map_err(exceptions::PyValueError::new_err)
+    } else {
+        Err(exceptions::PyTypeError::new_err(
+            "Match callbacks must return True, False, None, or a Condition",
+        ))
+    }
+}
+
+/// The matcher currently has an infallible callback interface. Keep its existing
+/// error reporting, but never turn a failed callback into a proven false value:
+/// negating the restriction must not make a failure into a successful match.
+pub(super) fn report_match_callback_result(result: PyResult<ConditionResult>) -> ConditionResult {
+    match result {
+        Ok(decision) => decision,
+        Err(error) => {
+            error!("Python pattern match callback failed: {error}");
+            ConditionResult::Inconclusive
+        }
+    }
+}
+
 pub(super) fn relation(lhs: Pattern, rhs: Pattern, op: CompareOp) -> PythonCondition {
     let relation = match op {
         CompareOp::Eq => Relation::Eq(lhs, rhs),

@@ -2725,39 +2725,28 @@ impl PythonPatternRestriction {
         (!self.condition.clone()).into()
     }
 
-    /// Create a pattern restriction based on the current matched variables.
-    /// `match_fn` is a Python function that takes a dictionary of wildcards and their matched values
-    /// and should return an integer. If the integer is less than 0, the restriction is false.
-    /// If the integer is 0, the restriction is inconclusive.
-    /// If the integer is greater than 0, the restriction is true.
-    ///
-    /// If your pattern restriction cannot decide if it holds since not all the required variables
-    /// have been matched, it should return inclusive (0).
+    /// Create a restriction from a callback receiving the currently matched wildcards.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// The dictionary may be incomplete: return `None` until the required wildcards
+    /// are present. A completed match is accepted only when the restriction is true.
+    /// A returned `Condition` is evaluated using the same three-valued contract.
     ///
     /// Examples
     /// --------
     /// >>> from symbolica import *
     /// >>> f, x_, y_, z_ = S('f', 'x_', 'y_', 'z_')
-    /// >>>
-    /// >>> def filter(m: dict[Expression, Expression]) -> int:
-    /// >>>    if x_ in m and y_ in m:
-    /// >>>        if m[x_] > m[y_]:
-    /// >>>            return -1  # no match
-    /// >>>        if z_ in m:
-    /// >>>            if m[y_] > m[z_]:
-    /// >>>                return -1
-    /// >>>            return 1  # match
-    /// >>>
-    /// >>>    return 0  # inconclusive
-    /// >>>
-    /// >>>
+    /// >>> def ordered(m: dict[Expression, Expression]) -> Condition | None:
+    /// ...     if not all(w in m for w in (x_, y_, z_)):
+    /// ...         return None
+    /// ...     return (m[x_] <= m[y_]) & (m[y_] <= m[z_])
     /// >>> e = f(1, 2, 3).replace(f(x_, y_, z_), 1,
-    /// >>>         PatternRestriction.req_matches(filter))
+    /// ...     PatternRestriction.req_matches(ordered))
+    /// >>> assert e == 1
     #[classmethod]
     pub fn req_matches(
         _cls: &Bound<'_, PyType>,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[dict[Expression, Expression]], int]"
+            type_repr = "typing.Callable[[dict[Expression, Expression]], bool | None | Condition]"
         ))]
         match_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
@@ -2769,23 +2758,10 @@ impl PythonPatternRestriction {
                     .map(|(s, t)| (Atom::var(*s).into(), t.to_atom().into()))
                     .collect();
 
-                let r = match Python::attach(|py| {
-                    match_fn.call(py, (matches,), None)?.extract::<isize>(py)
-                }) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        error!("Python pattern match callback failed: {err}");
-                        -1
-                    }
-                };
-
-                if r < 0 {
-                    false.into()
-                } else if r == 0 {
-                    ConditionResult::Inconclusive
-                } else {
-                    true.into()
-                }
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = match_fn.call1(py, (matches,))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
             }))
             .into(),
         })
@@ -6291,8 +6267,10 @@ impl PythonExpression {
         req_cmp!(self, other, cmp_any_atom, is_ge)
     }
 
-    /// Create a new pattern restriction that calls the function `filter_fn` with the matched
-    /// atom that should return a boolean. If true, the pattern matches.
+    /// Restrict a wildcard using a callback receiving its matched expression.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// A returned `Condition` is evaluated explicitly and may also be undecidable.
+    /// Unknown decisions stay unknown under negation and do not complete a match.
     ///
     /// Examples
     /// --------
@@ -6304,11 +6282,13 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// filter_fn: Callable[[Expression], bool | Condition]
-    ///     A callback that filters partially constructed graphs.
+    /// filter_fn: Callable[[Expression], bool | None | Condition]
+    ///     A callback deciding whether the wildcard value is accepted.
     pub fn req(
         &self,
-        #[gen_stub(override_type(type_repr = "typing.Callable[[Expression], bool | Condition]"))]
+        #[gen_stub(override_type(
+            type_repr = "typing.Callable[[Expression], bool | None | Condition]"
+        ))]
         filter_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
         let id = match self.expr.as_view() {
@@ -6329,21 +6309,17 @@ impl PythonExpression {
         };
 
         Ok(PythonPatternRestriction {
-            condition: (
-                id,
-                WildcardRestriction::Filter(Box::new(move |m| {
-                    let data: PythonExpression = m.to_atom().into();
-
-                    match Python::attach(|py| filter_fn.call(py, (data,), None)?.is_truthy(py)) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            error!("Python pattern filter callback failed: {err}");
-                            false
-                        }
-                    }
-                })),
-            )
-                .into(),
+            condition: PatternRestriction::MatchStack(Box::new(move |stack| {
+                let Some(matched) = stack.get(id) else {
+                    return ConditionResult::Inconclusive;
+                };
+                let data: PythonExpression = matched.to_atom().into();
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = filter_fn.call1(py, (data,))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
+            }))
+            .into(),
         })
     }
 
@@ -6467,8 +6443,10 @@ impl PythonExpression {
         req_wc_cmp!(self, other, cmp_any_atom, is_ge)
     }
 
-    /// Create a new pattern restriction that calls the function `cmp_fn` with another the matched
-    /// atom and the match atom of the `other` wildcard that should return a boolean. If true, the pattern matches.
+    /// Restrict two wildcards using a callback receiving their matched expressions.
+    /// The callback runs only once both wildcards have values.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// A returned `Condition` is evaluated explicitly and may also be undecidable.
     ///
     /// Examples
     /// --------
@@ -6482,13 +6460,13 @@ impl PythonExpression {
     /// ----------
     /// other: Expression | int | float | complex | Decimal
     ///     The other operand to combine or compare with.
-    /// cmp_fn: Callable[[Expression, Expression], bool | Condition]
+    /// cmp_fn: Callable[[Expression, Expression], bool | None | Condition]
     ///     The comparison callback applied to the matched values.
     pub fn req_cmp(
         &self,
         other: PythonExpression,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[Expression, Expression], bool | Condition]"
+            type_repr = "typing.Callable[[Expression, Expression], bool | None | Condition]"
         ))]
         cmp_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
@@ -6527,27 +6505,18 @@ impl PythonExpression {
         };
 
         Ok(PythonPatternRestriction {
-            condition: (
-                id,
-                WildcardRestriction::Cmp(
-                    other_id,
-                    Box::new(move |m1, m2| {
-                        let data1: PythonExpression = m1.to_atom().into();
-                        let data2: PythonExpression = m2.to_atom().into();
-
-                        match Python::attach(|py| {
-                            cmp_fn.call(py, (data1, data2), None)?.is_truthy(py)
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python pattern comparison callback failed: {err}");
-                                false
-                            }
-                        }
-                    }),
-                ),
-            )
-                .into(),
+            condition: PatternRestriction::MatchStack(Box::new(move |stack| {
+                let (Some(left), Some(right)) = (stack.get(id), stack.get(other_id)) else {
+                    return ConditionResult::Inconclusive;
+                };
+                let data1: PythonExpression = left.to_atom().into();
+                let data2: PythonExpression = right.to_atom().into();
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = cmp_fn.call1(py, (data1, data2))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
+            }))
+            .into(),
         })
     }
 
