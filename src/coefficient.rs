@@ -252,7 +252,12 @@ impl From<(Integer, Integer)> for Coefficient {
 #[cfg(feature = "gmp")]
 impl From<rug::Integer> for Coefficient {
     fn from(value: rug::Integer) -> Self {
-        Coefficient::Complex(Rational::from(value).into())
+        Coefficient::Complex(
+            Rational::from(crate::domains::integer::MultiPrecisionInteger::from_raw(
+                value,
+            ))
+            .into(),
+        )
     }
 }
 

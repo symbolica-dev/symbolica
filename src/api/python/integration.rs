@@ -319,12 +319,15 @@ impl PythonNumericalIntegrator {
         bins: Vec<Option<PythonNumericalIntegrator>>,
         max_prob_ratio: f64,
         train_on_avg: bool,
-    ) -> PythonNumericalIntegrator {
+    ) -> PyResult<PythonNumericalIntegrator> {
         let bins = bins.into_iter().map(|b| b.map(|bb| bb.grid)).collect();
 
-        PythonNumericalIntegrator {
-            grid: Grid::Discrete(DiscreteGrid::new(bins, max_prob_ratio, train_on_avg)),
-        }
+        Ok(PythonNumericalIntegrator {
+            grid: Grid::Discrete(
+                DiscreteGrid::new(bins, max_prob_ratio, train_on_avg)
+                    .map_err(exceptions::PyValueError::new_err)?,
+            ),
+        })
     }
 
     /// Create a new uniform layered grid for the numerical integrator.

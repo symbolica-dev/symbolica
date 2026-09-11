@@ -247,10 +247,6 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         a.try_div(b)
     }
 
-    fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        todo!("Sampling a polynomial is not possible yet")
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,

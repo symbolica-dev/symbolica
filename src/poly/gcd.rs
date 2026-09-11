@@ -1,5 +1,6 @@
 //! Compute the greatest common divisor (GCD) of multivariate polynomials with coefficients that implement [PolynomialGCD].
 
+use crate::domains::SampleableRing;
 use ahash::{HashMap, HashSet, HashSetExt};
 use rand;
 use smallvec::{SmallVec, smallvec};
@@ -188,7 +189,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// substituting all variables except `var`. This
     /// upper bound could be too tight due to an unfortunate
     /// sample point, but this is rare.
-    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E {
+    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E
+    where
+        F: SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>,
+    {
         let mut rng = rand::rng();
 
         // store a table for variables raised to a certain power
@@ -221,7 +225,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r: Vec<_> = vars
                 .iter()
-                .map(|i| (*i, ap.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| {
+                    (
+                        *i,
+                        ap.ring
+                            .sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1)),
+                    )
+                })
                 .collect();
 
             let a1 = ap.sample_polynomial(var, &r, &mut cache, &mut tm);
@@ -393,7 +403,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>,
+    {
         if vars.is_empty() {
             // return gcd divided by the single scale factor
             let g = a.univariate_gcd(b);
@@ -460,7 +473,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| {
+                    (
+                        *i,
+                        a.ring.sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1)),
+                    )
+                })
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -644,7 +662,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>,
+    {
         let mut rng = rand::rng();
 
         let mut failure_count = 0;
@@ -680,7 +701,12 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| {
+                    (
+                        *i,
+                        a.ring.sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1)),
+                    )
+                })
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -971,6 +997,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         }
                         Err(
                             MatrixError::NotSquare
+                            | MatrixError::FieldMismatch
                             | MatrixError::ShapeMismatch
                             | MatrixError::RightHandSideIsNotVector
                             | MatrixError::Singular
@@ -1028,7 +1055,11 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 }
 
-impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F, E> {
+impl<
+    F: Field + PolynomialGCD<E> + SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>,
+    E: PositiveExponent,
+> MultivariatePolynomial<F, E>
+{
     /// Compute the gcd shape of two polynomials in a finite field by filling in random
     /// numbers.
     #[instrument(level = "debug", skip_all)]
@@ -1098,7 +1129,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 
             let mut sample_fail_count = 0i64;
             let v = loop {
-                let r = a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
+                let r = a.ring.sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1));
                 if !gamma.replace(lastvar, &r).is_zero() {
                     break r;
                 }
@@ -1199,7 +1230,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 }
 
                 let v = loop {
-                    let v = a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
+                    let v = a.ring.sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1));
                     if !gamma.replace(lastvar, &v).is_zero() {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
@@ -1311,7 +1342,12 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 let r: Vec<_> = vars
                     .iter()
                     .skip(1)
-                    .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                    .map(|i| {
+                        (
+                            *i,
+                            a.ring.sample(&mut rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1)),
+                        )
+                    })
                     .collect();
 
                 let g1 = gc.replace_except(vars[0], &r, &mut cache);
@@ -2939,7 +2975,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let (univ_len_a, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
                 let (univ_len_b, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
 
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
+                let shift = p.from_element(&p.sample_small_integer(&mut rng, 0..=i64::MAX - 1));
                 let mut a_current_evals = a_term_evals
                     .iter()
                     .map(|(_, x)| p.pow(x, shift))
@@ -3227,7 +3263,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 let (bivar_len_a, a_term_evals) = Self::evaluate_terms_bivariate(&p, &a_p, &betas);
                 let (bivar_len_b, b_term_evals) = Self::evaluate_terms_bivariate(&p, &b_p, &betas);
 
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
+                let shift = p.from_element(&p.sample_small_integer(&mut rng, 0..=i64::MAX - 1));
                 let mut a_current_evals = a_term_evals
                     .iter()
                     .map(|(_, x)| p.pow(x, shift))
@@ -3688,8 +3724,12 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
     }
 }
 
-impl<UField: FiniteFieldWorkspace, F: GaloisField<Base = FiniteField<UField>>, E: PositiveExponent>
-    PolynomialGCD<E> for F
+impl<
+    UField: FiniteFieldWorkspace,
+    F: GaloisField<Base = FiniteField<UField>>
+        + SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>,
+    E: PositiveExponent,
+> PolynomialGCD<E> for F
 where
     FiniteField<UField>: FiniteFieldCore<UField>,
     <FiniteField<UField> as Set>::Element: Copy,

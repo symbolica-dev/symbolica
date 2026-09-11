@@ -1,5 +1,6 @@
 //! Algebraic number fields, e.g. fields supporting sqrt(2).
 
+use crate::domains::SampleableRing;
 use std::sync::Arc;
 
 use rand::Rng;
@@ -895,20 +896,6 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
     }
 
     /// Sample a polynomial.
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let coeffs: Vec<_> = (0..self.poly.degree(0))
-            .map(|_| self.poly.ring.sample(rng, range))
-            .collect();
-
-        let mut poly = self.poly.zero_with_capacity(coeffs.len());
-        let mut exp = vec![0];
-        for (i, c) in coeffs.into_iter().enumerate() {
-            exp[0] = i as u16;
-            poly.append_monomial(c, &exp);
-        }
-
-        AlgebraicNumber { poly }
-    }
 
     fn format<W: std::fmt::Write>(
         &self,
@@ -1314,5 +1301,27 @@ mod tests {
         assert_eq!(extension.try_div(&prod, &f2).unwrap(), f1);
         assert_eq!(extension.try_div(&prod, &f1).unwrap(), f2);
         assert!(extension.try_div(&f2, &f1).is_none());
+    }
+}
+
+impl<R: EuclideanDomain + SampleableRing> SampleableRing for AlgebraicExtension<R> {
+    type SamplingPolicy = R::SamplingPolicy;
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let coeffs: Vec<_> = (0..self.poly.degree(0))
+            .map(|_| self.poly.ring.sample(rng, policy))
+            .collect();
+
+        let mut poly = self.poly.zero_with_capacity(coeffs.len());
+        let mut exp = vec![0];
+        for (i, c) in coeffs.into_iter().enumerate() {
+            exp[0] = i as u16;
+            poly.append_monomial(c, &exp);
+        }
+
+        AlgebraicNumber { poly }
     }
 }

@@ -1,5 +1,6 @@
 //! The field of general expressions.
 
+use crate::domains::SampleableRing;
 use crate::{
     atom::{Atom, AtomCore, AtomView},
     domains::{RingOps, Set},
@@ -11,7 +12,6 @@ use super::{
 };
 
 use dyn_clone::DynClone;
-use rand::Rng;
 
 pub trait Map: Fn(AtomView, &mut Atom) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(Map);
@@ -256,11 +256,6 @@ impl Ring for AtomField {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0..range.1);
-        Atom::num(r)
-    }
-
     fn nth(&self, n: Integer) -> Self::Element {
         Atom::num(n)
     }
@@ -349,5 +344,16 @@ impl Derivable for AtomField {
             PolyVariable::Symbol(s) => e.derivative(*s),
             _ => panic!("Cannot take derivative of non-symbol"),
         }
+    }
+}
+
+impl SampleableRing for AtomField {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        self.sample_small_integer(rng, policy.clone())
     }
 }

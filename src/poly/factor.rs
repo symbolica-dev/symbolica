@@ -1,6 +1,7 @@
 //! Factorization methods for multivariate polynomials
 //! that implement [Factorize].
 
+use crate::domains::SampleableRing;
 use std::{borrow::Cow, cmp::Reverse};
 
 use ahash::{HashMap, HashSet, HashSetExt};
@@ -596,7 +597,9 @@ impl<E: PositiveExponent> Factorize
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
+    F: GaloisField<Base = FiniteField<UField>>
+        + SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>
+        + PolynomialGCD<E>,
     E: PositiveExponent,
 > Factorize for MultivariatePolynomial<F, E, LexOrder>
 where
@@ -755,7 +758,9 @@ where
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
+    F: GaloisField<Base = FiniteField<UField>>
+        + SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>
+        + PolynomialGCD<E>,
     E: PositiveExponent,
 > MultivariatePolynomial<F, E, LexOrder>
 where
@@ -941,9 +946,13 @@ where
             random_poly.clear();
 
             for i in 0..n {
-                let r = self
-                    .ring
-                    .sample(&mut rng, (0, characteristic.to_i64().unwrap_or(i64::MAX)));
+                let r = self.ring.sample(
+                    &mut rng,
+                    &(0..=characteristic
+                        .to_i64()
+                        .unwrap_or(i64::MAX)
+                        .saturating_sub(1)),
+                );
                 if !self.ring.is_zero(&r) {
                     exp[var] = E::from_u32(i as u32);
                     random_poly.append_monomial(r, &exp);
@@ -1160,7 +1169,7 @@ where
             }
 
             // TODO: sample simple points first
-            sample_point = self.ring.sample(&mut rng, (0, i));
+            sample_point = self.ring.sample(&mut rng, &(0..=i - 1));
             uni_f = self.replace(interpolation_var, &sample_point);
             i += 1;
         }
@@ -1779,7 +1788,9 @@ where
     }
 }
 
-impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+impl<F: Field + SampleableRing<SamplingPolicy = std::ops::RangeInclusive<i64>>, E: PositiveExponent>
+    MultivariatePolynomial<F, E, LexOrder>
+{
     fn multivariate_diophantine(
         univariate_deltas: &[Self],
         univariate_factors: &mut [Self],
@@ -2298,10 +2309,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         sample_vars
             .iter()
             .map(|v| {
-                let mut value = poly.ring.sample(rng, (1, MAX_RNG_PREFACTOR as i64));
+                let mut value = poly.ring.sample(rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1));
                 let mut attempts = 0;
                 while poly.ring.is_zero(&value) && attempts < 8 {
-                    value = poly.ring.sample(rng, (1, MAX_RNG_PREFACTOR as i64));
+                    value = poly.ring.sample(rng, &(1..=MAX_RNG_PREFACTOR as i64 - 1));
                     attempts += 1;
                 }
                 (*v, value)
