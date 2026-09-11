@@ -20,7 +20,7 @@ use ahash::HashMap;
 use bytes::Buf;
 use smallvec::{SmallVec, smallvec};
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 use crate::domains::integer::MultiPrecisionInteger;
 use crate::{
     atom::{Atom, AtomCore, AtomView, Symbol},
@@ -277,14 +277,14 @@ impl From<(Integer, Integer)> for Coefficient {
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 impl From<rug::Integer> for Coefficient {
     fn from(value: rug::Integer) -> Self {
         Coefficient::Complex(Rational::from(MultiPrecisionInteger::from_raw(value)).into())
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 impl From<rug::Rational> for Coefficient {
     fn from(value: rug::Rational) -> Self {
         Coefficient::Complex(Rational::from(value).into())

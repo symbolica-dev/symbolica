@@ -3371,7 +3371,7 @@ fn atom_to_complex_float(value: AtomView, binary_prec: u32) -> Option<Complex<Fl
 }
 
 fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     {
         if z.im.to_f64() == 0.0 {
             return Complex::new(
@@ -3402,7 +3402,7 @@ fn erf_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
 }
 
 fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     {
         if z.im.to_f64() == 0.0 {
             return Complex::new(
@@ -3648,7 +3648,7 @@ fn polylog_integer_numeric_eval(
         return Some(-(complex_one(binary_prec) - z.clone()).log());
     }
 
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     if order == 2 && z.im.to_f64() == 0.0 && z.re.to_f64() <= 1.0 {
         return Some(Complex::new(
             z.re.clone().into_raw().li2().into(),
@@ -3878,12 +3878,12 @@ fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
             return Complex::new(Float::with_val(binary_prec, f64::INFINITY), zero);
         }
 
-        #[cfg(feature = "gmp")]
+        #[cfg(feature = "float-mpfr")]
         {
             return Complex::new(s.re.clone().into_raw().zeta().into(), zero);
         }
 
-        #[cfg(not(feature = "gmp"))]
+        #[cfg(not(feature = "float-mpfr"))]
         {
             return zeta_complex_hasse(s, binary_prec);
         }
@@ -3931,14 +3931,14 @@ fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Floa
     let sine =
         (pi_c * s.clone() / Complex::new(Float::with_val(binary_prec, 2), zero.clone())).sin();
     let gamma = gamma_numeric_eval(&reflected, binary_prec);
-    #[cfg(feature = "gmp")]
+    #[cfg(feature = "float-mpfr")]
     let zeta = if reflected.im.to_f64() == 0.0 {
         Complex::new(reflected.re.clone().into_raw().zeta().into(), zero.clone())
     } else {
         zeta_complex_hasse(&reflected, binary_prec)
     };
 
-    #[cfg(not(feature = "gmp"))]
+    #[cfg(not(feature = "float-mpfr"))]
     let zeta = zeta_complex_hasse(&reflected, binary_prec);
 
     two_power * pi_power * sine * gamma * zeta
