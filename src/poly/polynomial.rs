@@ -1,6 +1,10 @@
 //! Multivariate polynomial structures and methods.
 
 mod homogeneous;
+mod rational_division;
+
+#[cfg(test)]
+mod division_tests;
 
 use ahash::{HashMap, HashMapExt};
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -27,7 +31,8 @@ use crate::domains::{
 };
 use crate::kernels::{
     ChunkedDensePolynomialMulRequest, DensePolynomialExactDivisionRequest,
-    DensePolynomialMulRequest, PolynomialKernels, TotalDegreePolynomialMulRequest,
+    DensePolynomialMulRequest, DivisionAttempt, PolynomialKernels, TotalDegreePolynomialMulRequest,
+    UnivariatePolynomialDivisionRequest,
 };
 use crate::printer::{AtomPrinter, PrintOptions, PrintState};
 
@@ -3862,8 +3867,8 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         &self,
         rhs: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> MultivariatePolynomial<F, E, LexOrder> {
-        // place the smallest polynomial first, as this is faster
-        // in the heap algorithm
+        // The first operand determines the number of heap rows. Swapping only
+        // unequal sizes bounds the heap and makes the recursive call terminate.
         if self.nterms() > rhs.nterms() {
             return rhs.heap_mul(self);
         }
@@ -5006,68 +5011,6 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     }
 }
 
-impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
-    /// Divide univariate polynomials over a field if the division is exact.
-    ///
-    /// Unlike [`Self::try_div`], this method uses the field inverse of the leading coefficient
-    /// once and then performs synthetic division by a monic polynomial. This is important for
-    /// extension fields where a generic exact coefficient-division test may be much more
-    /// expensive than inversion.
-    pub(crate) fn try_div_univariate_field(&self, div: &Self) -> Option<Self> {
-        if div.is_zero() {
-            return None;
-        }
-
-        if self.variables() != div.variables() {
-            let mut dividend = self.clone();
-            let mut divisor = div.clone();
-            dividend.unify_variables(&mut divisor);
-            return dividend.try_div_univariate_field(&divisor);
-        }
-
-        if self.is_zero() {
-            return Some(self.clone());
-        }
-
-        if div.is_constant() {
-            return Some(self.clone().mul_coeff(self.ring().inv(&div.get_constant())));
-        }
-
-        let active_variables = (0..self.nvars())
-            .filter(|&variable| {
-                self.degree(variable) != E::zero() || div.degree(variable) != E::zero()
-            })
-            .count();
-        assert_eq!(
-            active_variables, 1,
-            "try_div_univariate_field requires univariate polynomials"
-        );
-
-        if (0..self.nvars()).any(|variable| self.degree(variable) < div.degree(variable)) {
-            return None;
-        }
-
-        let leading_coefficient = div.lcoeff();
-        let (leading_inverse, monic_divisor) = if self.ring().is_one(&leading_coefficient) {
-            (self.ring().one(), div.clone())
-        } else {
-            let inverse = self.ring().inv(&leading_coefficient);
-            (inverse.clone(), div.clone().mul_coeff(inverse))
-        };
-        let (quotient, remainder) = self.quot_rem_univariate_monic(&monic_divisor);
-        remainder
-            .is_zero()
-            .then(|| quotient.mul_coeff(leading_inverse))
-    }
-}
-
-impl<F: PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
-    /// Divide exactly using the algorithm selected by the coefficient domain.
-    pub fn try_div_exact(&self, divisor: &Self) -> Option<Self> {
-        F::try_div_exact(self, divisor)
-    }
-}
-
 impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Convert the polynomial to one in a number field, where the variable
     /// of the number field is moved into the coefficient.
@@ -5105,7 +5048,9 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         }
         poly
     }
+}
 
+impl<F: EuclideanDomain, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Get the content from the coefficients.
     pub fn content(&self) -> F::Element {
         if self.coefficients.is_empty() {
@@ -5148,6 +5093,10 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
     }
 
     /// Divide two multivariate polynomials and return the quotient and remainder.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coefficient rings differ.
     pub fn quot_rem(
         &self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
@@ -5156,10 +5105,15 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
+        assert_eq!(self.ring(), div.ring(), "Polynomials have different rings");
         self.clone().quot_rem_impl(div, abort_on_remainder, false)
     }
 
     /// Divide an owned polynomial, reusing its coefficient storage where possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coefficient rings differ.
     pub fn quot_rem_owned(
         self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
@@ -5168,6 +5122,7 @@ impl<F: EuclideanDomain, E: PositiveExponent> MultivariatePolynomial<F, E, LexOr
         MultivariatePolynomial<F, E, LexOrder>,
         MultivariatePolynomial<F, E, LexOrder>,
     ) {
+        assert_eq!(self.ring(), div.ring(), "Polynomials have different rings");
         self.quot_rem_impl(div, abort_on_remainder, false)
     }
 
@@ -5344,11 +5299,98 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         degrees
     }
 
-    /// Divide `self` by `div` if there is no remainder, else return `None`.
+    /// Query checked division kernels before starting generic coefficient division.
+    fn try_div_kernel(&self, div: &Self) -> DivisionAttempt<Self> {
+        let kernels = self.ring().kernels();
+        if let Some(conversion) = kernels.rational_conversion()
+            && self.nterms() >= rational_division::MIN_DIVIDEND_TERMS
+            && div.nterms() >= rational_division::MIN_DIVISOR_TERMS
+            && self.is_polynomial()
+            && div.is_polynomial()
+            // Clearing denominators pays off for compact divisors. Lacunary
+            // divisors can be cheaper to divide directly over the rationals.
+            && div
+                .exponents
+                .iter()
+                .all(|exponent| exponent.to_i32() as usize <= div.nterms())
+        {
+            let dividend = self.map_coeff(conversion.to_rational, Q);
+            let divisor = div.map_coeff(conversion.to_rational, Q);
+            match dividend.try_div_via_integers(&divisor) {
+                DivisionAttempt::Quotient(quotient) => {
+                    return DivisionAttempt::Quotient(quotient.map_coeff(
+                        |coefficient| (conversion.from_rational)(coefficient.clone()),
+                        self.ring().clone(),
+                    ));
+                }
+                DivisionAttempt::NotDivisible => return DivisionAttempt::NotDivisible,
+                DivisionAttempt::Unsupported => {}
+            }
+        }
+        let Some(kernel) = kernels.checked_polynomial_division() else {
+            return DivisionAttempt::Unsupported;
+        };
+        if self.nvars() == 0 {
+            return DivisionAttempt::Unsupported;
+        }
+        // A single active coordinate gives a sparse univariate view, including
+        // when the variable map also contains unused coordinates.
+        let mut variable = None;
+        for exponents in self.exponents_iter().chain(div.exponents_iter()) {
+            for (index, exponent) in exponents.iter().enumerate() {
+                if exponent.to_i32() < 0 {
+                    return DivisionAttempt::Unsupported;
+                }
+                if !exponent.is_zero() {
+                    if variable.is_some_and(|variable| variable != index) {
+                        return DivisionAttempt::Unsupported;
+                    }
+                    variable = Some(index);
+                }
+            }
+        }
+        let Some(variable) = variable else {
+            return DivisionAttempt::Unsupported;
+        };
+        let dividend_exponents: Vec<_> = self
+            .exponents_iter()
+            .map(|exponents| exponents[variable].to_i32() as u32)
+            .collect();
+        let divisor_exponents: Vec<_> = div
+            .exponents_iter()
+            .map(|exponents| exponents[variable].to_i32() as u32)
+            .collect();
+        match kernel.try_univariate_division(UnivariatePolynomialDivisionRequest {
+            dividend_coefficients: &self.coefficients,
+            dividend_exponents: &dividend_exponents,
+            divisor_coefficients: &div.coefficients,
+            divisor_exponents: &divisor_exponents,
+        }) {
+            DivisionAttempt::Unsupported => DivisionAttempt::Unsupported,
+            DivisionAttempt::NotDivisible => DivisionAttempt::NotDivisible,
+            DivisionAttempt::Quotient(terms) => {
+                let mut quotient = self.zero_with_capacity(terms.len());
+                let mut exponents = vec![E::zero(); self.nvars()];
+                for (degree, coefficient) in terms {
+                    exponents[variable] = E::from_i32(degree as i32);
+                    quotient.append_monomial_back(coefficient, &exponents);
+                }
+                DivisionAttempt::Quotient(quotient)
+            }
+        }
+    }
+
+    /// Return the quotient if `div` divides `self`, or `None` if there is a
+    /// nonzero remainder or `div` is zero. Variable maps are unified as needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coefficient rings differ.
     pub fn try_div(
         &self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        assert_eq!(self.ring(), div.ring(), "Polynomials have different rings");
         #[cfg(feature = "polynomial_benchmark_capture")]
         let _capture = super::benchmark_capture::Capture::start("try_div", self, div);
         if div.is_zero() {
@@ -5364,6 +5406,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         if self.is_zero() || div.is_one() {
             return Some(self.clone());
+        }
+
+        match self.try_div_kernel(div) {
+            DivisionAttempt::Quotient(quotient) => return Some(quotient),
+            DivisionAttempt::NotDivisible => return None,
+            DivisionAttempt::Unsupported => {}
         }
 
         // check if the leading coefficients divide
@@ -5433,11 +5481,17 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         if b.nterms() == 0 { Some(a) } else { None }
     }
 
-    /// Divide an owned polynomial exactly, reusing its coefficient storage where possible.
+    /// Apply [`Self::try_div`] to an owned polynomial, reusing coefficient storage
+    /// where possible. Returns `None` for a nonzero remainder or a zero divisor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coefficient rings differ.
     pub fn try_div_owned(
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
     ) -> Option<MultivariatePolynomial<F, E, LexOrder>> {
+        assert_eq!(self.ring(), div.ring(), "Polynomials have different rings");
         if div.is_zero() {
             return None;
         }
@@ -5450,6 +5504,12 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         if self.is_zero() || div.is_one() {
             return Some(self);
+        }
+
+        match self.try_div_kernel(div) {
+            DivisionAttempt::Quotient(quotient) => return Some(quotient),
+            DivisionAttempt::NotDivisible => return None,
+            DivisionAttempt::Unsupported => {}
         }
 
         // Check the leading coefficients before starting polynomial division.

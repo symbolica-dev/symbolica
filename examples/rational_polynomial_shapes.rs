@@ -59,8 +59,8 @@ fn main() {
                     qp,
                     zp.map_coeff(|c| Q.to_element(c.clone(), &scale * &scale, true), Q)
                 );
-                assert_eq!(qp.try_div_exact(&q[0]).unwrap(), q[1]);
-                assert_eq!(zp.try_div_exact(&z[0]).unwrap(), z[1]);
+                assert_eq!(qp.try_div(&q[0]).unwrap(), q[1]);
+                assert_eq!(zp.try_div(&z[0]).unwrap(), z[1]);
                 let name = format!("{shape}-b{bits}-q{rational}");
                 for (suffix, value) in [
                     ("left", q[0].to_string()),
@@ -83,13 +83,13 @@ fn main() {
                                 black_box(if operation == "multiply" {
                                     black_box(&q[0]) * black_box(&q[1])
                                 } else {
-                                    black_box(&qp).try_div_exact(black_box(&q[0])).unwrap()
+                                    black_box(&qp).try_div(black_box(&q[0])).unwrap()
                                 });
                             } else {
                                 black_box(if operation == "multiply" {
                                     black_box(&z[0]) * black_box(&z[1])
                                 } else {
-                                    black_box(&zp).try_div_exact(black_box(&z[0])).unwrap()
+                                    black_box(&zp).try_div(black_box(&z[0])).unwrap()
                                 });
                             }
                         }

@@ -5069,7 +5069,7 @@ impl<E: PositiveExponent> Factorize
                     let f = f.to_number_field(&self.ring());
                     let gcd = f.gcd(&g_f);
                     g_f = g_f
-                        .try_div_exact(&gcd)
+                        .try_div(&gcd)
                         .expect("the lifted norm factor must divide the shifted polynomial");
                     gcd
                 };

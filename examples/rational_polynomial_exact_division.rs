@@ -1,4 +1,4 @@
-//! Compare coefficient-domain exact division with generic Q term division.
+//! Compare checked rational polynomial division with quotient/remainder division.
 //!
 //! Run with `cargo run --release --example rational_polynomial_exact_division`.
 //! Input construction and equality verification are excluded from timings.
@@ -59,9 +59,14 @@ fn sparse(degree: u16, seed: usize, bits: u64, fractions: bool) -> Polynomial {
     polynomial
 }
 
+fn quot_rem_checked(dividend: &Polynomial, divisor: &Polynomial) -> Option<Polynomial> {
+    let (quotient, remainder) = dividend.quot_rem(divisor, false);
+    remainder.is_zero().then_some(quotient)
+}
+
 fn main() {
     println!(
-        "shape,bits,fractions,dividend_terms,divisor_terms,generic_ns,candidate_ns,candidate_over_generic"
+        "shape,bits,fractions,dividend_terms,divisor_terms,quot_rem_ns,try_div_ns,try_div_over_quot_rem"
     );
     for bits in [12, 63, 127] {
         for fractions in [false, true] {
@@ -99,33 +104,33 @@ fn main() {
                 } else {
                     Some(quotient)
                 };
+                assert_eq!(quot_rem_checked(&dividend, &divisor), expected);
                 assert_eq!(dividend.try_div(&divisor), expected);
-                assert_eq!(dividend.try_div_exact(&divisor), expected);
                 let loops = if label == "tiny" { 1024 } else { 1 };
-                let mut generic = vec![];
-                let mut candidate = vec![];
+                let mut quot_rem = vec![];
+                let mut checked = vec![];
                 for pair in 0..5 {
-                    for candidate_first in [pair % 2 == 0, pair % 2 != 0] {
+                    for checked_first in [pair % 2 == 0, pair % 2 != 0] {
                         let start = Instant::now();
                         for _ in 0..loops {
-                            black_box(if candidate_first {
-                                black_box(&dividend).try_div_exact(black_box(&divisor))
-                            } else {
+                            black_box(if checked_first {
                                 black_box(&dividend).try_div(black_box(&divisor))
+                            } else {
+                                quot_rem_checked(black_box(&dividend), black_box(&divisor))
                             });
                         }
                         let elapsed = start.elapsed().as_nanos() / loops;
-                        if candidate_first {
-                            candidate.push(elapsed);
+                        if checked_first {
+                            checked.push(elapsed);
                         } else {
-                            generic.push(elapsed);
+                            quot_rem.push(elapsed);
                         }
                     }
                 }
-                generic.sort_unstable();
-                candidate.sort_unstable();
-                let g = generic[2];
-                let c = candidate[2];
+                quot_rem.sort_unstable();
+                checked.sort_unstable();
+                let g = quot_rem[2];
+                let c = checked[2];
                 println!(
                     "{label},{bits},{fractions},{},{},{g},{c},{}",
                     dividend.nterms(),

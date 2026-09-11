@@ -45,6 +45,8 @@ use super::{
     rational::Rational,
 };
 
+mod kernels;
+
 /// A Galois field `GF(p,n)` is a finite field with `p^n` elements.
 /// It provides methods to upgrade and downgrade to Galois fields with the
 /// same prime but with a different power.
@@ -1995,6 +1997,10 @@ impl<R: EuclideanDomain> RingOps<&AlgebraicNumber<R>> for AlgebraicExtension<R> 
 }
 
 impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
+    fn kernels(&self) -> crate::kernels::RingKernels<'_, Self::Element> {
+        crate::kernels::RingKernels::empty().with_checked_polynomial_division(self)
+    }
+
     fn zero(&self) -> Self::Element {
         AlgebraicNumber {
             poly: self.poly.zero(),

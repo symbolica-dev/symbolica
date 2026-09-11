@@ -7295,22 +7295,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
 /// Polynomial GCD functions for a certain coefficient type `Self`.
 pub trait PolynomialGCD<E: PositiveExponent>: Ring {
-    /// Divide two polynomials exactly, allowing the coefficient domain to
-    /// select a more suitable algorithm than generic term division.
-    fn try_div_exact(
-        dividend: &MultivariatePolynomial<Self, E>,
-        divisor: &MultivariatePolynomial<Self, E>,
-    ) -> Option<MultivariatePolynomial<Self, E>> {
-        dividend.try_div(divisor)
-    }
-
     /// Test exact divisibility. Coefficient domains can override this to avoid
     /// constructing the quotient.
     fn divides_exact(
         dividend: &MultivariatePolynomial<Self, E>,
         divisor: &MultivariatePolynomial<Self, E>,
     ) -> bool {
-        Self::try_div_exact(dividend, divisor).is_some()
+        dividend.try_div(divisor).is_some()
     }
 
     /// Tries a coefficient-domain GCD plan before generic univariate content removal.
@@ -7750,29 +7741,6 @@ where
 }
 
 impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField> {
-    fn try_div_exact(
-        dividend: &MultivariatePolynomial<Self, E>,
-        divisor: &MultivariatePolynomial<Self, E>,
-    ) -> Option<MultivariatePolynomial<Self, E>> {
-        if dividend.variables() != divisor.variables() {
-            let mut dividend = dividend.clone();
-            let mut divisor = divisor.clone();
-            dividend.unify_variables(&mut divisor);
-            return Self::try_div_exact(&dividend, &divisor);
-        }
-
-        let active_variables = (0..dividend.nvars())
-            .filter(|&variable| {
-                dividend.degree(variable) != E::zero() || divisor.degree(variable) != E::zero()
-            })
-            .count();
-        if active_variables == 1 {
-            dividend.try_div_univariate_field(divisor)
-        } else {
-            dividend.try_div(divisor)
-        }
-    }
-
     fn divides_exact(
         dividend: &MultivariatePolynomial<Self, E>,
         divisor: &MultivariatePolynomial<Self, E>,
@@ -7794,7 +7762,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             .next()
             .expect("a nonconstant polynomial must have an active variable");
         if active_variables.next().is_some() {
-            return Self::try_div_exact(dividend, divisor).is_some();
+            return dividend.try_div(divisor).is_some();
         }
         if dividend.degree(variable) < divisor.degree(variable) {
             return false;

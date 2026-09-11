@@ -808,25 +808,20 @@ impl PythonPolynomial {
     /// rhs: Polynomial
     ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-
-        if self.poly.ring() != rhs.poly.ring() {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {r}",
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -2364,25 +2359,20 @@ impl PythonFiniteFieldPolynomial {
     /// rhs: FiniteFieldPolynomial
     ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring() != rhs.poly.ring() {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -3628,19 +3618,20 @@ impl PythonPrimeTwoPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -3706,6 +3697,12 @@ impl PythonPrimeTwoPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonPrimeTwoPolynomial, PythonPrimeTwoPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -3723,6 +3720,12 @@ impl PythonPrimeTwoPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -4554,25 +4557,20 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring() != rhs.poly.ring() {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -5582,19 +5580,20 @@ impl PythonGaloisFieldPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -5660,6 +5659,12 @@ impl PythonGaloisFieldPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonGaloisFieldPolynomial, PythonGaloisFieldPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -5677,6 +5682,12 @@ impl PythonGaloisFieldPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -6576,19 +6587,20 @@ impl PythonNumberFieldPolynomial {
     /// rhs: NumberFieldPolynomial
     ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -6663,6 +6675,12 @@ impl PythonNumberFieldPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonNumberFieldPolynomial, PythonNumberFieldPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -6685,6 +6703,12 @@ impl PythonNumberFieldPolynomial {
     /// rhs: NumberFieldPolynomial
     ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
