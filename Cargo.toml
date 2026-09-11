@@ -24,6 +24,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 codegen-units = 1
 lto = true
 
+[profile.bench]
+codegen-units = 1
+lto = true
+
 [profile.dev.package."*"]
 opt-level = 3
 
@@ -80,6 +84,12 @@ tracing_max_level_info = ["tracing/release_max_level_info"]
 serde = ["dep:serde", "rug?/serde", "numerica/serde"]
 # allow importing/exporting of atoms with a state map using bincode
 bincode = ["dep:bincode", "dep:bincode-trait-derive", "numerica/bincode"]
+# Build the Symbolica-only polynomial benchmark harness.
+symbolica_benchmarks = ["dep:divan"]
+# Build the Rust benchmark harness that compares Symbolica with FLINT.
+flint_benchmarks = ["symbolica_benchmarks", "dep:flint3-sys"]
+# Link the benchmark harness to a pkg-config-provided FLINT 3.6 installation.
+flint_system_benchmarks = ["flint_benchmarks", "flint3-sys/use-system-libs"]
 
 [dependencies.pyo3]
 features = ["abi3", "py-clone", "num-complex"]
@@ -122,6 +132,18 @@ wolfram-library-link = { version = "0.2.9", optional = true }
 bincode-trait-derive = { version = "0.1.0", optional = true }
 pyo3-log = { version = "0.13", optional = true }
 symjit = { version = "2.24", optional = true }
+divan = { version = "0.1.21", optional = true }
+flint3-sys = { version = "3.6.1", optional = true, features = ["gmp-mpfr-sys"] }
+
+[[bench]]
+name = "flint_comparison"
+harness = false
+required-features = ["flint_benchmarks"]
+
+[[bench]]
+name = "symbolica_polynomial"
+harness = false
+required-features = ["symbolica_benchmarks"]
 
 [patch.crates-io]
 numerica = { path = "lib/numerica" }
