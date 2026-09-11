@@ -1210,13 +1210,13 @@ where
             dn,
             self.denominator.clone(),
             self.numerator.ring(),
-            false,
+            true, // derivative may expose scalar content
         );
         let b = RationalPolynomial::from_num_den(
             &self.numerator * &dd,
             &self.denominator * &self.denominator,
             self.numerator.ring(),
-            false,
+            true,
         );
 
         &a - &b

@@ -1041,6 +1041,7 @@ where
     fn is_one(&self, a: &Self::Element) -> bool {
         a.numerator.is_one()
             && a.denominators.is_empty()
+            && a.numerator.ring().is_one(&a.numer_coeff)
             && a.numerator.ring().is_one(&a.denom_coeff)
     }
 
