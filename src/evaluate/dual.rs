@@ -1,12 +1,101 @@
 use super::*;
 
 impl<T: Default + Clone> ExpressionEvaluator<T> {
+    /// Inline generated scalar instructions without dualizing them again.
+    fn inline_vector_components(
+        &self,
+        args: &[Slot],
+        ins: &mut InstructionList<T>,
+        external_functions: &mut Vec<ExternalFunctionContainer<T>>,
+        next_label: &mut usize,
+    ) -> Vec<Slot> {
+        let mut slots = args.to_vec();
+        let mut constants = Vec::new();
+        for value in &self.stack[self.param_count..self.reserved_indices] {
+            constants.push(ins.constants.len());
+            slots.push(Slot::Const(ins.constants.len()));
+            // InstructionList tracks constants in vector-sized groups.
+            ins.constants.push(value.clone());
+            ins.constants.extend((1..ins.dim).map(|_| T::default()));
+            ins.unknown_constants.push(false);
+        }
+        slots.resize(self.stack.len(), Slot::Temp(0));
+        let mut functions = Vec::new();
+        for external in &self.external_fns {
+            let mut external = external.clone();
+            if let Some(index) = external.constant_index.as_mut() {
+                *index = constants[*index];
+                ins.unknown_constants[*index / ins.dim] = true;
+            }
+            let index = external_functions
+                .iter()
+                .position(|f| f == &external && f.constant_index == external.constant_index)
+                .unwrap_or_else(|| {
+                    external_functions.push(external);
+                    external_functions.len() - 1
+                });
+            functions.push(index);
+        }
+        let mut labels = HashMap::default();
+        for (instr, _) in &self.instructions {
+            if let Instr::Label(label) = instr {
+                labels.insert(*label, Label(*next_label));
+                *next_label += 1;
+            }
+        }
+        for (instr, _) in &self.instructions {
+            let (output, instr) = match instr {
+                Instr::Add(output, args) | Instr::Mul(output, args) => {
+                    let mut value = slots[args[0]];
+                    for arg in &args[1..] {
+                        value = ins.add(if matches!(instr, Instr::Add(..)) {
+                            VectorInstruction::Add(value, slots[*arg])
+                        } else {
+                            VectorInstruction::Mul(value, slots[*arg])
+                        });
+                    }
+                    slots[*output] = value;
+                    continue;
+                }
+                Instr::Pow(o, a, p) => (*o, VectorInstruction::Pow(slots[*a], *p)),
+                Instr::Powf(o, a, b) => (*o, VectorInstruction::Powf(slots[*a], slots[*b])),
+                Instr::BuiltinFun(o, f, a) => (*o, VectorInstruction::BuiltinFun(*f, slots[*a])),
+                Instr::ExternalFun(o, f, args) => (
+                    *o,
+                    VectorInstruction::ExternalFun(
+                        functions[*f],
+                        args.iter().map(|a| slots[*a]).collect(),
+                    ),
+                ),
+                Instr::Join(o, c, a, b) => {
+                    (*o, VectorInstruction::Join(slots[*c], slots[*a], slots[*b]))
+                }
+                Instr::IfElse(c, l) => {
+                    ins.add(VectorInstruction::IfElse(slots[*c], labels[l]));
+                    continue;
+                }
+                Instr::Goto(l) => {
+                    ins.add(VectorInstruction::Goto(labels[l]));
+                    continue;
+                }
+                Instr::Label(l) => {
+                    ins.add(VectorInstruction::Label(labels[l]));
+                    continue;
+                }
+            };
+            slots[output] = ins.add(instr);
+        }
+        self.result_indices.iter().map(|i| slots[*i]).collect()
+    }
+
     /// Redefine every operation to take `n` components in and
     /// yield `n` components. This can be used to define efficient
     /// evaluation over dual numbers.
     ///
-    /// Non built-in functions will be rewritten to functions with the suffix `_v`
-    /// that take the vector index as an additional tag.
+    /// Non built-in functions can be rewritten to functions with the suffix `_v`
+    /// that take the vector index as an additional tag. If no such function exists,
+    /// the vectorizer may generate the components automatically. [Dualizer] does
+    /// this using the function's symbolic derivatives.
     /// The input to the functions
     /// is the flattened vector of all components of all parameters,
     /// followed by all previously computed output components.
@@ -63,10 +152,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             }
 
             let Some(s) = get_symbol!(format!("{}_v", external_fn.symbol.get_name())) else {
-                Err(format!(
-                    "To vectorize the function '{0}', the symbol '{0}_v' must be defined that takes the vector index as an additional tag",
-                    external_fn.symbol.get_name()
-                ))?;
                 continue;
             };
 
@@ -154,6 +239,17 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             dim: v.get_dimension(),
         };
 
+        let mut generated_functions = HashMap::default();
+        let mut next_label = self
+            .instructions
+            .iter()
+            .filter_map(|(i, _)| match i {
+                Instr::Label(l) => Some(l.0 + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+
         for (i, _sc) in self.instructions.drain(..) {
             let (o, instr) = match i {
                 Instr::Add(o, a) => (
@@ -173,6 +269,51 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                     (o, VectorInstruction::BuiltinFun(f, get_slot!(slot_map[&a])))
                 }
                 Instr::ExternalFun(o, f, a) => {
+                    if !external_fn_index_map.contains_key(&(self.external_fns[f].clone(), 0)) {
+                        let external = &self.external_fns[f];
+                        let generated = match generated_functions.entry((f, a.len())) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => {
+                                let mut evaluator = v.vectorize_function(external.symbol, &external.tags, a.len())?
+                                    .ok_or_else(|| format!(
+                                        "To vectorize the function '{0}', the symbol '{0}_v' must be defined that takes the vector index as an additional tag",
+                                        external.symbol.get_name()
+                                    ))?;
+                                if evaluator.param_count != a.len() * v.get_dimension()
+                                    || evaluator.result_indices.len() != v.get_dimension()
+                                {
+                                    return Err(format!(
+                                        "Generated vector function '{}' has incompatible input/output dimensions",
+                                        external.symbol
+                                    ));
+                                }
+                                evaluator.undo_stack_optimization();
+                                entry.insert(evaluator)
+                            }
+                        };
+                        let args = a
+                            .iter()
+                            .flat_map(|x| {
+                                let slot = get_slot!(slot_map[x]);
+                                (0..v.get_dimension()).map(move |k| slot.index(k))
+                            })
+                            .collect::<Vec<_>>();
+                        let results = generated.inline_vector_components(
+                            &args,
+                            &mut ins,
+                            &mut new_external_fns,
+                            &mut next_label,
+                        );
+                        // Keep the components contiguous, as required by slot_map.
+                        for result in results {
+                            ins.add(VectorInstruction::Assign(result));
+                        }
+                        slot_map.insert(
+                            o,
+                            ins.instructions.len() + self.reserved_indices - v.get_dimension(),
+                        );
+                        continue;
+                    }
                     let mut results = vec![];
                     for j in 0..v.get_dimension() {
                         let Some(index) =
@@ -359,6 +500,18 @@ pub trait Vectorize<T> {
 
     /// Get the dimension of the vectorization.
     fn get_dimension(&self) -> usize;
+
+    /// Generate a scalar evaluator whose inputs and outputs are flattened vector
+    /// components. Called for external functions without an explicit `_v` symbol.
+    /// Return `None` if automatic vectorization is not supported.
+    fn vectorize_function(
+        &self,
+        _symbol: Symbol,
+        _tags: &[Atom],
+        _argument_count: usize,
+    ) -> Result<Option<ExpressionEvaluator<T>>, String> {
+        Ok(None)
+    }
 }
 
 /// A dualizer that maps coefficients and instructions to dual number components.
@@ -385,6 +538,91 @@ impl<T: DualNumberStructure> Dualizer<T> {
 impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
     fn duplicate_constants(&self) -> bool {
         false
+    }
+
+    fn vectorize_function(
+        &self,
+        symbol: Symbol,
+        tags: &[Atom],
+        argument_count: usize,
+    ) -> Result<Option<ExpressionEvaluator<Complex<Rational>>>, String> {
+        let shape = self.dual.get_shape();
+        let dim = shape.len();
+        let indices = shape
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (*s, i))
+            .collect::<HashMap<_, _>>();
+        let mut parameters = Vec::with_capacity(argument_count * dim);
+        let mut index = 0usize;
+        let parameter_symbol = crate::symbol!("symbolica::evaluate::dual_arg");
+        while parameters.len() < argument_count * dim {
+            let parameter = crate::function!(parameter_symbol, index);
+            index += 1;
+            // Tags are constants and must not capture an internal parameter.
+            if !tags.iter().any(|tag| tag.contains(&parameter)) {
+                parameters.push(parameter);
+            }
+        }
+        let variables = parameters
+            .iter()
+            .cloned()
+            .map(|p| Indeterminate::try_from(p).unwrap())
+            .collect::<Vec<_>>();
+        let mut function = crate::atom::FunctionBuilder::new(symbol);
+        for tag in tags {
+            function = function.add_arg(tag);
+        }
+        for args in parameters.chunks(dim) {
+            function = function.add_arg(&args[0]);
+        }
+        let mut components = vec![Atom::new(); dim];
+        components[0] = function.finish();
+
+        // Components are Taylor coefficients. For a component alpha, choose
+        // beta = alpha - e_i and apply the total derivative D_i to c_beta:
+        // D_i = sum_(arg,gamma) (gamma_i + 1) a_(arg,gamma+e_i) d/da_(arg,gamma).
+        // Dividing by alpha_i restores the Taylor factorial convention.
+        let mut order = (1..dim).collect::<Vec<_>>();
+        order.sort_by_key(|i| shape[*i].iter().sum::<usize>());
+        for component in order {
+            let alpha = shape[component];
+            let axis = alpha
+                .iter()
+                .position(|p| *p > 0)
+                .ok_or("Dual shape has a non-leading scalar component")?;
+            let mut beta = alpha.to_vec();
+            beta[axis] -= 1;
+            let parent = &components[*indices
+                .get(beta.as_slice())
+                .ok_or("Dual shape is not ancestor-closed")?];
+            let mut derivative = Atom::new();
+            for (j, gamma) in shape.iter().enumerate() {
+                let mut successor = gamma.to_vec();
+                successor[axis] += 1;
+                let Some(&next) = indices.get(successor.as_slice()) else {
+                    continue;
+                };
+                for argument in 0..argument_count {
+                    derivative += parent.derivative(&variables[argument * dim + j])
+                        * &parameters[argument * dim + next]
+                        * Atom::num(successor[axis]);
+                }
+            }
+            components[component] = derivative / Atom::num(alpha[axis]);
+            if components[component].contains_symbol(Symbol::DERIVATIVE) {
+                return Err(format!(
+                    "Cannot automatically dualize '{}': no explicit derivative for component {:?}: {}",
+                    symbol.get_name(),
+                    alpha,
+                    components[component]
+                ));
+            }
+        }
+        let evaluator = Atom::evaluator_multiple(&components, &parameters)
+            .build()
+            .map_err(|e| format!("Cannot automatically dualize '{}': {e}", symbol.get_name()))?;
+        Ok(Some(evaluator))
     }
 
     fn map_instruction(
@@ -800,7 +1038,238 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
 mod test {
     use numerica::domains::{dual::HyperDual, float::Complex, rational::Rational};
 
-    use crate::{atom::AtomCore, evaluate::Dualizer, parse};
+    use crate::{
+        atom::{Atom, AtomCore, EvaluationInfo},
+        evaluate::Dualizer,
+        function, parse, symbol,
+    };
+
+    fn dualize(
+        expression: &str,
+        parameters: &[Atom],
+        shape: Vec<Vec<usize>>,
+    ) -> super::ExpressionEvaluator<Complex<Rational>> {
+        parse!(expression)
+            .evaluator(parameters)
+            .build()
+            .unwrap()
+            .vectorize(&Dualizer::new(
+                HyperDual::<Complex<Rational>>::new(shape),
+                vec![],
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn automatic_tanh_higher_derivatives() {
+        let evaluator = dualize(
+            "tanh(x)",
+            &[parse!("x")],
+            vec![vec![0], vec![1], vec![2], vec![3]],
+        );
+        let mut real = evaluator.clone().map_coeff(&|r| r.re.to_f64());
+        let x = 0.4_f64;
+        let value = x.tanh();
+        let slope = 1. - value * value;
+        let mut out = [0.; 4];
+        real.evaluate(&[x, 2., 3., 4.], &mut out);
+        let expected = [
+            value,
+            2. * slope,
+            slope * (3. - 4. * value),
+            4. * slope - 12. * value * slope + 8. / 3. * slope * (3. * value * value - 1.),
+        ];
+        for (actual, expected) in out.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+        }
+        let mut complex = evaluator.map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+        let z = Complex::new(0.4, 0.2);
+        let mut out = [Complex::new(0., 0.); 4];
+        complex.evaluate(
+            &[
+                z,
+                Complex::new(1., 0.),
+                Complex::new(0., 0.),
+                Complex::new(0., 0.),
+            ],
+            &mut out,
+        );
+        use crate::domains::float::Real;
+        let expected = z.tanh();
+        assert!((out[0] - expected).norm().re < 1e-12);
+        assert!(
+            (out[1] - (Complex::new(1., 0.) - expected * expected))
+                .norm()
+                .re
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn automatic_mixed_derivatives_and_multiple_arguments() {
+        // Nonstandard component order and nonzero higher input coefficients.
+        let shape = vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1], vec![2, 0]];
+        let expressions = [
+            "atan(x,y)",
+            "tanh(x*y)+sinh(x+y)",
+            "polygamma(2,x)",
+            "polylog(3,x)",
+            "bessel_j(2,x)",
+            "gamma(x)",
+            "erf(x)",
+        ];
+        let x = symbol!("x");
+        let y = symbol!("y");
+        for expression in expressions {
+            let expr = parse!(expression);
+            let mut expected = Atom::evaluator_multiple(
+                &[
+                    expr.clone(),
+                    expr.derivative(y),
+                    expr.derivative(x),
+                    expr.derivative(x).derivative(y),
+                    expr.derivative(x).derivative(x) / 2,
+                ],
+                &[Atom::from(x), Atom::from(y)],
+            )
+            .build()
+            .unwrap()
+            .map_coeff(&|r| r.re.to_f64());
+            let mut actual = dualize(expression, &[x.into(), y.into()], shape.clone())
+                .map_coeff(&|r| r.re.to_f64());
+            let mut a = [0.; 5];
+            let mut b = [0.; 5];
+            actual.evaluate(&[0.4, 0., 1., 0., 0., 0.7, 1., 0., 0., 0.], &mut a);
+            expected.evaluate(&[0.4, 0.7], &mut b);
+            for (a, b) in a.into_iter().zip(b) {
+                assert!(
+                    (a - b).abs() < 1e-10 * b.abs().max(1.),
+                    "{expression}: {a} != {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automatic_custom_function_reuses_scalar_output() {
+        let f = symbol!(
+            "auto_dual_exp",
+            der = |f, i, out| {
+                if i == 0 {
+                    **out = f.to_owned();
+                }
+            },
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0].exp())
+        );
+        let x = parse!("x");
+        let expression = function!(f, &x);
+        let evaluator = expression
+            .evaluator(&[x])
+            .build()
+            .unwrap()
+            .vectorize(&Dualizer::new(
+                HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1], vec![2]]),
+                vec![],
+            ))
+            .unwrap();
+        assert_eq!(evaluator.count_operations().function_calls, 1);
+        let mut evaluator = evaluator.map_coeff(&|r| r.re.to_f64());
+        let mut out = [0.; 3];
+        evaluator.evaluate(&[0.3, 2., 3.], &mut out);
+        assert!((out[0] - 0.3_f64.exp()).abs() < 1e-12);
+        assert!((out[1] - 2. * out[0]).abs() < 1e-12);
+        assert!((out[2] - 5. * out[0]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn missing_derivatives_report_an_error() {
+        let f = symbol!(
+            "auto_dual_missing",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0])
+        );
+        let x = parse!("x");
+        let error = function!(f, &x)
+            .evaluator(&[x])
+            .build()
+            .unwrap()
+            .vectorize(&Dualizer::new(
+                HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]),
+                vec![],
+            ))
+            .unwrap_err();
+        assert!(error.contains("no explicit derivative"), "{error}");
+        assert!(error.contains("auto_dual_missing"), "{error}");
+    }
+
+    #[test]
+    fn explicit_vector_function_still_overrides_generation() {
+        let f = symbol!(
+            "auto_dual_override",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0])
+        );
+        symbol!(
+            "auto_dual_override_v",
+            eval = EvaluationInfo::new().with_tags(1).register_tagged(|tags| {
+                let scalar = tags[0] == 0;
+                Box::new(move |args: &[f64]| if scalar { args[0] } else { 7. * args[1] })
+            })
+        );
+        let x = parse!("x");
+        let mut evaluator = function!(f, &x)
+            .evaluator(&[x])
+            .build()
+            .unwrap()
+            .vectorize(&Dualizer::new(
+                HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]),
+                vec![],
+            ))
+            .unwrap()
+            .map_coeff(&|r| r.re.to_f64());
+        let mut out = [0.; 2];
+        evaluator.evaluate(&[3., 2.], &mut out);
+        assert_eq!(out, [3., 14.]);
+    }
+
+    #[test]
+    fn generated_derivatives_preserve_branches_and_labels() {
+        let f = symbol!(
+            "auto_dual_branch",
+            der = |f, i, out| {
+                if i == 0 {
+                    let x = f.as_fun_view().unwrap().iter().next().unwrap();
+                    **out = function!(crate::atom::Symbol::IF, x, x.to_owned() * 2, 0);
+                }
+            },
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0] * args[0])
+        );
+        let x = parse!("x");
+        let c = parse!("c");
+        let expr = function!(
+            crate::atom::Symbol::IF,
+            &c,
+            function!(f, &x),
+            function!(f, &x + 1)
+        );
+        let mut evaluator = expr
+            .evaluator(&[c, x])
+            .build()
+            .unwrap()
+            .vectorize(&Dualizer::new(
+                HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]),
+                vec![],
+            ))
+            .unwrap()
+            .map_coeff(&|r| r.re.to_f64());
+        for (c, x, expected) in [
+            (1., 0.5, [0.25, 2.]),
+            (0., 0.5, [2.25, 6.]),
+            (1., 0., [0., 0.]),
+        ] {
+            let mut out = [0.; 2];
+            evaluator.evaluate(&[c, 0., x, 2.], &mut out);
+            assert_eq!(out, expected);
+        }
+    }
 
     #[test]
     fn unknown_constant() {

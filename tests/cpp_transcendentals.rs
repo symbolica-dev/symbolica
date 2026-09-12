@@ -165,6 +165,66 @@ fn real_transcendental_forwards() {
 }
 
 #[test]
+fn automatically_dualized_transcendentals_export() {
+    use symbolica::{
+        domains::{dual::HyperDual, rational::Rational},
+        evaluate::Dualizer,
+    };
+    let expressions = geometric_expressions();
+    let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x"), parse!("y")])
+        .build()
+        .unwrap()
+        .vectorize(&Dualizer::new(
+            HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1], vec![2]]),
+            vec![],
+        ))
+        .unwrap();
+    let mut real = evaluator.clone().map_coeff(&|c| c.re.to_f64());
+    let inputs = [0.25, 1., 0., -1., 0.5, 0.];
+    let mut expected = vec![0.; expressions.len() * 3];
+    real.evaluate(&inputs, &mut expected);
+    let code = real
+        .export_cpp_str::<f64>(
+            "dual_test",
+            ExportSettings::default().inline_asm(InlineASM::None),
+        )
+        .unwrap();
+    run_cpp(
+        &TestFiles::new("dual_real"),
+        &code,
+        &cpp_case("double", "dual_test_realf64", &inputs, &expected),
+    );
+
+    let mut complex = evaluator.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+    let inputs = [
+        Complex::new(0.25, 0.1),
+        Complex::new(1., 0.2),
+        Complex::new(0., 0.),
+        Complex::new(-1., 0.2),
+        Complex::new(0.5, -0.1),
+        Complex::new(0., 0.),
+    ];
+    let mut expected = vec![Complex::new(0., 0.); expressions.len() * 3];
+    complex.evaluate(&inputs, &mut expected);
+    let code = complex
+        .export_cpp_str::<Complex<f64>>(
+            "dual_test",
+            ExportSettings::default().inline_asm(InlineASM::None),
+        )
+        .unwrap();
+    run_cpp(
+        &TestFiles::new("dual_complex"),
+        &code,
+        &cpp_case(
+            "std::complex<double>",
+            "dual_test_complexf64",
+            &inputs,
+            &expected,
+        ),
+    );
+}
+
+#[test]
 fn complex_transcendental_forwards() {
     let expressions = geometric_expressions();
     let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x"), parse!("y")])

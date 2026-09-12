@@ -1293,8 +1293,10 @@ impl PythonExpressionEvaluator {
     /// For example, to compute first derivatives in two variables `x` and `y`,
     /// use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
     ///
-    /// External functions must be mapped to `len(dual_shape)` different functions
-    /// that compute a single component each. The input to the functions
+    /// External functions are dualized automatically using their symbolic derivative
+    /// rules. Functions appearing in those derivatives must support evaluation.
+    /// An explicit function with the suffix `_v` overrides automatic dualization
+    /// and computes one component per vector-index tag. The input to these functions
     /// is the flattened vector of all components of all parameters,
     /// followed by all previously computed output components.
     ///
