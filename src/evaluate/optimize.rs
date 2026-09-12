@@ -279,7 +279,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         {
             if let Some(ext) = other
                 .external_fns
-                .iter_mut()
+                .iter()
                 .find(|f| f.constant_index == Some(i))
             {
                 let key = Constant::Function(ext.export_name().to_owned());
@@ -287,8 +287,11 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                     let new_i = constants.len();
                     constants.insert(key.clone(), new_i);
                     self.stack.push(T::default());
-                    ext.constant_index = Some(new_i);
-                    self.external_fns.push(ext.clone());
+                    // Preserve source indices while scanning incoming constants:
+                    // the destination index may name a later incoming literal.
+                    let mut destination = ext.clone();
+                    destination.constant_index = Some(new_i);
+                    self.external_fns.push(destination);
                 }
                 constant_indices.push(self.param_count + constants[&key]);
             } else {

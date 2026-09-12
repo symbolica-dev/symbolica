@@ -1,5 +1,5 @@
 use symbolica::{
-    atom::{Atom, AtomCore, EvaluationInfo},
+    atom::{Atom, AtomCore, EvaluationInfo, Symbol},
     domains::{
         Ring,
         finite_field::{FiniteFieldCore, Zp},
@@ -232,6 +232,135 @@ fn merge_evaluator_with_external_functions() {
     evaluator.evaluate(&[3.0], &mut out);
 
     assert_eq!(out, vec![7.0, 18.0]);
+}
+
+#[test]
+fn merge_evaluator_preserves_external_constant_source_indices() {
+    let params: Vec<_> = [
+        "f", "dL", "dR", "rL", "sL", "uL", "vL", "hL", "rR", "sR", "uR", "vR", "hR",
+    ]
+    .into_iter()
+    .map(|s| parse!(s))
+    .collect();
+    let common = parse!("f/(dL*dR*rL^2*rR^2)");
+    let left = parse!("uL/(rL-sL)+vL/(-rL-sL)");
+    let right = parse!("uR/(rR-sR)+vR/(-rR-sR)");
+    let pi = Atom::var(Symbol::PI);
+    // Merging these evaluators moves pi to an index occupied by a later
+    // incoming literal. Subsequent merges also exercise reuse of pi.
+    let expressions = [
+        &common * &left * &right,
+        Atom::i() * &pi * &common * &left * parse!("hR"),
+        -Atom::i() * &pi * &common * parse!("hL") * &right,
+        &pi * &pi * &common * parse!("hL*hR"),
+    ];
+    let mut input =
+        [1., 1., 1., 2., 1., 1., 1., 0.3, 3., 1., 1., 1., 0.4].map(|x| Complex::new(x, 0.0));
+    input[0] = Complex::new(0.0, 1.0);
+    let pi = std::f64::consts::PI;
+    let expected = [
+        Complex::new(0.0, 1.0 / 216.0),
+        Complex::new(-pi / 135.0, 0.0),
+        Complex::new(pi / 480.0, 0.0),
+        Complex::new(0.0, pi * pi / 300.0),
+    ];
+    let convert = |c: &Complex<Rational>| Complex::new(c.re.to_f64(), c.im.to_f64());
+    let convert_prec = |c: &Complex<Rational>| {
+        Complex::new(c.re.to_multi_prec_float(256), c.im.to_multi_prec_float(256))
+    };
+    let input_prec =
+        input.map(|c| Complex::new(Float::with_val(256, c.re), Float::with_val(256, c.im)));
+
+    for expanded in [false, true] {
+        let expressions: Vec<_> = expressions
+            .iter()
+            .map(|a| if expanded { a.expand() } else { a.clone() })
+            .collect();
+        let evaluators: Vec<_> = expressions
+            .iter()
+            .map(|a| a.evaluator(&params).build().unwrap())
+            .collect();
+        let separate: Vec<_> = evaluators
+            .iter()
+            .cloned()
+            .map(|e| e.map_coeff(&convert).evaluate_single(&input))
+            .collect();
+        let separate_prec: Vec<_> = evaluators
+            .iter()
+            .cloned()
+            .map(|e| {
+                e.map_coeff_with_prec(&convert_prec, 256)
+                    .evaluate_single(&input_prec)
+            })
+            .collect();
+        let mut joint_output = [Complex::new(0.0, 0.0); 4];
+        Atom::evaluator_multiple(&expressions, &params)
+            .build()
+            .unwrap()
+            .map_coeff(&convert)
+            .evaluate(&input, &mut joint_output);
+
+        for cpe_rounds in [None, Some(0)] {
+            let mut merged = evaluators[0].clone();
+            for evaluator in evaluators.iter().skip(1) {
+                merged.merge(evaluator.clone(), cpe_rounds).unwrap();
+            }
+            let mut merged_output = [Complex::new(0.0, 0.0); 4];
+            merged
+                .clone()
+                .map_coeff(&convert)
+                .evaluate(&input, &mut merged_output);
+            for (route, output) in [
+                ("separate", separate.as_slice()),
+                ("joint", joint_output.as_slice()),
+                ("merged", merged_output.as_slice()),
+            ] {
+                for (i, (actual, expected)) in output.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (actual.re - expected.re).abs() < 1e-12
+                            && (actual.im - expected.im).abs() < 1e-12,
+                        "{route} output {i}, expanded={expanded}, cpe_rounds={cpe_rounds:?}: expected {expected:?}, got {actual:?}"
+                    );
+                }
+            }
+
+            // Keep builtin pi exact until mapping to the requested precision.
+            let mut merged_prec =
+                vec![Complex::new(Float::with_val(256, 0), Float::with_val(256, 0)); 4];
+            merged
+                .map_coeff_with_prec(&convert_prec, 256)
+                .evaluate(&input_prec, &mut merged_prec);
+            for (i, (actual, expected)) in merged_prec.iter().zip(&separate_prec).enumerate() {
+                assert!(
+                    (actual.re.clone() - &expected.re).to_f64().abs() < 1e-65
+                        && (actual.im.clone() - &expected.im).to_f64().abs() < 1e-65,
+                    "256-bit output {i}, expanded={expanded}, cpe_rounds={cpe_rounds:?}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn merge_evaluator_with_imaginary_pi() {
+    let x = parse!("x");
+    let expressions = [-&x, Atom::i() * Atom::var(Symbol::PI) * &x];
+    let params = [x];
+    let evaluators: Vec<_> = expressions
+        .iter()
+        .map(|a| a.evaluator(&params).build().unwrap())
+        .collect();
+    for cpe_rounds in [None, Some(0)] {
+        let mut merged = evaluators[0].clone();
+        merged.merge(evaluators[1].clone(), cpe_rounds).unwrap();
+        let mut output = [Complex::new(0.0, 0.0); 2];
+        merged
+            .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()))
+            .evaluate(&[Complex::new(2.0, 0.0)], &mut output);
+        assert_eq!(output[0], Complex::new(-2.0, 0.0));
+        assert_eq!(output[1].re, 0.0);
+        assert!((output[1].im - 2.0 * std::f64::consts::PI).abs() < 1e-12);
+    }
 }
 
 #[test]
