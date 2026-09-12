@@ -407,6 +407,7 @@ impl<'a> AtomView<'a> {
         let p_ref = &permutations;
 
         let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -423,6 +424,7 @@ impl<'a> AtomView<'a> {
                 let abort = abort.clone();
 
                 let mut op = move || {
+                    let _unlock = inherited_unlock.activate();
                     for j in 0..n_iterations / n_cores {
                         if abort.load(Ordering::Relaxed) {
                             return;
@@ -3139,6 +3141,7 @@ impl Expression<Complex<Rational>> {
         let p_ref = &permutations;
 
         let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -3155,6 +3158,7 @@ impl Expression<Complex<Rational>> {
                 let abort = abort.clone();
 
                 let mut op = move || {
+                    let _unlock = inherited_unlock.activate();
                     for j in 0..n_iterations / n_cores {
                         if abort.load(Ordering::Relaxed) {
                             return;

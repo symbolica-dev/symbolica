@@ -13,8 +13,8 @@ use rayon::{ThreadPool, prelude::*};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
-    LicenseManager,
     atom::{Atom, AtomView},
+    license::LicenseManager,
     state::{RecycledAtom, State, Workspace},
 };
 
@@ -591,14 +591,18 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         let reader = self.reader();
 
         let out_wrap = Mutex::new(new_out);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         t.install(
             #[inline(always)]
             || {
-                reader.par_bridge().for_each(|x| {
-                    let r = f(x);
-                    out_wrap.lock().unwrap().push(r);
-                });
+                reader.par_bridge().for_each_init(
+                    || inherited_unlock.activate(),
+                    |_, x| {
+                        let r = f(x);
+                        out_wrap.lock().unwrap().push(r);
+                    },
+                );
             },
         );
 
@@ -702,14 +706,18 @@ impl AtomView<'_> {
         if let AtomView::Add(aa) = self {
             let out_wrap = Mutex::new(vec![]);
             let args = aa.iter().collect::<Vec<_>>();
+            let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
             p.install(
                 #[inline(always)]
                 || {
-                    args.par_iter().for_each(|x| {
-                        let r = f(*x);
-                        out_wrap.lock().unwrap().push(r);
-                    });
+                    args.par_iter().for_each_init(
+                        || inherited_unlock.activate(),
+                        |_, x| {
+                            let r = f(*x);
+                            out_wrap.lock().unwrap().push(r);
+                        },
+                    );
                 },
             );
 

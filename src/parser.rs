@@ -15,7 +15,6 @@ use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
-    LicenseManager,
     atom::{Atom, DefaultNamespace, NamespacedSymbol, Symbol, SymbolAttribute, SymbolBuilder},
     coefficient::{Coefficient, ConvertToRing},
     domains::{
@@ -25,6 +24,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
+    license::LicenseManager,
     poly::{PolyVariable, PositiveExponent, polynomial::MultivariatePolynomial},
     printer::AnsiWrap,
     state::{RecycledAtom, State, Workspace},

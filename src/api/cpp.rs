@@ -11,7 +11,7 @@ use crate::domains::integer::{IntegerRing, Z};
 use crate::domains::rational::Q;
 use crate::parser::{ParseSettings, Token};
 use crate::poly::PolyVariable;
-use crate::{GLOBAL_SETTINGS, LicenseManager, symbol};
+use crate::{GLOBAL_SETTINGS, license::LicenseManager, symbol};
 use crate::{
     domains::factorized_rational_polynomial::FactorizedRationalPolynomial,
     domains::rational_polynomial::RationalPolynomial, printer::PrintOptions, printer::PrintState,

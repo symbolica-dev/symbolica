@@ -1309,6 +1309,27 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
+def set_library_key(key: str) -> None:
+    """
+    Set the Symbolica library key for this Python package.
+
+    Obtaining and using a library key requires a separate agreement with Symbolica.
+    Contact license@symbolica.io to arrange one. Possessing a copied or stolen key
+    does not authorize its use, even if Symbolica accepts it.
+
+    Call this from your package during import, before using Symbolica. It lets users run
+    your library without their own Symbolica license; it does not license their other code.
+    The key must be issued for your package.
+
+    If the key has expired, an internet connection and an active subscription are required.
+    Renew the key when prompted to keep your library usable offline.
+
+    Parameters
+    ----------
+    key: str
+        The Symbolica library key issued for your package.
+    """
+
 def get_version() -> str:
     """
     Get the current Symbolica version.

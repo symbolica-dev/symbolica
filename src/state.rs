@@ -27,13 +27,13 @@ use crate::poly::PolyVariable;
 use crate::printer::PrintFunction;
 use crate::warn;
 use crate::{
-    LicenseManager,
     atom::{Atom, Symbol},
     coefficient::Coefficient,
     domains::{
         finite_field::FiniteFieldCore,
         float::{Complex, Float, Real},
     },
+    license::LicenseManager,
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;

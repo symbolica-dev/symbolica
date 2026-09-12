@@ -57,7 +57,6 @@ use function_map::Expr;
 use instruction::Instr;
 
 use crate::{
-    LicenseManager,
     atom::{Atom, AtomCore, AtomView, EvaluationInfo, Indeterminate, KeyLookup, Symbol},
     coefficient::CoefficientView,
     combinatorics::unique_permutations,
@@ -74,6 +73,7 @@ use crate::{
     error, get_symbol,
     id::ConditionResult,
     info,
+    license::LicenseManager,
     numerical_integration::MonteCarloRng,
     state::State,
     utils::AbortCheck,
@@ -647,20 +647,19 @@ mod test {
     #[test]
     fn jit_compiles_non_inlined_function_registered_with_options() {
         let function = symbol!("symbolica::sub_eval::jit_options");
-        let evaluator = parse!(
-            "symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)"
-        )
-        .evaluator(&[parse!("x")])
-        .add_function_with_options(
-            function,
-            vec![symbol!("y")],
-            parse!("y^2 + 2"),
-            FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
-        )
-        .unwrap()
-        .build()
-        .unwrap()
-        .map_coeff(&|coefficient| coefficient.re.to_f64());
+        let evaluator =
+            parse!("symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)")
+                .evaluator(&[parse!("x")])
+                .add_function_with_options(
+                    function,
+                    vec![symbol!("y")],
+                    parse!("y^2 + 2"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
 
         let mut compiled = evaluator
             .jit_compile(JITCompilationSettings::default())
