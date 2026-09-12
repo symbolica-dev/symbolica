@@ -1150,7 +1150,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cosh().inv());
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sech());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1169,16 +1169,16 @@ impl GeometricSymbols {
                     EvaluationInfo::new()
                     .with_cpp(cpp::unary("sech", "cosh", "x", true))
                     .register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, |z, _| z.cosh().inv())
+                        unary_eval_complex_float(args, |z, _| z.sech())
                     })
-                    .register(|args: &[Float]| unary_eval_real(args, |x| x.cosh().inv()))
-                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.cosh().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.cosh().inv()))
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.sech()))
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sech()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sech()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
-                        unary_eval_real(args, |x| x.cosh().inv())
+                        unary_eval_real(args, |x| x.sech())
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
-                        unary_eval_real(args, |x| x.cosh().inv())
+                        unary_eval_real(args, |x| x.sech())
                     }),
                 )
             },
@@ -1193,7 +1193,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sinh().inv());
+                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.csch());
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1212,16 +1212,16 @@ impl GeometricSymbols {
                     EvaluationInfo::new()
                     .with_cpp(cpp::unary("csch", "sinh", "x", true))
                     .register(|args: &[Complex<Float>]| {
-                        unary_eval_complex_float(args, |z, _| z.sinh().inv())
+                        unary_eval_complex_float(args, |z, _| z.csch())
                     })
-                    .register(|args: &[Float]| unary_eval_real(args, |x| x.sinh().inv()))
-                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.sinh().recip()))
-                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.sinh().inv()))
+                    .register(|args: &[Float]| unary_eval_real(args, |x| x.csch()))
+                    .register(|args: &[f64]| unary_eval_real_f64(args, |x| x.csch()))
+                    .register(|args: &[Complex<f64>]| unary_eval_complex_real_f64(args, |z| z.csch()))
                     .register(|args: &[ErrorPropagatingFloat<f64>]| {
-                        unary_eval_real(args, |x| x.sinh().inv())
+                        unary_eval_real(args, |x| x.csch())
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
-                        unary_eval_real(args, |x| x.sinh().inv())
+                        unary_eval_real(args, |x| x.csch())
                     }),
                 )
             }
@@ -4818,6 +4818,34 @@ mod tests {
         evaluator.evaluate(&[0.25], &mut out);
 
         assert!(out[0].is_finite());
+    }
+
+    #[test]
+    fn reciprocal_hyperbolic_evaluators_avoid_overflow() {
+        for name in ["sech", "csch"] {
+            let evaluator = parse!(format!("{name}(x)"))
+                .evaluator(&[parse!("x")])
+                .build()
+                .unwrap();
+            let mut complex = evaluator
+                .clone()
+                .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+            let mut real = evaluator.map_coeff(&|x| x.re.to_f64());
+            for point in [1e13, -1e13, 711.0, -711.0, 745.5, -745.5] {
+                let value = complex.evaluate_single(&[Complex::new(point, 0.0)]);
+                let expected = if name == "sech" {
+                    point.sech()
+                } else {
+                    point.csch()
+                };
+                assert_eq!(value.re, expected, "{name}({point})");
+                assert_eq!(value.im, 0.0, "{name}({point})");
+                assert_eq!(real.evaluate_single(&[point]), expected);
+                if point.abs() < 1e13 {
+                    assert_ne!(value.re, 0.0);
+                }
+            }
+        }
     }
 
     #[test]
