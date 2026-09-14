@@ -129,6 +129,32 @@ fn samples_with_degree_and_coefficient_policies() {
 }
 
 #[test]
+fn exact_division_with_nonunit_constant_term() {
+    let p = parse!("6*x^2+15*x+6")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let d = parse!("2*x+4")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let q = parse!("3*x+3/2")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+    assert!(p.try_div(&d).is_none());
+    assert_eq!(
+        p.map_coeff(|c| c.into(), Q)
+            .try_div(&d.map_coeff(|c| c.into(), Q)),
+        Some(q)
+    );
+    let p = parse!("6*x^2+18*x+12")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let q = parse!("3*x+3")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    assert_eq!(p.try_div(&d), Some(q));
+}
+
+#[test]
 fn derivative_and_integral_are_inverses() {
     let polynomial = parse!("x^2+5x+x^7+3")
         .to_polynomial::<_, u8>(&Q, None)

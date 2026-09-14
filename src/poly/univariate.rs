@@ -1085,7 +1085,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
             let c = div.get_constant();
             if !self.ring.is_zero(&c)
                 && !self.ring.is_one(&c)
-                && self.ring.try_div(&self.get_constant(), &c).is_some()
+                && self.ring.try_div(&self.get_constant(), &c).is_none()
             {
                 return None;
             }
