@@ -8,13 +8,14 @@ build = "build.rs"
 categories = ["science"]
 description = "A blazing fast computer algebra system"
 edition = "2024"
+exclude = ["benches/fixtures/**"]
 keywords = ["algebra", "symbolic", "manipulation", "mathematics", "physics"]
 license-file = "License.md"
 name = "symbolica"
 readme = "Readme.md"
 repository = "https://github.com/symbolica-dev/symbolica"
 rust-version = "1.89"
-version = "2.2.0"
+version = "3.0.0"
 
 [package.metadata.docs.rs]
 features = ["python_export", "serde", "bincode", "python_stubgen"]
