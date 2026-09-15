@@ -18,7 +18,7 @@ use crate::{
         rational::{Q, Rational},
     },
     parse,
-    poly::{PolyVariable, univariate::IsolatedRoot},
+    poly::{PolyVariable, factor::Factorize, univariate::IsolatedRoot},
 };
 
 #[test]
@@ -30,37 +30,44 @@ fn isolate() {
 
     let roots = p.isolate_real_root_intervals();
 
+    // Isolation endpoints depend on the root-bound algorithm. Check certified
+    // separation, multiplicities, and refinement against fixed root windows,
+    // rather than requiring one particular sequence of bisections.
     assert_eq!(
-        roots,
-        vec![
-            ((-7, 1).into(), (-7, 2).into(), 6),
-            ((-1, 1).into(), (-1, 1).into(), 3),
-            ((0, 1).into(), (0, 1).into(), 6),
-            ((1, 8).into(), (3, 16).into(), 3),
-            ((3, 16).into(), (9, 32).into(), 1),
-            ((3, 4).into(), (1, 1).into(), 1),
-        ],
+        roots.iter().map(|r| r.2).collect::<Vec<_>>(),
+        vec![6, 3, 6, 3, 1, 1]
     );
-
-    let ref_roots: Vec<_> = roots
-        .into_iter()
-        .map(|x| {
-            let r = p.refine_root_interval((x.0, x.1), &(1, 1000).into());
-            (r.0, r.1, x.2)
-        })
-        .collect();
-
-    assert_eq!(
-        ref_roots,
-        vec![
-            ((-3955, 1024).into(), (-987, 256).into(), 6),
-            ((-1, 1).into(), (-1, 1).into(), 3),
-            ((0, 1).into(), (0, 1).into(), 6),
-            ((723, 4096).into(), (181, 1024).into(), 3),
-            ((1023, 4096).into(), (2049, 8192).into(), 1),
-            ((995, 1024).into(), (249, 256).into(), 1),
-        ],
-    );
+    assert!(roots.windows(2).all(|r| r[0].1 <= r[1].0));
+    let windows: Vec<(Rational, Rational)> = vec![
+        ((-3955, 1024).into(), (-987, 256).into()),
+        ((-1, 1).into(), (-1, 1).into()),
+        ((0, 1).into(), (0, 1).into()),
+        ((723, 4096).into(), (181, 1024).into()),
+        ((1, 4).into(), (1, 4).into()),
+        ((995, 1024).into(), (249, 256).into()),
+    ];
+    let mut square_free = p.one();
+    for (factor, _) in p
+        .clone()
+        .to_multivariate::<u16>()
+        .square_free_factorization()
+    {
+        if !factor.is_constant() {
+            square_free = square_free * &factor.to_univariate_from_univariate(0);
+        }
+    }
+    let tolerance: Rational = (1, 1000).into();
+    for ((lo, hi, _), (reference_lo, reference_hi)) in roots.into_iter().zip(windows) {
+        let refined = p.refine_root_interval((lo.clone(), hi.clone()), &tolerance);
+        assert!(lo <= refined.0 && refined.1 <= hi);
+        assert!(refined.0 <= reference_hi && reference_lo <= refined.1);
+        let left = square_free.evaluate(&refined.0);
+        let right = square_free.evaluate(&refined.1);
+        assert!(left * right <= 0);
+        if refined.0 != refined.1 {
+            assert!((&refined.1 - &refined.0) / (&refined.0 + &refined.1).abs() <= tolerance);
+        }
+    }
 }
 
 #[test]

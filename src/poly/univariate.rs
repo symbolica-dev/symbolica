@@ -1395,11 +1395,20 @@ impl UnivariatePolynomial<IntegerRing> {
         let mut bound = Rational::zero();
         for i in (0..self.coefficients.len()).rev() {
             if !sign_flip && self.coefficients[i] < 0 || sign_flip && self.coefficients[i] > 0 {
-                // TODO: what if precision is not enough?
-                let tmp: f64 = (-2f64.powf(t as f64) * self.coefficients[i].to_rational().to_f64()
-                    / self.coefficients[j].to_rational().to_f64())
-                .powf(1. / (j - i) as f64);
-                let tmp = Rational::try_from(tmp).unwrap();
+                // Round the local-max bound (2^t |a_i/a_j|)^(1/(j-i))
+                // upward to a dyadic rational. If an integer has b significant
+                // bits, its magnitude lies in [2^(b-1), 2^b).
+                let log_bound = self.coefficients[i].significant_bits() as i128
+                    - self.coefficients[j].significant_bits() as i128
+                    + t as i128
+                    + 1;
+                let degree = (j - i) as i128;
+                let exponent = (log_bound + degree - 1).div_euclid(degree);
+                let tmp: Rational = if exponent >= 0 {
+                    Integer::from(2).pow(exponent as u64).into()
+                } else {
+                    (Integer::one(), Integer::from(2).pow((-exponent) as u64)).into()
+                };
                 if tmp > bound {
                     bound = tmp;
                 }

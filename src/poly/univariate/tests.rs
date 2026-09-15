@@ -15,6 +15,23 @@ use crate::{
 };
 use rand::{SeedableRng, rngs::StdRng};
 
+#[test]
+fn positive_root_bound_does_not_underflow_or_overflow() {
+    let tiny = parse!("2^2000*x-1")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let large = parse!("x-2^2000")
+        .to_polynomial::<_, u16>(&Z, None)
+        .to_univariate_from_univariate(0);
+    let tiny_bound = tiny.max_real_root_bound();
+    let large_bound = large.max_real_root_bound();
+    assert!(tiny_bound > crate::domains::rational::Rational::zero());
+    assert!(tiny.map_coeff(|c| c.into(), Q).evaluate(&tiny_bound) > 0);
+    assert!(large.map_coeff(|c| c.into(), Q).evaluate(&large_bound) > 0);
+    assert_eq!(tiny.isolate_real_root_intervals().len(), 1);
+    assert_eq!(large.isolate_real_root_intervals().len(), 1);
+}
+
 fn polynomial_with_roots(
     field: &Zp64,
     roots: &[u64],
