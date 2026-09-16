@@ -1,5 +1,13 @@
 # FireFly, Smirnov–Zeng and scaling implementation comparison
 
+The [Hu–Monagan/BMA update](../reconstruction-bma.md) adds opt-in
+`PolynomialBma` and `HuMonagan` methods and a three-seed, matched-prime sample
+comparison, including dense and IBP cases. Both scalar runners accept these
+method names and `MAX_DEGREE`. For finite-field BMA runs, set `BENCH_PRIME`
+to a listed smooth prime, for example `2401514164751985937`; the Q runner
+selects smooth primes automatically and records `Symbolica_smooth` as its
+prime policy. `archive_bma.py` retains all results, including probe-limit failures.
+
 The [initial-image sharing update](../reconstruction-row-streams.md) isolates
 interpolation-row sample streams so vector outputs can share probes despite
 different rational degrees. It adds all 71 outputs of the nonplanar `xbox2l2m`

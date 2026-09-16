@@ -1,0 +1,5 @@
+{
+  "source": "/common/dev/symbolica-reconstruction/target/debug/examples/reconstruction_stress_benchmark",
+  "snapshot": "/common/dev/symbolica-reconstruction/target/reconstruction-external/bma-q-rational-logs/symbolica-stress",
+  "sha256": "6458808bd5b259580e7eaa333a6d5c03b97bffcc8a99e9b8045290347351b64b"
+}

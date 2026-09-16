@@ -1,0 +1,21 @@
+┌────────────────────────────────────────────────────────┐
+│ You are running a restricted Symbolica instance.       │
+│                                                        │
+│ For non-commercial use only, limited to one            │
+│ Symbolica thread per user.                             │
+│                                                        │
+├─ Unlock all cores ─────────────────────────────────────┤
+│                                                        │
+│ Hobbyists and students: free annual key                │
+│ https://symbolica.io/license/#get-hobbyist-license     │
+│                                                        │
+│ Free 30-day professional trial:                        │
+│ https://symbolica.io/license/#get-trial-license        │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods,factor_reductions
+bma_q_polynomial,BalancedZippel,3,ok,4140.629,165,6,5,4,0,2305843009213693967:146;2305843009213693973:4;2305843009213694009:4;2305843009213694017:4;2305843009213694087:4;2305843009213694149:3,0.937,4,1,BalancedZippel,0
+┌────────────────────────────────────────────────────────┐
+│ The Symbolica license key format is outdated.          │
+│ Renew your key at https://symbolica.io/license/        │
+└────────────────────────────────────────────────────────┘

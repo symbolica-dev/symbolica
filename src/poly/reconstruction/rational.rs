@@ -31,7 +31,10 @@ pub struct RationalReconstructionStats {
 /// Reconstruct over Q by CRT and maximal-quotient coefficient reconstruction.
 ///
 /// The result uses Symbolica's integer numerator/denominator representation.
-/// Primes start above 2^61; `max_primes` includes verification primes. The probe
+/// BMA methods use the finite `SMOOTH_PRIMES` list in descending order below
+/// 2^63, restricted to primes large enough for their exponent box. Other
+/// methods use consecutive primes above 2^61.
+/// `max_primes` includes verification primes. The probe
 /// bound in `options` applies separately to each reconstructed image. Failed
 /// modular interpolations and changing supports are retried within this bound.
 /// Learned support and coefficient hypotheses with repeated agreement or a
@@ -59,7 +62,21 @@ where
     if max_primes < 2 {
         return Err(ReconstructionError::InvalidOptions);
     }
-    let mut primes = PrimeIteratorU64::new(1 << 61);
+    let mut primes: Box<dyn Iterator<Item = u64>> = if matches!(
+        method,
+        ReconstructionMethod::PolynomialBma | ReconstructionMethod::HuMonagan
+    ) {
+        let minimum = super::bma::minimum_prime(variables.len(), method, options)?;
+        Box::new(
+            crate::domains::finite_field::SMOOTH_PRIMES
+                .iter()
+                .rev()
+                .map(|&(p, _, _)| p)
+                .filter(move |&p| p > minimum && p < 1 << 63),
+        )
+    } else {
+        Box::new(PrimeIteratorU64::new(1 << 61))
+    };
     let mut stats = RationalReconstructionStats::default();
     let mut support = Vec::new();
     let mut previous_guesses: Vec<Option<Rational>> = Vec::new();
@@ -131,6 +148,9 @@ where
             Ok(r) => r,
             Err(ReconstructionError::InvalidOptions) => {
                 return Err(ReconstructionError::InvalidOptions);
+            }
+            Err(ReconstructionError::UnsupportedBmaGeometry) => {
+                return Err(ReconstructionError::UnsupportedBmaGeometry);
             }
             Err(_) => continue,
         };

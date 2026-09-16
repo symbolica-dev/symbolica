@@ -30,7 +30,7 @@ env = {**os.environ, "RECONSTRUCTION_OVER_Q": "1", "CACHED_ORACLE": "1"}
 for key in ["EXPORT_ORACLE", "RECONSTRUCTION_DEGREE_RACE", "RECONSTRUCTION_NO_REUSE", "RECONSTRUCTION_NO_FACTOR_REUSE", "RECONSTRUCTION_DENSE_ROWS", "BENCH_ORDER"]:
     env.pop(key, None)
 methods = os.environ.get("BENCH_METHODS", "CuytLeePruned,BalancedZippel,FireFly_default,FireFly_scan").split(",")
-assert set(methods) <= {"AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "AutomaticNoFactorReuse", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned", "Rare_scaling"}
+assert set(methods) <= {"PolynomialBma", "HuMonagan", "AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "AutomaticNoFactorReuse", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippel", "BalancedZippelRace", "BalancedZippelSeparated", "FireFly_default", "FireFly_scan", "BalancedZippelNoReuse", "CuytLeePrunedNoReuse", "FIRE7_Q", "FIRE7_Q_learned", "Rare_scaling"}
 fields = "case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,prime_policy,oracle,num_terms,den_terms,setup_ms,selected_methods,factor_reductions".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")
@@ -64,7 +64,7 @@ with output.open("w") as out:
                         if is_fire7 else loader + [str(external / "firefly-q-stress"), str(oracle), case, str(seed), method.removeprefix("FireFly_")]
                         if is_external else [str(rust), case, method.removesuffix("DenseRows").removesuffix("NoReuse").removesuffix("Race").removesuffix("NoFactorReuse"), str(seed)])
                 row = dict(case=case, method=method, seed=seed, oracle="cached_powers_Q",
-                           prime_policy="Rare_native_60" if is_rare else "FIRE7_native_64" if is_fire7 else "FireFly_default" if is_external else "Symbolica_default",
+                           prime_policy="Rare_native_60" if is_rare else "FIRE7_native_64" if is_fire7 else "FireFly_default" if is_external else "Symbolica_smooth" if method in {"PolynomialBma", "HuMonagan"} else "Symbolica_default",
                            num_terms=ns, den_terms=ds)
                 if "TRACE_ORACLE_DIR" in env or "TRACE_ORACLE_PATH" in env:
                     row["oracle"] = "ratracer_trace"

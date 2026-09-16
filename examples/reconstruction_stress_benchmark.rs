@@ -72,13 +72,15 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     let case = args.get(1).expect("case");
     let method = match args.get(2).map(String::as_str) {
+        Some("PolynomialBma") => ReconstructionMethod::PolynomialBma,
+        Some("HuMonagan") => ReconstructionMethod::HuMonagan,
         Some("Automatic") => ReconstructionMethod::Automatic,
         Some("CuytLee") => ReconstructionMethod::CuytLee,
         Some("CuytLeePruned") => ReconstructionMethod::CuytLeePruned,
         Some("BalancedZippel") => ReconstructionMethod::BalancedZippel,
         Some("BalancedZippelSeparated") => ReconstructionMethod::BalancedZippelSeparated,
         _ => panic!(
-            "method must be Automatic, CuytLee, CuytLeePruned, BalancedZippel, or BalancedZippelSeparated"
+            "method must be Automatic, CuytLee, CuytLeePruned, BalancedZippel, BalancedZippelSeparated, PolynomialBma, or HuMonagan"
         ),
     };
     let seed = args.get(3).expect("seed").parse::<u64>().unwrap();
@@ -161,7 +163,9 @@ fn main() {
         .unwrap_or(120.);
     let options = ReconstructionOptions {
         seed,
-        max_degree: 512,
+        max_degree: std::env::var("MAX_DEGREE")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(512),
         degree_race: std::env::var_os("RECONSTRUCTION_DEGREE_RACE").is_some(),
         reuse_row_support: std::env::var_os("RECONSTRUCTION_DENSE_ROWS").is_none(),
         max_probes: std::env::var("MAX_PROBES")

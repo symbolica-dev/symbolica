@@ -63,7 +63,9 @@ pub(super) fn run(
         .unwrap_or(32);
     let options = ReconstructionOptions {
         seed,
-        max_degree: 512,
+        max_degree: std::env::var("MAX_DEGREE")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(512),
         max_attempts: 2,
         max_probes: std::env::var("MAX_PROBES")
             .map(|s| s.parse().unwrap())

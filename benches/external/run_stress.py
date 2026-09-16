@@ -17,14 +17,14 @@ rust = root / os.environ.get("SYMBOLICA_STRESS_BINARY", "target/release/examples
 affinity = ["taskset", "-c", os.environ["BENCH_CPU"]] if "BENCH_CPU" in os.environ else []
 loader = ([os.environ["EXTERNAL_LOADER"], "--library-path", os.environ["EXTERNAL_LIBRARY_PATH"]]
           if "EXTERNAL_LOADER" in os.environ else [])
-env = {**os.environ, "BENCH_PRIME": "9223372036854775783", "CACHED_ORACLE": "1"}
+env = {**os.environ, "BENCH_PRIME": os.environ.get("BENCH_PRIME", "9223372036854775783"), "CACHED_ORACLE": "1"}
 env.pop("RECONSTRUCTION_DENSE_ROWS", None)
 env.pop("EXPORT_ORACLE", None)
 env.pop("RECONSTRUCTION_DEGREE_RACE", None)
 env.pop("BENCH_ORDER", None)
 env.pop("FIRE7_LEARN_BATCH", None)
 methods = os.environ.get("BENCH_METHODS", "BalancedZippel,FireFly_default").split(",")
-assert set(methods) <= {"AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
+assert set(methods) <= {"PolynomialBma", "HuMonagan", "AutomaticDenseRows", "BalancedZippelDenseRows", "Automatic", "BalancedZippel", "BalancedZippelSeparated", "CuytLee", "CuytLeePruned", "CuytLeePrunedRace", "BalancedZippelRace", "FireFly_default", "FIRE7_balanced_adapter", "FIRE7_learned_batch"}
 fields = "case,method,seed,status,elapsed_us,probes,prime,oracle,degree_race,num_terms,den_terms,setup_ms,selected_methods,selection_probes,sparse_rows,sparse_row_fallbacks".split(",")
 with output.open("w") as out:
     writer = csv.DictWriter(out, fields, lineterminator="\n")

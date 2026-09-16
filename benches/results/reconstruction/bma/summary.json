@@ -1,0 +1,692 @@
+{
+  "profile": "dev, debug=0; timings are not release performance measurements",
+  "finite_field_prime": 2401514164751985937,
+  "seeds": [
+    1,
+    2,
+    3
+  ],
+  "max_probes": 20000,
+  "max_attempts": 2,
+  "soft_timeout_seconds": 120,
+  "verification_points": 3,
+  "polynomial_pilot_limit": 32,
+  "degree_bounds": {
+    "polynomial_sparse3": 2000,
+    "rational_sparse3": 512,
+    "other": 128
+  },
+  "q_options": {
+    "max_degree": 64,
+    "max_primes": 20,
+    "prime_policy": "method native"
+  },
+  "tables": {
+    "finite_field": [
+      {
+        "case": "ibp_box2l_rank0001",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 80,
+        "probes_median": 80,
+        "probes_max": 80
+      },
+      {
+        "case": "ibp_box2l_rank0001",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 79,
+        "probes_median": 79,
+        "probes_max": 79
+      },
+      {
+        "case": "ibp_box2l_rank0001",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 282,
+        "probes_median": 282,
+        "probes_max": 282
+      },
+      {
+        "case": "ibp_diamond3l_rank0001",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 119,
+        "probes_median": 119,
+        "probes_max": 119
+      },
+      {
+        "case": "ibp_diamond3l_rank0001",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 139,
+        "probes_median": 139,
+        "probes_max": 139
+      },
+      {
+        "case": "ibp_diamond3l_rank0001",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 501,
+        "probes_median": 501,
+        "probes_max": 501
+      },
+      {
+        "case": "ibp_tth2l_b16_rank0001",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 1133,
+        "probes_median": 1133,
+        "probes_max": 1133
+      },
+      {
+        "case": "ibp_tth2l_b16_rank0001",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 4565,
+        "probes_median": 4565,
+        "probes_max": 4565
+      },
+      {
+        "case": "ibp_tth2l_b16_rank0001",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 10594,
+        "probes_median": 10594,
+        "probes_max": 10594
+      },
+      {
+        "case": "ibp_xbox2l2m_rank0001",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 8300,
+        "probes_median": 8300,
+        "probes_max": 8300
+      },
+      {
+        "case": "ibp_xbox2l2m_rank0001",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 12387,
+        "probes_median": 12387,
+        "probes_max": 12387
+      },
+      {
+        "case": "ibp_xbox2l2m_rank0001",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ProbeLimit": 3
+        },
+        "probes_min": 20000,
+        "probes_median": 20000,
+        "probes_max": 20000
+      },
+      {
+        "case": "paper_eq28",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 306,
+        "probes_median": 306,
+        "probes_max": 306
+      },
+      {
+        "case": "paper_eq28",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 451,
+        "probes_median": 451,
+        "probes_max": 451
+      },
+      {
+        "case": "paper_eq28",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 1224,
+        "probes_median": 1224,
+        "probes_max": 1224
+      },
+      {
+        "case": "polynomial_dense2",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 148,
+        "probes_median": 148,
+        "probes_max": 148
+      },
+      {
+        "case": "polynomial_dense2",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 148,
+        "probes_median": 148,
+        "probes_max": 148
+      },
+      {
+        "case": "polynomial_dense2",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 327,
+        "probes_median": 327,
+        "probes_max": 327
+      },
+      {
+        "case": "polynomial_dense2",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 259,
+        "probes_median": 259,
+        "probes_max": 259
+      },
+      {
+        "case": "polynomial_dense3",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 259,
+        "probes_median": 259,
+        "probes_max": 259
+      },
+      {
+        "case": "polynomial_dense3",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 244,
+        "probes_median": 244,
+        "probes_max": 244
+      },
+      {
+        "case": "polynomial_dense3",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 593,
+        "probes_median": 593,
+        "probes_max": 593
+      },
+      {
+        "case": "polynomial_dense3",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 259,
+        "probes_median": 259,
+        "probes_max": 259
+      },
+      {
+        "case": "polynomial_sparse3_2000",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 16038,
+        "probes_median": 16038,
+        "probes_max": 16038
+      },
+      {
+        "case": "polynomial_sparse3_2000",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 12035,
+        "probes_median": 12035,
+        "probes_max": 12035
+      },
+      {
+        "case": "polynomial_sparse3_2000",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 17,
+        "probes_median": 17,
+        "probes_max": 17
+      },
+      {
+        "case": "polynomial_sparse3_2000",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 14,
+        "probes_median": 14,
+        "probes_max": 14
+      },
+      {
+        "case": "polynomial_sparse3_5",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 78,
+        "probes_median": 78,
+        "probes_max": 78
+      },
+      {
+        "case": "polynomial_sparse3_5",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 65,
+        "probes_median": 65,
+        "probes_max": 65
+      },
+      {
+        "case": "polynomial_sparse3_5",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 17,
+        "probes_median": 17,
+        "probes_max": 17
+      },
+      {
+        "case": "polynomial_sparse3_5",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 14,
+        "probes_median": 14,
+        "probes_max": 14
+      },
+      {
+        "case": "polynomial_sparse3_50",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 438,
+        "probes_median": 438,
+        "probes_max": 438
+      },
+      {
+        "case": "polynomial_sparse3_50",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 335,
+        "probes_median": 335,
+        "probes_max": 335
+      },
+      {
+        "case": "polynomial_sparse3_50",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 17,
+        "probes_median": 17,
+        "probes_max": 17
+      },
+      {
+        "case": "polynomial_sparse3_50",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 14,
+        "probes_median": 14,
+        "probes_max": 14
+      },
+      {
+        "case": "polynomial_sparse3_500",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 4038,
+        "probes_median": 4038,
+        "probes_max": 4038
+      },
+      {
+        "case": "polynomial_sparse3_500",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 3035,
+        "probes_median": 3035,
+        "probes_max": 3035
+      },
+      {
+        "case": "polynomial_sparse3_500",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 17,
+        "probes_median": 17,
+        "probes_max": 17
+      },
+      {
+        "case": "polynomial_sparse3_500",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 14,
+        "probes_median": 14,
+        "probes_max": 14
+      },
+      {
+        "case": "rational_dense3",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 103,
+        "probes_median": 103,
+        "probes_max": 103
+      },
+      {
+        "case": "rational_dense3",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 142,
+        "probes_median": 142,
+        "probes_max": 142
+      },
+      {
+        "case": "rational_dense3",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 659,
+        "probes_median": 659,
+        "probes_max": 659
+      },
+      {
+        "case": "rational_mixed3",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 101,
+        "probes_median": 101,
+        "probes_max": 101
+      },
+      {
+        "case": "rational_mixed3",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 69,
+        "probes_median": 69,
+        "probes_max": 69
+      },
+      {
+        "case": "rational_mixed3",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 229,
+        "probes_median": 229,
+        "probes_max": 229
+      },
+      {
+        "case": "rational_sparse3_5",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 52,
+        "probes_median": 52,
+        "probes_max": 52
+      },
+      {
+        "case": "rational_sparse3_5",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 44,
+        "probes_median": 44,
+        "probes_max": 44
+      },
+      {
+        "case": "rational_sparse3_5",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 88,
+        "probes_median": 88,
+        "probes_max": 88
+      },
+      {
+        "case": "rational_sparse3_50",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 231,
+        "probes_median": 231,
+        "probes_max": 231
+      },
+      {
+        "case": "rational_sparse3_50",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 223,
+        "probes_median": 223,
+        "probes_max": 223
+      },
+      {
+        "case": "rational_sparse3_50",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 88,
+        "probes_median": 88,
+        "probes_max": 88
+      },
+      {
+        "case": "rational_sparse3_500",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 2031,
+        "probes_median": 2031,
+        "probes_max": 2031
+      },
+      {
+        "case": "rational_sparse3_500",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 2023,
+        "probes_median": 2023,
+        "probes_max": 2023
+      },
+      {
+        "case": "rational_sparse3_500",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 88,
+        "probes_median": 88,
+        "probes_max": 88
+      }
+    ],
+    "q_polynomial": [
+      {
+        "case": "bma_q_polynomial",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 165,
+        "probes_median": 165,
+        "probes_max": 165
+      },
+      {
+        "case": "bma_q_polynomial",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 165,
+        "probes_median": 165,
+        "probes_max": 165
+      },
+      {
+        "case": "bma_q_polynomial",
+        "method": "PolynomialBma",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 33,
+        "probes_median": 33,
+        "probes_max": 33
+      }
+    ],
+    "q_rational": [
+      {
+        "case": "bma_q_rational",
+        "method": "Automatic",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 165,
+        "probes_median": 165,
+        "probes_max": 165
+      },
+      {
+        "case": "bma_q_rational",
+        "method": "BalancedZippel",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 165,
+        "probes_median": 165,
+        "probes_max": 165
+      },
+      {
+        "case": "bma_q_rational",
+        "method": "HuMonagan",
+        "runs": 3,
+        "statuses": {
+          "ok": 3
+        },
+        "probes_min": 138,
+        "probes_median": 138,
+        "probes_max": 138
+      }
+    ]
+  }
+}

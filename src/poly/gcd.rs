@@ -1378,7 +1378,7 @@ fn hu_monagan_prime_lower_bound(
 /// `e_s + r_s e_(s+1) + ...`. Interpolation recovers that encoded exponent as a `u64`; `decode`
 /// expands it directly into the polynomial's exponent type.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HuMonaganKroneckerMap {
+pub(crate) struct HuMonaganKroneckerMap {
     start_index: usize,
     radices: Vec<u32>,
     powers: Vec<u64>,
@@ -1386,7 +1386,7 @@ struct HuMonaganKroneckerMap {
 }
 
 impl HuMonaganKroneckerMap {
-    fn new(radices: &[u32], start_index: usize) -> Option<Self> {
+    pub(crate) fn new(radices: &[u32], start_index: usize) -> Option<Self> {
         let radices = radices.get(start_index..)?;
         let mut product = 1u64;
         let mut powers = Vec::with_capacity(radices.len());
@@ -1406,15 +1406,19 @@ impl HuMonaganKroneckerMap {
         })
     }
 
-    fn powers(&self) -> &[u64] {
+    pub(crate) fn powers(&self) -> &[u64] {
         &self.powers
     }
 
-    fn range(&self) -> u64 {
+    pub(crate) fn range(&self) -> u64 {
         self.range
     }
 
-    fn decode<E: PositiveExponent>(&self, mut encoded: u64, exponents: &mut [E]) -> Option<()> {
+    pub(crate) fn decode<E: PositiveExponent>(
+        &self,
+        mut encoded: u64,
+        exponents: &mut [E],
+    ) -> Option<()> {
         if encoded >= self.range {
             return None;
         }

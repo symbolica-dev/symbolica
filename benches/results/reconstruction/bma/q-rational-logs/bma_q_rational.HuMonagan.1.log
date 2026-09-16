@@ -1,0 +1,21 @@
+┌────────────────────────────────────────────────────────┐
+│ You are running a restricted Symbolica instance.       │
+│                                                        │
+│ For non-commercial use only, limited to one            │
+│ Symbolica thread per user.                             │
+│                                                        │
+├─ Unlock all cores ─────────────────────────────────────┤
+│                                                        │
+│ Hobbyists and students: free annual key                │
+│ https://symbolica.io/license/#get-hobbyist-license     │
+│                                                        │
+│ Free 30-day professional trial:                        │
+│ https://symbolica.io/license/#get-trial-license        │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+case,method,seed,status,elapsed_us,probes,primes,images,support_reuses,support_fallbacks,probes_by_prime,setup_ms,num_terms,den_terms,selected_methods,factor_reductions
+bma_q_rational,HuMonagan,1,ok,4983.553,138,6,5,4,0,1945555039024054273:3;2401514164751985937:4;2844673747342852097:4;3906250000000000001:4;4803028329503971873:4;6566248256706183169:119,2.352,4,3,HuMonagan,0
+┌────────────────────────────────────────────────────────┐
+│ The Symbolica license key format is outdated.          │
+│ Renew your key at https://symbolica.io/license/        │
+└────────────────────────────────────────────────────────┘

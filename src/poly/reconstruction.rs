@@ -4,6 +4,8 @@
 //! Symbolica polynomial arithmetic: Cuyt–Lee with Zippel interpolation (the
 //! algorithm used by Kira through FireFly, arXiv:1904.00009, section 2.2), and
 //! balanced Zippel (Smirnov–Zeng, arXiv:2409.19099, section 2.5).
+//! Additional opt-in polynomial and rational routes reuse the Hu–Monagan GCD's
+//! BMA interpolation primitives and require a listed smooth prime.
 //! Results are probabilistic: fresh probes check the result and failed attempts
 //! restart with new anchors. Degree and probe limits make failure bounded.
 
@@ -25,6 +27,7 @@ use std::{
 };
 
 mod automatic;
+mod bma;
 mod factors;
 mod rational;
 mod rational_factors;
@@ -39,6 +42,16 @@ type Fraction = RationalPolynomial<Zp64, u16>;
 /// Reconstruction strategy. These are implementations, not external-code bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconstructionMethod {
+    /// Ben-Or/Tiwari polynomial interpolation using the Hu-Monagan GCD's BMA,
+    /// root recovery and Kronecker decoding. Assumes the oracle is polynomial;
+    /// returns denominator one, subject to ordinary fresh verification.
+    /// Requires a prime in `SMOOTH_PRIMES` and an injective exponent box.
+    PolynomialBma,
+    /// Rational interpolation with BMA coefficient rows and recursively
+    /// reconstructed normalization slices. Tries a bounded polynomial pilot
+    /// first. Univariate rational slices still use Thiele; their degrees
+    /// remain a cost. Requires a prime in `SMOOTH_PRIMES`.
+    HuMonagan,
     /// Choose from learned slice structure and estimated dense interpolation
     /// costs. A shared univariate factor in the last-variable pilot triggers
     /// factor removal and balanced reconstruction with reused survey rows. All discovery
@@ -63,7 +76,8 @@ pub enum ReconstructionMethod {
 #[derive(Clone, Debug)]
 pub struct ReconstructionOptions {
     /// Maximum degree of either univariate numerator or denominator.
-    /// For Cuyt–Lee this bounds total degree, for balanced Zippel individual degree.
+    /// For Cuyt–Lee this bounds total degree; for balanced Zippel and BMA it
+    /// bounds individual degree. BMA may use tighter `bma_degree_bounds`.
     pub max_degree: u16,
     /// Maximum number of distinct black-box calls, including poles and retries.
     pub max_probes: usize,
@@ -86,6 +100,13 @@ pub struct ReconstructionOptions {
     /// Reuse univariate powers observed in an earlier balanced row when they
     /// are sparse enough to save probes, with fresh row checks and fallback.
     pub reuse_row_support: bool,
+    /// Optional individual degree bounds for BMA's mixed-radix encoding.
+    /// Defaults to `max_degree` in every variable; every entry must be at most
+    /// `max_degree`. The exponent box must fit below the multiplicative order.
+    pub bma_degree_bounds: Option<Vec<u16>>,
+    /// Maximum samples in each polynomial prediction made by `HuMonagan`.
+    /// Zero disables these predictions. Unused by `PolynomialBma`.
+    pub bma_polynomial_probe_limit: usize,
 }
 
 impl Default for ReconstructionOptions {
@@ -100,6 +121,8 @@ impl Default for ReconstructionOptions {
             reuse_coefficients: true,
             reuse_rational_factors: true,
             reuse_row_support: true,
+            bma_degree_bounds: None,
+            bma_polynomial_probe_limit: 32,
         }
     }
 }
@@ -125,6 +148,8 @@ pub struct ReconstructionStats {
     pub separation_fallbacks: usize,
     pub linear_solves: usize,
     pub attempts: usize,
+    /// Polynomial sequences successfully decoded through BMA, including pilots.
+    pub bma_sequences: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +160,8 @@ pub enum ReconstructionError {
     PrimeLimit,
     /// Degree limit, exceptional specializations, or verification failure.
     AttemptsExhausted,
+    /// BMA needs a listed smooth prime and an injective, representable degree box.
+    UnsupportedBmaGeometry,
 }
 
 impl std::fmt::Display for ReconstructionError {
@@ -144,6 +171,7 @@ impl std::fmt::Display for ReconstructionError {
             Self::ProbeLimit => "rational reconstruction exhausted its black-box probe budget",
             Self::PrimeLimit => "rational reconstruction exhausted its prime budget",
             Self::AttemptsExhausted => "rational reconstruction failed: increase the degree/attempt limit or change the seed/prime",
+            Self::UnsupportedBmaGeometry => "BMA reconstruction requires a listed smooth prime and a degree box smaller than its multiplicative order",
         })
     }
 }
@@ -156,8 +184,10 @@ type Result<T> = std::result::Result<T, ReconstructionError>;
 /// in `field`. Variable order is significant for performance.
 ///
 /// `field` must have an odd prime modulus (as required by `Zp64`); this function
-/// does not prove primality. No degrees or monomial supports are supplied by the
-/// caller. Returned numerator and denominator are coprime and denominator-monic.
+/// does not prove primality. No exact degrees or monomial supports are required;
+/// BMA additionally accepts optional individual degree bounds. BMA methods require
+/// `field` to occur in `SMOOTH_PRIMES`. Returned numerator and denominator are
+/// coprime and denominator-monic.
 /// Three random checks are the default, not a deterministic identity proof.
 pub fn reconstruct_rational_function<F>(
     field: Zp64,
@@ -181,6 +211,12 @@ where
         return Err(ReconstructionError::InvalidOptions);
     }
     let template = Polynomial::new(&field, None, variables);
+    if matches!(
+        method,
+        ReconstructionMethod::PolynomialBma | ReconstructionMethod::HuMonagan
+    ) {
+        bma::validate(&field, template.nvars(), method, options)?;
+    }
     let mut ctx = Context {
         field,
         template,
@@ -224,6 +260,15 @@ where
         };
         for &separate in candidates {
             let result = match selected {
+                ReconstructionMethod::PolynomialBma => {
+                    let fixed = ctx.point();
+                    ctx.bma_polynomial(ctx.template.nvars(), &fixed, options.max_probes)
+                        .and_then(|p| p.ok_or(ReconstructionError::AttemptsExhausted))
+                }
+                ReconstructionMethod::HuMonagan => {
+                    let fixed = ctx.point();
+                    ctx.hu_monagan(ctx.template.nvars(), &fixed)
+                }
                 ReconstructionMethod::Automatic => unreachable!(),
                 ReconstructionMethod::CuytLee => ctx.cuyt_lee(false),
                 ReconstructionMethod::CuytLeePruned => {
