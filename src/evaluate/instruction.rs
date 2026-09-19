@@ -150,14 +150,35 @@ pub struct ExportedInstructions<T> {
     pub instructions: Vec<Instruction>,
     /// The number of temporary storage slots required to execute `instructions`.
     pub temporary_count: usize,
-    /// Constant values referenced by [`Slot::Const`].
+    /// Constant values referenced by [`Slot::Const`]. Slots listed in
+    /// [`Self::constant_functions`] may contain rational placeholders in an exact
+    /// evaluator; resolve their definitions at the target precision before use.
     pub constants: Vec<T>,
+    /// Symbolic definitions of constant slots evaluated by registered functions.
+    ///
+    /// In exact evaluators these slots may contain placeholders, not
+    /// the value of the registered constant. A consumer must resolve these
+    /// definitions at its target precision before using the constant slots.
+    pub constant_functions: Vec<ExportedConstantFunction>,
     /// Locally defined evaluators called by [`Instruction::Fun`] instructions in this stream.
     ///
     /// A call resolves to a sub-evaluator when its symbol and tags match the corresponding fields
     /// of an entry in this list. Calls without a matching entry remain ordinary external function
     /// calls. Sub-evaluators may recursively contain their own sub-evaluators.
     pub sub_evaluators: Vec<ExportedSubEvaluator<T>>,
+}
+
+/// An exact registered constant or fixed-argument function in a constant slot.
+#[derive(Debug, Clone)]
+pub struct ExportedConstantFunction {
+    /// Index in [`ExportedInstructions::constants`], not in temporary storage.
+    pub index: usize,
+    /// Registered function or constant symbol.
+    pub symbol: Symbol,
+    /// Canonical function tags, in their original order.
+    pub tags: Vec<String>,
+    /// Exact numerical arguments; empty for a registered constant such as pi.
+    pub fixed_args: Vec<Complex<Rational>>,
 }
 
 /// A non-inlined function body exported alongside an instruction stream.
@@ -189,6 +210,8 @@ impl<T: Clone> ExpressionEvaluator<T> {
     /// - [`ExportedInstructions::instructions`] is the linear instruction list.
     /// - [`ExportedInstructions::temporary_count`] is the number of temporary slots required.
     /// - [`ExportedInstructions::constants`] contains the values addressed by [`Slot::Const`].
+    /// - [`ExportedInstructions::constant_functions`] identifies registered constants and
+    ///   fixed-argument functions whose slots must be resolved at the target precision.
     /// - [`ExportedInstructions::sub_evaluators`] contains bodies for non-inlined functions. A
     ///   function instruction without a matching sub-evaluator is an ordinary external call.
     ///
@@ -196,6 +219,24 @@ impl<T: Clone> ExpressionEvaluator<T> {
     pub fn export_instructions(&self) -> ExportedInstructions<T> {
         let mut instr = vec![];
         let constants: Vec<_> = self.stack[self.param_count..self.reserved_indices].to_vec();
+        let constant_functions = self
+            .external_fns
+            .iter()
+            .filter_map(|external| {
+                external
+                    .constant_index
+                    .map(|index| ExportedConstantFunction {
+                        index,
+                        symbol: external.symbol,
+                        tags: external
+                            .tags
+                            .iter()
+                            .map(|tag| tag.to_canonical_string())
+                            .collect(),
+                        fixed_args: external.fixed_args.clone(),
+                    })
+            })
+            .collect();
         let sub_evaluators = self
             .external_fns
             .iter()
@@ -331,6 +372,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
             instructions: instr,
             temporary_count: self.stack.len() - self.reserved_indices,
             constants,
+            constant_functions,
             sub_evaluators,
         }
     }
