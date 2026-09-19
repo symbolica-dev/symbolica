@@ -801,6 +801,7 @@ impl JITCompiledNumber for f64 {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -827,6 +828,10 @@ impl JITCompiledNumber for f64 {
 }
 
 /// A JIT-compiled evaluator for expressions, using the SymJIT compiler.
+///
+/// Serialization retains the compilation settings for recursively rebuilding
+/// non-inlined evaluators. Serialized JIT payloads are revision-dependent;
+/// payloads written before settings were included must be regenerated.
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
     code: Applet,
@@ -834,6 +839,8 @@ pub struct JITCompiledEvaluator<T> {
     external_functions: Vec<ExternalFunctionContainer<T>>,
     #[allow(dead_code)]
     compressed_ir: Vec<u8>,
+    #[allow(dead_code)] // Used when serialization support is enabled.
+    settings: JITCompilationSettings,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
 }
@@ -853,7 +860,12 @@ impl<T> JITCompiledEvaluator<T> {
 #[cfg(feature = "serde")]
 impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (&self.external_functions, &self.compressed_ir).serialize(serializer)
+        (
+            &self.external_functions,
+            &self.compressed_ir,
+            &self.settings,
+        )
+            .serialize(serializer)
     }
 }
 
@@ -864,9 +876,12 @@ impl<
 > serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
-            serde::Deserialize::deserialize(deserializer)?;
-        Self::load(compressed_ir, fs).map_err(serde::de::Error::custom)
+        let (fs, compressed_ir, settings): (
+            Vec<ExternalFunctionContainer<T>>,
+            Vec<u8>,
+            JITCompilationSettings,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+        Self::load(compressed_ir, fs, settings).map_err(serde::de::Error::custom)
     }
 }
 
@@ -878,6 +893,7 @@ impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
     ) -> core::result::Result<(), bincode::error::EncodeError> {
         bincode::Encode::encode(&self.external_functions, encoder)?;
         bincode::Encode::encode(&self.compressed_ir, encoder)?;
+        bincode::Encode::encode(&self.settings, encoder)?;
         Ok(())
     }
 }
@@ -891,7 +907,8 @@ impl<Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<
     ) -> Result<Self, bincode::error::DecodeError> {
         let fs: Vec<ExternalFunctionContainer<T>> = bincode::Decode::decode(decoder)?;
         let compressed_ir: Vec<u8> = bincode::Decode::decode(decoder)?;
-        Self::load(compressed_ir, fs).map_err(|e| bincode::error::DecodeError::OtherString(e))
+        let settings: JITCompilationSettings = bincode::Decode::decode(decoder)?;
+        Self::load(compressed_ir, fs, settings).map_err(bincode::error::DecodeError::OtherString)
     }
 }
 
@@ -927,9 +944,10 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
     fn load(
         compressed_ir: Vec<u8>,
         external_functions: Vec<ExternalFunctionContainer<T>>,
+        settings: JITCompilationSettings,
     ) -> Result<Self, String> {
-        let settings = JITCompilationSettings::default();
         let mut config = Config::default();
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(T::convert_external_functions(
             &external_functions,
             &settings,
@@ -943,6 +961,7 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
             code: app,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1048,6 +1067,7 @@ impl JITCompiledNumber for wide::f64x4 {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1240,6 +1260,7 @@ impl JITCompiledNumber for Complex<f64> {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1390,6 +1411,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
