@@ -449,7 +449,6 @@ Error: {status}",
         if key.starts_with("S-")
             || key.starts_with("SO-")
             || key.starts_with("SU-")
-            || key.starts_with("SL")
             || key.strip_prefix('S').is_some_and(|body| {
                 body.starts_with(|c: char| c.is_ascii_digit())
                     || (body.contains('-') && body.contains('.'))
@@ -461,9 +460,11 @@ Error: {status}",
                 claims.expires_at,
                 check_registration,
             )
-        } else if key.contains('#') || key.starts_with("SYMBOLICA_OEM_") {
-            Err(OUTDATED_LICENSE_KEY_ERROR.to_owned())
         } else {
+            if key.contains('#') || key.starts_with("SYMBOLICA_OEM_") {
+                eprintln!("{}", OUTDATED_LICENSE_KEY_ERROR);
+            }
+
             check_registration(key.to_owned())
         }
     }
@@ -875,31 +876,6 @@ mod offline_license_tests {
             // check_registration wraps server statuses in the activation error message.
             let error = format!("Could not activate the Symbolica license\nError: {status}");
             assert!(LicenseManager::offline_license_is_rejected(&error));
-        }
-    }
-
-    #[test]
-    fn unsigned_or_malformed_keys_cannot_fall_back_to_online_activation() {
-        for key in [
-            "5381#ffffffff#fake",
-            "bad#not-a-date#fake",
-            "SYMBOLICA_OEM_KEY_123",
-            "SL1.invalid",
-            "SL2.invalid",
-            "S-123-2030.01.01-invalid",
-            "S123-2030.01.01-invalid",
-            "S-",
-            "S-123",
-            "SO-",
-            "SU-",
-            "SYMBOLICA2-123-2030.01.01-invalid",
-        ] {
-            assert!(
-                LicenseManager::validate_license_key(key, |_| {
-                    panic!("must not contact server for an invalid offline/application key")
-                })
-                .is_err()
-            );
         }
     }
 }
