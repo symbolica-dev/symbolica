@@ -1,4 +1,7 @@
-use std::sync::{Arc, LazyLock};
+use std::{
+    ops::Deref,
+    sync::{Arc, OnceLock},
+};
 
 mod cpp;
 
@@ -26,7 +29,37 @@ use crate::{
     utils::Settable,
 };
 
-static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
+// State initialization runs dependent crates' callbacks, which may themselves
+// request a transcendental symbol. Enter State BEFORE acquiring this cache's
+// initialization lock; the opposite order would re-enter the same pending
+// LazyLock/OnceLock from such a callback.
+struct SymbolCache<T> {
+    value: OnceLock<T>,
+    initialize: fn() -> T,
+}
+
+impl<T> SymbolCache<T> {
+    const fn new(initialize: fn() -> T) -> Self {
+        Self {
+            value: OnceLock::new(),
+            initialize,
+        }
+    }
+}
+
+impl<T> Deref for SymbolCache<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        if let Some(value) = self.value.get() {
+            return value;
+        }
+        let _ = State::get_global_state();
+        self.value.get_or_init(self.initialize)
+    }
+}
+
+static SPECIALS: SymbolCache<SpecialSymbols> = SymbolCache::new(|| SpecialSymbols {
     euler_gamma: get_symbol!("euler_gamma").expect("Euler gamma not defined"),
     gamma: get_symbol!("gamma").expect("gamma not defined"),
     erf: get_symbol!("erf").expect("erf not defined"),
@@ -36,7 +69,7 @@ static SPECIALS: LazyLock<SpecialSymbols> = LazyLock::new(|| SpecialSymbols {
     root_var: get_symbol!("root_var").expect("root_var not defined"),
     zeta: get_symbol!("zeta").expect("zeta not defined"),
 });
-static GEOMETRICS: LazyLock<GeometricSymbols> = LazyLock::new(|| GeometricSymbols {
+static GEOMETRICS: SymbolCache<GeometricSymbols> = SymbolCache::new(|| GeometricSymbols {
     tan: get_symbol!("tan").expect("tan not defined"),
     cot: get_symbol!("cot").expect("cot not defined"),
     sec: get_symbol!("sec").expect("sec not defined"),
@@ -60,7 +93,7 @@ static GEOMETRICS: LazyLock<GeometricSymbols> = LazyLock::new(|| GeometricSymbol
     asech: get_symbol!("asech").expect("asech not defined"),
     acsch: get_symbol!("acsch").expect("acsch not defined"),
 });
-static BESSELS: LazyLock<BesselSymbols> = LazyLock::new(|| BesselSymbols {
+static BESSELS: SymbolCache<BesselSymbols> = SymbolCache::new(|| BesselSymbols {
     bessel_j: get_symbol!("bessel_j").expect("bessel_j not defined"),
     bessel_y: get_symbol!("bessel_y").expect("bessel_y not defined"),
     bessel_i: get_symbol!("bessel_i").expect("bessel_i not defined"),
