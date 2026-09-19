@@ -263,6 +263,35 @@ impl<T> ExternalFunctionContainer<T> {
         self.tags.iter().map(|x| x.as_view()).collect()
     }
 
+    /// Resolve a registered constant or fixed-argument function in the target domain.
+    pub(super) fn evaluate_constant<T2: EvaluationDomain>(
+        &self,
+        binary_prec: u32,
+    ) -> Result<T2, String> {
+        let info = self
+            .symbol
+            .get_evaluation_info()
+            .ok_or_else(|| format!("External constant '{}' does not have evaluation info", self))?;
+        let tags = self.tag_views();
+        if self.fixed_args.is_empty() {
+            T2::try_from_complex_float(info.evaluate_constant(&tags, binary_prec)?)
+        } else {
+            let args = self
+                .fixed_args
+                .iter()
+                .map(|c| {
+                    T2::try_from_complex_float(Complex::new(
+                        c.re.to_multi_prec_float(binary_prec),
+                        c.im.to_multi_prec_float(binary_prec),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let eval = T2::resolve_function(&tags, info)
+                .ok_or_else(|| format!("External constant '{}' has no implementation", self))?;
+            Ok(eval(&args))
+        }
+    }
+
     pub(super) fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
         debug_assert!(self.sub_evaluator.is_none());
         ExternalFunctionContainer {

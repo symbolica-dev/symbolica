@@ -496,17 +496,28 @@ impl ExpressionEvaluator<Complex<Rational>> {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
         let exported = self.export_instructions();
-        let constants = exported
+        let mut constants = exported
             .constants
             .into_iter()
             .map(|c| symjit::Complex::new(c.re.to_f64(), c.im.to_f64()))
             .collect::<Vec<_>>();
 
+        // Exact evaluators contain placeholders for registered constants and constant function
+        // calls. Resolve them just as coefficient mapping does before exporting numeric code.
+        let binary_prec = T::FIXED_PRECISION.unwrap_or(53);
+        for external in &self.external_fns {
+            let Some(index) = external.constant_index else {
+                continue;
+            };
+            let value = external.evaluate_constant::<T>(binary_prec)?;
+            constants[index] = value.to_complex_f64()?;
+        }
+
         let external_fns = self
             .external_fns
             .iter()
             .map(|f| {
-                let mapped = f.map_rational::<T>(T::FIXED_PRECISION.unwrap_or(53));
+                let mapped = f.map_rational::<T>(binary_prec);
                 if mapped.constant_index.is_none()
                     && mapped.imp.is_none()
                     && mapped.sub_evaluator.is_none()
@@ -790,6 +801,7 @@ impl JITCompiledNumber for f64 {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -816,6 +828,10 @@ impl JITCompiledNumber for f64 {
 }
 
 /// A JIT-compiled evaluator for expressions, using the SymJIT compiler.
+///
+/// Serialization retains the compilation settings for recursively rebuilding
+/// non-inlined evaluators. Serialized JIT payloads are revision-dependent;
+/// payloads written before settings were included must be regenerated.
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
     code: Applet,
@@ -823,6 +839,8 @@ pub struct JITCompiledEvaluator<T> {
     external_functions: Vec<ExternalFunctionContainer<T>>,
     #[allow(dead_code)]
     compressed_ir: Vec<u8>,
+    #[allow(dead_code)] // Used when serialization support is enabled.
+    settings: JITCompilationSettings,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
 }
@@ -842,7 +860,12 @@ impl<T> JITCompiledEvaluator<T> {
 #[cfg(feature = "serde")]
 impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (&self.external_functions, &self.compressed_ir).serialize(serializer)
+        (
+            &self.external_functions,
+            &self.compressed_ir,
+            &self.settings,
+        )
+            .serialize(serializer)
     }
 }
 
@@ -853,9 +876,12 @@ impl<
 > serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
-            serde::Deserialize::deserialize(deserializer)?;
-        Self::load(compressed_ir, fs).map_err(serde::de::Error::custom)
+        let (fs, compressed_ir, settings): (
+            Vec<ExternalFunctionContainer<T>>,
+            Vec<u8>,
+            JITCompilationSettings,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+        Self::load(compressed_ir, fs, settings).map_err(serde::de::Error::custom)
     }
 }
 
@@ -867,6 +893,7 @@ impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
     ) -> core::result::Result<(), bincode::error::EncodeError> {
         bincode::Encode::encode(&self.external_functions, encoder)?;
         bincode::Encode::encode(&self.compressed_ir, encoder)?;
+        bincode::Encode::encode(&self.settings, encoder)?;
         Ok(())
     }
 }
@@ -880,7 +907,8 @@ impl<Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<
     ) -> Result<Self, bincode::error::DecodeError> {
         let fs: Vec<ExternalFunctionContainer<T>> = bincode::Decode::decode(decoder)?;
         let compressed_ir: Vec<u8> = bincode::Decode::decode(decoder)?;
-        Self::load(compressed_ir, fs).map_err(|e| bincode::error::DecodeError::OtherString(e))
+        let settings: JITCompilationSettings = bincode::Decode::decode(decoder)?;
+        Self::load(compressed_ir, fs, settings).map_err(bincode::error::DecodeError::OtherString)
     }
 }
 
@@ -916,9 +944,10 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
     fn load(
         compressed_ir: Vec<u8>,
         external_functions: Vec<ExternalFunctionContainer<T>>,
+        settings: JITCompilationSettings,
     ) -> Result<Self, String> {
-        let settings = JITCompilationSettings::default();
         let mut config = Config::default();
+        settings.apply_to_config(&mut config)?;
         config.set_defuns(T::convert_external_functions(
             &external_functions,
             &settings,
@@ -932,6 +961,7 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
             code: app,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -982,7 +1012,9 @@ impl JITCompiledNumber for wide::f64x4 {
         let mut defuns = Defuns::new();
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
@@ -1035,6 +1067,7 @@ impl JITCompiledNumber for wide::f64x4 {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1167,7 +1200,9 @@ impl JITCompiledNumber for Complex<f64> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
@@ -1225,6 +1260,7 @@ impl JITCompiledNumber for Complex<f64> {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1313,7 +1349,9 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
@@ -1373,6 +1411,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
             code: app.seal().map_err(|e| e.to_string())?,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
