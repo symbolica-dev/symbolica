@@ -180,16 +180,25 @@ pub trait Real: FloatLike {
     #[inline]
     fn hypot(&self, other: &Self) -> Self {
         let (mut a, mut b) = (self.norm(), other.norm());
+
         match a.real_cmp(&b) {
             Some(std::cmp::Ordering::Less) => std::mem::swap(&mut a, &mut b),
             Some(_) => {}
             None => return (self.clone() * self + other.clone() * other).sqrt(),
         }
+
         if b.is_fully_zero() {
             return a;
         }
+
+        let one = if a.get_precision() >= b.get_precision() {
+            a.one()
+        } else {
+            b.one()
+        };
+
         let r = b / &a;
-        a * (r.one() + r.clone() * r).sqrt()
+        a * (one + r.clone() * r).sqrt()
     }
 
     /// Absolute value with the sign of `sign`, including signed zero where supported.
