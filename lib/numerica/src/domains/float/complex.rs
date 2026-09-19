@@ -1062,19 +1062,28 @@ impl<T: Real> Real for Complex<T> {
         if a.real_cmp(&b) == Some(Ordering::Less) {
             std::mem::swap(&mut a, &mut b);
         }
-        let one = a.one();
-        let two = a.from_usize(2);
-        let h = a.hypot(&b);
+        // Exact constants must not limit a result carried by the smaller,
+        // more precise component (for example the real part of log(1 + i*b)).
+        let highest_prec = if a.get_precision() >= b.get_precision() {
+            &a
+        } else {
+            &b
+        };
+        let one = highest_prec.one();
+        let two = highest_prec.from_usize(2);
         let re = if a.real_cmp(&(one.clone() / &two)) == Some(Ordering::Greater)
             && a.real_cmp(&(one.clone() + one.clone() / &two)) == Some(Ordering::Less)
         {
             // Retain the small real part near the unit circle.
             ((a.clone() - &one) * (a.clone() + one) + b.clone() * b).log1p() / two
-        } else if h.needs_rescaling() && !a.is_fully_zero() && a.real_cmp(&b).is_some() {
-            let r = b / &a;
-            a.log() + (r.clone() * r).log1p() / two
         } else {
-            h.log()
+            let h = a.hypot(&b);
+            if h.needs_rescaling() && !a.is_fully_zero() && a.real_cmp(&b).is_some() {
+                let r = b / &a;
+                a.log() + (r.clone() * r).log1p() / two
+            } else {
+                h.log()
+            }
         };
         Complex::new(re, self.arg())
     }
