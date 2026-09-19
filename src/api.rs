@@ -1,6 +1,7 @@
 //! Contains various API bindings.
 
 #[doc(hidden)]
+#[cfg(feature = "c_api")]
 pub mod cpp;
 #[cfg(feature = "mathematica_api")]
 pub mod mathematica;

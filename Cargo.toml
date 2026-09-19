@@ -53,6 +53,8 @@ wasm = ["integer-malachite", "float-astro", "binary_size", "dep:getrandom"]
 native_code_generation = ["dep:libloading", "dep:symjit"]
 # sort functions based on an argument-by-argument comparison
 full_fn_cmp = []
+# Export the C API symbols for C/C++ consumers.
+c_api = []
 mathematica_api = ["wolfram-library-link"]
 # Reduce monomorphized polynomial code in internal modular GCD routines by using
 # FiniteField<u64> only instead of compiling both FiniteField<u32> and
