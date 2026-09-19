@@ -993,7 +993,9 @@ impl JITCompiledNumber for wide::f64x4 {
         let mut defuns = Defuns::new();
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
@@ -1178,7 +1180,9 @@ impl JITCompiledNumber for Complex<f64> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
@@ -1324,7 +1328,9 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.sub_evaluator.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
