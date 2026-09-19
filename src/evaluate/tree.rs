@@ -834,6 +834,28 @@ impl<'a> AtomView<'a> {
             call_args.push(slot);
         }
 
+        // Update external function indices to account for upstreamed constant callbacks.
+        let mut next_index = 0;
+        let external_indices = evaluator
+            .external_fns
+            .iter()
+            .map(|external| {
+                if external.constant_index.is_none() {
+                    let index = next_index;
+                    next_index += 1;
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (instruction, _) in &mut evaluator.instructions {
+            if let Instr::ExternalFun(_, index, _) = instruction {
+                *index = external_indices[*index].expect("runtime external function");
+            }
+        }
+
         evaluator
             .external_fns
             .retain(|external| external.constant_index.is_none());
