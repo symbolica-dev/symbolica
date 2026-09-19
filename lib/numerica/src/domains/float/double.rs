@@ -153,6 +153,15 @@ impl FloatLike for DoubleFloat {
     }
 
     #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(if self.is_nan() {
+            std::num::FpCategory::Nan
+        } else {
+            self.0.hi().classify()
+        })
+    }
+
+    #[inline(always)]
     fn needs_rescaling(&self) -> bool {
         !self.0.hi().is_normal()
     }

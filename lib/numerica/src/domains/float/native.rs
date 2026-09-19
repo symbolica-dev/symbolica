@@ -20,6 +20,11 @@ impl FloatLike for f64 {
     }
 
     #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(f64::classify(*self))
+    }
+
+    #[inline(always)]
     fn needs_rescaling(&self) -> bool {
         !self.is_normal()
     }
@@ -339,6 +344,11 @@ impl FloatLike for F64 {
     #[inline(always)]
     fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(self.0.classify())
     }
 
     #[inline(always)]

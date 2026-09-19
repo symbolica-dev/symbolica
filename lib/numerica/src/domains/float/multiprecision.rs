@@ -881,6 +881,20 @@ impl FloatLike for Float {
         self.partial_cmp(other)
     }
 
+    #[inline]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        use std::num::FpCategory;
+        Some(if self.0.is_nan() {
+            FpCategory::Nan
+        } else if !self.is_finite() {
+            FpCategory::Infinite
+        } else if self.0.is_zero() {
+            FpCategory::Zero
+        } else {
+            FpCategory::Normal
+        })
+    }
+
     #[inline(always)]
     fn needs_rescaling(&self) -> bool {
         !self.is_finite() || self.is_zero()
@@ -1116,7 +1130,43 @@ impl Real for Float {
 
     #[inline(always)]
     fn atan2(&self, x: &Self) -> Self {
-        self.0.clone().atan2(&x.0).into()
+        if self.prec() == x.prec() {
+            return self.0.clone().atan2(&x.0).into();
+        }
+        let precision = self.prec().max(x.prec());
+        if !self.is_finite() || !x.is_finite() || self.is_zero() || x.is_zero() {
+            // Axis angles are exact zeros or exact multiples of pi. Preserve
+            // the backend's signed-zero/nonfinite conventions without making
+            // the precision of an exact zero throttle a known angle.
+            return MultiPrecisionFloat::with_val(precision, &self.0)
+                .atan2(&x.0)
+                .into();
+        }
+
+        // A tiny component can retain few relative bits after cancellation,
+        // yet the phase near +/-pi or +/-pi/2 is accurately known in absolute
+        // terms. Compute only the small correction at the ratio's precision;
+        // Float subtraction then tracks its absolute uncertainty against a
+        // freshly computed exact constant. Never pad a computed small angle.
+        let pi = || Float::with_val(precision, Constant::Pi);
+        if x.norm() >= self.norm() {
+            let correction: Float = (self.clone() / x.norm()).0.atan().into();
+            if x.is_negative() {
+                let axis = if self.is_negative() { -pi() } else { pi() };
+                axis - correction
+            } else {
+                correction
+            }
+        } else {
+            let correction: Float = (x.clone() / self).0.atan().into();
+            let half_pi = pi() / 2;
+            let axis = if self.is_negative() {
+                -half_pi
+            } else {
+                half_pi
+            };
+            axis - correction
+        }
     }
 
     #[inline(always)]

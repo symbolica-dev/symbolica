@@ -70,6 +70,14 @@ pub trait FloatLike:
         None
     }
 
+    /// Classify a scalar float for exceptional-value handling.
+    /// Return `None` for domains without a scalar floating-point classification,
+    /// such as complex numbers, SIMD vectors, or exact types.
+    #[inline]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        None
+    }
+
     /// Request scaled arithmetic for zero, subnormal or non-finite intermediates.
     /// The default opts out of scalar range guards (for example for exact types
     /// or types with multiple independently scaled components).

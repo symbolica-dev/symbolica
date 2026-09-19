@@ -839,12 +839,21 @@ impl<T: FloatLike> FloatLike for Complex<T> {
     }
 
     fn pow(&self, e: u64) -> Self {
-        // TODO: use binary exponentiation
-        let mut r = self.one();
-        for _ in 0..e {
-            r *= self;
+        if e != 0 {
+            // Avoid multiplying by a weak-precision identity or changing a
+            // signed zero before the first actual multiplication.
+            let mut result = self.clone();
+            for _ in 1..e {
+                result *= self;
+            }
+            return result;
         }
-        r
+        let prototype = if self.re.get_precision() >= self.im.get_precision() {
+            &self.re
+        } else {
+            &self.im
+        };
+        Self::new(prototype.one(), prototype.zero())
     }
 
     fn inv(&self) -> Self {
@@ -955,28 +964,89 @@ impl<T: Real> Real for Complex<T> {
 
     #[inline]
     fn sqrt(&self) -> Self {
+        use std::num::FpCategory;
+
+        let fixed = self.re.fixed_precision() && self.im.fixed_precision();
+        // Only constants borrow the stronger component's precision. Computed
+        // values keep their own precision, including uncertain small components.
+        let prototype = if fixed || self.re.get_precision() >= self.im.get_precision() {
+            &self.re
+        } else {
+            &self.im
+        };
+
+        // Resolve infinite limits before scaling (infinity / infinity is NaN).
+        let im_class = self.im.real_classify();
+        if im_class == Some(FpCategory::Infinite) {
+            return Self::new(self.im.norm(), self.im.clone());
+        }
+        let re_class = self.re.real_classify();
+        if re_class == Some(FpCategory::Infinite) {
+            let other = if im_class == Some(FpCategory::Nan) {
+                self.im.clone()
+            } else {
+                prototype.zero()
+            };
+            return if self.re.real_cmp(&self.re.zero()) == Some(Ordering::Less) {
+                Self::new(other, self.re.norm().copy_sign(&self.im))
+            } else {
+                Self::new(self.re.clone(), other.copy_sign(&self.im))
+            };
+        }
+        if re_class == Some(FpCategory::Nan) || im_class == Some(FpCategory::Nan) {
+            let nan = prototype.nan().unwrap_or_else(|| {
+                if re_class == Some(FpCategory::Nan) {
+                    self.re.clone()
+                } else {
+                    self.im.clone()
+                }
+            });
+            return Self::new(nan.clone(), nan);
+        }
+
         let (a, b) = (self.re.norm(), self.im.norm());
         let order = a.real_cmp(&b);
         if order.is_none() {
             let (r, phi) = self.clone().to_polar_coordinates();
-            return Complex::from_polar_coordinates(r.sqrt(), phi / self.re.from_usize(2));
+            return Self::from_polar_coordinates(r.sqrt(), phi / prototype.from_usize(2));
         }
-        let two = a.from_usize(2);
-        let h = a.hypot(&b);
-        let s = if !h.needs_rescaling() {
-            (a.clone() / &two + h / &two).sqrt()
-        } else {
-            let scale = if order == Some(Ordering::Less) {
-                b.clone()
+        // Keep exact axes and signed-zero branch lips without a division by zero.
+        if self.im.is_fully_zero() {
+            let root = a.sqrt();
+            return if self.re.real_cmp(&self.re.zero()) == Some(Ordering::Less) {
+                Self::new(prototype.zero(), root.copy_sign(&self.im))
             } else {
-                a.clone()
+                Self::new(root, self.im.clone())
             };
-            if scale.is_fully_zero() {
-                return Self::new(self.re.zero(), self.im.clone());
+        }
+
+        let two = prototype.from_usize(2);
+        let s = if fixed {
+            let h = a.hypot(&b);
+            if !h.needs_rescaling() {
+                (a.clone() / &two + h / &two).sqrt()
+            } else {
+                let scale = if order == Some(Ordering::Less) {
+                    &b
+                } else {
+                    &a
+                };
+                let x = a.clone() / scale;
+                let y = b.clone() / scale;
+                scale.sqrt() * ((x.hypot(&y) + x) / &two).sqrt()
             }
-            let x = a / &scale;
-            let y = b.clone() / &scale;
-            scale.sqrt() * ((x.hypot(&y) + x) / &two).sqrt()
+        } else {
+            // Unlike hypot's ratio formula, this sum retains the precision of
+            // the dominant squared component when the other is tiny and uncertain.
+            let scale = if order == Some(Ordering::Less) {
+                &b
+            } else {
+                &a
+            };
+            let x = a.clone() / scale;
+            let y = b.clone() / scale;
+            let radius = (x.clone() * &x + y.clone() * &y).sqrt();
+            scale.sqrt() * ((radius + x) / &two).sqrt()
         };
         let d = self.im.clone() / &s / two;
         if self.re.real_cmp(&self.re.zero()) == Some(Ordering::Less) {
@@ -1194,8 +1264,24 @@ impl<T: Real> Real for Complex<T> {
     #[inline]
     fn powf(&self, e: &Self) -> Self {
         if e.re == self.re.zero() && e.im == self.im.zero() {
-            self.one()
+            self.pow(0)
         } else if e.im == self.im.zero() {
+            // Exact half powers retain Cartesian root precision and branch lips.
+            let half = e.re.one() / e.re.from_usize(2);
+            if e.re == half {
+                return self.sqrt();
+            }
+            if e.re == -half {
+                return self.sqrt().inv();
+            }
+            let three_halves = e.re.from_usize(3) / e.re.from_usize(2);
+            if e.re == three_halves {
+                return self.clone() * self.sqrt();
+            }
+            if e.re == -three_halves {
+                // Invert before cubing to avoid overflowing a representable result.
+                return self.sqrt().inv().pow(3);
+            }
             let (r, phi) = self.clone().to_polar_coordinates();
             let radius = if r.needs_rescaling() && !self.is_fully_zero() {
                 (self.log().re * &e.re).exp()
