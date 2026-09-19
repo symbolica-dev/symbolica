@@ -557,41 +557,14 @@ impl<T: Default> ExpressionEvaluator<T> {
     ) -> ExpressionEvaluator<T2> {
         let mut stack: Vec<_> = self.stack.iter().map(f).collect();
 
-        let mut external_fns = std::mem::take(&mut self.external_fns)
+        let external_fns = std::mem::take(&mut self.external_fns)
             .into_iter()
             .map(|x| x.map_coeff(f, binary_prec))
             .collect::<Vec<_>>();
-        for external in &mut external_fns {
+        for external in &external_fns {
             if let Some(i) = external.constant_index {
-                let Some(eval) = external.symbol.get_evaluation_info() else {
-                    panic!(
-                        "Symbol '{}' does not have evaluation info",
-                        external.symbol.get_name()
-                    );
-                };
-                let tags = external.tag_views();
-
-                let res = if external.fixed_args.is_empty() {
-                    let c = eval.evaluate_constant(&tags, binary_prec).unwrap();
-                    T2::try_from_complex_float(c).unwrap()
-                } else {
-                    let fixed_args = external
-                        .fixed_args
-                        .iter()
-                        .map(|c| {
-                            T2::try_from_complex_float(Complex::new(
-                                c.re.to_multi_prec_float(binary_prec),
-                                c.im.to_multi_prec_float(binary_prec),
-                            ))
-                            .unwrap()
-                        })
-                        .collect::<Vec<_>>();
-
-                    let eval = T2::resolve_function(&tags, eval).unwrap();
-                    eval(&fixed_args)
-                };
-
-                stack[self.param_count + i] = res;
+                stack[self.param_count + i] =
+                    external.evaluate_constant::<T2>(binary_prec).unwrap();
             }
         }
 

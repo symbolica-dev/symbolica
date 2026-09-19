@@ -496,17 +496,28 @@ impl ExpressionEvaluator<Complex<Rational>> {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
         let exported = self.export_instructions();
-        let constants = exported
+        let mut constants = exported
             .constants
             .into_iter()
             .map(|c| symjit::Complex::new(c.re.to_f64(), c.im.to_f64()))
             .collect::<Vec<_>>();
 
+        // Exact evaluators contain placeholders for registered constants and constant function
+        // calls. Resolve them just as coefficient mapping does before exporting numeric code.
+        let binary_prec = T::FIXED_PRECISION.unwrap_or(53);
+        for external in &self.external_fns {
+            let Some(index) = external.constant_index else {
+                continue;
+            };
+            let value = external.evaluate_constant::<T>(binary_prec)?;
+            constants[index] = value.to_complex_f64()?;
+        }
+
         let external_fns = self
             .external_fns
             .iter()
             .map(|f| {
-                let mapped = f.map_rational::<T>(T::FIXED_PRECISION.unwrap_or(53));
+                let mapped = f.map_rational::<T>(binary_prec);
                 if mapped.constant_index.is_none()
                     && mapped.imp.is_none()
                     && mapped.sub_evaluator.is_none()
