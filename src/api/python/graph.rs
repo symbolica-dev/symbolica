@@ -57,13 +57,19 @@ pub struct PythonGraph {
     graph: Graph<Atom, Atom>,
 }
 
+impl From<Graph<Atom, Atom>> for PythonGraph {
+    fn from(graph: Graph<Atom, Atom>) -> Self {
+        Self { graph }
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonGraph {
     /// Create an empty graph.
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             graph: Graph::new(),
         }
