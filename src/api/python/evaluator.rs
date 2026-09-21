@@ -133,6 +133,14 @@ mod tests {
         }));
         assert_eq!(exported.sub_evaluators[0].input_count, 1);
 
+        let wrapped = PythonEvaluatorInstructions::from(evaluator.export_instructions());
+        let body = wrapped.sub_evaluators()[0].evaluator();
+        assert!(Arc::ptr_eq(
+            &body.exported,
+            &wrapped.exported.sub_evaluators[0].instructions,
+        ));
+        assert!(Arc::ptr_eq(&body.exported, &body.clone().exported));
+
         let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
         let mut output = [0.];
         evaluator.evaluate(&[3.], &mut output);
@@ -149,12 +157,7 @@ mod tests {
 )]
 #[derive(Clone)]
 pub struct PythonEvaluatorInstructions {
-    input_count: usize,
-    output_count: usize,
-    instructions: Vec<Instruction>,
-    temporary_count: usize,
-    constants: Vec<Complex<Rational>>,
-    sub_evaluators: Vec<PythonEvaluatorFunction>,
+    exported: Arc<ExportedInstructions<Complex<Rational>>>,
 }
 
 /// A non-inlined function evaluator referenced by an instruction stream.
@@ -170,26 +173,19 @@ pub struct PythonEvaluatorFunction {
 impl From<ExportedInstructions<Complex<Rational>>> for PythonEvaluatorInstructions {
     fn from(exported: ExportedInstructions<Complex<Rational>>) -> Self {
         Self {
-            input_count: exported.input_count,
-            output_count: exported.output_count,
-            instructions: exported.instructions,
-            temporary_count: exported.temporary_count,
-            constants: exported.constants,
-            sub_evaluators: exported
-                .sub_evaluators
-                .into_iter()
-                .map(PythonEvaluatorFunction::from)
-                .collect(),
+            exported: Arc::new(exported),
         }
     }
 }
 
-impl From<ExportedSubEvaluator<Complex<Rational>>> for PythonEvaluatorFunction {
-    fn from(sub_evaluator: ExportedSubEvaluator<Complex<Rational>>) -> Self {
+impl From<&ExportedSubEvaluator<Complex<Rational>>> for PythonEvaluatorFunction {
+    fn from(sub: &ExportedSubEvaluator<Complex<Rational>>) -> Self {
         Self {
-            function: sub_evaluator.symbol,
-            tags: sub_evaluator.tags,
-            evaluator: sub_evaluator.instructions.into(),
+            function: sub.symbol,
+            tags: sub.tags.clone(),
+            evaluator: PythonEvaluatorInstructions {
+                exported: sub.instructions.clone(),
+            },
         }
     }
 }
@@ -206,7 +202,7 @@ impl PythonEvaluatorInstructions {
         }
 
         let mut result = vec![];
-        for instruction in &self.instructions {
+        for instruction in &self.exported.instructions {
             match instruction {
                 Instruction::Add(out, args, real_args) | Instruction::Mul(out, args, real_args) => {
                     result.push(PyTuple::new(
@@ -336,13 +332,13 @@ impl PythonEvaluatorInstructions {
     /// The number of input parameter values expected by this instruction stream.
     #[getter]
     fn input_count(&self) -> usize {
-        self.input_count
+        self.exported.input_count
     }
 
     /// The number of output values produced by this instruction stream.
     #[getter]
     fn output_count(&self) -> usize {
-        self.output_count
+        self.exported.output_count
     }
 
     /// The linear evaluation instructions.
@@ -355,13 +351,14 @@ impl PythonEvaluatorInstructions {
     /// The number of temporary storage slots required by `instructions`.
     #[getter]
     fn temporary_count(&self) -> usize {
-        self.temporary_count
+        self.exported.temporary_count
     }
 
     /// Exact constants referenced by `('const', index)` slots.
     #[getter]
     fn constants(&self) -> Vec<PythonExpression> {
-        self.constants
+        self.exported
+            .constants
             .iter()
             .map(|constant| Atom::num(constant.clone()).into())
             .collect()
@@ -370,18 +367,22 @@ impl PythonEvaluatorInstructions {
     /// Non-inlined function bodies referenced by `fun` instructions in this stream.
     #[getter]
     fn sub_evaluators(&self) -> Vec<PythonEvaluatorFunction> {
-        self.sub_evaluators.clone()
+        self.exported
+            .sub_evaluators
+            .iter()
+            .map(PythonEvaluatorFunction::from)
+            .collect()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "EvaluatorInstructions(input_count={}, output_count={}, instructions={}, temporary_count={}, constants={}, sub_evaluators={})",
-            self.input_count,
-            self.output_count,
-            self.instructions.len(),
-            self.temporary_count,
-            self.constants.len(),
-            self.sub_evaluators.len()
+            self.exported.input_count,
+            self.exported.output_count,
+            self.exported.instructions.len(),
+            self.exported.temporary_count,
+            self.exported.constants.len(),
+            self.exported.sub_evaluators.len()
         )
     }
 }
@@ -452,7 +453,6 @@ impl PythonExpressionEvaluator {
         if self.eval_double_float.is_none() {
             self.eval_double_float = Some(
                 self.eval_complex
-                    .clone()
                     .set_coeff(&self.rational_constants)
                     .map_coeff(&|x| (&x.re).into()),
             );
@@ -477,7 +477,6 @@ impl PythonExpressionEvaluator {
         if self.eval_double_float_complex.is_none() {
             self.eval_double_float_complex = Some(
                 self.eval_complex
-                    .clone()
                     .set_coeff(&self.rational_constants)
                     .map_coeff(&|x| Complex::new((&x.re).into(), (&x.im).into())),
             );
@@ -727,9 +726,7 @@ impl PythonExpressionEvaluator {
         #[cfg(not(feature = "native_code_generation"))]
         {
             return bincode::encode_to_vec(
-                self.eval_complex
-                    .clone()
-                    .set_coeff(&self.rational_constants),
+                self.eval_complex.set_coeff(&self.rational_constants),
                 bincode::config::standard(),
             )
             .map(|a| PyBytes::new(py, &a))
@@ -742,9 +739,7 @@ impl PythonExpressionEvaluator {
                 &(
                     self.jit_compile,
                     self.jit_settings.clone(),
-                    self.eval_complex
-                        .clone()
-                        .set_coeff(&self.rational_constants),
+                    self.eval_complex.set_coeff(&self.rational_constants),
                     &self.jit_real,
                     &self.jit_complex,
                 ),
@@ -843,7 +838,6 @@ impl PythonExpressionEvaluator {
     /// ```
     fn get_instructions(&self) -> PythonEvaluatorInstructions {
         self.eval_complex
-            .clone()
             .set_coeff(&self.rational_constants)
             .export_instructions()
             .into()
@@ -878,16 +872,10 @@ impl PythonExpressionEvaluator {
         other: PythonExpressionEvaluator,
         cpe_iterations: Option<usize>,
     ) -> PyResult<()> {
-        let mut r = self
-            .eval_complex
-            .clone()
-            .set_coeff(&self.rational_constants);
+        let mut r = self.eval_complex.set_coeff(&self.rational_constants);
 
         r.merge(
-            other
-                .eval_complex
-                .clone()
-                .set_coeff(&other.rational_constants),
+            other.eval_complex.set_coeff(&other.rational_constants),
             cpe_iterations,
         )
         .map_err(|e| {
@@ -1072,7 +1060,6 @@ impl PythonExpressionEvaluator {
             self.eval_arb_prec = Some((
                 prec,
                 self.eval_complex
-                    .clone()
                     .set_coeff(&self.rational_constants)
                     .map_coeff_with_prec(&|x| x.re.to_multi_prec_float(prec), prec),
             ));
@@ -1260,7 +1247,6 @@ impl PythonExpressionEvaluator {
             self.eval_arb_prec_complex = Some((
                 prec,
                 self.eval_complex
-                    .clone()
                     .set_coeff(&self.rational_constants)
                     .map_coeff_with_prec(
                         &|x| {
@@ -1330,7 +1316,6 @@ impl PythonExpressionEvaluator {
 
         let r = self
             .eval_complex
-            .clone()
             .set_coeff(&self.rational_constants)
             .vectorize(&dual)
             .map_err(|e| {

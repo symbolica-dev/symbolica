@@ -1,5 +1,3 @@
-use crate::atom::InlineVar;
-
 use super::*;
 
 /// A numerical function callback receiving, in order, evaluated arguments,
@@ -114,7 +112,9 @@ impl FunctionMap {
     }
 
     /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
-    /// Only provide explicit arguments in `args` if they are meant to shadow function arguments from a higher scope.
+    /// Bodies see global evaluator inputs and their own arguments, which shadow matching
+    /// global names, regardless of inlining policy. Use [`Self::add_aliases`] for definitions
+    /// that expand in the caller's local scope.
     pub fn add_function<S: Into<Indeterminate>, A: Into<Indeterminate>>(
         &mut self,
         name: S,
@@ -150,23 +150,28 @@ impl FunctionMap {
         self.add_tagged_function_with_options(name, tags, args, body, options)
     }
 
-    /// Register a set of aliases (e.g. `s1 -> x^2+y`).
+    /// Register argument-free aliases (e.g. `s1 -> x^2+y`).
+    /// Aliases always inline in the scope where they are used, including local arguments.
+    /// Function-shaped aliases match their full argument list as fixed tags.
     pub fn add_aliases(
         &mut self,
         aliases: impl IntoIterator<Item = (Atom, Atom)>,
     ) -> Result<(), EvaluationError> {
         for (from, to) in aliases {
-            self.add_function::<_, Indeterminate>(
-                match &from {
-                    Atom::Var(v) => {
-                        Indeterminate::Symbol(v.get_symbol(), InlineVar::from(v.get_symbol()))
-                    }
-                    Atom::Fun(f) => Indeterminate::Function(f.get_symbol(), from),
-                    _ => return Err(EvaluationError::NotIndeterminate { atom: from }),
-                },
-                vec![],
-                to,
-            )?;
+            let (name, tags) = match &from {
+                Atom::Var(v) => (v.get_symbol(), vec![]),
+                Atom::Fun(f) => (
+                    f.get_symbol(),
+                    from.as_fun_view()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.to_owned())
+                        .collect(),
+                ),
+                _ => return Err(EvaluationError::NotIndeterminate { atom: from }),
+            };
+            self.add_tagged_function::<Indeterminate>(name, tags.clone(), vec![], to)?;
+            self.tagged_fn_map.get_mut(&(name, tags)).unwrap().is_alias = true;
         }
         Ok(())
     }
@@ -225,6 +230,7 @@ impl FunctionMap {
             .or_insert_with(|| Expr {
                 id,
                 tag_len,
+                is_alias: false,
                 args: args.into_iter().map(|x| x.into()).collect(),
                 body,
                 options,
@@ -371,7 +377,8 @@ impl<'a> EvaluatorBuilder<'a> {
         Ok(self)
     }
 
-    /// Register a set of aliases (e.g. `s1 -> x^2+y`).
+    /// Register argument-free aliases that always inline in the caller's local scope.
+    /// See [`FunctionMap::add_aliases`].
     pub fn add_aliases(
         mut self,
         aliases: impl IntoIterator<Item = (Atom, Atom)>,
@@ -482,6 +489,7 @@ impl<'a> EvaluatorBuilder<'a> {
 pub(super) struct Expr {
     pub(super) id: usize,
     pub(super) tag_len: usize,
+    pub(super) is_alias: bool,
     pub(super) args: Vec<Indeterminate>,
     pub(super) body: Atom,
     pub(super) options: FunctionRegistrationOptions,

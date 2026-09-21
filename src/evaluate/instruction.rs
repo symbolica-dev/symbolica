@@ -196,8 +196,8 @@ pub struct ExportedSubEvaluator<T> {
     pub input_count: usize,
     /// The number of values produced by this evaluator.
     pub output_count: usize,
-    /// The recursively exported function body.
-    pub instructions: ExportedInstructions<T>,
+    /// The exported function body.
+    pub instructions: Arc<ExportedInstructions<T>>,
 }
 
 impl<T: Clone> ExpressionEvaluator<T> {
@@ -217,9 +217,38 @@ impl<T: Clone> ExpressionEvaluator<T> {
     ///
     /// This function can be used to create an evaluator in a different language.
     pub fn export_instructions(&self) -> ExportedInstructions<T> {
-        let mut instr = vec![];
-        let constants: Vec<_> = self.stack[self.param_count..self.reserved_indices].to_vec();
-        let constant_functions = self
+        // Callees precede callers, so each body can reuse already-exported bodies.
+        let mut bodies = Vec::with_capacity(self.external_fns.len());
+        for external in &self.external_fns {
+            let body = external.body.as_ref().map(|body| {
+                let instructions = Arc::new(
+                    body.program()
+                        .export_instructions(&self.external_fns, &bodies),
+                );
+                ExportedSubEvaluator {
+                    symbol: external.symbol,
+                    tags: external
+                        .tags
+                        .iter()
+                        .map(|tag| tag.to_canonical_string())
+                        .collect(),
+                    input_count: instructions.input_count,
+                    output_count: instructions.output_count,
+                    instructions,
+                }
+            });
+            bodies.push(body);
+        }
+        self.export_instructions_impl(&self.external_fns, &bodies)
+    }
+
+    pub(super) fn export_instructions_impl(
+        &self,
+        external_fns: &[ExternalFunctionContainer<T>],
+        bodies: &[Option<ExportedSubEvaluator<T>>],
+    ) -> ExportedInstructions<T> {
+        let mut exported = self.program().export_instructions(external_fns, bodies);
+        exported.constant_functions = self
             .external_fns
             .iter()
             .filter_map(|external| {
@@ -237,25 +266,36 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     })
             })
             .collect();
-        let sub_evaluators = self
-            .external_fns
+        exported
+    }
+}
+
+impl<T: Clone> ProgramView<'_, T> {
+    pub(super) fn export_instructions(
+        &self,
+        external_fns: &[ExternalFunctionContainer<T>],
+        bodies: &[Option<ExportedSubEvaluator<T>>],
+    ) -> ExportedInstructions<T> {
+        let mut instr = vec![];
+        let constants: Vec<_> = self.constants.to_vec();
+        let mut calls = self
+            .instructions
             .iter()
-            .filter_map(|external| {
-                external.sub_evaluator.as_ref().map(|evaluator| {
-                    let instructions = evaluator.export_instructions();
-                    ExportedSubEvaluator {
-                        symbol: external.symbol,
-                        tags: external
-                            .tags
-                            .iter()
-                            .map(|tag| tag.to_canonical_string())
-                            .collect(),
-                        input_count: instructions.input_count,
-                        output_count: instructions.output_count,
-                        instructions,
-                    }
-                })
+            .filter_map(|(instruction, _)| {
+                if !bodies.is_empty()
+                    && let Instr::ExternalFun(_, index, _) = instruction
+                {
+                    Some(*index)
+                } else {
+                    None
+                }
             })
+            .collect::<Vec<_>>();
+        calls.sort_unstable();
+        calls.dedup();
+        let sub_evaluators = calls
+            .into_iter()
+            .filter_map(|key| bodies[key].clone())
             .collect();
 
         macro_rules! get_slot {
@@ -274,7 +314,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
             };
         }
 
-        for (i, sc) in &self.instructions {
+        for (i, sc) in self.instructions {
             match i {
                 Instr::Add(o, a) => {
                     let n_real_args = match sc {
@@ -329,8 +369,8 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     instr.push(Instruction::Fun(
                         get_slot!(*o),
                         Box::new((
-                            self.external_fns[*f].symbol,
-                            self.external_fns[*f]
+                            external_fns[*f].symbol,
+                            external_fns[*f]
                                 .tags
                                 .iter()
                                 .map(|x| x.to_canonical_string())
@@ -370,9 +410,9 @@ impl<T: Clone> ExpressionEvaluator<T> {
             input_count: self.param_count,
             output_count: self.result_indices.len(),
             instructions: instr,
-            temporary_count: self.stack.len() - self.reserved_indices,
+            temporary_count: self.stack_size - self.reserved_indices,
             constants,
-            constant_functions,
+            constant_functions: Vec::new(),
             sub_evaluators,
         }
     }

@@ -495,7 +495,7 @@ impl ExpressionEvaluator<Complex<Rational>> {
         &self,
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
-        let exported = self.export_instructions();
+        let exported = self.export_instructions_impl(&self.external_fns, &[]);
         let mut constants = exported
             .constants
             .into_iter()
@@ -517,10 +517,8 @@ impl ExpressionEvaluator<Complex<Rational>> {
             .external_fns
             .iter()
             .map(|f| {
-                let mapped = f.map_rational::<T>(binary_prec);
-                if mapped.constant_index.is_none()
-                    && mapped.imp.is_none()
-                    && mapped.sub_evaluator.is_none()
+                let mapped = f.map::<T>();
+                if mapped.constant_index.is_none() && mapped.imp.is_none() && mapped.body.is_none()
                 {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
@@ -565,7 +563,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
         &self,
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
-        let exported = self.export_instructions();
+        let exported = self.export_instructions_impl(&self.external_fns, &[]);
         let constants = exported
             .constants
             .into_iter()
@@ -576,7 +574,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             .external_fns
             .iter()
             .map(|f| {
-                if f.constant_index.is_none() && f.imp.is_none() && f.sub_evaluator.is_none() {
+                if f.constant_index.is_none() && f.imp.is_none() && f.body.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -714,22 +712,40 @@ pub trait JITCompiledNumber: Sized {
     );
 }
 
-fn register_sub_evaluator<T>(
+fn register_function_body<T: JITCompiledNumber + Clone>(
     defuns: &mut Defuns,
     external: &ExternalFunctionContainer<T>,
+    external_functions: &[ExternalFunctionContainer<T>],
     settings: &JITCompilationSettings,
-) -> Result<bool, String>
-where
-    T: JITCompiledNumber + Clone,
-{
-    let Some(sub_evaluator) = external.sub_evaluator.as_ref() else {
+    complex: bool,
+    simd: bool,
+) -> Result<bool, String> {
+    let Some(body) = external.body.as_ref() else {
         return Ok(false);
     };
-
-    let compiled = sub_evaluator
-        .jit_compile(settings.clone())
-        .map_err(|e| format!("Could not JIT-compile sub-evaluator '{}': {e}", external))?;
-    defuns.add_applet(external.export_name(), compiled.code);
+    // The registry is topological: every callee has already been compiled into defuns.
+    let exported = body.program().export_instructions(external_functions, &[]);
+    let mut config = Config::default();
+    config.set_complex(complex);
+    // Match the main evaluator: scalar compilation keeps the backend's SIMD default.
+    if simd {
+        config.set_simd(true);
+    }
+    settings.apply_to_config(&mut config)?;
+    // Move callback ownership into the compiled body's configuration. Defuns::clone
+    // also clones owning raw pointers, so it cannot safely snapshot callbacks.
+    config.set_defuns(std::mem::take(defuns));
+    let mut translator =
+        translate_to_symjit(exported.instructions, vec![], body.param_count, config)?;
+    let compiled = translator
+        .compile()
+        .map_err(|e| format!("Could not JIT-compile sub-evaluator '{external}': {e}"))?
+        .seal()
+        .map_err(|e| e.to_string())?;
+    // The new applet retains the previous table. Copy only the function references;
+    // callback allocations remain owned by that table for the applet's lifetime.
+    defuns.funcs = compiled.config.df.as_ref().unwrap().funcs.clone();
+    defuns.add_applet(external.export_name(), compiled);
     Ok(true)
 }
 
@@ -749,7 +765,7 @@ impl JITCompiledNumber for f64 {
                 continue;
             }
 
-            if register_sub_evaluator(&mut defuns, f, settings)? {
+            if register_function_body(&mut defuns, f, external_functions, settings, false, false)? {
                 continue;
             }
 
@@ -829,7 +845,7 @@ impl JITCompiledNumber for f64 {
 
 /// A JIT-compiled evaluator for expressions, using the SymJIT compiler.
 ///
-/// Serialization retains the compilation settings for recursively rebuilding
+/// Serialization retains the compilation settings for rebuilding
 /// non-inlined evaluators. Serialized JIT payloads are revision-dependent;
 /// payloads written before settings were included must be regenerated.
 #[derive(Clone)]
@@ -1012,14 +1028,14 @@ impl JITCompiledNumber for wide::f64x4 {
         let mut defuns = Defuns::new();
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.sub_evaluator.is_none()
+                || f.body.is_none()
                     && f.symbol.is_builtin()
                     && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            if register_sub_evaluator(&mut defuns, f, settings)? {
+            if register_function_body(&mut defuns, f, external_functions, settings, false, true)? {
                 continue;
             }
 
@@ -1200,14 +1216,14 @@ impl JITCompiledNumber for Complex<f64> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.sub_evaluator.is_none()
+                || f.body.is_none()
                     && f.symbol.is_builtin()
                     && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            if register_sub_evaluator(&mut defuns, f, settings)? {
+            if register_function_body(&mut defuns, f, external_functions, settings, true, false)? {
                 continue;
             }
 
@@ -1349,14 +1365,14 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.sub_evaluator.is_none()
+                || f.body.is_none()
                     && f.symbol.is_builtin()
                     && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            if register_sub_evaluator(&mut defuns, f, settings)? {
+            if register_function_body(&mut defuns, f, external_functions, settings, true, true)? {
                 continue;
             }
 

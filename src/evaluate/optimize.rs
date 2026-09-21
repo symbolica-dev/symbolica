@@ -249,7 +249,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Constant<T: Default + Clone + Eq + Hash> {
             Literal(T),
-            Function(String),
+            Function(Symbol, Vec<Atom>, Vec<Complex<Rational>>),
         }
 
         for (i, c) in self.stack[self.param_count..self.reserved_indices]
@@ -261,7 +261,10 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 .iter()
                 .find(|f| f.constant_index == Some(i))
             {
-                constants.insert(Constant::Function(ext.export_name().to_owned()), i);
+                constants.insert(
+                    Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone()),
+                    i,
+                );
             } else {
                 constants.insert(Constant::Literal(c.clone()), i);
             }
@@ -282,7 +285,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 .iter()
                 .find(|f| f.constant_index == Some(i))
             {
-                let key = Constant::Function(ext.export_name().to_owned());
+                let key = Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone());
                 if !constants.contains_key(&key) {
                     let new_i = constants.len();
                     constants.insert(key.clone(), new_i);
@@ -307,16 +310,21 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 
         // add new external functions
         let mut external_fn_indices = Vec::with_capacity(other.external_fns.len());
-        for e in &other.external_fns {
-            if let Some(i) = self
-                .external_fns
-                .iter()
-                .position(|f| f.export_name == e.export_name)
-            {
+        for mut external in std::mem::take(&mut other.external_fns) {
+            if let Some(i) = self.external_fns.iter().position(|f| {
+                f == &external && f.constant_index.is_some() == external.constant_index.is_some()
+            }) {
                 external_fn_indices.push(i);
             } else {
+                if let Some(body) = &mut external.body {
+                    for (instruction, _) in &mut Arc::make_mut(body).instructions {
+                        if let Instr::ExternalFun(_, index, _) = instruction {
+                            *index = external_fn_indices[*index];
+                        }
+                    }
+                }
                 external_fn_indices.push(self.external_fns.len());
-                self.external_fns.push(e.clone());
+                self.external_fns.push(external);
             }
         }
 

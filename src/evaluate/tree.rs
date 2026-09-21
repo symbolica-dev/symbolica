@@ -258,6 +258,52 @@ fn register_constant_external_container<T>(
     constant_index
 }
 
+// Shared by the root and every function compiled in this build.
+struct LinearizationContext<'a> {
+    external_functions: Vec<ExternalFunctionContainer<Complex<Rational>>>,
+    // Hidden global slots for each body; a pending entry detects recursive definitions.
+    functions: HashMap<usize, Option<Vec<Slot>>>,
+    // None denotes a registered constant whose value is resolved in the numerical domain.
+    constants: Vec<Option<Complex<Rational>>>,
+    constant_indices: HashMap<Complex<Rational>, usize>,
+    // None denotes a callable; Some contains the fixed arguments of a constant.
+    external_indices: HashMap<(Symbol, Vec<Atom>, Option<Vec<Complex<Rational>>>), usize>,
+    inputs: Vec<AtomView<'a>>,
+    expanding_functions: HashSet<usize>,
+}
+
+impl LinearizationContext<'_> {
+    fn constant_slot(&mut self, constant: Complex<Rational>) -> Slot {
+        let index = *self
+            .constant_indices
+            .entry(constant.clone())
+            .or_insert_with(|| {
+                self.constants.push(Some(constant));
+                self.constants.len() - 1
+            });
+        Slot::Const(index)
+    }
+
+    fn external_constant_slot(
+        &mut self,
+        symbol: Symbol,
+        tags: Vec<Atom>,
+        fixed_args: Vec<Complex<Rational>>,
+    ) -> Slot {
+        let index = *self
+            .external_indices
+            .entry((symbol, tags.clone(), Some(fixed_args.clone())))
+            .or_insert_with(|| {
+                let mut external = ExternalFunctionContainer::new(symbol, tags, fixed_args);
+                external.constant_index = Some(self.constants.len());
+                self.constants.push(None);
+                self.external_functions.push(external);
+                self.external_functions.len() - 1
+            });
+        Slot::Const(self.external_functions[index].constant_index.unwrap())
+    }
+}
+
 impl<'a> AtomView<'a> {
     pub(crate) fn to_evaluator(
         expressions: &[Self],
@@ -556,47 +602,101 @@ impl<'a> AtomView<'a> {
         params: &[Atom],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
-        let mut constants = Vec::new();
-        let mut constant_map = HashMap::new();
+        let expressions = expressions
+            .iter()
+            .map(|e| e.as_atom_view())
+            .collect::<Vec<_>>();
+        let params = params.iter().map(|p| p.as_view()).collect::<Vec<_>>();
+        let mut context = LinearizationContext {
+            external_functions: Vec::new(),
+            functions: HashMap::default(),
+            constants: Vec::new(),
+            constant_indices: HashMap::default(),
+            external_indices: HashMap::default(),
+            inputs: params.clone(),
+            expanding_functions: HashSet::default(),
+        };
+        let (instr, results) = AtomView::linearize_multiple_impl(
+            &expressions,
+            fn_map,
+            &params,
+            &settings,
+            &mut context,
+        )?;
+        let param_count = params.len();
+        let reserved_indices = param_count + context.constants.len();
+        let mut stack = vec![Complex::default(); reserved_indices + instr.len()];
+        let (instructions, result_indices) = AtomView::lower_instructions(
+            instr,
+            results,
+            param_count,
+            reserved_indices,
+            &mut context,
+        )?;
+        for (slot, constant) in stack[param_count..reserved_indices]
+            .iter_mut()
+            .zip(context.constants)
+        {
+            if let Some(value) = constant {
+                *slot = value;
+            }
+        }
+        Ok(ExpressionEvaluator {
+            stack,
+            param_count,
+            reserved_indices,
+            instructions,
+            result_indices,
+            external_fns: context.external_functions,
+            settings,
+        })
+    }
+
+    fn linearize_multiple_impl(
+        expressions: &[AtomView<'a>],
+        fn_map: &'a FunctionMap,
+        params: &[AtomView<'a>],
+        settings: &OptimizationSettings,
+        context: &mut LinearizationContext<'a>,
+    ) -> Result<(Vec<Instruction>, Vec<Slot>), EvaluationError> {
         let mut instr = Vec::new();
 
         // we can only safely remove entries that don't depend on any of the function arguments
         let mut subexpression: HashMap<AtomView, Slot> = HashMap::default();
 
-        let mut external_functions = vec![];
-
         let mut result_indices = vec![];
-        let mut args = params
+        let args = params
             .iter()
             .enumerate()
-            .map(|(i, p)| (p.as_view(), vec![Slot::Param(i)]))
+            .map(|(i, p)| (*p, Slot::Param(i)))
             .collect();
         for expr in expressions {
-            let res = expr.as_atom_view().linearize_impl(
+            let res = expr.linearize_impl(
                 fn_map,
-                &mut args,
-                &settings,
-                &mut constants,
-                &mut constant_map,
-                &mut external_functions,
+                context,
+                &args,
+                settings,
                 &mut instr,
                 &mut subexpression,
             )?;
             result_indices.push(res);
         }
 
-        let reserved_indices = params.len() + constants.len();
+        Ok((instr, result_indices))
+    }
 
-        let mut stack = vec![Complex::default(); params.len() + constants.len() + instr.len()];
-        for (s, c) in stack.iter_mut().skip(params.len()).zip(constants) {
-            *s = c;
-        }
-
+    fn lower_instructions(
+        instr: Vec<Instruction>,
+        results: Vec<Slot>,
+        param_count: usize,
+        reserved_indices: usize,
+        context: &mut LinearizationContext<'a>,
+    ) -> Result<(Vec<(Instr, ComplexPhase)>, Vec<usize>), EvaluationError> {
         macro_rules! slot_map {
             ($s: expr) => {
                 match $s {
                     Slot::Param(i) => i,
-                    Slot::Const(i) => params.len() + i,
+                    Slot::Const(i) => param_count + i,
                     Slot::Temp(i) => reserved_indices + i,
                     Slot::Out(_) => unreachable!(),
                 }
@@ -610,7 +710,7 @@ impl<'a> AtomView<'a> {
                     instructions.push((
                         Instr::Add(
                             slot_map!(o),
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -619,7 +719,7 @@ impl<'a> AtomView<'a> {
                     instructions.push((
                         Instr::Mul(
                             slot_map!(o),
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -637,41 +737,39 @@ impl<'a> AtomView<'a> {
                     ));
                 }
                 Instruction::Fun(o, b, _) => {
-                    let (sym, tags, args) = &*b;
+                    let (sym, tags, args) = *b;
 
                     if sym.is_fixed_builtin() {
                         if args.len() != 1 {
                             return Err(EvaluationError::UnsupportedBuiltinArity {
-                                function: *sym,
+                                function: sym,
                                 expected: 1,
                                 actual: args.len(),
                             });
                         }
                         instructions.push((
-                            Instr::BuiltinFun(slot_map!(o), *sym, slot_map!(args[0])),
+                            Instr::BuiltinFun(slot_map!(o), sym, slot_map!(args[0])),
                             ComplexPhase::default(),
                         ));
                         continue;
                     }
 
                     let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
-                    let index = if let Some(index) = external_functions.iter().position(|x| {
-                        x.symbol == *sym
-                            && x.tags == tags
-                            && x.fixed_args.is_empty()
-                            && x.constant_index.is_none()
-                    }) {
-                        index
-                    } else {
-                        external_functions.push(ExternalFunctionContainer::new(*sym, tags, vec![]));
-                        external_functions.len() - 1
-                    };
+                    let index = *context
+                        .external_indices
+                        .entry((sym, tags.clone(), None))
+                        .or_insert_with(|| {
+                            context
+                                .external_functions
+                                .push(ExternalFunctionContainer::new(sym, tags, vec![]));
+                            context.external_functions.len() - 1
+                        });
 
                     instructions.push((
                         Instr::ExternalFun(
                             slot_map!(o),
                             index,
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -700,205 +798,215 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        Ok(ExpressionEvaluator {
-            stack,
-            param_count: params.len(),
-            reserved_indices,
+        Ok((
             instructions,
-            result_indices: result_indices.iter().map(|s| slot_map!(*s)).collect(),
-            external_fns: external_functions,
-            settings: settings.clone(),
-        })
+            results.into_iter().map(|s| slot_map!(s)).collect(),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn linearize_sub_evaluator(
-        fn_map: &FunctionMap,
-        params: &HashMap<AtomView<'_>, Vec<Slot>>,
+    fn linearize_function_call(
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
         settings: &OptimizationSettings,
         symbol: Symbol,
         tags: Vec<Atom>,
-        arg_spec: &[Indeterminate],
+        function: &'a Expr,
         arg_slots: Vec<Slot>,
-        body: &Atom,
-        constants: &mut Vec<Complex<Rational>>,
-        constant_map: &mut HashMap<Complex<Rational>, usize>,
-        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
         instr: &mut Vec<Instruction>,
     ) -> Result<Slot, EvaluationError> {
-        // Capture parameters from the surrounding function scope. Explicit arguments of this
-        // function are appended afterwards so that they shadow equally-named captured values.
-        let mut captures = params
-            .iter()
-            .filter(|(parameter, values)| {
-                !values.is_empty()
-                    && arg_spec
-                        .iter()
-                        .all(|argument| argument.as_view() != **parameter)
-            })
-            .map(|(parameter, values)| (parameter.to_owned(), *values.last().unwrap()))
-            .collect::<Vec<_>>();
-        captures.sort_by_cached_key(|(parameter, _)| parameter.to_canonical_string());
-
-        let build_evaluator = |captures: &[(Atom, Slot)]| {
-            let mut sub_params = captures
+        if arg_slots.len() != function.args.len() {
+            return Err(EvaluationError::WrongNumberOfArguments {
+                function: symbol,
+                expected: function.args.len() + function.tag_len,
+                actual: arg_slots.len() + tags.len(),
+            });
+        }
+        let recursive_call = || EvaluationError::EvaluatorConstructionFailed {
+            expression: symbol.call(&tags),
+            reason: "recursive function dependency".into(),
+        };
+        if !context.functions.contains_key(&function.id) {
+            // A pending entry detects recursion. No caller bindings enter this compilation:
+            // root inputs precede declared arguments, which shadow matching input names.
+            context.functions.insert(function.id, None);
+            let body_params = context
+                .inputs
                 .iter()
-                .map(|(parameter, _)| parameter.clone())
+                .copied()
+                .chain(function.args.iter().map(|arg| arg.as_view()))
                 .collect::<Vec<_>>();
-            sub_params.extend(arg_spec.iter().map(|arg| arg.as_view().to_owned()));
-            Self::linearize_multiple(
-                std::slice::from_ref(body),
+            let (mut instr, mut result_indices) = Self::linearize_multiple_impl(
+                &[function.body.as_view()],
                 fn_map,
-                &sub_params,
-                settings.clone(),
-            )
-        };
-
-        let mut evaluator = build_evaluator(&captures)?;
-
-        // The body is initially built with every in-scope parameter so lexical captures remain
-        // available. Afterwards, retain only captures that the generated instruction stream
-        // actually reads. Explicit function arguments are never removed, even if the body does
-        // not use them, because they are part of the declared call signature.
-        let mut used_captures = vec![false; captures.len()];
-        let mut mark_used = |index: usize| {
-            if index < used_captures.len() {
-                used_captures[index] = true;
-            }
-        };
-        for (instruction, _) in &evaluator.instructions {
-            match instruction {
-                Instr::Add(_, args) | Instr::Mul(_, args) | Instr::ExternalFun(_, _, args) => {
-                    for &arg in args {
-                        mark_used(arg);
-                    }
+                &body_params,
+                settings,
+                context,
+            )?;
+            // Root inputs and constants stay symbolic during construction. Compact only
+            // the surviving references, including globals forwarded to callees, once the
+            // body is complete. Declared arguments retain their original positions.
+            let mut globals = Vec::new();
+            let root_param_count = context.inputs.len();
+            let mut param_count = function.args.len();
+            let mut indices = HashMap::default();
+            let mut lower_global = |slot: &mut Slot| match *slot {
+                Slot::Param(index) if index >= root_param_count => {
+                    *slot = Slot::Param(index - root_param_count);
                 }
-                Instr::Pow(_, base, _) | Instr::BuiltinFun(_, _, base) => mark_used(*base),
-                Instr::Powf(_, base, exponent) => {
-                    mark_used(*base);
-                    mark_used(*exponent);
+                Slot::Param(_) | Slot::Const(_) => {
+                    let index = *indices.entry(*slot).or_insert_with(|| {
+                        let index = param_count + globals.len();
+                        globals.push(*slot);
+                        index
+                    });
+                    *slot = Slot::Param(index);
                 }
-                Instr::IfElse(condition, _) => mark_used(*condition),
-                Instr::Join(_, condition, if_true, if_false) => {
-                    mark_used(*condition);
-                    mark_used(*if_true);
-                    mark_used(*if_false);
-                }
-                Instr::Goto(_) | Instr::Label(_) => {}
-            }
-        }
-        for &result in &evaluator.result_indices {
-            mark_used(result);
-        }
-
-        if used_captures.iter().any(|used| !used) {
-            captures = captures
-                .into_iter()
-                .zip(used_captures)
-                .filter_map(|(capture, used)| used.then_some(capture))
-                .collect();
-            evaluator = build_evaluator(&captures)?;
-        }
-
-        let mut call_args = captures
-            .into_iter()
-            .map(|(_, slot)| slot)
-            .collect::<Vec<_>>();
-        call_args.extend(arg_slots);
-
-        // Keep all coefficients in the top-level evaluator. This makes coefficient remapping and
-        // arbitrary-precision evaluation work exactly as they do for an inlined function.
-        let sub_constants =
-            evaluator.stack[evaluator.param_count..evaluator.reserved_indices].to_vec();
-        for (i, coefficient) in sub_constants.iter().enumerate() {
-            let slot = if let Some(external) = evaluator
-                .external_fns
-                .iter()
-                .find(|external| external.constant_index == Some(i))
-            {
-                Slot::Const(register_constant_external_container(
-                    external_functions,
-                    external.symbol,
-                    external.tags.clone(),
-                    external.fixed_args.clone(),
-                    constants,
-                ))
-            } else if let Some(index) = constant_map.get(coefficient) {
-                Slot::Const(*index)
-            } else {
-                let index = constants.len();
-                constants.push(coefficient.clone());
-                constant_map.insert(coefficient.clone(), index);
-                Slot::Const(index)
+                Slot::Temp(_) | Slot::Out(_) => {}
             };
-            call_args.push(slot);
-        }
-
-        // Update external function indices to account for upstreamed constant callbacks.
-        let mut next_index = 0;
-        let external_indices = evaluator
-            .external_fns
-            .iter()
-            .map(|external| {
-                if external.constant_index.is_none() {
-                    let index = next_index;
-                    next_index += 1;
-                    Some(index)
-                } else {
-                    None
+            for instruction in &mut instr {
+                match instruction {
+                    Instruction::Add(_, args, _) | Instruction::Mul(_, args, _) => {
+                        args.iter_mut().for_each(&mut lower_global);
+                    }
+                    Instruction::Pow(_, base, _, _) | Instruction::Assign(_, base) => {
+                        lower_global(base);
+                    }
+                    Instruction::Powf(_, base, exp, _) => {
+                        lower_global(base);
+                        lower_global(exp);
+                    }
+                    Instruction::Fun(_, function, _) => {
+                        function.2.iter_mut().for_each(&mut lower_global);
+                    }
+                    Instruction::IfElse(cond, _) => lower_global(cond),
+                    Instruction::Join(_, cond, then_value, else_value) => {
+                        lower_global(cond);
+                        lower_global(then_value);
+                        lower_global(else_value);
+                    }
+                    Instruction::Goto(_) | Instruction::Label(_) => {}
                 }
-            })
-            .collect::<Vec<_>>();
-
-        for (instruction, _) in &mut evaluator.instructions {
-            if let Instr::ExternalFun(_, index, _) = instruction {
-                *index = external_indices[*index].expect("runtime external function");
             }
-        }
+            result_indices.iter_mut().for_each(lower_global);
+            param_count += globals.len();
 
-        evaluator
-            .external_fns
-            .retain(|external| external.constant_index.is_none());
-        evaluator.param_count = evaluator.reserved_indices;
-        for value in evaluator.stack.iter_mut().take(evaluator.reserved_indices) {
-            *value = Complex::default();
+            let stack_size = param_count + instr.len();
+            let (instructions, result_indices) =
+                Self::lower_instructions(instr, result_indices, param_count, param_count, context)?;
+            let body = FunctionBody {
+                instructions,
+                param_count,
+                result_index: result_indices[0],
+                stack_size,
+            };
+            // Recursive compilation has already registered every callee.
+            context.external_indices.insert(
+                (symbol, tags.clone(), None),
+                context.external_functions.len(),
+            );
+            context
+                .external_functions
+                .push(ExternalFunctionContainer::with_body(
+                    symbol,
+                    tags.clone(),
+                    Arc::new(body),
+                ));
+            context.functions.insert(function.id, Some(globals));
         }
+        let globals = context.functions[&function.id]
+            .as_ref()
+            .ok_or_else(recursive_call)?;
 
-        let tag_strings = tags.iter().map(|tag| tag.to_canonical_string()).collect();
-        if external_functions.iter().all(|external| {
-            external.symbol != symbol || external.tags != tags || external.sub_evaluator.is_none()
-        }) {
-            external_functions.push(ExternalFunctionContainer::new_sub_evaluator(
-                symbol, tags, evaluator,
-            ));
-        }
+        // Global slots bypass local name bindings, including shadowing arguments.
+        // The caller's final lowering pass will compact them in its own signature.
+        let mut call_args = arg_slots;
+        call_args.extend_from_slice(globals);
 
         let result = Slot::Temp(instr.len());
         instr.push(Instruction::Fun(
             result,
-            Box::new((symbol, tag_strings, call_args)),
+            Box::new((
+                symbol,
+                tags.iter().map(|tag| tag.to_canonical_string()).collect(),
+                call_args,
+            )),
             false,
         ));
         Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn linearize_inline_function(
+        &self,
+        function: &'a Expr,
+        arg_slots: Vec<Slot>,
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+    ) -> Result<Slot, EvaluationError> {
+        if !context.expanding_functions.insert(function.id) {
+            return Err(EvaluationError::EvaluatorConstructionFailed {
+                expression: self.to_owned(),
+                reason: "recursive function or alias dependency".into(),
+            });
+        }
+        let mut body_params = HashMap::default();
+        if !function.is_alias {
+            body_params.extend(
+                context
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (*p, Slot::Param(i))),
+            );
+            body_params.extend(
+                function
+                    .args
+                    .iter()
+                    .zip(arg_slots)
+                    .map(|(arg, slot)| (arg.as_view(), slot)),
+            );
+        }
+        // Aliases inherit the caller's bindings and cache. Ordinary functions, including
+        // zero-argument functions, get their own scope and expression cache.
+        let mut body_subexpressions = HashMap::default();
+        let result = function.body.as_view().linearize_impl(
+            fn_map,
+            context,
+            if function.is_alias {
+                params
+            } else {
+                &body_params
+            },
+            settings,
+            instr,
+            if function.is_alias {
+                subexpressions
+            } else {
+                &mut body_subexpressions
+            },
+        );
+        context.expanding_functions.remove(&function.id);
+        result
     }
 
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
         fn_map: &'a FunctionMap,
-        params: &mut HashMap<AtomView<'a>, Vec<Slot>>,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
-        constants: &mut Vec<Complex<Rational>>,
-        constant_map: &mut HashMap<Complex<Rational>, usize>,
-        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
-            if let Some(p) = params.get(self)
-                && let Some(v) = p.last()
-            {
-                return Ok(*v);
+            if let Some(slot) = params.get(self) {
+                return Ok(*slot);
             }
         }
 
@@ -939,57 +1047,46 @@ impl<'a> AtomView<'a> {
                     }
                 };
 
-                if let Some(&i) = constant_map.get(&c) {
-                    return Ok(Slot::Const(i));
-                }
-
-                let i = constants.len();
-                constants.push(c.clone());
-                constant_map.insert(c, i);
-                Slot::Const(i)
+                context.constant_slot(c)
             }
             AtomView::Var(v) => {
                 let s = v.get_symbol();
 
                 if let Some(expr) = fn_map.get(*self) {
-                    if expr.options.should_inline() {
-                        return expr.body.as_view().linearize_impl(
+                    if !expr.args.is_empty() {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: s,
+                            expected: expr.args.len(),
+                            actual: 0,
+                        });
+                    }
+                    if expr.is_alias || expr.options.should_inline() {
+                        return self.linearize_inline_function(
+                            expr,
+                            vec![],
                             fn_map,
+                            context,
                             params,
                             settings,
-                            constants,
-                            constant_map,
-                            external_functions,
                             instr,
                             subexpressions,
                         );
                     }
 
-                    return Self::linearize_sub_evaluator(
+                    return Self::linearize_function_call(
                         fn_map,
-                        params,
+                        context,
                         settings,
                         s,
                         vec![],
-                        &expr.args,
+                        expr,
                         vec![],
-                        &expr.body,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                     );
                 }
 
                 if s.get_evaluation_info().is_some() {
-                    let i = register_constant_external_container(
-                        external_functions,
-                        s,
-                        vec![],
-                        vec![],
-                        constants,
-                    );
-                    return Ok(Slot::Const(i));
+                    return Ok(context.external_constant_slot(s, vec![], vec![]));
                 }
 
                 return Err(EvaluationError::UndefinedVariable { symbol: s });
@@ -1016,11 +1113,9 @@ impl<'a> AtomView<'a> {
                     let arg = f.iter().next().unwrap();
                     let arg_eval = arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         subexpressions,
                     )?;
@@ -1051,11 +1146,9 @@ impl<'a> AtomView<'a> {
                     let subexpression_len = subexpressions.len();
                     let cond = cond.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         subexpressions,
                     )?;
@@ -1064,15 +1157,14 @@ impl<'a> AtomView<'a> {
                     fn resolve(
                         cond: Slot,
                         instr: &[Instruction],
-                        constants: &[Complex<Rational>],
+                        constants: &[Option<Complex<Rational>>],
                     ) -> Option<Complex<Rational>> {
                         let i = match cond {
                             Slot::Param(_) => {
                                 return None;
                             }
                             Slot::Const(i) => {
-                                // TODO: check that this constant is not an external function evaluation slot!
-                                return Some(constants[i].clone());
+                                return constants[i].clone();
                             }
                             Slot::Temp(t) => t,
                             Slot::Out(_) => {
@@ -1120,7 +1212,7 @@ impl<'a> AtomView<'a> {
                         }
                     }
 
-                    if let Some(cond_res) = resolve(cond, instr, constants) {
+                    if let Some(cond_res) = resolve(cond, instr, &context.constants) {
                         // remove dead code
                         instr.truncate(instr_len);
                         if subexpression_len != subexpressions.len() {
@@ -1137,22 +1229,18 @@ impl<'a> AtomView<'a> {
                         let res = if !cond_res.is_zero() {
                             then_branch.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
                                 settings,
-                                constants,
-                                constant_map,
-                                external_functions,
                                 instr,
                                 subexpressions,
                             )?
                         } else {
                             else_branch.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
                                 settings,
-                                constants,
-                                constant_map,
-                                external_functions,
                                 instr,
                                 subexpressions,
                             )?
@@ -1168,11 +1256,9 @@ impl<'a> AtomView<'a> {
                     let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
                     let then_branch = then_branch.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         &mut sub_expr_pos_child,
                     )?;
@@ -1185,11 +1271,9 @@ impl<'a> AtomView<'a> {
                     sub_expr_pos_child.clone_from(subexpressions);
                     let else_branch = else_branch.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         &mut sub_expr_pos_child,
                     )?;
@@ -1218,14 +1302,7 @@ impl<'a> AtomView<'a> {
 
                     // check if it a constant external function
                     if f.get_nargs() == eval_info.get_tag_count() + fixed_args.len() {
-                        let i = register_constant_external_container(
-                            external_functions,
-                            name,
-                            tags,
-                            fixed_args,
-                            constants,
-                        );
-                        return Ok(Slot::Const(i));
+                        return Ok(context.external_constant_slot(name, tags, fixed_args));
                     };
 
                     let eval_args = f
@@ -1234,11 +1311,9 @@ impl<'a> AtomView<'a> {
                         .map(|arg| {
                             arg.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
                                 settings,
-                                constants,
-                                constant_map,
-                                external_functions,
                                 instr,
                                 subexpressions,
                             )
@@ -1266,7 +1341,6 @@ impl<'a> AtomView<'a> {
                     let Expr {
                         tag_len,
                         args: arg_spec,
-                        body: e,
                         options,
                         ..
                     } = fun;
@@ -1279,97 +1353,45 @@ impl<'a> AtomView<'a> {
                         });
                     }
 
-                    let mut arg_shadowed = false;
                     let mut arg_slots = Vec::with_capacity(arg_spec.len());
-                    for (eval_arg, arg_spec) in f.iter().skip(*tag_len).zip(arg_spec) {
+                    for eval_arg in f.iter().skip(*tag_len) {
                         let slot = eval_arg.linearize_impl(
                             fn_map,
+                            context,
                             params,
                             settings,
-                            constants,
-                            constant_map,
-                            external_functions,
                             instr,
                             subexpressions,
                         )?;
 
-                        if let Some(p) = params.get(&arg_spec.as_view())
-                            && !p.is_empty()
-                        {
-                            arg_shadowed = true;
-                        }
-
                         arg_slots.push(slot);
                     }
 
-                    if !options.should_inline() {
+                    if !fun.is_alias && !options.should_inline() {
                         let tags = f.iter().take(*tag_len).map(|tag| tag.to_owned()).collect();
-                        return Self::linearize_sub_evaluator(
-                            fn_map,
-                            params,
-                            settings,
-                            name,
-                            tags,
-                            arg_spec,
-                            arg_slots,
-                            e,
-                            constants,
-                            constant_map,
-                            external_functions,
-                            instr,
+                        return Self::linearize_function_call(
+                            fn_map, context, settings, name, tags, fun, arg_slots, instr,
                         );
                     }
 
-                    for (eval_arg, arg_slot) in arg_spec.iter().zip(arg_slots) {
-                        params.entry(eval_arg.as_view()).or_default().push(arg_slot);
-                    }
-
-                    // inline function call
-                    // we have to use a new subexpression list as the function has arguments that may be different per call
-                    // this means that not all subexpressions will be shared across calls
-                    let mut sub_expr_pos_child = HashMap::default();
-                    let r = e.as_view().linearize_impl(
+                    self.linearize_inline_function(
+                        fun,
+                        arg_slots,
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
-                        if arg_spec.is_empty() {
-                            subexpressions
-                        } else {
-                            // we can only inherit the subexpressions if the new function argument symbols
-                            // have not been used earlier
-                            if !arg_shadowed {
-                                sub_expr_pos_child.clone_from(subexpressions);
-                            }
-
-                            &mut sub_expr_pos_child
-                        },
-                    )?;
-
-                    for eval_arg in arg_spec {
-                        params.get_mut(&eval_arg.as_view()).unwrap().pop();
-                    }
-
-                    r
+                        subexpressions,
+                    )?
                 }
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
                 if b == InlineVar::new(Symbol::E).as_view() {
-                    let e_eval = e.linearize_impl(
-                        fn_map,
-                        params,
-                        settings,
-                        constants,
-                        constant_map,
-                        external_functions,
-                        instr,
-                        subexpressions,
-                    )?;
+                    let e_eval =
+                        e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
 
                     let temp = Slot::Temp(instr.len());
                     let c = Instruction::Fun(
@@ -1383,16 +1405,8 @@ impl<'a> AtomView<'a> {
                     return Ok(temp);
                 }
 
-                let b_eval = b.linearize_impl(
-                    fn_map,
-                    params,
-                    settings,
-                    constants,
-                    constant_map,
-                    external_functions,
-                    instr,
-                    subexpressions,
-                )?;
+                let b_eval =
+                    b.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
@@ -1439,16 +1453,8 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                let e_eval = e.linearize_impl(
-                    fn_map,
-                    params,
-                    settings,
-                    constants,
-                    constant_map,
-                    external_functions,
-                    instr,
-                    subexpressions,
-                )?;
+                let e_eval =
+                    e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
 
                 let temp = Slot::Temp(instr.len());
                 instr.push(Instruction::Powf(temp, b_eval, e_eval, false));
@@ -1459,11 +1465,9 @@ impl<'a> AtomView<'a> {
                 for arg in m.iter() {
                     let a = arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         subexpressions,
                     )?;
@@ -1481,11 +1485,9 @@ impl<'a> AtomView<'a> {
                 for arg in a.iter() {
                     adds.push(arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
                         settings,
-                        constants,
-                        constant_map,
-                        external_functions,
                         instr,
                         subexpressions,
                     )?);
@@ -3783,7 +3785,7 @@ impl<'a> AtomView<'a> {
         fn_map: &FunctionMap,
         params: &[Atom],
         args: &[Indeterminate],
-        fn_id_map: &mut HashMap<usize, usize>,
+        fn_id_map: &mut HashMap<usize, Option<usize>>,
         funcs: &mut Vec<(
             String,
             Vec<Indeterminate>,
@@ -3844,14 +3846,34 @@ impl<'a> AtomView<'a> {
             AtomView::Var(v) => {
                 let name = v.get_symbol();
                 if let Some(expr) = fn_map.get(*self) {
-                    return expr.body.as_view().to_eval_tree_impl(
+                    if !expr.args.is_empty() {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: expr.args.len(),
+                            actual: 0,
+                        });
+                    }
+                    if fn_id_map.get(&expr.id) == Some(&None) {
+                        return Err(EvaluationError::EvaluatorConstructionFailed {
+                            expression: self.to_owned(),
+                            reason: "recursive function or alias dependency".into(),
+                        });
+                    }
+                    let previous = fn_id_map.insert(expr.id, None);
+                    let result = expr.body.as_view().to_eval_tree_impl(
                         fn_map,
                         params,
-                        args,
+                        if expr.is_alias { args } else { &[] },
                         fn_id_map,
                         funcs,
                         external_functions,
                     );
+                    if let Some(index) = previous {
+                        fn_id_map.insert(expr.id, index);
+                    } else {
+                        fn_id_map.remove(&expr.id);
+                    }
+                    return result;
                 }
 
                 if name.get_evaluation_info().is_some() {
@@ -3967,6 +3989,7 @@ impl<'a> AtomView<'a> {
                 if let Some(Expr {
                     id,
                     tag_len,
+                    is_alias,
                     args: arg_spec,
                     body: e,
                     ..
@@ -3979,6 +4002,27 @@ impl<'a> AtomView<'a> {
                                 expected: arg_spec.len() + tag_len,
                                 actual: f.get_nargs(),
                             });
+                        }
+
+                        // Pending entries detect cycles before expanding aliases or bodies.
+                        if fn_id_map.get(id) == Some(&None) {
+                            return Err(EvaluationError::EvaluatorConstructionFailed {
+                                expression: self.to_owned(),
+                                reason: "recursive function or alias dependency".into(),
+                            });
+                        }
+                        if *is_alias {
+                            fn_id_map.insert(*id, None);
+                            let result = e.as_view().to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                args,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            );
+                            fn_id_map.remove(id);
+                            return result;
                         }
 
                         let eval_args = f
@@ -3996,9 +4040,10 @@ impl<'a> AtomView<'a> {
                             })
                             .collect::<Result<_, _>>()?;
 
-                        if let Some(pos) = fn_id_map.get(id) {
+                        if let Some(Some(pos)) = fn_id_map.get(id) {
                             Ok(Expression::Eval(0, *pos as u32, eval_args))
                         } else {
+                            fn_id_map.insert(*id, None);
                             let r = e.as_view().to_eval_tree_impl(
                                 fn_map,
                                 params,
@@ -4015,7 +4060,7 @@ impl<'a> AtomView<'a> {
                                     subexpressions: vec![],
                                 },
                             ));
-                            fn_id_map.insert(*id, funcs.len() - 1);
+                            fn_id_map.insert(*id, Some(funcs.len() - 1));
                             Ok(Expression::Eval(0, funcs.len() as u32 - 1, eval_args))
                         }
                     };
