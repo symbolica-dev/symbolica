@@ -1,20 +1,24 @@
 use super::*;
 
 /// A registered external function together with its symbolic tags, numerical
-/// implementation, and storage used by an expression evaluator.
+/// implementation, and optional shared instruction body. Each evaluator owns one
+/// entry per function, including its reusable evaluation stack; cloned evaluators
+/// share bodies but have independent stacks.
 pub struct ExternalFunctionContainer<T> {
     pub(super) export_name: String,
     pub(super) symbol: Symbol,
     pub(super) tags: Vec<Atom>,
     pub(super) fixed_args: Vec<Complex<Rational>>,
     pub(super) imp: Option<Box<dyn ExternalFunction<T>>>,
-    pub(super) cache: Vec<T>,
     pub(super) constant_index: Option<usize>,
-    pub(super) sub_evaluator: Option<Box<ExpressionEvaluator<T>>>,
+    // Reusable body stack, or argument buffer for callbacks. Allocated on first
+    // use and grown for larger callback arities; never shared or serialized.
+    pub(super) stack: Vec<T>,
+    pub(super) body: Option<Arc<FunctionBody>>,
 }
 
 #[cfg(feature = "serde")]
-impl<T: serde::Serialize> serde::Serialize for ExternalFunctionContainer<T> {
+impl<T> serde::Serialize for ExternalFunctionContainer<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         (
             &self.export_name,
@@ -25,24 +29,22 @@ impl<T: serde::Serialize> serde::Serialize for ExternalFunctionContainer<T> {
                 .collect::<Vec<_>>(),
             &self.fixed_args,
             &self.constant_index,
-            &self.sub_evaluator,
+            &self.body.as_deref(),
         )
             .serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T: serde::Deserialize<'de> + EvaluationDomain> serde::Deserialize<'de>
-    for ExternalFunctionContainer<T>
-{
+impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (export_name, symbol, tags, fixed_args, constant_index, sub_evaluator): (
+        let (export_name, symbol, tags, fixed_args, constant_index, body): (
             String,
             Symbol,
             Vec<String>,
             Vec<Complex<Rational>>,
             Option<usize>,
-            Option<Box<ExpressionEvaluator<T>>>,
+            Option<Box<FunctionBody>>,
         ) = serde::Deserialize::deserialize(deserializer)?;
 
         let mut external = Self {
@@ -51,11 +53,11 @@ impl<'de, T: serde::Deserialize<'de> + EvaluationDomain> serde::Deserialize<'de>
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index,
-            sub_evaluator,
+            body: body.map(Arc::from),
         };
-        if external.sub_evaluator.is_none() {
+        if external.body.is_none() {
             external.imp = external.fetch_impl_for::<T>();
         }
         Ok(external)
@@ -63,7 +65,7 @@ impl<'de, T: serde::Deserialize<'de> + EvaluationDomain> serde::Deserialize<'de>
 }
 
 #[cfg(feature = "bincode")]
-impl<T: bincode::Encode> bincode::Encode for ExternalFunctionContainer<T> {
+impl<T> bincode::Encode for ExternalFunctionContainer<T> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
@@ -80,14 +82,12 @@ impl<T: bincode::Encode> bincode::Encode for ExternalFunctionContainer<T> {
         )?;
         bincode::Encode::encode(&self.fixed_args, encoder)?;
         bincode::Encode::encode(&self.constant_index, encoder)?;
-        bincode::Encode::encode(&self.sub_evaluator, encoder)
+        bincode::Encode::encode(&self.body.as_deref(), encoder)
     }
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Context>
-    for ExternalFunctionContainer<T>
-{
+impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunctionContainer<T> {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
@@ -96,7 +96,7 @@ impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Co
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
         let fixed_args: Vec<Complex<Rational>> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
-        let sub_evaluator: Option<Box<ExpressionEvaluator<T>>> = bincode::Decode::decode(decoder)?;
+        let body: Option<Box<FunctionBody>> = bincode::Decode::decode(decoder)?;
 
         let mut external = Self {
             export_name,
@@ -104,11 +104,11 @@ impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Co
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index,
-            sub_evaluator,
+            body: body.map(Arc::from),
         };
-        if external.sub_evaluator.is_none() {
+        if external.body.is_none() {
             external.imp = external.fetch_impl_for::<T>();
         }
 
@@ -117,8 +117,8 @@ impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Co
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
-    bincode::BorrowDecode<'de, Context> for ExternalFunctionContainer<T>
+impl<'de, Context, T: EvaluationDomain> bincode::BorrowDecode<'de, Context>
+    for ExternalFunctionContainer<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -128,8 +128,7 @@ impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
         let tags: Vec<String> = bincode::BorrowDecode::borrow_decode(decoder)?;
         let fixed_args: Vec<Complex<Rational>> = bincode::BorrowDecode::borrow_decode(decoder)?;
         let constant_index: Option<usize> = bincode::BorrowDecode::borrow_decode(decoder)?;
-        let sub_evaluator: Option<Box<ExpressionEvaluator<T>>> =
-            bincode::BorrowDecode::borrow_decode(decoder)?;
+        let body: Option<Box<FunctionBody>> = bincode::BorrowDecode::borrow_decode(decoder)?;
 
         let mut external = Self {
             export_name,
@@ -137,18 +136,18 @@ impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index,
-            sub_evaluator,
+            body: body.map(Arc::from),
         };
-        if external.sub_evaluator.is_none() {
+        if external.body.is_none() {
             external.imp = external.fetch_impl_for::<T>();
         }
         Ok(external)
     }
 }
 
-impl<T: Clone> Clone for ExternalFunctionContainer<T> {
+impl<T> Clone for ExternalFunctionContainer<T> {
     fn clone(&self) -> Self {
         Self {
             export_name: self.export_name.clone(),
@@ -156,9 +155,9 @@ impl<T: Clone> Clone for ExternalFunctionContainer<T> {
             tags: self.tags.clone(),
             fixed_args: self.fixed_args.clone(),
             imp: self.imp.clone(),
-            cache: vec![],
+            stack: Vec::new(),
             constant_index: self.constant_index,
-            sub_evaluator: self.sub_evaluator.clone(),
+            body: self.body.clone(),
         }
     }
 }
@@ -171,9 +170,8 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
             .field("tags", &self.tags)
             .field("fixed_args", &self.fixed_args)
             .field("imp", &self.imp.is_some())
-            .field("cache_len", &self.cache.len())
             .field("constant_index", &self.constant_index)
-            .field("sub_evaluator", &self.sub_evaluator.is_some())
+            .field("body", &self.body.is_some())
             .finish()
     }
 }
@@ -239,19 +237,15 @@ impl<T> ExternalFunctionContainer<T> {
             tags,
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index: None,
-            sub_evaluator: None,
+            body: None,
         }
     }
 
-    pub(super) fn new_sub_evaluator(
-        symbol: Symbol,
-        tags: Vec<Atom>,
-        evaluator: ExpressionEvaluator<T>,
-    ) -> Self {
+    pub(super) fn with_body(symbol: Symbol, tags: Vec<Atom>, body: Arc<FunctionBody>) -> Self {
         let mut container = Self::new(symbol, tags, vec![]);
-        container.sub_evaluator = Some(Box::new(evaluator));
+        container.body = Some(body);
         container
     }
 
@@ -293,70 +287,19 @@ impl<T> ExternalFunctionContainer<T> {
     }
 
     pub(super) fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
-        debug_assert!(self.sub_evaluator.is_none());
         ExternalFunctionContainer {
             export_name: self.export_name.clone(),
             symbol: self.symbol,
             tags: self.tags.clone(),
             fixed_args: self.fixed_args.clone(),
-            imp: self.fetch_impl_for::<T2>(),
-            cache: vec![],
+            imp: if self.body.is_none() {
+                self.fetch_impl_for::<T2>()
+            } else {
+                None
+            },
+            stack: Vec::new(),
             constant_index: self.constant_index,
-            sub_evaluator: None,
-        }
-    }
-
-    pub(super) fn map_owned<T2: Default + Clone + EvaluationDomain>(
-        self,
-    ) -> ExternalFunctionContainer<T2>
-    where
-        T: Default,
-    {
-        let imp = if self.sub_evaluator.is_none() {
-            self.fetch_impl_for::<T2>()
-        } else {
-            None
-        };
-        let sub_evaluator = self
-            .sub_evaluator
-            .map(|evaluator| Box::new(evaluator.set_coeff(&[])));
-        ExternalFunctionContainer {
-            export_name: self.export_name,
-            symbol: self.symbol,
-            tags: self.tags,
-            fixed_args: self.fixed_args,
-            imp,
-            cache: vec![],
-            constant_index: self.constant_index,
-            sub_evaluator,
-        }
-    }
-
-    pub(super) fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(
-        self,
-        f: &F,
-        binary_prec: u32,
-    ) -> ExternalFunctionContainer<T2>
-    where
-        T: Default,
-    {
-        let imp = if self.sub_evaluator.is_none() {
-            self.fetch_impl_for::<T2>()
-        } else {
-            None
-        };
-        let sub_evaluator = self
-            .sub_evaluator
-            .map(|evaluator| Box::new(evaluator.map_coeff_with_prec(f, binary_prec)));
-        ExternalFunctionContainer {
-            export_name: self.export_name,
-            symbol: self.symbol,
-            tags: self.tags,
-            fixed_args: self.fixed_args,
-            imp,
-            cache: vec![],
-            constant_index: self.constant_index,
-            sub_evaluator,
+            body: self.body.clone(),
         }
     }
 
@@ -384,43 +327,6 @@ impl<T> ExternalFunctionContainer<T> {
 impl<T> std::fmt::Display for ExternalFunctionContainer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.export_name())
-    }
-}
-
-#[cfg(feature = "native_code_generation")]
-impl ExternalFunctionContainer<Complex<Rational>> {
-    pub(super) fn map_rational<T: EvaluationDomain>(
-        &self,
-        binary_prec: u32,
-    ) -> ExternalFunctionContainer<T> {
-        let convert = |coefficient: &Complex<Rational>| {
-            T::try_from_complex_float(Complex::new(
-                coefficient.re.to_multi_prec_float(binary_prec),
-                coefficient.im.to_multi_prec_float(binary_prec),
-            ))
-            .unwrap()
-        };
-
-        ExternalFunctionContainer {
-            export_name: self.export_name.clone(),
-            symbol: self.symbol,
-            tags: self.tags.clone(),
-            fixed_args: self.fixed_args.clone(),
-            imp: if self.sub_evaluator.is_none() {
-                self.fetch_impl_for::<T>()
-            } else {
-                None
-            },
-            cache: vec![],
-            constant_index: self.constant_index,
-            sub_evaluator: self.sub_evaluator.as_ref().map(|evaluator| {
-                Box::new(
-                    (**evaluator)
-                        .clone()
-                        .map_coeff_with_prec(&convert, binary_prec),
-                )
-            }),
-        }
     }
 }
 

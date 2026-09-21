@@ -129,7 +129,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         let mut external_fn_index_map = HashMap::default();
         let mut unknown_constants = vec![false; self.reserved_indices - self.param_count];
         for external_fn in &self.external_fns {
-            if external_fn.sub_evaluator.is_some() {
+            if external_fn.body.is_some() {
                 return Err(format!(
                     "Sub-evaluator '{}' cannot be vectorized",
                     external_fn.symbol.get_name()
