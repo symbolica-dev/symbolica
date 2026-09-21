@@ -3692,9 +3692,7 @@ impl FunctionBuilder {
         T: Into<AtomOrView<'a>>,
     {
         if let Atom::Fun(f) = self.handle.deref_mut() {
-            for a in args {
-                f.add_arg(a.into().as_view());
-            }
+            f.add_args_iter(args.into_iter().map(Into::into));
         }
 
         self
@@ -4705,7 +4703,7 @@ mod test {
         let x = parse!("v1+f1(v2)");
         assert_eq!(
             format!("{x:#?}"),
-            "AddView { data: [5, 17, 2, 13, 2, 1, 17, 3, 5, 0, 0, 0, 1, 47, 2, 1, 18] }"
+            "AddView { data: [5, 17, 2, 11, 2, 1, 17, 3, 1, 5, 1, 47, 2, 1, 18] }"
         );
         assert_eq!(
             x.get_all_symbols(true),
@@ -4713,7 +4711,7 @@ mod test {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(x.as_view().get_byte_size(), 17);
+        assert_eq!(x.as_view().get_byte_size(), 15);
     }
 
     #[test]
