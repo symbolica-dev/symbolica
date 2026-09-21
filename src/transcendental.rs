@@ -2742,29 +2742,34 @@ fn bessel_j_numeric_eval(
     z: &Complex<Float>,
     binary_prec: u32,
 ) -> Option<Complex<Float>> {
-    if z.is_zero()
-        && let Some(n) = complex_float_to_integer(order)
-        && n >= 0
-    {
-        return Some(if n == 0 {
-            complex_one(binary_prec)
-        } else {
-            Complex::new(Float::new(binary_prec), Float::new(binary_prec))
-        });
-    }
-
-    if let Some(n) = complex_float_to_integer(order)
-        && n < 0
-    {
-        let positive = Complex::new(Float::with_val(binary_prec, -n), Float::new(binary_prec));
-        let value = bessel_j_numeric_eval(&positive, z, binary_prec)?;
-        return Some(if n % 2 == 0 { value } else { -value });
-    }
-
-    bessel_series_eval(order, z, binary_prec, true)
+    bessel_checked("bessel_j", order, z, binary_prec, bessel_j_numeric_work)
 }
 
 fn bessel_i_numeric_eval(
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    binary_prec: u32,
+) -> Option<Complex<Float>> {
+    bessel_checked("bessel_i", order, z, binary_prec, bessel_i_numeric_work)
+}
+
+fn bessel_y_numeric_eval(
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    binary_prec: u32,
+) -> Option<Complex<Float>> {
+    bessel_checked("bessel_y", order, z, binary_prec, bessel_y_numeric_work)
+}
+
+fn bessel_k_numeric_eval(
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    binary_prec: u32,
+) -> Option<Complex<Float>> {
+    bessel_checked("bessel_k", order, z, binary_prec, bessel_k_numeric_work)
+}
+
+fn bessel_j_numeric_work(
     order: &Complex<Float>,
     z: &Complex<Float>,
     binary_prec: u32,
@@ -2783,14 +2788,47 @@ fn bessel_i_numeric_eval(
     if let Some(n) = complex_float_to_integer(order)
         && n < 0
     {
-        let positive = Complex::new(Float::with_val(binary_prec, -n), Float::new(binary_prec));
-        return bessel_i_numeric_eval(&positive, z, binary_prec);
+        let positive = Complex::new(
+            Float::with_val(binary_prec, n.checked_neg()?),
+            Float::new(binary_prec),
+        );
+        let value = bessel_j_numeric_work(&positive, z, binary_prec)?;
+        return Some(if n % 2 == 0 { value } else { -value });
+    }
+
+    bessel_series_eval(order, z, binary_prec, true)
+}
+
+fn bessel_i_numeric_work(
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    binary_prec: u32,
+) -> Option<Complex<Float>> {
+    if z.is_zero()
+        && let Some(n) = complex_float_to_integer(order)
+        && n >= 0
+    {
+        return Some(if n == 0 {
+            complex_one(binary_prec)
+        } else {
+            Complex::new(Float::new(binary_prec), Float::new(binary_prec))
+        });
+    }
+
+    if let Some(n) = complex_float_to_integer(order)
+        && n < 0
+    {
+        let positive = Complex::new(
+            Float::with_val(binary_prec, n.checked_neg()?),
+            Float::new(binary_prec),
+        );
+        return bessel_i_numeric_work(&positive, z, binary_prec);
     }
 
     bessel_series_eval(order, z, binary_prec, false)
 }
 
-fn bessel_y_numeric_eval(
+fn bessel_y_numeric_work(
     order: &Complex<Float>,
     z: &Complex<Float>,
     binary_prec: u32,
@@ -2805,21 +2843,24 @@ fn bessel_y_numeric_eval(
     if let Some(n) = complex_float_to_integer(order)
         && n < 0
     {
-        let positive = Complex::new(Float::with_val(binary_prec, -n), Float::new(binary_prec));
-        let value = bessel_y_numeric_eval(&positive, z, binary_prec)?;
+        let positive = Complex::new(
+            Float::with_val(binary_prec, n.checked_neg()?),
+            Float::new(binary_prec),
+        );
+        let value = bessel_y_numeric_work(&positive, z, binary_prec)?;
         return Some(if n % 2 == 0 { value } else { -value });
     }
 
     if complex_float_to_integer(order).is_some() {
-        return bessel_integer_order_limit(order, z, binary_prec, bessel_y_numeric_eval);
+        return bessel_integer_order_limit(order, z, binary_prec, bessel_y_numeric_work);
     }
     let pi_order = complex_pi(binary_prec) * order.clone();
-    let j_pos = bessel_j_numeric_eval(order, z, binary_prec)?;
-    let j_neg = bessel_j_numeric_eval(&(-order.clone()), z, binary_prec)?;
+    let j_pos = bessel_j_numeric_work(order, z, binary_prec)?;
+    let j_neg = bessel_j_numeric_work(&(-order.clone()), z, binary_prec)?;
     Some((j_pos * pi_order.clone().cos() - j_neg) / pi_order.sin())
 }
 
-fn bessel_k_numeric_eval(
+fn bessel_k_numeric_work(
     order: &Complex<Float>,
     z: &Complex<Float>,
     binary_prec: u32,
@@ -2832,15 +2873,11 @@ fn bessel_k_numeric_eval(
     }
 
     if let Some(n) = complex_float_to_integer(order) {
-        let order = Complex::new(
-            Float::with_val(binary_prec, n.abs()),
-            Float::new(binary_prec),
-        );
-        return bessel_integer_order_limit(&order, z, binary_prec, bessel_k_numeric_eval);
+        return bessel_k_integer_series(u32::try_from(n.unsigned_abs()).ok()?, z, binary_prec);
     }
     let pi_order = complex_pi(binary_prec) * order.clone();
-    let i_neg = bessel_i_numeric_eval(&(-order.clone()), z, binary_prec)?;
-    let i_pos = bessel_i_numeric_eval(order, z, binary_prec)?;
+    let i_neg = bessel_i_numeric_work(&(-order.clone()), z, binary_prec)?;
+    let i_pos = bessel_i_numeric_work(order, z, binary_prec)?;
     let pref = Complex::new(
         Float::with_val(binary_prec, Constant::Pi) / Float::with_val(binary_prec, 2),
         Float::new(binary_prec),
@@ -2863,6 +2900,7 @@ fn bessel_series_eval(
     let z_half_sq = z_half.clone() * z_half;
     let threshold = Float::with_val(binary_prec, 0.5).pow(u64::from(binary_prec));
 
+    let radius_squared = z_half_sq.norm().re;
     for k in 1..(16 * binary_prec.max(16)) {
         let kf = Float::with_val(binary_prec, k);
         let denom = Complex::new(kf.clone(), zero.clone())
@@ -2875,12 +2913,24 @@ fn bessel_series_eval(
         term = term * factor / denom;
         let term_size = term.norm().re;
         sum += term.clone();
-        if k > 16 && (term_size.is_zero() || term_size < threshold) {
-            return Some(sum);
+        // Once k > |nu|, (k+1)*(k+1-|nu|) bounds the next
+        // denominator from below and increases for every following term.
+        let next = Float::with_val(binary_prec, k + 1);
+        let order_size = order.norm().re;
+        if k > 16 && next > order_size {
+            let ratio = radius_squared.clone() / (next.clone() * (next - order_size));
+            if ratio < Float::with_val(binary_prec, 0.5)
+                && term_size * ratio.clone() * 2
+                    <= complex_l1_norm(&sum)
+                        * &threshold
+                        * (Float::with_val(binary_prec, 1) - ratio)
+            {
+                return Some(sum);
+            }
         }
     }
 
-    Some(sum)
+    None
 }
 
 fn bessel_integer_order_limit(
@@ -2889,7 +2939,7 @@ fn bessel_integer_order_limit(
     binary_prec: u32,
     evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
 ) -> Option<Complex<Float>> {
-    // Y and K have a removable 0/0 singularity in their order formulas.
+    // Y has a removable 0/0 singularity in its order formula.
     // Keep the O(epsilon) perturbation below the requested rounding error,
     // and supply extra working bits for cancellation both in the Bessel
     // series near gamma poles and in the numerator of the order formula.
@@ -3451,7 +3501,7 @@ fn atom_to_complex_float(value: AtomView, binary_prec: u32) -> Option<Complex<Fl
 fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     #[cfg(feature = "float-mpfr")]
     {
-        if z.im.to_f64() == 0.0 {
+        if z.im.is_fully_zero() {
             return Complex::new(
                 z.re.clone().into_raw().gamma().into(),
                 Float::new(binary_prec),
@@ -3459,30 +3509,43 @@ fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
         }
     }
 
+    if z.im.is_fully_zero()
+        && z.re <= Float::new(binary_prec)
+        && z.re.try_to_rational().is_some_and(|r| r.is_integer())
+    {
+        return Complex::new(
+            Float::with_val(binary_prec, f64::NAN),
+            Float::new(binary_prec),
+        );
+    }
+
+    if let Some(n) = complex_float_to_integer(z)
+        && n > 0
+        && n <= 4096
+    {
+        return Complex::new(
+            factorial_float(n as u32 - 1, binary_prec),
+            Float::new(binary_prec),
+        );
+    }
     gamma_complex_spouge(z, binary_prec)
 }
 
 fn erf_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    if z.is_zero() {
-        return Complex::new(Float::new(binary_prec), Float::new(binary_prec));
+    #[cfg(feature = "float-mpfr")]
+    if z.im.is_fully_zero() {
+        return Complex::new(
+            z.re.clone().into_raw().erf().into(),
+            Float::new(binary_prec),
+        );
     }
-
-    if z.re.to_f64() < 0.0 {
-        return -erf_numeric_eval(&(-z.clone()), binary_prec);
-    }
-
-    let abs_z = z.norm().re.to_f64().abs();
-    if abs_z <= 4.0 || z.re.to_f64().abs() < 1.0 {
-        erf_series_eval(z, binary_prec)
-    } else {
-        erf_asymptotic_eval(z, binary_prec)
-    }
+    erf_checked(z, binary_prec)
 }
 
 fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     #[cfg(feature = "float-mpfr")]
     {
-        if z.im.to_f64() == 0.0 {
+        if z.im.is_fully_zero() {
             return Complex::new(
                 z.re.clone().into_raw().digamma().into(),
                 Float::new(binary_prec),
@@ -3497,40 +3560,7 @@ fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> C
     if order == 0 {
         return polygamma_order_zero_numeric_eval(z, binary_prec);
     }
-
-    let zero = Float::new(binary_prec);
-    let one = Float::with_val(binary_prec, 1);
-    let exponent = Complex::new(Float::with_val(binary_prec, order + 1), zero.clone());
-    let factorial = Float::with_integer(binary_prec, Integer::factorial(order).to_multi_prec());
-    let sign = if order.is_multiple_of(2) {
-        -factorial
-    } else {
-        factorial
-    };
-    let prefactor = Complex::new(sign, zero.clone());
-
-    let mut shifted = z.clone();
-    let mut correction = Complex::new(zero.clone(), zero.clone());
-
-    while shifted.re.to_f64() < 8.0 {
-        let denom = shifted.clone().powf(&exponent);
-        correction += prefactor.clone() / denom;
-        shifted += Complex::new(one.clone(), zero.clone());
-    }
-
-    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
-    let mut sum = Complex::new(zero.clone(), zero.clone());
-    for n in 0..(8 * binary_prec.max(16)) {
-        let shift = Complex::new(Float::with_val(binary_prec, n), zero.clone());
-        let term = prefactor.clone() / (shifted.clone() + shift).powf(&exponent);
-        let term_size = term.norm().re.to_f64().abs();
-        sum += term;
-        if n > 16 && (term_size == 0.0 || term_size < threshold) {
-            break;
-        }
-    }
-
-    correction + sum
+    polygamma_checked(order, z, binary_prec)
 }
 
 fn polylog_exact(s: AtomView, z: AtomView) -> Option<Atom> {
@@ -3617,11 +3647,22 @@ fn polylog_numeric_eval(
     }
 
     if let Some(order) = complex_float_to_integer(s) {
-        return polylog_integer_numeric_eval(order, z, binary_prec, 0);
+        let result = polylog_integer_numeric_eval(order, z, binary_prec, 0);
+        if result.is_none() {
+            tracing::warn!(
+                order,
+                binary_precision = binary_prec,
+                "polylog: convergence or precision budget exceeded; numerical evaluation declined"
+            );
+        }
+        return result;
     }
 
     let radius = z.norm().re;
     if radius >= Float::with_val(binary_prec, 19) / Float::with_val(binary_prec, 20) {
+        tracing::warn!(
+            "polylog: noninteger-order continuation outside |z| < 0.95 is not implemented; numerical evaluation declined"
+        );
         return None;
     }
 
@@ -3657,6 +3698,7 @@ fn polylog_numeric_eval(
     }
 
     // Do not silently return an unconverged partial sum for difficult orders.
+    tracing::warn!("polylog: series did not converge; numerical evaluation declined");
     None
 }
 
@@ -4025,6 +4067,45 @@ fn zeta_integer_numeric_eval(order: i64, binary_prec: u32) -> Complex<Float> {
             Float::new(binary_prec),
         );
     }
+    #[cfg(not(feature = "float-mpfr"))]
+    {
+        // The logarithmic polylog series asks for many integer zeta values.
+        // In particular, running Hasse's double sum at negative integers is
+        // both expensive and subject to severe cancellation. Use the exact
+        // Bernoulli formulas (DLMF 25.6.1--25.6.3) instead.
+        let zero = Float::new(binary_prec);
+        if order == 0 {
+            return Complex::new(Float::with_val(binary_prec, -0.5), zero);
+        }
+        // For n >= p+2, 0 < zeta(n)-1 < 2^(1-n), below half an ulp.
+        // Avoid constructing large Bernoulli numbers for a result rounding to 1.
+        if order >= i64::from(binary_prec) + 2 {
+            return complex_one(binary_prec);
+        }
+        if order < 0 {
+            if order % 2 == 0 {
+                return Complex::new(zero.clone(), zero);
+            }
+            if let Some(n) = order
+                .checked_neg()
+                .and_then(|n| n.checked_add(1))
+                .and_then(|n| u32::try_from(n).ok())
+            {
+                let value = -bernoulli_number(n) / Rational::from(n);
+                return Complex::new(value.to_multi_prec_float(binary_prec), zero);
+            }
+        } else if order % 2 == 0
+            && let Ok(n) = u32::try_from(order)
+        {
+            let coefficient = bernoulli_number(n) / Rational::from(Integer::factorial(n) * 2);
+            let mut value = coefficient.to_multi_prec_float(binary_prec)
+                * (Float::with_val(binary_prec, Constant::Pi) * 2).pow(u64::from(n));
+            if n.is_multiple_of(4) {
+                value = -value;
+            }
+            return Complex::new(value, zero);
+        }
+    }
     zeta_numeric_eval(
         &Complex::new(Float::with_val(binary_prec, order), Float::new(binary_prec)),
         binary_prec,
@@ -4097,8 +4178,8 @@ fn factorial_float(n: u32, binary_prec: u32) -> Float {
 fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let zero = Float::new(binary_prec);
 
-    if s.is_real() {
-        if s.re.to_f64() == 1.0 {
+    if s.im.is_fully_zero() {
+        if s.re == Float::with_val(binary_prec, 1) {
             return Complex::new(Float::with_val(binary_prec, f64::INFINITY), zero);
         }
 
@@ -4108,18 +4189,42 @@ fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
         }
 
         #[cfg(not(feature = "float-mpfr"))]
-        {
-            return zeta_complex_hasse(s, binary_prec);
+        if let Some(n) = complex_float_to_integer(s) {
+            if (-4096..=0).contains(&n)
+                || (n > 0 && n % 2 == 0 && n <= 4096)
+                || n >= i64::from(binary_prec) + 2
+            {
+                return zeta_integer_numeric_eval(n, binary_prec);
+            }
+            if n < 0 && n % 2 == 0 {
+                return Complex::new(zero.clone(), zero);
+            }
         }
     }
 
-    if (s.re.to_f64() - 1.0).abs() < 1e-14 && s.im.to_f64().abs() < 1e-14 {
-        return Complex::new(Float::with_val(binary_prec, f64::INFINITY), zero);
+    if !s.re.is_finite() || !s.im.is_finite() || binary_prec > 16_384 {
+        tracing::warn!("zeta: unsupported argument or precision; numerical evaluation declined");
+        return Complex::new(
+            Float::with_val(binary_prec.clamp(1, 16_384), f64::NAN),
+            zero,
+        );
     }
 
+    // Forming 1-2^(1-s) loses bits close to the pole. Preserve those
+    // bits internally; only the exact pole above should return infinity.
+    let distance = (s.re.clone() - 1).norm() + s.im.norm();
+    let pole_guard = distance
+        .as_raw()
+        .get_exp()
+        .map_or(0, |e| e.saturating_neg().max(0) as u32);
+    if pole_guard > 16_384 {
+        tracing::warn!("zeta: argument too close to the pole; numerical evaluation declined");
+        return Complex::new(Float::with_val(binary_prec, f64::NAN), zero);
+    }
     let work_prec = binary_prec
         .saturating_mul(4)
-        .max(binary_prec.saturating_add(64));
+        .max(binary_prec.saturating_add(64))
+        .saturating_add(pole_guard);
     let mut s_re = s.re.clone();
     let mut s_im = s.im.clone();
     s_re.set_prec(work_prec);
@@ -4156,7 +4261,7 @@ fn zeta_complex_reflection(s: &Complex<Float>, binary_prec: u32) -> Complex<Floa
         (pi_c * s.clone() / Complex::new(Float::with_val(binary_prec, 2), zero.clone())).sin();
     let gamma = gamma_numeric_eval(&reflected, binary_prec);
     #[cfg(feature = "float-mpfr")]
-    let zeta = if reflected.im.to_f64() == 0.0 {
+    let zeta = if reflected.im.is_fully_zero() {
         Complex::new(reflected.re.clone().into_raw().zeta().into(), zero.clone())
     } else {
         zeta_complex_hasse(&reflected, binary_prec)
@@ -4176,17 +4281,46 @@ fn zeta_complex_hasse(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let two_c = Complex::new(two.clone(), zero.clone());
 
     let denominator = one_c.clone() - two_c.powf(&(one_c - s.clone()));
-    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
+    // The caller supplies at least twice the required output precision.
+    // Keep convergence tests in arbitrary precision, including beyond the
+    // f64 exponent range, and reserve half the bits for cancellation.
+    let threshold = binary_series_threshold(binary_prec / 2);
+    if complex_l1_norm(&denominator) < threshold {
+        tracing::warn!("zeta: Hasse denominator is ill-conditioned; numerical evaluation declined");
+        return Complex::new(Float::with_val(binary_prec, f64::NAN), zero);
+    }
     let mut outer = Complex::new(zero.clone(), zero.clone());
+    let mut small_terms = 0;
     let mut two_power = Float::with_val(binary_prec, 2);
+    let mut inverse_powers = Vec::new();
+    let integer_order = complex_float_to_integer(s);
 
     for n in 0..(8 * binary_prec.max(16)) {
+        // Each (k+1)^(-s) occurs in every subsequent row. Computing it once
+        // removes the quadratic number of arbitrary-precision log/exp calls,
+        // especially costly in the portable/WASM backend.
+        let base = Float::with_val(binary_prec, n + 1);
+        let inverse_power = if let Some(order) = integer_order {
+            let power = base.pow(order.unsigned_abs());
+            Complex::new(
+                if order < 0 {
+                    power
+                } else {
+                    one.clone() / power
+                },
+                zero.clone(),
+            )
+        } else if s.im.is_fully_zero() {
+            Complex::new(base.powf(&(-s.re.clone())), zero.clone())
+        } else {
+            Complex::new(base, zero.clone()).powf(&(-s.clone()))
+        };
+        inverse_powers.push(inverse_power);
         let mut inner = Complex::new(zero.clone(), zero.clone());
         let mut binom = Float::with_val(binary_prec, 1);
 
         for k in 0..=n {
-            let base = Complex::new(Float::with_val(binary_prec, k + 1), zero.clone());
-            let mut term = Complex::new(binom.clone(), zero.clone()) / base.powf(s);
+            let mut term = inverse_powers[k as usize].clone() * binom.clone();
             if k % 2 == 1 {
                 term = -term;
             }
@@ -4199,19 +4333,73 @@ fn zeta_complex_hasse(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
         }
 
         let term = inner / Complex::new(two_power.clone(), zero.clone());
-        let term_size = term.norm().re.to_f64().abs();
+        let term_size = complex_l1_norm(&term);
         outer += term;
-        if n > 16 && (term_size == 0.0 || term_size < threshold) {
-            break;
+        if n > 16 && term_size < complex_l1_norm(&outer) * &threshold {
+            small_terms += 1;
+        } else {
+            small_terms = 0;
+        }
+        if small_terms == 4 {
+            return outer / denominator;
         }
 
         two_power *= Float::with_val(binary_prec, 2);
     }
 
-    outer / denominator
+    tracing::warn!(
+        binary_precision = binary_prec,
+        "zeta: series did not converge; numerical evaluation declined"
+    );
+    Complex::new(
+        Float::with_val(binary_prec, f64::NAN),
+        Float::with_val(binary_prec, f64::NAN),
+    )
 }
 
 fn gamma_complex_spouge(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
+    // Coefficient cancellation needs guard bits. Complex gamma can be
+    // exponentially small in |Im(z)|; increase the approximation order too.
+    let imaginary = z.im.to_f64().abs();
+    let gap = match (z.re.as_raw().get_exp(), z.im.as_raw().get_exp()) {
+        (Some(a), Some(b)) => a.abs_diff(b),
+        _ => 0,
+    };
+    let adjusted = binary_prec
+        .checked_add(gap)
+        .and_then(|p| p.checked_add((3.0 * imaginary).ceil() as u32));
+    let work = adjusted
+        .and_then(|p| p.checked_mul(2))
+        .and_then(|p| p.checked_add(64));
+    if binary_prec == 0
+        || !z.re.is_finite()
+        || !imaginary.is_finite()
+        || work.is_none_or(|p| p > 65_536)
+    {
+        tracing::warn!(
+            "gamma: unsupported argument or working precision; numerical evaluation declined"
+        );
+        return Complex::new(Float::with_val(53, f64::NAN), Float::with_val(53, f64::NAN));
+    }
+    let work_prec = work.unwrap();
+    let mut argument = z.clone();
+    argument.re.set_prec(work_prec);
+    argument.im.set_prec(work_prec);
+    let a = spouge_parameter(adjusted.unwrap() + 32);
+    let mut value = gamma_complex_spouge_work(&argument, work_prec, a);
+    if !value.re.is_finite() || !value.im.is_finite() || value.is_fully_zero() {
+        tracing::warn!("gamma: result exceeds the numerical range; numerical evaluation declined");
+        return Complex::new(
+            Float::with_val(binary_prec, f64::NAN),
+            Float::with_val(binary_prec, f64::NAN),
+        );
+    }
+    value.re.set_prec(binary_prec);
+    value.im.set_prec(binary_prec);
+    value
+}
+
+fn gamma_complex_spouge_work(z: &Complex<Float>, binary_prec: u32, a: u32) -> Complex<Float> {
     let zero = Float::new(binary_prec);
     let one = Float::with_val(binary_prec, 1);
     let half = Float::with_val(binary_prec, 1) / Float::with_val(binary_prec, 2);
@@ -4221,10 +4409,9 @@ fn gamma_complex_spouge(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> 
         let numerator = Complex::new(pi.clone(), zero.clone());
         let pi_z = Complex::new(pi, zero.clone()) * z.clone();
         let reflected = Complex::new(one.clone(), zero.clone()) - z.clone();
-        return numerator / (pi_z.sin() * gamma_complex_spouge(&reflected, binary_prec));
+        return numerator / (pi_z.sin() * gamma_complex_spouge_work(&reflected, binary_prec, a));
     }
 
-    let a = spouge_parameter(binary_prec);
     let mut sum = Complex::new(
         (Float::with_val(binary_prec, 2) * Float::with_val(binary_prec, Constant::Pi)).sqrt(),
         zero.clone(),
@@ -4242,116 +4429,7 @@ fn gamma_complex_spouge(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> 
 }
 
 fn polygamma_order_zero_complex(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    let zero = Float::new(binary_prec);
-    let one = Float::with_val(binary_prec, 1);
-    let pi = Float::with_val(binary_prec, Constant::Pi);
-
-    if z.re.to_f64() < 0.5 {
-        let pi_z = Complex::new(pi.clone(), zero.clone()) * z.clone();
-        let reflected = Complex::new(one.clone(), zero.clone()) - z.clone();
-        return polygamma_order_zero_complex(&reflected, binary_prec)
-            - Complex::new(pi, zero.clone()) / pi_z.tan();
-    }
-
-    let mut shifted = z.clone();
-    let mut correction = Complex::new(zero.clone(), zero.clone());
-    while shifted.re.to_f64() < 8.0 {
-        correction -= Complex::new(one.clone(), zero.clone()) / shifted.clone();
-        shifted += Complex::new(one.clone(), zero.clone());
-    }
-
-    let mut sum = Complex::new(-Float::with_val(binary_prec, Constant::Euler), zero.clone());
-    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
-
-    for n in 0..(8 * binary_prec.max(16)) {
-        let n1 = Float::with_val(binary_prec, n + 1);
-        let term = Complex::new(one.clone() / &n1, zero.clone())
-            - Complex::new(one.clone(), zero.clone())
-                / (shifted.clone() + Complex::new(n1, zero.clone()));
-        let term_size = term.norm().re.to_f64().abs();
-        sum += term;
-        if n > 16 && (term_size == 0.0 || term_size < threshold) {
-            break;
-        }
-    }
-
-    correction + sum
-}
-
-fn erf_series_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    let work_prec = binary_prec
-        .saturating_mul(2)
-        .max(binary_prec.saturating_add(64));
-    let mut z = z.clone();
-    z.re.set_prec(work_prec);
-    z.im.set_prec(work_prec);
-
-    let zero = Float::new(work_prec);
-    let z_squared = z.clone() * z.clone();
-    let mut term = z.clone();
-    let mut sum = term.clone();
-    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
-
-    for n in 0..(64 * binary_prec.max(16)) {
-        let numerator = Complex::new(Float::with_val(work_prec, 2 * n + 1), zero.clone());
-        let denominator = Complex::new(
-            Float::with_val(work_prec, n + 1) * Float::with_val(work_prec, 2 * n + 3),
-            zero.clone(),
-        );
-        term = -term * z_squared.clone() * numerator / denominator;
-        let term_size = term.norm().re.to_f64().abs();
-        sum += term.clone();
-        if n > 16 && (term_size == 0.0 || term_size < threshold) {
-            break;
-        }
-    }
-
-    let prefactor = Complex::new(
-        Float::with_val(work_prec, 2) / Float::with_val(work_prec, Constant::Pi).sqrt(),
-        zero,
-    );
-    let mut result = prefactor * sum;
-    result.re.set_prec(binary_prec);
-    result.im.set_prec(binary_prec);
-    result
-}
-
-fn erf_asymptotic_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
-    let work_prec = binary_prec
-        .saturating_mul(2)
-        .max(binary_prec.saturating_add(64));
-    let mut z = z.clone();
-    z.re.set_prec(work_prec);
-    z.im.set_prec(work_prec);
-
-    let zero = Float::new(work_prec);
-    let one = Complex::new(Float::with_val(work_prec, 1), zero.clone());
-    let two = Complex::new(Float::with_val(work_prec, 2), zero.clone());
-    let z_squared = z.clone() * z.clone();
-    let mut term = one.clone();
-    let mut sum = term.clone();
-    let threshold = 2f64.powi(-(binary_prec.min(900) as i32));
-
-    for n in 0..(16 * binary_prec.max(16)) {
-        let factor = Complex::new(Float::with_val(work_prec, 2 * n + 1), zero.clone())
-            / (two.clone() * z_squared.clone());
-        term = -term * factor;
-        let term_size = term.norm().re.to_f64().abs();
-        if n > 0 && term_size > sum.norm().re.to_f64().abs() {
-            break;
-        }
-        sum += term.clone();
-        if n > 4 && (term_size == 0.0 || term_size < threshold) {
-            break;
-        }
-    }
-
-    let sqrt_pi = Float::with_val(work_prec, Constant::Pi).sqrt();
-    let erfc = (-z_squared).exp() * sum / (Complex::new(sqrt_pi, zero) * z);
-    let mut result = one - erfc;
-    result.re.set_prec(binary_prec);
-    result.im.set_prec(binary_prec);
-    result
+    polygamma_checked(0, z, binary_prec)
 }
 
 fn spouge_parameter(binary_prec: u32) -> u32 {
@@ -4372,6 +4450,368 @@ fn spouge_coefficient(a: u32, k: u32, binary_prec: u32) -> Float {
     coeff
 }
 
+// Numerical fallbacks with explicit convergence and precision checks.
+
+const MAX_WORK_BITS: u32 = 65_536;
+
+fn finite(z: &Complex<Float>) -> bool {
+    z.re.is_finite() && z.im.is_finite()
+}
+
+fn at_precision(z: &Complex<Float>, bits: u32) -> Complex<Float> {
+    let mut z = z.clone();
+    z.re.set_prec(bits);
+    z.im.set_prec(bits);
+    z
+}
+
+fn failure(name: &str, bits: u32, reason: &str) -> Complex<Float> {
+    tracing::warn!(
+        function = name,
+        binary_precision = bits,
+        "{reason}; numerical evaluation declined"
+    );
+    Complex::new(
+        Float::with_val(bits.clamp(1, MAX_WORK_BITS), f64::NAN),
+        Float::with_val(bits.clamp(1, MAX_WORK_BITS), f64::NAN),
+    )
+}
+
+fn polygamma_checked(order: u32, z: &Complex<Float>, bits: u32) -> Complex<Float> {
+    let Some(work) = bits.checked_add(64).filter(|&p| p <= MAX_WORK_BITS) else {
+        return failure(
+            "polygamma",
+            bits,
+            "working precision exceeds the supported budget",
+        );
+    };
+    if bits == 0 || !finite(z) || order > 4096 {
+        return failure(
+            "polygamma",
+            bits,
+            "unsupported argument, order, or precision",
+        );
+    }
+    let z = at_precision(z, work);
+    if z.im.is_fully_zero() && z.re <= Float::new(work) && complex_float_to_integer(&z).is_some() {
+        return Complex::new(Float::with_val(bits, f64::INFINITY), Float::new(bits));
+    }
+
+    // Recurrence to the right half-plane, followed by DLMF 5.11.2/5.15.9.
+    // The Euler--Maclaurin remainder after B_(2k) is bounded by the
+    // magnitude of that term with z replaced by Re(z)>0. This also works
+    // for complex z; checking the actual next complex term alone does not.
+    let cutoff = Float::with_val(work, (bits + order) / 2 + 16);
+    let mut shifted = z;
+    let mut correction = Complex::new(Float::new(work), Float::new(work));
+    let mut magnitude = Float::new(work);
+    let max_shifts = 8 * work + 1024;
+    if cutoff.clone() - &shifted.re > Float::with_val(work, max_shifts) {
+        return failure(
+            "polygamma",
+            bits,
+            "argument recurrence exceeds the supported budget",
+        );
+    }
+    let mut shifts = 0;
+    while shifted.re < cutoff {
+        if shifts == max_shifts {
+            return failure(
+                "polygamma",
+                bits,
+                "argument recurrence exceeds the supported budget",
+            );
+        }
+        let inv = shifted.inv();
+        let term = if order == 0 {
+            -inv
+        } else {
+            pow_complex_u32(&inv, order + 1)
+        };
+        magnitude += complex_l1_norm(&term);
+        correction += term;
+        shifted += complex_one(work);
+        shifts += 1;
+    }
+
+    let inv = shifted.inv();
+    let inv_sq = inv.clone() * inv.clone();
+    let inv_re = Float::with_val(work, 1) / shifted.re.clone();
+    let inv_re_sq = inv_re.clone() * inv_re.clone();
+    let mut power = if order == 0 {
+        inv_sq.clone()
+    } else {
+        pow_complex_u32(&inv, order) * inv_sq.clone()
+    };
+    let mut bound_power = inv_re.pow(u64::from(order) + 2);
+    let mut sum = if order == 0 {
+        shifted.log() - inv.clone() / Float::with_val(work, 2)
+    } else {
+        pow_complex_u32(&inv, order) / Float::with_val(work, order)
+            + pow_complex_u32(&inv, order + 1) / Float::with_val(work, 2)
+    };
+    magnitude += complex_l1_norm(&sum);
+    let mut rising = Float::with_val(work, order + 1);
+    let mut factorial = Float::with_val(work, 2);
+    let tolerance = binary_series_threshold(bits + 8);
+    let round_unit = binary_series_threshold(work - 8);
+
+    for k in 1..=bits + 32 {
+        let bernoulli = bernoulli_number(2 * k).to_multi_prec_float(work);
+        let coefficient = if order == 0 {
+            -bernoulli / Float::with_val(work, 2 * k)
+        } else {
+            bernoulli * &rising / &factorial
+        };
+        let term = power.clone() * coefficient.clone();
+        magnitude += complex_l1_norm(&term);
+        sum += term;
+        let total = sum.clone() + correction.clone();
+        let remainder = coefficient.norm() * bound_power.clone();
+        let roundoff = magnitude.clone() * &round_unit * Float::with_val(work, shifts + k + 1);
+        if remainder + roundoff <= complex_l1_norm(&total) * &tolerance {
+            let result = if order == 0 {
+                total
+            } else {
+                let factor = factorial_float(order, work);
+                total * if order % 2 == 0 { -factor } else { factor }
+            };
+            if finite(&result) {
+                return at_precision(&result, bits);
+            }
+            break;
+        }
+        power *= inv_sq.clone();
+        bound_power *= &inv_re_sq;
+        rising *= Float::with_val(work, order + 2 * k) * Float::with_val(work, order + 2 * k + 1);
+        factorial *= Float::with_val(work, 2 * k + 1) * Float::with_val(work, 2 * k + 2);
+    }
+    failure(
+        "polygamma",
+        bits,
+        "remainder or roundoff exceeds the requested accuracy",
+    )
+}
+
+fn bessel_checked(
+    name: &str,
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    bits: u32,
+    evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
+) -> Option<Complex<Float>> {
+    let fail = |reason| {
+        failure(name, bits, reason);
+        None
+    };
+    if bits == 0 || bits > MAX_WORK_BITS / 4 || !finite(order) || !finite(z) {
+        return fail("unsupported argument, order, or precision");
+    }
+    if z.is_fully_zero() {
+        return evaluator(order, z, bits);
+    }
+    // On the positive real axis the K expansion has a first-omitted-term
+    // bound. Use it only if that bound achieves the requested accuracy.
+    if name == "bessel_k"
+        && let Some(value) = bessel_k_asymptotic(order, z, bits)
+    {
+        return Some(value);
+    }
+    let radius = z.re.to_f64().abs() + z.im.to_f64().abs();
+    let order_size = order.re.to_f64().abs() + order.im.to_f64().abs();
+    if !radius.is_finite() || !order_size.is_finite() || radius > 8192.0 || order_size > 4096.0 {
+        return fail("series would require excessive cancellation guard bits");
+    }
+    // K's I_-nu - I_nu formula loses about 2*|Re(z)|/ln(2) bits;
+    // J's alternating power series can also have exponentially large terms.
+    let gap = |z: &Complex<Float>| match (z.re.as_raw().get_exp(), z.im.as_raw().get_exp()) {
+        (Some(a), Some(b)) => a.abs_diff(b),
+        _ => 0,
+    };
+    let Some(mut work) = bits
+        .checked_add(64 + (4.0 * radius + 2.0 * order_size).ceil() as u32)
+        .and_then(|p| p.checked_add(gap(z).max(gap(order))))
+        .filter(|&p| p < MAX_WORK_BITS / 4)
+    else {
+        return fail("working precision exceeds the supported budget");
+    };
+    let mut previous = None;
+    for _ in 0..4 {
+        let value = evaluator(&at_precision(order, work), &at_precision(z, work), work);
+        if let Some(value) = value.filter(finite) {
+            if let Some(old) = previous {
+                let error = complex_l1_norm(&(value.clone() - old));
+                let scale = complex_l1_norm(&value);
+                if !scale.is_fully_zero() && error <= scale * binary_series_threshold(bits + 8) {
+                    return Some(at_precision(&value, bits));
+                }
+            }
+            previous = Some(value);
+        }
+        work = work.checked_add((work / 2).max(64))?;
+        if work >= MAX_WORK_BITS / 4 {
+            break;
+        }
+    }
+    fail("series did not converge to a stable result at the requested precision")
+}
+
+fn bessel_k_asymptotic(
+    order: &Complex<Float>,
+    z: &Complex<Float>,
+    bits: u32,
+) -> Option<Complex<Float>> {
+    if !order.im.is_fully_zero() || !z.im.is_fully_zero() || z.re <= Float::with_val(bits, 32) {
+        return None;
+    }
+    let work = bits + 64;
+    let nu = at_precision(order, work).re;
+    let x = at_precision(z, work).re;
+    let mu = nu.clone() * nu.clone() * 4;
+    let mut term = Float::with_val(work, 1);
+    let mut sum = term.clone();
+    let mut previous_size = term.clone();
+    let tolerance = binary_series_threshold(bits + 16);
+    for k in 1..=2 * bits + 64 {
+        let odd = Float::with_val(work, 2 * k - 1);
+        term *= (mu.clone() - odd.clone() * odd) / (x.clone() * Float::with_val(work, 8 * k));
+        let size = term.norm();
+        // DLMF 10.40(ii): for real nu and x>0, after k>|nu|-1/2
+        // the remainder is bounded by the first omitted term.
+        if Float::with_val(work, k) > nu.norm() + 1 && size <= sum.norm() * &tolerance {
+            let prefactor =
+                (Float::with_val(work, Constant::Pi) / (x.clone() * 2)).sqrt() * (-x).exp();
+            let result = sum * prefactor;
+            if !result.is_finite() || result <= Float::new(work) {
+                return None;
+            }
+            return Some(at_precision(&Complex::new(result, Float::new(work)), bits));
+        }
+        if k > 1 && size > previous_size {
+            return None;
+        }
+        previous_size = size;
+        sum += term.clone();
+    }
+    None
+}
+
+fn bessel_k_integer_series(n: u32, z: &Complex<Float>, bits: u32) -> Option<Complex<Float>> {
+    // DLMF 10.31.1. Avoid a finite difference in the order at integer nu.
+    // The caller supplies cancellation guard bits and checks stability.
+    let half = z.clone() / Float::with_val(bits, 2);
+    let half_sq = half.clone() * half.clone();
+    let mut sum = Complex::new(Float::new(bits), Float::new(bits));
+    if n > 0 {
+        let mut term = pow_complex_u32(&half.inv(), n)
+            * (factorial_float(n - 1, bits) / Float::with_val(bits, 2));
+        sum += term.clone();
+        for k in 1..n {
+            term *= -half_sq.clone() / (Float::with_val(bits, k) * Float::with_val(bits, n - k));
+            sum += term.clone();
+        }
+    }
+    let log = half.log() + Complex::new(Float::with_val(bits, Constant::Euler), Float::new(bits));
+    let mut power = pow_complex_u32(&half, n) / factorial_float(n, bits);
+    if n % 2 == 1 {
+        power = -power;
+    }
+    let mut h_k = Float::new(bits);
+    let mut h_nk = harmonic_rational(n).to_multi_prec_float(bits);
+    let tolerance = binary_series_threshold(bits);
+    let radius_sq = half.norm_squared();
+    let mut small_terms = 0;
+    for k in 0..16 * bits.max(16) {
+        let coefficient = Complex::new(
+            (h_k.clone() + &h_nk) / Float::with_val(bits, 2),
+            Float::new(bits),
+        ) - log.clone();
+        let term = power.clone() * coefficient;
+        let size = complex_l1_norm(&term);
+        sum += term;
+        let denominator = Float::with_val(bits, k + 1) * Float::with_val(bits, n + k + 1);
+        if radius_sq.clone() * 2 < denominator && size <= complex_l1_norm(&sum) * &tolerance {
+            small_terms += 1;
+            if small_terms >= 2 {
+                return Some(sum);
+            }
+        } else {
+            small_terms = 0;
+        }
+        power *= half_sq.clone() / denominator;
+        h_k += Float::with_val(bits, 1) / Float::with_val(bits, k + 1);
+        h_nk += Float::with_val(bits, 1) / Float::with_val(bits, n + k + 1);
+    }
+    None
+}
+
+fn erf_checked(z: &Complex<Float>, bits: u32) -> Complex<Float> {
+    if bits == 0 || bits > MAX_WORK_BITS / 2 || !finite(z) {
+        return failure("erf", bits, "unsupported argument or precision");
+    }
+    if z.is_fully_zero() {
+        return z.clone();
+    }
+    if z.re < Float::new(bits) {
+        return -erf_checked(&(-z.clone()), bits);
+    }
+    let preliminary = bits + 64;
+    let argument = at_precision(z, preliminary);
+    // For real x>0, erfc(x) < exp(-x^2)/(x*sqrt(pi)). If this
+    // is below half an output ulp, erf(x) rounds to one directly.
+    if z.im.is_fully_zero() && z.re > Float::with_val(bits, 1) {
+        let x = argument.re.clone();
+        let bound =
+            (-(x.clone() * &x)).exp() / (x * Float::with_val(preliminary, Constant::Pi).sqrt());
+        if bound < binary_series_threshold(bits + 8) {
+            return complex_one(bits);
+        }
+    }
+    let radius = z.re.to_f64().abs() + z.im.to_f64().abs();
+    let guard = (2.0 * radius * radius).ceil();
+    if !guard.is_finite() || guard > f64::from(MAX_WORK_BITS / 2) {
+        return failure(
+            "erf",
+            bits,
+            "series would require excessive cancellation guard bits",
+        );
+    }
+    let work = bits + 64 + guard as u32;
+    let z = at_precision(z, work);
+    let square = z.clone() * z.clone();
+    let radius_squared = square.norm().re;
+    let mut term = z;
+    let mut sum = term.clone();
+    let mut magnitude = complex_l1_norm(&term);
+    let tolerance = binary_series_threshold(bits + 8);
+    let round_unit = binary_series_threshold(work - 8);
+    for n in 0..16 * work {
+        term = -term * square.clone() * Float::with_val(work, 2 * n + 1)
+            / (Float::with_val(work, n + 1) * Float::with_val(work, 2 * n + 3));
+        let size = complex_l1_norm(&term);
+        magnitude += &size;
+        sum += term.clone();
+        let ratio = radius_squared.clone() / Float::with_val(work, n + 2);
+        if ratio < Float::with_val(work, 0.5) {
+            let tail = size * ratio.clone() / (Float::with_val(work, 1) - ratio);
+            let rounding = magnitude.clone() * &round_unit * Float::with_val(work, n + 2);
+            if tail + rounding < complex_l1_norm(&sum) * &tolerance {
+                let result =
+                    sum * (Float::with_val(work, 2) / Float::with_val(work, Constant::Pi).sqrt());
+                if finite(&result) {
+                    return at_precision(&result, bits);
+                }
+                break;
+            }
+        }
+    }
+    failure(
+        "erf",
+        bits,
+        "remainder or roundoff exceeds the requested accuracy",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "float-mpfr")]
@@ -4379,7 +4819,6 @@ mod tests {
         Constant, complex_one, complex_pi, polylog_integer_numeric_eval, polylog_numeric_eval,
         polylog_series_integer,
     };
-    #[cfg(feature = "float-mpfr")]
     use crate::domains::float::FloatLike;
 
     use ahash::HashMap;
@@ -4445,12 +4884,12 @@ mod tests {
         assert_eq!(parse!("gamma(5)"), Atom::num(24));
         assert_eq!(parse!("gamma(1/2)"), parse!("pi^(1/2)"));
         assert_eq!(parse!("gamma(-5/2)"), parse!("-8/15*pi^(1/2)"));
-        // Match the 53-bit input precision explicitly: the reference literal
-        // contains enough decimal digits to infer a higher precision.
-        assert_eq!(
-            parse!("gamma(0.3)"),
-            Atom::num(Float::parse("2.991568987687591", Some(53)).unwrap())
-        );
+        // The backends round the decimal input at different storage widths.
+        // Compare accuracy at the input precision, not bitwise identity to a
+        // rounded decimal reference.
+        let value = Complex::<Float>::try_from(parse!("gamma(0.3)")).unwrap();
+        assert!((value.re.to_f64() - 2.991568987687591).abs() < 1e-15);
+        assert!(value.im.is_fully_zero());
         assert_eq!(
             parse!("gamma(0)"),
             Atom::num(Coefficient::complex_infinity())
@@ -4511,12 +4950,14 @@ mod tests {
         let value = parse!("root(x^2-2,1)")
             .evaluate_with_prec(&HashMap::<Atom, Float>::default(), 192)
             .unwrap();
+        assert!(value.prec() >= 192);
         let mut residual = value.clone() * value - Float::with_val(192, 2);
         if residual.is_negative() {
             residual = -residual;
         }
 
-        assert!(residual.prec() >= 192);
+        // Cancellation reduces the residual's tracked significant precision;
+        // the requested precision applies to the root, checked above.
         assert!(residual.to_f64() < 2f64.powi(-150));
     }
 
