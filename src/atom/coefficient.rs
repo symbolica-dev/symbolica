@@ -38,6 +38,125 @@ const NUM_MASK: u8 = 0b00001111;
 const DEN_MASK: u8 = 0b01110000;
 const SIGN: u8 = 0b10000000;
 
+/// Read only the length when traversing an atom; avoid the full fraction dispatch.
+#[inline(always)]
+pub(crate) fn read_packed_u64(data: &[u8]) -> (u64, &[u8]) {
+    // Keep the common width out of the variable-width dispatch.
+    if data[0] == U8_NUM {
+        return (data[1] as u64, &data[2..]);
+    }
+    let mut rest = &data[1..];
+    let value = match data[0] {
+        U16_NUM => rest.get_u16_le() as u64,
+        U32_NUM => rest.get_u32_le() as u64,
+        U64_NUM => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed length"),
+    };
+    (value, rest)
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_denominator(data: &[u8]) -> (u64, &[u8]) {
+    let tag = data[0];
+    if tag == U8_NUM | U8_DEN {
+        return (data[2] as u64, &data[3..]);
+    }
+    read_packed_denominator_wide(data)
+}
+
+// Keep LLVM from merging the common case back into the wide jump table.
+#[cold]
+#[inline(always)]
+fn read_packed_denominator_wide(data: &[u8]) -> (u64, &[u8]) {
+    let tag = data[0];
+    // The count (or symbol ID) usually fits in one byte, even when the
+    // payload length is large. Keep its offset constant in these cases.
+    match tag {
+        U8_NUM_U16_DEN => {
+            return (
+                u16::from_le_bytes(data[2..4].try_into().unwrap()) as u64,
+                &data[4..],
+            );
+        }
+        U8_NUM_U32_DEN => {
+            return (
+                u32::from_le_bytes(data[2..6].try_into().unwrap()) as u64,
+                &data[6..],
+            );
+        }
+        U8_NUM_U64_DEN => {
+            return (
+                u64::from_le_bytes(data[2..10].try_into().unwrap()),
+                &data[10..],
+            );
+        }
+        U8_NUM => return (1, &data[2..]),
+        _ => {}
+    }
+    // Counts always occupy 1, 2, 4 or 8 bytes. No need to decode their value.
+    let count_size = 1usize << ((tag & NUM_MASK) - 1);
+    let mut rest = &data[1 + count_size..];
+    let value = match tag & DEN_MASK {
+        0 => 1,
+        U8_DEN => rest.get_u8() as u64,
+        U16_DEN => rest.get_u16_le() as u64,
+        U32_DEN => rest.get_u32_le() as u64,
+        U64_DEN => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed length"),
+    };
+    (value, rest)
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_numerator(data: &[u8]) -> u64 {
+    let tag = data[0] & NUM_MASK;
+    if tag == U8_NUM {
+        return data[1] as u64;
+    }
+    let mut rest = &data[1..];
+    match tag {
+        U16_NUM => rest.get_u16_le() as u64,
+        U32_NUM => rest.get_u32_le() as u64,
+        U64_NUM => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed numerator"),
+    }
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_pair(data: &[u8]) -> (u64, u64, &[u8]) {
+    if data[0] == U8_NUM_U8_DEN {
+        (data[1] as u64, data[2] as u64, &data[3..])
+    } else {
+        read_packed_pair_wide(data)
+    }
+}
+
+#[cold]
+#[inline(always)]
+fn read_packed_pair_wide(data: &[u8]) -> (u64, u64, &[u8]) {
+    data.get_frac_u64()
+}
+
+/// Skip a function's length header and payload.
+///
+/// # Safety
+/// `data` must start with a valid packed function length and contain its payload.
+#[inline(always)]
+pub(crate) unsafe fn skip_packed_function(data: &[u8]) -> &[u8] {
+    let (size, rest) = read_packed_u64(data);
+    unsafe { rest.get_unchecked(size as usize..) }
+}
+
+/// Skip a product/sum's packed count/length header and payload.
+///
+/// # Safety
+/// `data` must contain a valid packed count/length pair and its entire payload.
+#[inline(always)]
+pub(crate) unsafe fn skip_packed_list(data: &[u8]) -> &[u8] {
+    let (size, rest) = read_packed_denominator(data);
+    unsafe { rest.get_unchecked(size as usize..) }
+}
+
 const U8_NUM_U8_DEN: u8 = U8_NUM | U8_DEN;
 const U16_NUM_U8_DEN: u8 = U16_NUM | U8_DEN;
 const U32_NUM_U8_DEN: u8 = U32_NUM | U8_DEN;
@@ -841,6 +960,7 @@ impl PackedRationalNumberWriter for (u64, u64) {
         }
     }
 
+    #[inline]
     fn get_packed_size(&self) -> u64 {
         let mut size = 1;
         size += if self.0 <= u8::MAX as u64 {

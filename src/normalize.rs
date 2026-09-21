@@ -877,13 +877,22 @@ impl AtomView<'_> {
                     }
                 }
 
-                let mut handle = workspace.new_atom();
-                for a in f {
-                    if a.needs_normalization() {
-                        a.normalize(workspace, &mut handle);
-                        add_arg(out_f, handle.as_view());
-                    } else {
-                        add_arg(out_f, a);
+                if f.iter().all(|a| {
+                    !a.needs_normalization()
+                        && !matches!(a, AtomView::Fun(fa) if fa.get_symbol_id() == Symbol::ARG_ID)
+                }) {
+                    // Builders commonly receive canonical arguments. Preserve
+                    // their encoding instead of rebuilding both headers per arg.
+                    out_f.set_from_view(f);
+                } else {
+                    let mut handle = workspace.new_atom();
+                    for a in f {
+                        if a.needs_normalization() {
+                            a.normalize(workspace, &mut handle);
+                            add_arg(out_f, handle.as_view());
+                        } else {
+                            add_arg(out_f, a);
+                        }
                     }
                 }
 
@@ -2042,6 +2051,44 @@ mod test {
         printer::PrintOptions,
         state::Workspace,
     };
+
+    #[test]
+    fn function_argument_copy_fast_path() {
+        use crate::atom::{Fun, Mul, Symbol};
+
+        let reference = parse!("packed_normalize_fast(x,x^2)");
+        let AtomView::Fun(reference_fun) = reference.as_view() else {
+            unreachable!()
+        };
+        let head = reference_fun.get_symbol();
+        let x = parse!("x");
+        let square = parse!("x^2");
+        let normalize = |f: &Fun| {
+            Workspace::get_local().with(|ws| {
+                let mut out = Atom::new();
+                f.as_view().normalize(ws, &mut out);
+                out
+            })
+        };
+
+        let mut f = Fun::new_into(head, Vec::new());
+        f.add_args(&[x.as_view(), square.as_view()]);
+        assert_eq!(normalize(&f), reference);
+
+        let mut raw_square = Mul::new();
+        raw_square.extend(x.as_view());
+        raw_square.extend(x.as_view());
+        f.set_from_symbol(head);
+        f.add_args(&[x.as_view(), raw_square.as_view()]);
+        assert_eq!(normalize(&f), reference);
+
+        let mut arg = Fun::new_into(Symbol::ARG, Vec::new());
+        arg.add_args(&[x.as_view(), square.as_view()]);
+        arg.set_normalized(true);
+        f.set_from_symbol(head);
+        f.add_arg(arg.as_view());
+        assert_eq!(normalize(&f), reference);
+    }
 
     #[test]
     fn pow_apart() {

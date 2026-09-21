@@ -37,8 +37,8 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 5;
-pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[4, 5];
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 6;
+pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[6];
 pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
@@ -1402,8 +1402,8 @@ impl State {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "Invalid export format version: expected {} but got {}",
-                    EXPORT_FORMAT_VERSION, version
+                    "Unsupported export format version {}. Please export the expression using strings in an older Symbolica and read the string into the newer Symbolica.",
+                    version
                 ),
             ));
         }
