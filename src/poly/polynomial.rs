@@ -4881,23 +4881,36 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             );
         }
 
-        #[inline(always)]
-        fn to_uni_var<E: Exponent>(s: &[E], max_degs_rev: &[usize]) -> Integer {
-            let mut shift = 1;
-            let mut res = Integer::from(s.last().unwrap().to_i32());
-            for (ee, &x) in s.iter().rev().skip(1).zip(max_degs_rev) {
-                shift *= x as u32;
-                res += ee.to_i32() as u32 * shift;
+        #[inline]
+        fn to_uni_var<E: Exponent>(exponents: &[E], radices_rev: &[usize]) -> Integer {
+            debug_assert_eq!(exponents.len(), radices_rev.len());
+            let mut encoded = Integer::zero();
+            for (exponent, &radix) in exponents.iter().zip(radices_rev.iter().rev()) {
+                encoded *= Integer::from(radix);
+                encoded += Integer::from(exponent.to_i32());
             }
-            res
+            encoded
         }
 
-        #[inline(always)]
-        fn from_uni_var<E: Exponent>(mut p: Integer, max_degs_rev: &[usize], exp: &mut [E]) {
-            for (ee, &x) in exp.iter_mut().rev().zip(max_degs_rev) {
-                *ee = E::from_i32(((&p % x as u64).to_i64().unwrap() as u32) as i32);
-                p /= x as u32;
+        #[inline]
+        fn from_uni_var<E: Exponent>(
+            mut encoded: Integer,
+            radices_rev: &[usize],
+            exponents: &mut [E],
+        ) {
+            debug_assert_eq!(exponents.len(), radices_rev.len());
+            for (exponent, &radix) in exponents.iter_mut().rev().zip(radices_rev) {
+                let (quotient, remainder) = encoded.quot_rem(&Integer::from(radix));
+                *exponent = E::from_i32(
+                    i32::try_from(remainder.to_i64().expect("heap power digit exceeds i64"))
+                        .expect("heap power digit exceeds the supported exponent range"),
+                );
+                encoded = quotient;
             }
+            assert!(
+                encoded.is_zero(),
+                "heap power exponent exceeds its radix bounds"
+            );
         }
 
         let degree_bounds = (0..self.nvars())
@@ -4907,7 +4920,14 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let max_degs_rev = degree_bounds
             .iter()
             .rev()
-            .map(|v| (v.1 - v.0).to_i32() as usize * pow + 1)
+            .map(|v| {
+                v.1.to_i32()
+                    .checked_sub(v.0.to_i32())
+                    .and_then(|width| usize::try_from(width).ok())
+                    .and_then(|width| width.checked_mul(pow))
+                    .and_then(|width| width.checked_add(1))
+                    .expect("heap power radix exceeds the supported size")
+            })
             .collect::<Vec<_>>();
 
         let mut exp = vec![E::zero(); self.nvars()];
@@ -7354,6 +7374,42 @@ mod test {
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
         total_degree_kernel_precedes_mixed_radix, total_degree_rank_table,
     };
+
+    #[test]
+    fn heap_pow_many_variable_square_matches_native_multiplication() {
+        let variables = Arc::new((0..22).map(super::PolyVariable::Temporary).collect());
+        let mut affine = MultivariatePolynomial::<_, u32>::new(&Q, None, variables);
+        for axis in 0..22 {
+            let mut exponents = vec![0; 22];
+            exponents[axis] = 1;
+            affine.append_monomial(crate::domains::rational::Rational::one(), &exponents);
+        }
+        let expected = &affine * &affine;
+        assert_eq!(expected.nterms(), 253);
+        assert_eq!(affine.pow(2), expected);
+    }
+
+    #[test]
+    fn heap_pow_wide_nonuniform_exponents_matches_multiplication() {
+        for exponents in [
+            vec![7_u32, 0, 5, 1],
+            vec![1, 0, 32767, 32768],
+            vec![7, 0, 1 << 29],
+            vec![65535; 12],
+        ] {
+            let variables = Arc::new(
+                (0..exponents.len())
+                    .map(super::PolyVariable::Temporary)
+                    .collect(),
+            );
+            let mut polynomial = MultivariatePolynomial::<_, u32>::new(&Z, None, variables);
+            polynomial.append_monomial(Integer::one(), &vec![0; exponents.len()]);
+            polynomial.append_monomial(Integer::one(), &exponents);
+            let expected = &polynomial * &polynomial;
+            assert_eq!(expected.nterms(), 3);
+            assert_eq!(polynomial.heap_pow(2), expected);
+        }
+    }
 
     #[test]
     fn constants_can_grow_and_shrink_variable_maps() {
