@@ -44,17 +44,27 @@ default = [
     "float-mpfr",
     "native_code_generation",
 ]
+# Use mimalloc for faster allocations. Use `faster_alloc_dynamic_tls` if you run into TLS space issues.
 faster_alloc = ["mimalloc"]
+# Use mimalloc with local dynamic TLS for faster allocations.
+faster_alloc_dynamic_tls = ["faster_alloc", "mimalloc/local_dynamic_tls"]
+# Use rug for GMP-based integer arithmetic.
 integer-gmp = ["dep:rug", "numerica/integer-gmp"]
+# Use Malachite for integer arithmetic.
 integer-malachite = ["numerica/integer-malachite"]
+# Use MPFR for floating-point arithmetic.
 float-mpfr = ["numerica/float-mpfr"]
+# Use Astro for floating-point arithmetic.
 float-astro = ["numerica/float-astro"]
+# Select features that compile on WebAssembly. Disable default features.
 wasm = ["integer-malachite", "float-astro", "binary_size", "dep:getrandom"]
+# Compile native code generation support.
 native_code_generation = ["dep:libloading", "dep:symjit"]
-# sort functions based on an argument-by-argument comparison
+# Sort functions based on an argument-by-argument comparison
 full_fn_cmp = []
 # Export the C API symbols for C/C++ consumers.
 c_api = []
+# Compile support for the Mathematica API.
 mathematica_api = ["wolfram-library-link"]
 # Reduce monomorphized polynomial code in internal modular GCD routines by using
 # FiniteField<u64> only instead of compiling both FiniteField<u32> and
@@ -78,14 +88,15 @@ python_export = [
     "pyo3-stub-gen-derive",
     "numerica/python",
 ]
-# generate stubs for Python API
+# Generate stubs for Python API
 python_stubgen = ["python_export", "pyo3-stub-gen", "numerica/python_stubgen"]
-# build a module that is independent of the specific Python version
+# Build a module that is independent of the specific Python version
 python_abi3 = ["pyo3/abi3", "pyo3/abi3-py37"]
+# Prevent tracing overhead in release builds
 tracing_max_level_info = ["tracing/release_max_level_info"]
-# import/export objects that do not depend on the state using serde
+# Import/export objects that do not depend on the state using serde
 serde = ["dep:serde", "rug?/serde", "numerica/serde"]
-# allow importing/exporting of atoms with a state map using bincode
+# Allow importing/exporting of atoms with a state map using bincode
 bincode = ["dep:bincode", "dep:bincode-trait-derive", "numerica/bincode"]
 # Build the Symbolica-only polynomial benchmark harness.
 symbolica_benchmarks = ["dep:divan"]
@@ -130,7 +141,7 @@ self_cell = "1.2.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
 smallvec = "1.13"
 smartstring = "1.0"
-mimalloc = { version = "0.1", optional = true }
+mimalloc = { package = "rustfs-mimalloc", version = "0.5.4", optional = true }
 tinyjson = "2.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
