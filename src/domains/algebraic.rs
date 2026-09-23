@@ -183,9 +183,11 @@ pub struct AlgebraicQuotient<R: Ring> {
 ///
 /// For fields with an analytic embedding, such as [`Q`](tyalias@Q) and
 /// [`AlgebraicExtension<Q>`], `index` refers to Symbolica's canonical ordering
-/// of complex roots. Over a parametric field such as `Q(a, b, ...)`, it is a
-/// formal branch label whose analytic meaning is fixed only after the
-/// parameters are specialized.
+/// of roots: real roots in increasing order, then nonreal roots ordered by
+/// real part and imaginary part, counting multiplicity from index zero.
+/// Over a parametric field such as `Q(a, b, ...)`, specialize the parameters
+/// before selecting this index. It does not identify an analytic continuation
+/// across parameter values where the root order or number of real roots changes.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Root<R: Ring> {
     polynomial: MultivariatePolynomial<R, u16>,
@@ -1479,18 +1481,27 @@ impl AtomView<'_> {
                                     if selected_factor.is_some() {
                                         return None;
                                     }
-                                    selected_factor = Some((factor, degree));
+                                    selected_factor = Some(factor);
                                 }
                             }
 
-                            let (factor, degree) = selected_factor?;
+                            let factor = selected_factor?;
 
-                            // Among the roots of x^d-base, the positive
-                            // root has the greatest real part and is last
-                            // in the canonical complex-root ordering.
+                            // A factor of x^d-base has exactly one positive
+                            // root and no zero root. Its real-first index is
+                            // the number of negative roots of this factor.
+                            let mut reflected = factor.to_univariate_from_univariate(0);
+                            for coefficient in reflected.coefficients.iter_mut().skip(1).step_by(2)
+                            {
+                                *coefficient = c.neg(&*coefficient);
+                            }
+                            let index = reflected
+                                .to_multivariate::<u16>()
+                                .count_positive_real_roots()
+                                .ok()?;
                             let ext = AlgebraicExtension {
                                 poly: Arc::new(factor),
-                                embedding: AlgebraicEmbedding::Indexed(degree - 1),
+                                embedding: AlgebraicEmbedding::Indexed(index),
                             };
                             cur = Some(c.adjoin_with_embedding(&ext, None).0);
                         }
@@ -3585,11 +3596,13 @@ impl Root<Q> {
             let [c, b, a] = polynomial.coefficients.as_slice() else {
                 unreachable!("a quadratic has three coefficients");
             };
-            let discriminant = Atom::num(b * b - a * c * &Rational::from(4));
+            let b = b / a;
+            let c = c / a;
+            let discriminant = Atom::num(&b * &b - c * Rational::from(4));
             return if self.index == 0 {
-                ((-b.clone() - discriminant.sqrt()) / (Rational::from(2) * a.clone())).expand()
+                ((-b - discriminant.sqrt()) / Rational::from(2)).expand()
             } else {
-                ((-b.clone() + discriminant.sqrt()) / (Rational::from(2) * a.clone())).expand()
+                ((-b + discriminant.sqrt()) / Rational::from(2)).expand()
             };
         }
 
@@ -3675,8 +3688,9 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
         Root::new(polynomial, index)
     }
 
-    /// Normalize roots which have a closed expression over the parametric
-    /// field. Branch indices are formal until parameter specialization.
+    /// Normalize only when the expression preserves canonical root selection
+    /// after parameter specialization. General radical formulas label analytic
+    /// branches, which need not follow the specialized real-first ordering.
     pub fn simplify(&self) -> Option<Atom> {
         let polynomial = self.polynomial.to_univariate_from_univariate(0);
         let field = &polynomial.ring;
@@ -3703,42 +3717,35 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
                 });
             }
 
-            let four_ac = field.mul(&field.nth(Integer::from(4)), &field.mul(a, c));
-            let discriminant = field.sub(&field.mul(b, b), &four_ac).to_expression().sqrt();
-            let minus_b = -b.to_expression();
-            let numerator = if self.index == 0 {
-                minus_b - discriminant
-            } else {
-                minus_b + discriminant
-            };
-            return Some((numerator / (Atom::num(2) * a.to_expression())).expand());
-        }
-
-        if polynomial.degree() == 3 {
-            let [constant, linear, quadratic, leading] = polynomial.coefficients.as_slice() else {
-                unreachable!("a cubic has four coefficients");
-            };
-            if field.is_zero(linear) && field.is_zero(quadratic) {
-                let radicand = field.neg(field.div(constant, leading)).to_expression();
-                let one_third = Atom::num(Rational::from((1, 3)));
-                let principal_root = radicand.pow(one_third.clone());
-                let minus_one_root = Atom::num(-1).pow(one_third);
-                return Some(match self.index {
-                    // For a positive radicand these follow the canonical
-                    // complex order: negative-imaginary, positive-imaginary,
-                    // and positive-real.
-                    0 => -minus_one_root * principal_root,
-                    1 => minus_one_root.pow(Atom::num(2)) * principal_root,
-                    2 => principal_root,
-                    _ => unreachable!("the root index was checked by Root::new"),
-                });
+            // Normalize before taking the square root so a negative leading
+            // coefficient cannot reverse the branch order. A real midpoint
+            // makes the minus/plus branches follow the canonical order even
+            // for a complex discriminant. With a complex midpoint, either
+            // branch can become the sole real root and move to index zero.
+            let linear = field.div(b, a);
+            let linear_expression = linear.to_expression();
+            if linear_expression.is_real().is_true() {
+                let constant = field.div(c, a);
+                let discriminant = field
+                    .sub(
+                        &field.mul(&linear, &linear),
+                        &field.mul(&field.nth(Integer::from(4)), &constant),
+                    )
+                    .to_expression()
+                    .sqrt();
+                let numerator = if self.index == 0 {
+                    -linear_expression - discriminant
+                } else {
+                    -linear_expression + discriminant
+                };
+                return Some((numerator / Atom::num(2)).expand());
             }
         }
 
         None
     }
 
-    /// Convert this formal polynomial root to an expression-level root.
+    /// Convert this parameter-dependent root to an expression-level root.
     pub fn to_atom(&self) -> Atom {
         if let Some(simplified) = self.simplify() {
             return simplified;

@@ -212,6 +212,12 @@ impl RootCache {
 
     /// Convert roots into canonically ordered cache records.
     fn cache_states(mut roots: Vec<IsolatedRoot>) -> Vec<CachedRoot> {
+        if roots.iter().any(|root| root.location.is_none()) {
+            // Classify the complete defining root set before assigning indices.
+            // The public classifier would re-enter this cache's OnceLock.
+            let poly = roots[0].poly.clone();
+            poly.classify_root_locations(&mut roots);
+        }
         UnivariatePolynomial::<Q>::sort_roots_canonically(&mut roots);
         roots
             .into_iter()
@@ -1205,7 +1211,9 @@ impl UnivariatePolynomial<RationalField> {
         )
     }
 
-    /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
+    /// Get the zero-based `index`-th root, counting multiplicity. Real roots
+    /// come first in increasing order, followed by nonreal roots ordered by
+    /// real part and then imaginary part. Returns `None` for an invalid index.
     pub fn root(&self, index: usize) -> Option<IsolatedRoot> {
         if index >= self.degree() {
             return None;
@@ -1218,8 +1226,9 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     /// Isolate the distinct complex roots of the polynomial. The result contains
-    /// canonically sorted `(root, multiplicity)` pairs. Every root enclosure is a
-    /// rational ball containing exactly one root of its defining polynomial.
+    /// `(root, multiplicity)` pairs: real roots first in increasing order, then
+    /// nonreal roots ordered by real and imaginary part. Every root enclosure
+    /// is a rational ball containing exactly one root of its defining polynomial.
     pub fn isolate_roots(&self) -> Vec<(IsolatedRoot, usize)> {
         let cache = root_cache();
         let entry = cache.rational.root_multiset_slot(self);
@@ -1249,8 +1258,9 @@ impl UnivariatePolynomial<RationalField> {
         cache.roots_in_multiset(multiset)
     }
 
-    /// Isolate the distinct real roots of the polynomial. Resolving whether a
-    /// root lies on the real axis may refine its cached enclosure.
+    /// Isolate the distinct real roots in increasing order, with multiplicity
+    /// stored separately. Each entry defines one CAD section; its root's
+    /// index refers to its defining factor, not its position in this list.
     pub fn isolate_real_roots(&self) -> Vec<(IsolatedRoot, usize)> {
         self.isolate_roots()
             .into_iter()
@@ -1285,8 +1295,24 @@ impl UnivariatePolynomial<RationalField> {
             .collect()
     }
 
-    /// Sort roots by certified real part and then imaginary part.
+    /// Sort classified roots with the real roots first, each group ordered
+    /// by certified real part and then imaginary part.
     fn sort_roots_canonically(roots: &mut [IsolatedRoot]) {
+        let is_nonreal = |root: &IsolatedRoot| {
+            !matches!(
+                root.location.expect("classify roots before ordering"),
+                RootLocation::Real | RootLocation::Zero
+            )
+        };
+        roots.sort_by_key(is_nonreal);
+        let real_count = roots.partition_point(|root| !is_nonreal(root));
+        let (real, nonreal) = roots.split_at_mut(real_count);
+        Self::sort_roots_by_coordinates(real);
+        Self::sort_roots_by_coordinates(nonreal);
+    }
+
+    /// Order one group without comparing real roots against nonreal roots.
+    fn sort_roots_by_coordinates(roots: &mut [IsolatedRoot]) {
         // Establishing the order may strengthen the supplied root snapshots.
         // Cache owners must retain those stronger certificates after this call.
         Self::separate_real_projections(roots);
@@ -1499,6 +1525,13 @@ impl UnivariatePolynomial<RationalField> {
     #[cfg(test)]
     /// Compare two roots using the complete canonical-ordering procedure.
     fn cmp_complex_roots_canonical(a: &IsolatedRoot, b: &IsolatedRoot) -> Ordering {
+        let is_real = |root: &IsolatedRoot| {
+            matches!(root.location, Some(RootLocation::Real | RootLocation::Zero))
+        };
+        let reality_order = is_real(b).cmp(&is_real(a));
+        if reality_order != Ordering::Equal {
+            return reality_order;
+        }
         let a_projected = Self::compute_projected_real_root(a);
         let b_projected = Self::compute_projected_real_root(b);
         Self::cmp_complex_roots_canonical_with_projected(
@@ -2431,7 +2464,9 @@ impl UnivariatePolynomial<ExactComplexField> {
             .then_some(complex_roots)
     }
 
-    /// Gets the `index`-th root of the polynomial. Fails when `index` is out of bounds.
+    /// Get the zero-based `index`-th root, counting multiplicity. Real roots
+    /// come first in increasing order, followed by nonreal roots ordered by
+    /// real part and then imaginary part. Returns `None` for an invalid index.
     pub fn root(&self, index: usize) -> Option<IsolatedRoot> {
         if let Some(poly) = self.try_map_to_rational() {
             return poly.root(index);
@@ -2447,7 +2482,8 @@ impl UnivariatePolynomial<ExactComplexField> {
     }
 
     /// Isolate the distinct complex roots of a polynomial with exact complex
-    /// rational coefficients as canonically sorted `(root, multiplicity)` pairs.
+    /// rational coefficients as `(root, multiplicity)` pairs: real roots first
+    /// in increasing order, then nonreal roots ordered by real and imaginary part.
     /// If all coefficients are rational, use the rational polynomial path and
     /// its root cache.
     pub fn isolate_roots(&self) -> Vec<(IsolatedRoot, usize)> {
@@ -2461,8 +2497,9 @@ impl UnivariatePolynomial<ExactComplexField> {
         cache.roots_in_multiset(multiset)
     }
 
-    /// Isolate the distinct real roots of the polynomial. Resolving whether a
-    /// root lies on the real axis may refine its cached enclosure.
+    /// Isolate the distinct real roots in increasing order, with multiplicity
+    /// stored separately. Each entry defines one CAD section; its root's
+    /// index refers to its defining factor, not its position in this list.
     pub fn isolate_real_roots(&self) -> Vec<(IsolatedRoot, usize)> {
         self.isolate_roots()
             .into_iter()

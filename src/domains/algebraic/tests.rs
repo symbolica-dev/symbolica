@@ -34,7 +34,7 @@ fn to_alg() {
     let b = crate::parse!("2^(2/3)");
     let ext = b.as_view().embedding_field().unwrap();
     let alg = b.as_view().to_algebraic(&ext).unwrap();
-    assert_eq!(ext.embedding.index(), Some(2));
+    assert_eq!(ext.embedding.index(), Some(0));
     assert_eq!(ext.pow(&alg, 3), ext.nth(4.into()));
 
     let b = crate::parse!("root(1-10*x^2+x^4,3)+1");
@@ -47,9 +47,9 @@ fn to_alg() {
     assert_eq!(polynomial.nvars(), 0);
     assert_eq!(polynomial.get_constant(), alg);
 
-    let b = crate::parse!("root(x^3-2,0)+sqrt(3)");
+    let b = crate::parse!("root(x^3-2,1)+sqrt(3)");
     let ext = b.as_view().embedding_field().unwrap();
-    let complex_cube_root = crate::parse!("root(x^3-2,0)")
+    let complex_cube_root = crate::parse!("root(x^3-2,1)")
         .as_view()
         .to_algebraic(&ext)
         .unwrap();
@@ -429,6 +429,37 @@ fn simplify_parametric_root_struct() {
 }
 
 #[test]
+fn positive_nested_radicals_use_real_first_embeddings() {
+    for degree in [3, 4] {
+        let expression = parse!(format!("(3+sqrt(2))^(1/{degree})"));
+        let field = expression.as_view().embedding_field().unwrap();
+        let value = expression.as_view().to_algebraic(&field).unwrap();
+        let base = parse!("3+sqrt(2)").as_view().to_algebraic(&field).unwrap();
+        assert!(field.is_positive_real(&value).unwrap());
+        assert_eq!(field.pow(&value, degree), base);
+    }
+}
+
+#[test]
+fn quadratic_root_order_is_independent_of_leading_coefficient_sign() {
+    for polynomial in ["x^2-2", "x^2+1"] {
+        for scale in [-3, -1, 2] {
+            for index in 0..2 {
+                let root = Root::<Q>::from_atom(
+                    parse!(format!("({scale})*({polynomial})")).as_view(),
+                    index,
+                )
+                .unwrap();
+                assert_eq!(
+                    root.to_atom(),
+                    parse!(format!("root({polynomial},{index})"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn normalize_degree_twenty_extension_without_rediscovering_embeddings() {
     // Use a non-canonical presentation of Q(i) so that Root::simplify is
     // forced to collapse the degree-ten polynomial to degree twenty over Q.
@@ -657,7 +688,7 @@ fn simplify() {
 
 #[test]
 fn simplify_preserves_the_selected_embedding() {
-    for (source_embedding, expected_embedding) in [(0, 1), (1, 0), (2, 0), (3, 1)] {
+    for (source_embedding, expected_embedding) in [(0, 1), (1, 1), (2, 0), (3, 0)] {
         let field = AlgebraicExtension::from_polynomial_with_embedding(
             parse!("x^4-2").to_polynomial(&Q, None),
             source_embedding,

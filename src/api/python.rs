@@ -10,7 +10,10 @@ use std::{
     ops::{Deref, Neg},
     sync::{
         Arc, LazyLock, Mutex, RwLock,
-        atomic::{AtomicU32, Ordering::Relaxed},
+        atomic::{
+            AtomicBool, AtomicU32,
+            Ordering::{Acquire, Relaxed, Release},
+        },
     },
 };
 
@@ -706,17 +709,19 @@ struct RegisteredLibraryUnlock {
     claims: UnlockClaims,
     module_globals: Vec<Py<PyDict>>,
     checked_pid: AtomicU32,
+    enabled: RwLock<Arc<AtomicBool>>,
 }
 
 impl RegisteredLibraryUnlock {
-    fn ensure_license_checked(&self) -> PyResult<()> {
+    fn ensure_license_checked(&self) -> PyResult<bool> {
         let pid = std::process::id();
-        if self.checked_pid.load(Relaxed) != pid {
-            crate::license::start_license_check(&self.claims)
+        if self.checked_pid.load(Acquire) != pid {
+            let enabled = crate::license::start_license_check(&self.claims)
                 .map_err(exceptions::PyPermissionError::new_err)?;
-            self.checked_pid.store(pid, Relaxed);
+            *self.enabled.write().unwrap() = enabled;
+            self.checked_pid.store(pid, Release);
         }
-        Ok(())
+        Ok(self.enabled.read().unwrap().load(Relaxed))
     }
 }
 
@@ -740,6 +745,7 @@ fn is_loaded_module_globals(
 fn register_library_unlock_module(
     claims: UnlockClaims,
     globals: &Bound<'_, PyDict>,
+    enabled: Arc<AtomicBool>,
 ) -> PyResult<()> {
     let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
     if let Some(registered) = packages
@@ -764,6 +770,7 @@ fn register_library_unlock_module(
             claims,
             module_globals: vec![globals.clone().unbind()],
             checked_pid: AtomicU32::new(std::process::id()),
+            enabled: RwLock::new(enabled),
         });
     }
     Ok(())
@@ -778,8 +785,7 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
                 .iter()
                 .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
         }) {
-            registered.ensure_license_checked()?;
-            return Ok(true);
+            return registered.ensure_license_checked();
         }
     }
 
@@ -811,7 +817,7 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
     let Some(registered) = packages.get_mut(matching_package) else {
         return Ok(false);
     };
-    registered.ensure_license_checked()?;
+    let enabled = registered.ensure_license_checked()?;
     if !registered
         .module_globals
         .iter()
@@ -819,7 +825,7 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
     {
         registered.module_globals.push(globals.clone().unbind());
     }
-    Ok(true)
+    Ok(enabled)
 }
 
 fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
@@ -901,8 +907,10 @@ fn validated_library_unlock_caller_globals<'py>(
 /// your library without their own Symbolica license; it does not license their other code.
 /// The key must be issued for your package.
 ///
-/// If the key has expired, an internet connection and an active subscription are required.
-/// Renew the key when prompted to keep your library usable offline.
+/// Expired keys synchronously check for an online extension. If renewal cannot
+/// be confirmed, registration succeeds with a warning and leaves the library
+/// restricted to one core unless the user has another valid license. Explicit
+/// revocation also warns and falls back. Renew the key to keep using it offline.
 ///
 /// Parameters
 /// ----------
@@ -916,8 +924,9 @@ fn validated_library_unlock_caller_globals<'py>(
 pub fn set_library_key(py: Python, key: &str) -> PyResult<()> {
     let claims = crate::license::verify_token(key).map_err(exceptions::PyValueError::new_err)?;
     let globals = validated_library_unlock_caller_globals(py, &claims)?;
-    crate::license::start_license_check(&claims).map_err(exceptions::PyPermissionError::new_err)?;
-    register_library_unlock_module(claims, &globals)?;
+    let enabled = crate::license::start_license_check(&claims)
+        .map_err(exceptions::PyPermissionError::new_err)?;
+    register_library_unlock_module(claims, &globals, enabled)?;
     Ok(())
 }
 
@@ -2049,6 +2058,62 @@ tags: Sequence[str] | None = None
             column: column!(),
             index: 0,
         }
+}
+
+#[cfg(test)]
+mod library_registration_tests {
+    use super::*;
+
+    #[test]
+    fn expired_library_frames_do_not_grant_unlocks() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let mut claims =
+                crate::license::verify_token(crate::license::TEST_UNLOCK_TOKEN).unwrap();
+            claims.package = "symbolica_expiry_registration_test".into();
+            let package = claims.package.clone();
+            let globals = PyDict::new(py);
+            let enabled = Arc::new(AtomicBool::new(false));
+            register_library_unlock_module(claims, &globals, enabled.clone())?;
+            assert!(!is_registered_module_globals(py, &globals)?);
+
+            // A submodule must also retain the disabled outcome after its
+            // globals dictionary is cached by the pointer-identity fast path.
+            let submodule = format!("{package}.child");
+            let module = PyModule::new(py, &submodule)?;
+            let modules = PyModule::import(py, "sys")?
+                .getattr("modules")?
+                .cast_into::<PyDict>()?;
+            modules.set_item(&submodule, &module)?;
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            enabled.store(true, Relaxed);
+            assert!(is_registered_module_globals(py, &globals)?);
+            assert!(is_registered_module_globals(py, &module.dict())?);
+            enabled.store(false, Relaxed);
+            assert!(!is_registered_module_globals(py, &globals)?);
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            {
+                let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+                let registered = packages
+                    .iter()
+                    .find(|r| r.claims.package == package)
+                    .unwrap();
+                // Simulate a fork: the development fixture rechecks as valid.
+                registered.checked_pid.store(0, Release);
+                assert!(registered.ensure_license_checked()?);
+            }
+            assert!(is_registered_module_globals(py, &globals)?);
+            assert!(is_registered_module_globals(py, &module.dict())?);
+            REGISTERED_LIBRARY_UNLOCKS
+                .write()
+                .unwrap()
+                .retain(|r| r.claims.package != package);
+            modules.del_item(&submodule)?;
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
