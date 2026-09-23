@@ -1212,16 +1212,16 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        let old_len = unique_constants.len();
         unique_constants.retain(|_, v| v.1 != 1);
 
         if unique_constants.is_empty() {
             return;
         }
 
-        let mut outs = vec![(*self, ws.new_atom()); old_len];
+        let mut outs = Vec::with_capacity(unique_constants.len());
         for (k, v) in &mut unique_constants {
-            outs[v.0].0 = *k;
+            v.0 = outs.len();
+            outs.push((*k, ws.new_atom()));
         }
 
         let mut outs_add = outs.iter_mut().map(|x| x.1.to_add()).collect::<Vec<_>>();
@@ -1314,28 +1314,25 @@ impl<'a> AtomView<'a> {
                     subfactors.push(h);
                 }
 
-                let mut first = true;
+                let mut powers = HashMap::default();
                 for f in &subfactors {
                     for (k, v) in f {
-                        if let Some(p) = factors.get_mut(k) {
-                            *p = (*p).min(*v);
-                        } else if first {
-                            factors.insert(k.clone(), *v);
-                        } else {
-                            factors.insert(k.clone(), 0.min(*v));
-                        }
+                        let (power, count) = powers.entry(k).or_insert((*v, 0));
+                        *power = (*power).min(*v);
+                        *count += 1;
                     }
-
-                    first = false;
                 }
 
-                for (ff, p) in &mut *factors {
-                    for f in &subfactors {
-                        if !f.contains_key(ff) {
-                            *p = 0.min(*p)
-                        }
+                for (k, (mut power, count)) in powers {
+                    if count < subfactors.len() {
+                        power = power.min(0);
                     }
+                    if power != 0 {
+                        factors.insert(k.clone(), power);
+                    }
+                }
 
+                for (ff, p) in &*factors {
                     for f in &mut subfactors {
                         if let Some(v) = f.get_mut(ff) {
                             *v -= *p;
@@ -1344,8 +1341,6 @@ impl<'a> AtomView<'a> {
                         }
                     }
                 }
-
-                factors.retain(|_, p| *p != 0);
 
                 // construct the sum factor
                 let mut sum = ws.new_atom();
