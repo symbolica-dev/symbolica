@@ -1327,6 +1327,8 @@ impl Token {
                                     }
                                 }
                             }
+                        } else if id_buffer == "𝑖" {
+                            stack.push(Token::Number("1".into(), true));
                         } else {
                             stack.push(Token::ID(id_buffer.as_str().into()));
                         }
@@ -2103,6 +2105,28 @@ mod test {
         printer::{PrintOptions, PrintState},
         symbol,
     };
+
+    #[test]
+    fn unicode_imaginary_unit() {
+        for (input, expected) in [
+            ("𝑖", "1i"),
+            ("-𝑖", "-1i"),
+            ("1+𝑖", "1+1i"),
+            ("1-𝑖", "1-1i"),
+            ("𝑖/2", "1i/2"),
+            ("𝑖^2", "-1"),
+            ("𝑖*x", "1i*x"),
+            ("𝑖(x+1)", "1i*(x+1)"),
+            ("f(𝑖,-𝑖)", "f(1i,-1i)"),
+            ("2𝑖", "2i"),
+        ] {
+            assert_eq!(parse!(input), parse!(expected), "{input}");
+        }
+
+        for name in ["i", "𝑖x", "x𝑖", "𝑖_", "test::𝑖"] {
+            assert!(parse!(name).get_symbol().is_some(), "{name}");
+        }
+    }
 
     #[test]
     fn mathematica() {

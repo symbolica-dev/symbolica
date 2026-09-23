@@ -550,10 +550,10 @@ fn adjoin_with_complex_embedding() {
 fn algebraic_number_to_atom_complex() {
     let ring = AlgebraicExtension::complex(Q);
 
-    let i = ring.element_from_polynomial(parse!("𝑖").to_polynomial::<_, u16>(&Q, None));
+    let i = ring.generator();
     assert_eq!(ring.element_to_atom(&i), parse!("1𝑖"));
 
-    let one_plus_i = ring.element_from_polynomial(parse!("1+𝑖").to_polynomial::<_, u16>(&Q, None));
+    let one_plus_i = ring.add(&ring.one(), &i);
     assert_eq!(ring.element_to_atom(&one_plus_i), parse!("1+1𝑖"));
 
     let ring = AlgebraicExtension::from_polynomial_with_embedding(
