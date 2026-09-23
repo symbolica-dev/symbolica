@@ -1,16 +1,17 @@
 //! License activation, verification, library unlocks, and execution limits.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     marker::PhantomData,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering::Relaxed},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    },
 };
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
-    cell::RefCell,
-    collections::HashSet,
     env,
     fs::{DirBuilder, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
@@ -44,6 +45,9 @@ static LICENSE_KEY: OnceCell<String> = OnceCell::new();
 #[cfg(not(target_arch = "wasm32"))]
 static LICENSE_MANAGER: OnceCell<LicenseManager> = OnceCell::new();
 static LICENSED: AtomicBool = LicenseManager::init();
+#[cfg(not(target_arch = "wasm32"))]
+static APPLICATION_LICENSED: LazyLock<Arc<AtomicBool>> =
+    LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
 std::thread_local! {
     static INTERNAL_LICENSE_BYPASS_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -191,8 +195,10 @@ macro_rules! set_application_key {
 /// your crate, keep the returned [`LibraryUnlock`] private, and call its `unlock()` method
 /// for each library operation and worker thread that uses Symbolica.
 ///
-/// If the key has expired, an internet connection and an active subscription are required.
-/// Renew the key when prompted to keep your library usable offline.
+/// Expired keys synchronously check for an online extension. If renewal cannot
+/// be confirmed, registration warns and succeeds with a disabled unlock; the
+/// library can still run on one core, or use the user's separate valid license.
+/// Explicit revocation also warns and falls back. Renew the key to keep using it offline.
 ///
 /// # Examples
 ///
@@ -521,6 +527,64 @@ Error: {status}",
             .any(|status| error.contains(status))
     }
 
+    /// Expired package keys synchronously check their online subscription.
+    /// Rejected subscriptions disable only the package's multicore permission.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_package_registration_at(
+        key: String,
+        expires_at: u32,
+        now: u64,
+        kind: &'static str,
+        enabled: Arc<AtomicBool>,
+        check_registration: impl FnOnce(String) -> Result<(), String> + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        if now >= u64::from(expires_at) {
+            enabled.store(false, Relaxed);
+            match check_registration(key) {
+                Ok(()) => {
+                    enabled.store(true, Relaxed);
+                    eprintln!(
+                        "Warning: the Symbolica {kind} key has expired, but its online subscription is still valid. Please renew the key to restore offline use."
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Warning: the Symbolica {kind} key has expired and its online extension could not be confirmed: {error}. Using single-core mode unless another valid license is available."
+                    );
+                }
+            }
+            return None;
+        }
+        enabled.store(true, Relaxed);
+        Some(std::thread::spawn(move || {
+            if let Err(error) = check_registration(key)
+                && Self::offline_license_is_rejected(&error)
+            {
+                enabled.store(false, Relaxed);
+                eprintln!(
+                    "Warning: the Symbolica {kind} key was rejected: {error}. Using single-core mode unless another valid license is available."
+                );
+            }
+        }))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn activate_application_at(
+        key: String,
+        expires_at: u32,
+        now: u64,
+        check_registration: impl FnOnce(String) -> Result<(), String> + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        Self::validate_package_registration_at(
+            key,
+            expires_at,
+            now,
+            "application",
+            APPLICATION_LICENSED.clone(),
+            check_registration,
+        )
+    }
+
     #[inline(always)]
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn check() {
@@ -530,7 +594,8 @@ Error: {status}",
     #[inline(always)]
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn check() {
-        if LICENSED.load(Relaxed) || Self::is_check_bypassed() {
+        if LICENSED.load(Relaxed) || APPLICATION_LICENSED.load(Relaxed) || Self::is_check_bypassed()
+        {
             return;
         }
 
@@ -577,15 +642,20 @@ Error: {status}",
     /// Obtaining and using an application key requires a separate agreement with Symbolica.
     /// Contact <license@symbolica.io> to arrange one. Possessing a copied or stolen key
     /// does not authorize its use, even if Symbolica accepts it.
+    ///
+    /// Expired application keys synchronously check for an online extension.
+    /// Without confirmation, warn and continue restricted; a separate personal
+    /// license remains usable. Valid keys check in the background; rejection
+    /// disables only the application's multicore permission and warns.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_application_key(key: &str, crate_name: &str) -> Result<(), String> {
         let claims = verify(key, Purpose::Application(crate_name))?;
-        Self::validate_signed_registration(
+        Self::activate_application_at(
             key.to_owned(),
             claims.expires_at,
+            signed::now()?,
             Self::check_registration,
-        )?;
-        LICENSED.store(true, Relaxed);
+        );
         Ok(())
     }
 
@@ -599,7 +669,10 @@ Error: {status}",
     /// Returns `true` iff this instance has a valid license key or active library unlock.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn is_licensed() -> bool {
-        LICENSED.load(Relaxed) || Self::is_library_unlocked() || Self::check_license_key().is_ok()
+        LICENSED.load(Relaxed)
+            || APPLICATION_LICENSED.load(Relaxed)
+            || Self::is_library_unlocked()
+            || Self::check_license_key().is_ok()
     }
 
     /// Clamp a requested worker-thread count to what the current target and license allow.
@@ -764,6 +837,183 @@ mod offline_license_tests {
     use super::*;
 
     #[test]
+    fn package_expiry_and_revocation_fall_back_without_panic() {
+        for kind in ["application", "library"] {
+            for personal in [false, true] {
+                for local_expired in [false, true] {
+                    for status in [
+                        "extended",
+                        "expired",
+                        "revoked",
+                        "banned",
+                        "unknown",
+                        "network",
+                        "throttled",
+                    ] {
+                        let output = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args([
+                                "--exact",
+                                "license::offline_license_tests::application_activation_child",
+                                "--nocapture",
+                            ])
+                            .env(
+                                "SYMBOLICA_TEST_APPLICATION_MODE",
+                                format!("{kind}:{personal}:{local_expired}:{status}"),
+                            )
+                            .output()
+                            .unwrap();
+                        assert!(
+                            output.status.success(),
+                            "{kind}:{personal}:{local_expired}:{status}: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        assert_eq!(
+                            stderr.matches(&format!("{kind} key has expired")).count(),
+                            usize::from(local_expired),
+                            "{stderr}"
+                        );
+                        let rejected =
+                            matches!(status, "expired" | "revoked" | "banned" | "unknown");
+                        assert_eq!(
+                            stderr.contains("single-core mode"),
+                            status != "extended" && (local_expired || rejected),
+                            "{stderr}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn application_activation_child() {
+        let Ok(scenario) = std::env::var("SYMBOLICA_TEST_APPLICATION_MODE") else {
+            return;
+        };
+        let parts: Vec<_> = scenario.split(':').collect();
+        let kind = parts[0];
+        let personal = parts[1] == "true";
+        let expired = parts[2] == "true";
+        let status = parts[3];
+        let rejected = matches!(status, "expired" | "revoked" | "banned" | "unknown");
+        let expected_enabled = status == "extended" || (!expired && !rejected);
+        LICENSE_KEY.set("S-invalid".into()).unwrap(); // no real personal-key network requests
+        LICENSED.store(personal, Relaxed);
+        let expires_at = if expired { 100 } else { 101 };
+        let called = Arc::new(AtomicBool::new(false));
+        let called_check = called.clone();
+        let caller = std::thread::current().id();
+        let status = status.to_owned();
+        let check = move |_| {
+            assert_eq!(
+                std::thread::current().id() == caller,
+                expired,
+                "renewal must run synchronously, revocation in the background"
+            );
+            called_check.store(true, Relaxed);
+            match status.as_str() {
+                "expired" => Err("License has expired".into()),
+                "revoked" => Err("License revoked: inactive".into()),
+                "banned" => Err("License banned".into()),
+                "unknown" => Err("Unknown license".into()),
+                "network" => Err(NETWORK_ERROR.into()),
+                "throttled" => Err("Too many requests; retry in 5 minutes".into()),
+                _ => Ok(()),
+            }
+        };
+        let (enabled, worker) = if kind == "application" {
+            let worker = LicenseManager::activate_application_at(
+                "authenticated-key".into(),
+                expires_at,
+                100,
+                check,
+            );
+            (APPLICATION_LICENSED.clone(), worker)
+        } else {
+            let enabled = Arc::new(AtomicBool::new(false));
+            let worker = LicenseManager::validate_package_registration_at(
+                "authenticated-key".into(),
+                expires_at,
+                100,
+                "library",
+                enabled.clone(),
+                check,
+            );
+            (enabled, worker)
+        };
+        if expired {
+            assert!(worker.is_none());
+        } else {
+            worker.unwrap().join().unwrap();
+        }
+        assert!(called.load(Relaxed));
+        assert_eq!(enabled.load(Relaxed), expected_enabled);
+        assert_eq!(LICENSED.load(Relaxed), personal);
+        let registration = LibraryUnlock {
+            enabled: if kind == "library" {
+                enabled.clone()
+            } else {
+                Arc::new(AtomicBool::new(false))
+            },
+        };
+        let guard = registration.unlock();
+        assert_eq!(
+            current_thread_is_unlocked(),
+            kind == "library" && expected_enabled
+        );
+        assert_eq!(
+            LicenseManager::max_threads(8),
+            if expected_enabled || personal { 8 } else { 1 }
+        );
+        assert_eq!(LicenseManager::max_threads(0), 0);
+        drop(guard);
+        assert!(!current_thread_is_unlocked());
+        if kind == "library" {
+            let claims = UnlockClaims {
+                package: "test".into(),
+                license: "authenticated-key".into(),
+                token_id: "cached-result".into(),
+                expires_at,
+            };
+            CHECKED_UNLOCK_LICENSES.lock().unwrap().insert(
+                (std::process::id(), claims.token_id.clone()),
+                enabled.clone(),
+            );
+            assert!(Arc::ptr_eq(
+                &start_license_check(&claims).unwrap(),
+                &enabled
+            ));
+            let outer = LibraryUnlock {
+                enabled: Arc::new(AtomicBool::new(true)),
+            }
+            .unlock();
+            drop(
+                LibraryUnlock {
+                    enabled: Arc::new(AtomicBool::new(false)),
+                }
+                .unlock(),
+            );
+            assert!(
+                current_thread_is_unlocked(),
+                "inactive guards must not disable another library's unlock"
+            );
+            drop(outer);
+            assert!(!current_thread_is_unlocked());
+            enabled.store(true, Relaxed);
+            let active = registration.unlock();
+            assert!(current_thread_is_unlocked());
+            enabled.store(false, Relaxed);
+            assert!(
+                !current_thread_is_unlocked(),
+                "background rejection must reach existing guards"
+            );
+            assert_eq!(LicenseManager::max_threads(8), if personal { 8 } else { 1 });
+            drop(active);
+        }
+    }
+
+    #[test]
     fn expired_key_checks_subscription_before_warning() {
         for status in ["extended", "expired", "network unavailable"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -901,11 +1151,11 @@ pub(crate) struct UnlockClaims {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static CHECKED_UNLOCK_LICENSES: LazyLock<Mutex<HashSet<(u32, String)>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static CHECKED_UNLOCK_LICENSES: LazyLock<Mutex<HashMap<(u32, String), Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 thread_local! {
-    static LIBRARY_UNLOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static LIBRARY_UNLOCKS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1039,28 +1289,38 @@ fn verify_legacy_test_unlock(token: &str) -> Result<UnlockClaims, String> {
     })
 }
 
-pub(crate) fn start_license_check(claims: &UnlockClaims) -> Result<(), String> {
+pub(crate) fn start_license_check(claims: &UnlockClaims) -> Result<Arc<AtomicBool>, String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         #[cfg(any(test, debug_assertions))]
         if claims.license == TEST_UNLOCK_LICENSE
             && claims.token_id == TEST_UNLOCK_TOKEN.split_once('.').unwrap().1
         {
-            return Ok(());
+            return Ok(Arc::new(AtomicBool::new(true)));
         }
-
-        let pid = std::process::id();
-        let cache_key = (pid, claims.token_id.clone());
-        if !CHECKED_UNLOCK_LICENSES.lock().unwrap().contains(&cache_key) {
-            LicenseManager::validate_signed_registration(
-                claims.license.clone(),
-                claims.expires_at,
-                LicenseManager::check_registration,
-            )?;
-            CHECKED_UNLOCK_LICENSES.lock().unwrap().insert(cache_key);
+        let cache_key = (std::process::id(), claims.token_id.clone());
+        if let Some(enabled) = CHECKED_UNLOCK_LICENSES.lock().unwrap().get(&cache_key) {
+            return Ok(enabled.clone());
         }
+        let enabled = Arc::new(AtomicBool::new(false));
+        LicenseManager::validate_package_registration_at(
+            claims.license.clone(),
+            claims.expires_at,
+            signed::now()?,
+            "library",
+            enabled.clone(),
+            LicenseManager::check_registration,
+        );
+        // Cache both outcomes: an expired registration must not perform a
+        // network lookup on every Python frame or silently gain an unlock.
+        CHECKED_UNLOCK_LICENSES
+            .lock()
+            .unwrap()
+            .insert(cache_key, enabled.clone());
+        Ok(enabled)
     }
-    Ok(())
+    #[cfg(target_arch = "wasm32")]
+    Ok(Arc::new(AtomicBool::new(true)))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1187,7 +1447,7 @@ pub(crate) fn try_acquire_lock(name: &str) -> io::Result<Option<File>> {
 /// ```
 #[derive(Clone, Debug)]
 pub struct LibraryUnlock {
-    _private: (),
+    enabled: Arc<AtomicBool>,
 }
 
 impl LibraryUnlock {
@@ -1201,14 +1461,16 @@ impl LibraryUnlock {
                 claims.package, crate_name
             ));
         }
-        start_license_check(&claims)?;
-        Ok(Self { _private: () })
+        let enabled = start_license_check(&claims)?;
+        Ok(Self { enabled })
     }
 
     /// Authorize Symbolica calls on the current thread until the returned guard is dropped.
+    /// An expired or rejected key without a confirmed online extension returns an inert guard
+    /// and does not override the user's normal license or single-core limits.
     #[inline]
     pub fn unlock(&self) -> LibraryUnlockGuard {
-        LibraryUnlockGuard::activate()
+        LibraryUnlockGuard::with_license(self.enabled.clone())
     }
 }
 
@@ -1218,21 +1480,21 @@ impl LibraryUnlock {
 /// threads owned by the library must call [`LibraryUnlock::unlock`] themselves.
 #[must_use = "the library is unlocked only while this guard is alive"]
 pub struct LibraryUnlockGuard {
+    enabled: Arc<AtomicBool>,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl LibraryUnlockGuard {
     #[inline]
     fn activate() -> Self {
-        LIBRARY_UNLOCK_DEPTH.with(|depth| {
-            depth.set(
-                depth
-                    .get()
-                    .checked_add(1)
-                    .expect("library unlock scope nesting overflow"),
-            );
-        });
+        Self::with_license(Arc::new(AtomicBool::new(true)))
+    }
+
+    #[inline]
+    fn with_license(enabled: Arc<AtomicBool>) -> Self {
+        LIBRARY_UNLOCKS.with(|licenses| licenses.borrow_mut().push(enabled.clone()));
         Self {
+            enabled,
             _not_send: PhantomData,
         }
     }
@@ -1241,18 +1503,26 @@ impl LibraryUnlockGuard {
 impl Drop for LibraryUnlockGuard {
     #[inline]
     fn drop(&mut self) {
-        LIBRARY_UNLOCK_DEPTH.with(|depth| {
-            let current = depth.get();
-            debug_assert!(current > 0, "unbalanced library unlock scope");
-            depth.set(current.saturating_sub(1));
+        LIBRARY_UNLOCKS.with(|licenses| {
+            let mut licenses = licenses.borrow_mut();
+            let index = licenses
+                .iter()
+                .rposition(|license| Arc::ptr_eq(license, &self.enabled))
+                .expect("unbalanced library unlock scope");
+            licenses.remove(index);
         });
     }
 }
 
-/// Return whether the current Rust thread is inside a library unlock scope.
+/// Return whether the current Rust thread is inside an enabled library unlock scope.
 #[inline]
 pub(crate) fn current_thread_is_unlocked() -> bool {
-    LIBRARY_UNLOCK_DEPTH.with(|depth| depth.get() != 0)
+    LIBRARY_UNLOCKS.with(|licenses| {
+        licenses
+            .borrow()
+            .iter()
+            .any(|license| license.load(Relaxed))
+    })
 }
 
 /// Authorization captured before Symbolica dispatches work to one of its own threads.
