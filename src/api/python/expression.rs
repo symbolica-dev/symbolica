@@ -5650,6 +5650,9 @@ impl PythonExpression {
     /// Construct the root with index `index` of the polynomial represented by
     /// this expression. If `variable` is provided, explicitly select it as the
     /// polynomial variable.
+    /// Indices start at zero and count multiplicity. Real roots come first in
+    /// increasing order, followed by nonreal roots ordered by real and imaginary
+    /// part. For parametric polynomials, the index selects a root after substitution.
     ///
     /// Examples
     /// --------

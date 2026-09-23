@@ -194,6 +194,35 @@ fn real_root_isolation_returns_root_objects_with_multiplicity() {
 }
 
 #[test]
+fn real_first_indices_count_multiplicity_across_factors() {
+    let p = parse!("(x^3-2)^2*x^3*(x^2+1)")
+        .to_polynomial::<_, u16>(&Q, None)
+        .to_univariate_from_univariate(0);
+    let roots = p.isolate_roots();
+    let real = p.isolate_real_roots();
+    assert_eq!(roots.len(), 6);
+    assert_eq!(real.len(), 2);
+    assert_eq!(real[0].1, 3);
+    assert_eq!(real[1].1, 2);
+    assert_eq!(roots[0].0.location, Some(RootLocation::Zero));
+    assert!(is_real(&roots[1].0));
+    assert!(roots[2..].iter().all(|(root, _)| !is_real(root)));
+    for index in 0..3 {
+        assert_eq!(p.root(index).unwrap().to_atom(), parse!("0"));
+    }
+    let cube_root = parse!("root(x^3-2,0)");
+    let tolerance = Rational::from((Integer::one(), Integer::one() << 96u32));
+    for index in 3..5 {
+        let root = p.root(index).unwrap().refined(&tolerance);
+        assert_eq!(root.to_atom(), cube_root);
+        assert_eq!(root.index(), 0); // Index in the irreducible cubic factor.
+        assert!(is_real(&root));
+    }
+    assert!(!is_real(&p.root(5).unwrap()));
+    assert!(p.root(p.degree()).is_none());
+}
+
+#[test]
 fn isolated_root_to_atom_uses_the_canonical_root_variable() {
     let x_polynomial = parse!("x^5+x+1")
         .to_polynomial::<_, u16>(&Q, None)
@@ -257,7 +286,7 @@ fn complex_root_isolation_marks_imaginary_roots_from_common_axis_part() {
 
     assert_eq!(roots.len(), 3);
     assert_eq!(roots.iter().filter(|root| is_imaginary(root)).count(), 3);
-    assert_eq!(roots[1].location, Some(RootLocation::Zero));
+    assert_eq!(roots[0].location, Some(RootLocation::Zero));
     assert_pairwise_isolated(&roots);
     assert_complex_roots_canonical(&roots);
 }
@@ -278,9 +307,9 @@ fn complex_root_isolation_handles_axis_binomial() {
     assert_eq!(roots.iter().filter(|root| is_imaginary(root)).count(), 2);
     assert_pairwise_isolated(&roots);
     assert!(is_real(&roots[0]));
-    assert!(is_imaginary(&roots[1]) && roots[1].enclosure().center().im.is_negative());
-    assert!(is_imaginary(&roots[2]) && roots[2].enclosure().center().im > Rational::zero());
-    assert!(is_real(&roots[3]));
+    assert!(is_real(&roots[1]));
+    assert!(is_imaginary(&roots[2]) && roots[2].enclosure().center().im.is_negative());
+    assert!(is_imaginary(&roots[3]) && roots[3].enclosure().center().im > Rational::zero());
 }
 
 #[test]
@@ -314,13 +343,13 @@ fn complex_root_isolation_handles_non_axis_binomial() {
     assert_eq!(roots.iter().filter(|root| is_imaginary(root)).count(), 2);
     assert_pairwise_isolated(&roots);
     assert!(is_real(&roots[0]));
-    assert!(roots[1].enclosure().center().im.is_negative());
-    assert!(roots[2].enclosure().center().im > Rational::zero());
-    assert!(is_imaginary(&roots[3]) && roots[3].enclosure().center().im.is_negative());
-    assert!(is_imaginary(&roots[4]) && roots[4].enclosure().center().im > Rational::zero());
-    assert!(roots[5].enclosure().center().im.is_negative());
-    assert!(roots[6].enclosure().center().im > Rational::zero());
-    assert!(is_real(&roots[7]));
+    assert!(is_real(&roots[1]));
+    assert!(roots[2].enclosure().center().im.is_negative());
+    assert!(roots[3].enclosure().center().im > Rational::zero());
+    assert!(is_imaginary(&roots[4]) && roots[4].enclosure().center().im.is_negative());
+    assert!(is_imaginary(&roots[5]) && roots[5].enclosure().center().im > Rational::zero());
+    assert!(roots[6].enclosure().center().im.is_negative());
+    assert!(roots[7].enclosure().center().im > Rational::zero());
     assert!(
         roots
             .iter()
@@ -405,14 +434,14 @@ fn exact_complex_root_location_is_resolved_and_cached() {
     ];
 
     let roots = without_multiplicities(p.isolate_roots());
-    assert!(roots.iter().all(|root| root.location.is_none()));
+    assert!(roots.iter().all(|root| root.location.is_some()));
 
-    let mut first = roots[0].clone();
+    let mut first = roots[1].clone();
     let first_location = first.classify_location();
     assert_eq!(first_location, RootLocation::Imaginary);
     assert!(is_imaginary(&first));
 
-    let cached_real = p.root(1).unwrap();
+    let cached_real = p.root(0).unwrap();
     assert_eq!(cached_real.location, Some(RootLocation::Real));
     assert!(is_real(&cached_real));
 

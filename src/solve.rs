@@ -1810,7 +1810,7 @@ mod test {
     }
 
     #[test]
-    fn exact_solve_expands_parametric_binomial_cubic_roots() {
+    fn exact_solve_preserves_parametric_binomial_cubic_root_selection() {
         let x = symbol!("x");
         let y = symbol!("y");
         let a = symbol!("a");
@@ -1823,8 +1823,7 @@ mod test {
         for solution in solutions {
             let x_value = solution.get(&PolyVariable::from(x)).unwrap();
             let y_value = solution.get(&PolyVariable::from(y)).unwrap();
-            assert!(!x_value.contains_symbol(root()));
-            assert!(!y_value.contains_symbol(root()));
+            assert!(x_value.contains_symbol(root()));
 
             let x_value = x_value.replace(a).with(Atom::num(2));
             let y_value = y_value.replace(a).with(Atom::num(2));

@@ -1484,12 +1484,15 @@ impl PythonPolynomial {
     }
 
     /// Return one root from the canonical ordering, counting multiplicity.
+    /// Indices start at zero. Real roots come first in increasing order, then
+    /// nonreal roots ordered by real part and imaginary part.
     pub fn root(&self, index: usize) -> PyResult<Option<PythonIsolatedRoot>> {
         Ok(self.as_univariate()?.root(index).map(Into::into))
     }
 
     /// Isolate all distinct roots in the complex plane, together with their
-    /// multiplicities.
+    /// multiplicities. Real roots come first in increasing order, followed by
+    /// nonreal roots ordered by real part and imaginary part.
     ///
     /// Examples
     /// --------
@@ -1506,7 +1509,9 @@ impl PythonPolynomial {
             .collect())
     }
 
-    /// Isolate all distinct real roots, together with their multiplicities.
+    /// Isolate all distinct real roots in increasing order, with multiplicities
+    /// stored separately. Each entry defines one CAD section. A returned root's
+    /// index belongs to its defining factor, not its position in this list.
     pub fn isolate_real_roots(&self) -> PyResult<Vec<(PythonIsolatedRoot, usize)>> {
         Ok(self
             .as_univariate()?

@@ -247,18 +247,21 @@ impl SpecialSymbols {
 
                 // Canonicalize the polynomial variable even when the selected
                 // root index is invalid. Use index zero only to recover the
-                // same variable selection without weakening Root's index
+                // same variable selection and degree without weakening Root's index
                 // validation.
                 let rational_root = if let Some(variable) = &explicit_variable {
                     Root::<Q>::from_atom_with_variable(poly_tag, variable.clone(), 0)
                 } else {
                     Root::<Q>::from_atom(poly_tag, 0)
                 };
-                let mut root_variable = rational_root
-                    .ok()
-                    .map(|root| root.polynomial().get_vars_ref()[0].clone());
+                let mut root_metadata = rational_root.ok().map(|root| {
+                    (
+                        root.polynomial().get_vars_ref()[0].clone(),
+                        root.polynomial().degree(0) as usize,
+                    )
+                });
 
-                if root_variable.is_none() {
+                if root_metadata.is_none() {
                     let algebraic_root = if let Some(variable) = &explicit_variable {
                         Root::<AlgebraicExtension<Q>>::from_atom_with_variable(
                             poly_tag,
@@ -268,13 +271,15 @@ impl SpecialSymbols {
                     } else {
                         Root::<AlgebraicExtension<Q>>::from_atom(poly_tag, 0)
                     };
-                    root_variable = algebraic_root
-                        .ok()
-                        .flatten()
-                        .map(|root| root.polynomial().get_vars_ref()[0].clone());
+                    root_metadata = algebraic_root.ok().flatten().map(|root| {
+                        (
+                            root.polynomial().get_vars_ref()[0].clone(),
+                            root.polynomial().degree(0) as usize,
+                        )
+                    });
                 }
 
-                if root_variable.is_none() {
+                if root_metadata.is_none() {
                     let parametric_root = if let Some(variable) = explicit_variable {
                         Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom_with_variable(
                             poly_tag, variable, 0,
@@ -282,15 +287,23 @@ impl SpecialSymbols {
                     } else {
                         Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(poly_tag, 0)
                     };
-                    root_variable = parametric_root
-                        .ok()
-                        .map(|root| root.polynomial().get_vars_ref()[0].clone());
+                    root_metadata = parametric_root.ok().map(|root| {
+                        (
+                            root.polynomial().get_vars_ref()[0].clone(),
+                            root.polynomial().degree(0) as usize,
+                        )
+                    });
                 }
 
-                if let Some(variable) = root_variable
-                    && let Some(polynomial) = canonical_root_polynomial(poly_tag, &variable)
-                {
-                    **out = polynomial.root(index);
+                if let Some((variable, degree)) = root_metadata {
+                    if let Some(polynomial) = canonical_root_polynomial(poly_tag, &variable) {
+                        // The canonical root emits the warning during normalization.
+                        **out = polynomial.root(index);
+                    } else if index >= degree {
+                        crate::warn!(
+                            "root index {index} is out of bounds for polynomial of degree {degree}"
+                        );
+                    }
                 }
             },
             der = |_x, _i, out| {
@@ -2140,12 +2153,20 @@ pub fn polylog() -> Symbol {
 
 /// Return the built-in algebraic root symbol `root`.
 ///
-/// `root(poly, n)` represents the `n`-th complex root of a univariate polynomial
-/// with exact algebraic coefficients, ordered lexicographically by `(re, im)`.
+/// `root(poly, n)` represents the zero-based `n`-th root of a univariate
+/// polynomial with exact algebraic coefficients, counting multiplicity.
+/// Real roots come first in increasing order; nonreal roots follow, ordered
+/// lexicographically by `(re, im)`.
 /// The three-argument form `root(poly, x, n)` explicitly selects the symbol
 /// `x` as the polynomial variable; all other symbols in `poly` are treated as
 /// parameters. For example, `root(x^2-a-1, x, 0)` represents the first root in
 /// `x`.
+/// The index selects a root after parameter specialization, rather than an
+/// analytic branch continued across parameter values. Over a CAD cell where
+/// the polynomial is delineable, each distinct real-root position identifies
+/// a continuous section. Sections count distinct roots, not multiplicities.
+/// Parametric radical simplifications are made only when they preserve the
+/// specialized root selection.
 ///
 /// In the two-argument form the polynomial variable is inferred only when
 /// there is a single indeterminate, or when `root_var` (or conventional `z`)
@@ -4973,7 +4994,7 @@ mod tests {
         );
         assert_eq!(
             parse!("root(1-1/2*12^(1/2)+z^3,2)"),
-            parse!("root(root_var^6+2*root_var^3-2,5)")
+            parse!("root(root_var^6+2*root_var^3-2,3)")
         );
         assert_eq!(parse!("root((z-2^(1/2))^2,0)"), parse!("1/2*8^(1/2)"));
         assert_eq!(parse!("root((z-2^(1/2))^2,1)"), parse!("1/2*8^(1/2)"));
@@ -4985,7 +5006,7 @@ mod tests {
         );
         assert_eq!(
             parse!("root(z^2-2^(1/2),1)"),
-            parse!("root(-2+root_var^4,3)")
+            parse!("root(-2+root_var^4,1)")
         );
         assert_eq!(
             parse!("root(z-2^(1/2)-3^(1/2),0)"),
@@ -4994,7 +5015,7 @@ mod tests {
         assert_eq!(parse!("root(z-(1+1i),0)"), parse!("1+1i"));
         assert_eq!(
             parse!("root((1+x)^2*(2^(1/2)+x^4),3)"),
-            parse!("root(-2+root_var^8,2)")
+            parse!("root(-2+root_var^8,3)")
         );
     }
 
@@ -5016,11 +5037,91 @@ mod tests {
     }
 
     #[test]
-    fn root_simplifies_parametric_binomial_cubic() {
-        assert_eq!(parse!("root(-a+z^3,0)"), parse!("-(-1)^(1/3)*a^(1/3)"));
-        assert_eq!(parse!("root(-a+z^3,1)"), parse!("(-1)^(2/3)*a^(1/3)"));
-        assert_eq!(parse!("root(-a+z^3,2)"), parse!("a^(1/3)"));
-        assert_eq!(parse!("root(x^2-a^3-1,a,2)"), parse!("(-1+x^2)^(1/3)"));
+    fn parametric_cubic_selects_real_root_after_specialization() {
+        for index in 0..3 {
+            let root = parse!(format!("root(x^3-a,x,{index})"));
+            assert_eq!(root, parse!(format!("root(root_var^3-a,{index})")));
+            for value in [-8, 0, 8] {
+                assert_eq!(
+                    root.replace(symbol!("a")).with(Atom::num(value)),
+                    parse!(format!("root(x^3-({value}),{index})"))
+                );
+            }
+        }
+        let real_root = parse!("root(x^3-a,x,0)");
+        assert_eq!(
+            real_root.replace(symbol!("a")).with(Atom::num(-8)),
+            Atom::num(-2)
+        );
+        assert_eq!(
+            real_root.replace(symbol!("a")).with(Atom::num(8)),
+            Atom::num(2)
+        );
+        assert_eq!(
+            parse!("root(x^2-a^3-1,a,2)"),
+            parse!("root(x^2-root_var^3-1,2)")
+        );
+    }
+
+    #[test]
+    fn parametric_quadratic_preserves_specialized_order() {
+        // The branches x=a and x=-a exchange ranks at a=0.
+        let root = parse!("root(x^2-a^2,x,0)");
+        for value in [-2, 2] {
+            assert_eq!(
+                root.replace(symbol!("a")).with(Atom::num(value)),
+                Atom::num(-2)
+            );
+        }
+
+        // A complex shift can make either quadratic branch the real root.
+        // An unconditional minus-discriminant formula would choose -i here.
+        let root = parse!("root(x^2+a*x-1,x,0)");
+        assert_eq!(root, parse!("root(root_var^2+a*root_var-1,0)"));
+        assert_eq!(root.replace(symbol!("a")).with(Atom::num(0)), Atom::num(-1));
+        let shifted = parse!("root(x^2+a*x+b,x,0)");
+        let specialized = shifted
+            .replace(symbol!("a"))
+            .with(parse!("-1+1i"))
+            .replace(symbol!("b"))
+            .with(parse!("-1i"));
+        assert_eq!(specialized, Atom::num(1));
+    }
+
+    #[test]
+    fn parametric_quadratic_simplifies_with_real_midpoint() {
+        let _ = symbol!("root_real_linear"; Real);
+        let root = parse!("root(x^2-root_real_linear*x-a,x,0)");
+        assert_eq!(
+            root,
+            parse!("(root_real_linear-sqrt(root_real_linear^2+4*a))/2").expand()
+        );
+        // Normalize the leading coefficient before taking the square root.
+        assert_eq!(parse!("root(-x^2+root_real_linear*x+a,x,0)"), root);
+        for value in [-3, 0, 3] {
+            for constant in [-2, 0, 2] {
+                let specialized = root
+                    .replace(symbol!("root_real_linear"))
+                    .with(Atom::num(value))
+                    .replace(symbol!("a"))
+                    .with(Atom::num(constant));
+                assert_eq!(
+                    specialized,
+                    parse!(format!("root(x^2-({value})*x-({constant}),0)"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parametric_real_root_rank_ignores_complex_real_parts() {
+        let root = parse!("root((x-a)*((x+1)^2+1),x,0)");
+        for value in [-2, -1, 0, 2] {
+            assert_eq!(
+                root.replace(symbol!("a")).with(Atom::num(value)),
+                Atom::num(value)
+            );
+        }
     }
 
     #[test]
