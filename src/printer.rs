@@ -1126,6 +1126,8 @@ impl FormattedPrintNum for NumView<'_> {
             "\u{1b}\u{5b}\u{33}\u{35}\u{6d}\u{1d456}\u{1b}\u{5b}\u{30}\u{6d}"
         } else if opts.mode.is_mathematica() {
             "I"
+        } else if opts.mode.is_latex() {
+            "i"
         } else {
             "𝑖"
         };
@@ -1160,6 +1162,9 @@ impl FormattedPrintNum for NumView<'_> {
             if need_paren {
                 AtomPrinter::format_bracket('(', f, opts, print_state)?;
             }
+
+            let suppress_imaginary_one =
+                !opts.mode.is_mathematica() && imag.numerator_ref().abs().is_one();
 
             if !opts.mode.is_latex()
                 && (opts.number_thousands_separator.is_some() || print_state.superscript)
@@ -1198,12 +1203,14 @@ impl FormattedPrintNum for NumView<'_> {
                     if !global_negative && imag.is_negative() {
                         f.write_char('-')?;
                     }
-                    AtomPrinter::format_digits(
-                        imag.numerator_ref().abs().to_string(),
-                        opts,
-                        &print_state,
-                        f,
-                    )?;
+                    if !suppress_imaginary_one {
+                        AtomPrinter::format_digits(
+                            imag.numerator_ref().abs().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
+                    }
                     f.write_str(i_str)?;
                     if !imag.is_integer() {
                         f.write_char('/')?;
@@ -1248,23 +1255,20 @@ impl FormattedPrintNum for NumView<'_> {
                         f.write_char('-')?;
                     }
 
-                    if !imag.is_integer() {
-                        if opts.mode.is_latex() {
-                            f.write_fmt(format_args!(
-                                "\\frac{{{}}}{{{}}}𝑖",
-                                imag.numerator_ref().abs(),
-                                imag.denominator_ref(),
-                            ))?;
-                        } else {
-                            f.write_fmt(format_args!(
-                                "{}{}/{}",
-                                imag.numerator_ref().abs(),
-                                i_str,
-                                imag.denominator_ref()
-                            ))?;
+                    if !imag.is_integer() && opts.mode.is_latex() {
+                        f.write_str("\\frac{")?;
+                        if !suppress_imaginary_one {
+                            f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
                         }
+                        f.write_fmt(format_args!("{i_str}}}{{{}}}", imag.denominator_ref()))?;
                     } else {
-                        f.write_fmt(format_args!("{}{}", imag.numerator_ref().abs(), i_str))?;
+                        if !suppress_imaginary_one {
+                            f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
+                        }
+                        f.write_str(i_str)?;
+                        if !imag.is_integer() {
+                            f.write_fmt(format_args!("/{}", imag.denominator_ref()))?;
+                        }
                     }
                 }
             }
@@ -2443,6 +2447,81 @@ mod test {
     };
 
     #[test]
+    fn unicode_imaginary_unit() {
+        for separator in [None, Some('_')] {
+            let opts = PrintOptions {
+                number_thousands_separator: separator,
+                ..PrintOptions::file_no_namespace()
+            };
+            for (input, expected) in [
+                ("1i", "𝑖"),
+                ("-1i", "-𝑖"),
+                ("2+1i", "2+𝑖"),
+                ("2-1i", "2-𝑖"),
+                ("2i", "2𝑖"),
+                ("-2i", "-2𝑖"),
+                ("1i/2", "𝑖/2"),
+                ("-1i/2", "-𝑖/2"),
+                ("3-1i/2", "3-𝑖/2"),
+                ("3+1i/2", "3+𝑖/2"),
+                ("3-2i/3", "3-2𝑖/3"),
+                (
+                    "1i/123456789012345678901234567890",
+                    "𝑖/123456789012345678901234567890",
+                ),
+                (
+                    "123456789012345678901234567890+1i",
+                    "123456789012345678901234567890+𝑖",
+                ),
+            ] {
+                let atom = parse!(input);
+                let output = atom.format_string(&opts, PrintState::new());
+                assert_eq!(output.replace('_', ""), expected);
+                assert_eq!(parse!(output), atom);
+            }
+        }
+
+        for input in [
+            "x-1i",
+            "-1i*x",
+            "(2-1i)*x",
+            "(-1i)^x",
+            "x^(1i)",
+            "x-1i/2",
+            "-1i*x/2",
+            "(3-1i/2)*x",
+            "(-1i/2)^x",
+            "x^(1i/2)",
+        ] {
+            let atom = parse!(input);
+            for color_mode in [ColorMode::Never, ColorMode::Always] {
+                let output = atom.format_string(
+                    &PrintOptions {
+                        color_mode,
+                        ..PrintOptions::new()
+                    },
+                    PrintState::new(),
+                );
+                assert!(!output.contains("1𝑖"), "{output}");
+                assert_eq!(parse!(output), atom);
+            }
+        }
+
+        assert_eq!(
+            parse!("-1i").format_string(&PrintOptions::latex(), PrintState::new()),
+            "-i"
+        );
+        assert_eq!(
+            parse!("-1i").format_string(&PrintOptions::mathematica(), PrintState::new()),
+            "-1I"
+        );
+        assert_eq!(
+            parse!("3-1i/2").format_string(&PrintOptions::mathematica(), PrintState::new()),
+            "3-1I/2"
+        );
+    }
+
+    #[test]
     fn ansi_wrap_respects_color_mode() {
         assert_eq!(
             AnsiWrap::yellow("+")
@@ -2542,17 +2621,27 @@ mod test {
 
     #[test]
     fn atoms() {
-        let a = parse!("f(x,y^2)^(x+z)/5+3");
+        // Keep symbol registration order independent of concurrently running tests.
+        const NAMESPACE: &str = "symbolica::printer_test_atoms";
+        let a = parse!("f(x,y^2)^(x+z)/5+3", default_namespace = NAMESPACE);
 
-        if AnsiWrap::<&str>::should_colorize() {
+        // These symbols are in a private namespace, so only operators and brackets are colored.
+        for (color_mode, expected) in [
+            (
+                ColorMode::Always,
+                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*f\u{1b}[0;38;5;25m(\u{1b}[0mx,y^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0mx+z\u{1b}[0;38;5;244m)\u{1b}[0m",
+            ),
+            (ColorMode::Never, "3+1/5*f(x,y^2)^(x+z)"),
+        ] {
             assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*\u{1b}[0;38;5;5mf\u{1b}[0m\u{1b}[0;38;5;25m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m,\u{1b}[0;38;5;5my\u{1b}[0m^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m+\u{1b}[0;38;5;5mz\u{1b}[0m\u{1b}[0;38;5;244m)\u{1b}[0m"
-            );
-        } else {
-            assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3+1/5*f(x,y^2)^(x+z)"
+                format!(
+                    "{}",
+                    a.printer(PrintOptions {
+                        color_mode,
+                        ..PrintOptions::short()
+                    })
+                ),
+                expected
             );
         }
 
@@ -2567,12 +2656,18 @@ mod test {
         assert_eq!(
             format!(
                 "{}",
-                AtomPrinter::new_with_options(a.as_view(), PrintOptions::mathematica())
+                AtomPrinter::new_with_options(
+                    a.as_view(),
+                    PrintOptions {
+                        hide_namespace: Some(NAMESPACE.into()),
+                        ..PrintOptions::mathematica()
+                    }
+                )
             ),
             "3+1/5 f[x,y^2]^(x+z)"
         );
 
-        let a = parse!("8127389217 x^2");
+        let a = parse!("8127389217 x^2", default_namespace = NAMESPACE);
         assert_eq!(
             format!(
                 "{}",
@@ -2586,10 +2681,10 @@ mod test {
                     }
                 )
             ),
-            "812_738_921_7 symbolica::x²"
+            "812_738_921_7 symbolica::printer_test_atoms::x²"
         );
 
-        let a = parse!("der(3,5,f,x,y)");
+        let a = parse!("der(3,5,f,x,y)", default_namespace = NAMESPACE);
         assert_eq!(
             format!(
                 "{}",
