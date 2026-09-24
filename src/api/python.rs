@@ -235,6 +235,15 @@ pub enum PythonParseMode {
     Mathematica,
 }
 
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonParseMode {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
 /// A domain supported by the exact equation solver.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(
@@ -250,6 +259,15 @@ pub enum PythonSolveDomain {
     Rationals,
     Reals,
     Complexes,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonSolveDomain {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
 }
 
 impl From<PythonSolveDomain> for crate::solve::SolveDomain {
@@ -307,6 +325,15 @@ pub enum PythonPrintMode {
     Sympy,
     /// Print using Typst notation.
     Typst,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonPrintMode {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because PrintMode supports integer equality.
+        *self as usize
+    }
 }
 
 impl From<PrintMode> for PythonPrintMode {
@@ -1274,6 +1301,106 @@ fn python_callable_fingerprint(callable: &Bound<'_, PyAny>) -> PyResult<Vec<u8>>
     Ok(out)
 }
 
+enum PythonPrintDefinition {
+    Callback(Py<PyAny>, Vec<u8>),
+    Formats(Vec<(PythonPrintMode, String)>, Vec<u8>),
+}
+
+impl PythonPrintDefinition {
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(dict) = value.cast::<PyDict>() {
+            let mut formats = Vec::with_capacity(dict.len());
+            for (key, value) in dict.iter() {
+                let mode = if let Ok(mode) = key.extract::<PythonPrintMode>() {
+                    mode
+                } else if let Ok(name) = key.extract::<String>() {
+                    match name.to_ascii_lowercase().as_str() {
+                        "symbolica" => PythonPrintMode::Symbolica,
+                        "latex" => PythonPrintMode::Latex,
+                        "mathematica" => PythonPrintMode::Mathematica,
+                        "sympy" => PythonPrintMode::Sympy,
+                        "typst" => PythonPrintMode::Typst,
+                        _ => {
+                            return Err(exceptions::PyValueError::new_err(format!(
+                                "Unknown print mode {name:?}; expected symbolica, latex, mathematica, sympy, or typst"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(exceptions::PyTypeError::new_err(
+                        "print dictionary keys must be strings or PrintMode values",
+                    ));
+                };
+                let text = value.extract::<String>().map_err(|_| {
+                    exceptions::PyTypeError::new_err("print dictionary values must be strings")
+                })?;
+                if formats.iter().any(|(existing, _)| *existing == mode) {
+                    return Err(exceptions::PyValueError::new_err(
+                        "print dictionary contains duplicate entries for the same mode",
+                    ));
+                }
+                formats.push((mode, text));
+            }
+
+            // Normalize aliases and insertion order for symbol redefinition checks.
+            formats.sort_by_key(|(mode, _)| *mode as usize);
+            let mut fingerprint = b"python-print-dict".to_vec();
+            for (mode, text) in &formats {
+                fingerprint.push(*mode as u8);
+                append_fingerprint_part(&mut fingerprint, text.as_bytes());
+            }
+            Ok(Self::Formats(formats, fingerprint))
+        } else if value.is_callable() {
+            Ok(Self::Callback(
+                value.clone().unbind(),
+                python_callable_fingerprint(value)?,
+            ))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "print must be a callable or a dictionary",
+            ))
+        }
+    }
+
+    fn apply_to(&self, py: Python<'_>, symbol: SymbolBuilder) -> SymbolBuilder {
+        match self {
+            Self::Formats(formats, key) => {
+                let formats = formats.clone();
+                symbol.with_keyed_print_function(
+                    move |_, opts, _| {
+                        formats.iter().find_map(|(mode, text)| {
+                            (PrintMode::from(*mode) == opts.mode).then(|| text.clone())
+                        })
+                    },
+                    key.clone(),
+                )
+            }
+            Self::Callback(function, key) => {
+                let function = function.clone_ref(py);
+                symbol.with_keyed_print_function(
+                    move |input, opts, state| match Python::attach(|py| {
+                        let kwargs = print_options_to_dict(opts, state, py)?;
+                        function
+                            .call(
+                                py,
+                                (PythonExpression::from(input.to_owned()),),
+                                Some(&kwargs),
+                            )?
+                            .extract::<Option<String>>(py)
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python custom print callback failed: {err}");
+                            None
+                        }
+                    },
+                    key.clone(),
+                )
+            }
+        }
+    }
+}
+
 fn python_evaluation_fingerprint(eval: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     let dict = eval
         .cast::<PyDict>()
@@ -1407,10 +1534,14 @@ fn python_evaluation_fingerprint(eval: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 ///     receives the normalized function and returns its replacement. The symbol name
 ///     cannot be used in a transformer, as this would define the symbol recursively;
 ///     use a wildcard with the same attributes instead.
-/// print : Callable[..., str | None] | None:
+/// print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
 ///     A function that is called when printing the variable/function, which is provided as its first argument.
 ///     This function should return a string, or `None` if the default print function should be used.
 ///     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+///     Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+///     or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+///     Values replace the entire variable or function call verbatim. Missing modes use default printing.
+///     The dictionary is copied when the symbol is defined; duplicate modes are rejected.
 /// derivative: Callable[[Expression, int], Expression] | None:
 ///     A function that is called when computing the derivative of a function in a given argument.
 /// series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -1980,7 +2111,7 @@ PyFunctionInfo {
                     name: "print",
                     kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
@@ -2289,7 +2420,7 @@ PyFunctionInfo {
                     name: "print",
                     kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
@@ -2421,10 +2552,14 @@ normalization : Transformer | Callable[[Expression], Expression] | None
     receives the normalized function and returns its replacement. The symbol name
     cannot be used in a transformer, as this would define the symbol recursively;
     use a wildcard with the same attributes instead.
-print : Callable[..., str | None] | None:
+print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+    Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    Values replace the entire variable or function call verbatim. Missing modes use default printing.
+    The dictionary is copied when the symbol is defined; duplicate modes are rejected.
 derivative: Callable[[Expression, int], Expression] | None:
     A function that is called when computing the derivative of a function in a given argument.
 series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:

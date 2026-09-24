@@ -18,6 +18,15 @@ pub enum PythonRootLocation {
     Zero,
 }
 
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonRootLocation {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
 impl From<RootLocation> for PythonRootLocation {
     fn from(location: RootLocation) -> Self {
         match location {
