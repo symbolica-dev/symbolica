@@ -2284,12 +2284,33 @@ impl<'a> Iterator for ListIterator<'a> {
     }
 
     #[inline(always)]
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        if n >= self.length {
+            self.data = &[];
+            self.length = 0;
+            return None;
+        }
+
+        // Keep constant indices as easy to inline and unroll as repeated next()
+        // calls. The upfront length check also handles oversized indices in O(1).
+        for _ in 0..n {
+            self.next();
+        }
+        self.next()
+    }
+
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.length == 0 {
             return None;
         }
 
         self.length -= 1;
+
+        if self.length == 0 {
+            // The remaining slice contains exactly the final atom.
+            return Some(AtomView::from(std::mem::take(&mut self.data)));
+        }
 
         let start = self.data;
 
