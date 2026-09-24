@@ -1134,7 +1134,7 @@ impl AtomView<'_> {
     ) -> Result<MultivariatePolynomial<R, E>, &'static str> {
         fn check_factor(
             factor: &AtomView<'_>,
-            vars: &mut Vec<PolyVariable>,
+            vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
         ) -> Result<(), &'static str> {
             match factor {
@@ -1150,7 +1150,7 @@ impl AtomView<'_> {
                         if !allow_new_vars {
                             return Err("Expression contains variable that is not in variable map");
                         } else {
-                            vars.push(v.get_symbol().into());
+                            Arc::make_mut(vars).push(v.get_symbol().into());
                         }
                     }
                     Ok(())
@@ -1167,7 +1167,7 @@ impl AtomView<'_> {
                                         "Expression contains variable that is not in variable map",
                                     );
                                 } else {
-                                    vars.push(v.get_symbol().into());
+                                    Arc::make_mut(vars).push(v.get_symbol().into());
                                 }
                             }
                         }
@@ -1217,7 +1217,7 @@ impl AtomView<'_> {
 
         fn check_term(
             term: &AtomView<'_>,
-            vars: &mut Vec<PolyVariable>,
+            vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
         ) -> Result<(), &'static str> {
             match term {
@@ -1231,8 +1231,8 @@ impl AtomView<'_> {
             }
         }
 
-        // get all variables and check structure
-        let mut vars = var_map.map(|v| (**v).clone()).unwrap_or_default();
+        // Reuse the existing map; copy only when a new variable is discovered.
+        let mut vars = var_map.cloned().unwrap_or_default();
         let mut n_terms = 0;
         match self {
             AtomView::Add(a) => {
@@ -1347,16 +1347,13 @@ impl AtomView<'_> {
                 Ok(MultivariatePolynomial::from_coefficient_list(
                     coefficients,
                     exponents,
-                    Arc::new(vars),
+                    vars,
                     field,
                 ))
             }
             _ => {
-                let mut poly = MultivariatePolynomial::<R, E>::new(
-                    field,
-                    Some(n_terms),
-                    Arc::new(vars.clone()),
-                );
+                let mut poly =
+                    MultivariatePolynomial::<R, E>::new(field, Some(n_terms), vars.clone());
 
                 parse_term(self, &vars, &mut poly, field)?;
                 Ok(poly)
@@ -1628,12 +1625,23 @@ impl AtomView<'_> {
                 r
             }
             AtomView::Add(a) => {
-                let mut r = poly.zero();
+                let mut coefficients = Vec::new();
+                let mut exponents = Vec::new();
                 for arg in a {
-                    let arg_r = arg.to_polynomial_in_vars_impl(&r.variables(), poly);
-                    r = &r + &arg_r;
+                    let arg_r = arg.to_polynomial_in_vars_impl(var_map, poly);
+                    coefficients.extend(arg_r.coefficients);
+                    exponents.extend(arg_r.exponents);
                 }
-                r
+                if coefficients.is_empty() {
+                    poly.zero()
+                } else {
+                    MultivariatePolynomial::from_coefficient_list(
+                        coefficients,
+                        exponents,
+                        var_map.clone(),
+                        &field,
+                    )
+                }
             }
         }
     }
