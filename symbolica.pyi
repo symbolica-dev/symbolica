@@ -1421,7 +1421,7 @@ def S(
     tags: Sequence[str] | None = None,
     aliases: Sequence[str] | None = None,
     normalization: Transformer | Callable[[Expression], Expression] | None = None,
-    print: Callable[..., str | None] | None = None,
+    print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
     derivative: Callable[[Expression, int], Expression] | None = None,
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
     | None = None,
@@ -1539,10 +1539,14 @@ def S(
         A transformer that is called after every normalization. Note that the symbol
         name cannot be used in the transformer as this will lead to a definition of the
         symbol. Use a wildcard with the same attributes instead.
-    print : Callable[..., str | None] | None:
+    print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
         A function that is called when printing the variable/function, which is provided as its first argument.
         This function should return a string, or `None` if the default print function should be used.
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+        Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+        or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+        Values replace the entire variable or function call verbatim. Missing modes use default printing.
+        The dictionary is copied when the symbol is defined; duplicate modes are rejected.
     derivative: Callable[[Expression, int], Expression] | None:
         A function that is called when computing the derivative of a function in a given argument.
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -1590,7 +1594,7 @@ def S(
     tags: Sequence[str] | None = None,
     aliases: Sequence[str] | None = None,
     normalization: Transformer | Callable[[Expression], Expression] | None = None,
-    print: Callable[..., str | None] | None = None,
+    print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
     derivative: Callable[[Expression, int], Expression] | None = None,
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
     | None = None,
@@ -2361,7 +2365,7 @@ class Expression:
         tags: Sequence[str] | None = None,
         aliases: Sequence[str] | None = None,
         normalization: Transformer | Callable[[Expression], Expression] | None = None,
-        print: Callable[..., str | None] | None = None,
+        print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
         derivative: Callable[[Expression, int], Expression] | None = None,
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
         | None = None,
@@ -2479,10 +2483,14 @@ class Expression:
             A transformer that is called after every normalization. Note that the symbol
             name cannot be used in the transformer as this will lead to a definition of the
             symbol. Use a wildcard with the same attributes instead.
-        print : Callable[..., str | None] | None:
+        print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
             A function that is called when printing the variable/function, which is provided as its first argument.
             This function should return a string, or `None` if the default print function should be used.
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+            Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+            or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+            Values replace the entire variable or function call verbatim. Missing modes use default printing.
+            The dictionary is copied when the symbol is defined; duplicate modes are rejected.
         derivative: Callable[[Expression, int], Expression] | None:
             A function that is called when computing the derivative of a function in a given argument.
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -2532,7 +2540,7 @@ class Expression:
         tags: Sequence[str] | None = None,
         aliases: Sequence[str] | None = None,
         normalization: Transformer | Callable[[Expression], Expression] | None = None,
-        print: Callable[..., str | None] | None = None,
+        print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
         derivative: Callable[[Expression, int], Expression] | None = None,
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
         | None = None,

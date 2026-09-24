@@ -3510,8 +3510,8 @@ impl PythonExpression {
     /// >>> E("real_log(exp(x)) + real_log(5)")
     ///
     /// Define a custom print function:
-    /// >>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
-    /// >>>     if latex:
+    /// >>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+    /// >>>     if mode == PrintMode.Latex:
     /// >>>         if mu.get_type() == AtomType.Fn:
     /// >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
     /// >>>         else:
@@ -3580,10 +3580,14 @@ impl PythonExpression {
     ///     receives the normalized function and returns its replacement. The symbol name
     ///     cannot be used in a transformer, as this would define the symbol recursively;
     ///     use a wildcard with the same attributes instead.
-    /// print : Callable[..., str | None] | None:
+    /// print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     ///     A function that is called when printing the variable/function, which is provided as its first argument.
     ///     This function should return a string, or `None` if the default print function should be used.
     ///     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+    ///     Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    ///     or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    ///     Values replace the entire variable or function call verbatim. Missing modes use default printing.
+    ///     The dictionary is copied when the symbol is defined; duplicate modes are rejected.
     /// derivative: Callable[[Expression, int], Expression] | None:
     ///     A function that is called when computing the derivative of a function in a given argument.
     /// series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -3739,16 +3743,14 @@ impl PythonExpression {
             opts.push(SymbolAttribute::Positive);
         }
 
+        let print = print
+            .map(|definition| PythonPrintDefinition::from_py(definition.bind(py)))
+            .transpose()?;
+
         if names.len() == 1 {
             let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
             let name = namespace.attach_namespace(&name);
 
-            let print = print
-                .map(|function| {
-                    let key = python_callable_fingerprint(function.bind(py))?;
-                    Ok::<_, PyErr>((function, key))
-                })
-                .transpose()?;
             let derivative = derivative
                 .map(|function| {
                     let key = python_callable_fingerprint(function.bind(py))?;
@@ -3781,27 +3783,8 @@ impl PythonExpression {
                 };
             }
 
-            if let Some((f, key)) = print {
-                symbol = symbol.with_keyed_print_function(
-                    move |input: AtomView<'_>, opts: &PrintOptions, state: &PrintState| {
-                        match Python::attach(|py| {
-                            let kwargs = print_options_to_dict(opts, state, py)?;
-                            f.call(
-                                py,
-                                (PythonExpression::from(input.to_owned()),),
-                                Some(&kwargs),
-                            )?
-                            .extract::<Option<String>>(py)
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python custom print callback failed: {err}");
-                                None
-                            }
-                        }
-                    },
-                    key,
-                )
+            if let Some(print) = &print {
+                symbol = print.apply_to(py, symbol);
             }
 
             if let Some((f, key)) = derivative {
@@ -3888,6 +3871,10 @@ impl PythonExpression {
                 let name = a.extract::<PyBackedStr>()?;
                 let name = namespace.attach_namespace(&name);
                 let mut symbol = SymbolBuilder::new(name).with_attributes(opts.clone());
+
+                if let Some(print) = &print {
+                    symbol = print.apply_to(py, symbol);
+                }
 
                 if let Some(f) = &normalization {
                     let key = f.fingerprint(py)?;
@@ -9224,7 +9211,7 @@ PyMethodsInfo {
                     name: "print",
                     kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
@@ -9289,8 +9276,8 @@ Define a custom normalization function:
 >>> E("real_log(exp(x)) + real_log(5)")
 
 Define a custom print function:
->>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
->>>     if latex:
+>>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+>>>     if mode == PrintMode.Latex:
 >>>         if mu.get_type() == AtomType.Fn:
 >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
 >>>         else:
@@ -9357,10 +9344,13 @@ normalization : Transformer | Callable[[Expression], Expression] | None
     receives the normalized function and returns its replacement. The symbol name
     cannot be used in a transformer, as this would define the symbol recursively;
     use a wildcard with the same attributes instead.
-print : Callable[..., str | None] | None:
+print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+    Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    Values replace the entire variable or function call verbatim. Missing modes use default printing.
 derivative: Callable[[Expression, int], Expression] | None:
     A function that is called when computing the derivative of a function in a given argument.
 series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -9490,7 +9480,7 @@ data: str | int | Expression | bytes | list | dict | None = None
                     name: "print",
                     kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",

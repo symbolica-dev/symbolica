@@ -25,6 +25,15 @@ pub enum PythonAtomType {
     Pow,
 }
 
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonAtomType {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(
     from_py_object,
@@ -54,6 +63,15 @@ pub enum PythonSymbolAttribute {
     Positive,
     /// The function is flat (associative).
     Flat,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonSymbolAttribute {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
 }
 
 impl From<SymbolAttribute> for PythonSymbolAttribute {
