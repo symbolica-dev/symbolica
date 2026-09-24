@@ -614,7 +614,7 @@ impl bincode::Encode for Atom {
         let d = self.as_view().get_data();
         let writer = encoder.writer();
         writer.write(&[ATOM_EXPORT_FORMAT])?;
-        writer.write(&d.len().to_le_bytes())?;
+        writer.write(&(d.len() as u64).to_le_bytes())?;
         writer.write(d)
     }
 }
@@ -639,10 +639,11 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
                 .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
             source.read(&mut size_buf)?;
 
-            let n_size = usize::from_le_bytes(size_buf);
+            let n_size = u64::from_le_bytes(size_buf);
+            let n_size = usize::try_from(n_size)
+                .map_err(|_| bincode::error::DecodeError::OutsideUsizeRange(n_size))?;
 
-            dest.extend(size_buf);
-            dest.resize(n_size as usize, 0);
+            dest.resize(n_size, 0);
             source.read(&mut dest)?;
 
             unsafe {
@@ -672,8 +673,14 @@ impl Atom {
 
         let mut dest = std::mem::replace(self, Atom::Zero).into_raw();
         let n_size = source.read_u64::<LittleEndian>()?;
+        let n_size = usize::try_from(n_size).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Atom byte length does not fit in usize",
+            )
+        })?;
 
-        dest.resize(n_size as usize, 0);
+        dest.resize(n_size, 0);
         source.read_exact(&mut dest)?;
 
         unsafe {
@@ -2795,6 +2802,11 @@ mod tests {
             let mut bytes = Vec::new();
             atom.as_view().write(&mut bytes).unwrap();
             assert_eq!(bytes[0], ATOM_EXPORT_FORMAT);
+            assert_eq!(
+                &bytes[1..9],
+                &(atom.as_view().get_data().len() as u64).to_le_bytes()
+            );
+            assert_eq!(&bytes[9..], atom.as_view().get_data());
             let mut decoded = Atom::new();
             decoded.read(&mut &bytes[..]).unwrap();
             assert_eq!(decoded, atom);
@@ -2803,6 +2815,7 @@ mod tests {
             {
                 let config = bincode::config::standard();
                 let encoded = bincode::encode_to_vec(&atom, config).unwrap();
+                assert_eq!(encoded, bytes);
                 let (decoded, read): (Atom, usize) =
                     bincode::decode_from_slice_with_context(&encoded, config, StateMap::default())
                         .unwrap();
