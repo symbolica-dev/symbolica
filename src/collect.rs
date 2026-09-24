@@ -172,6 +172,10 @@ impl<'a> AtomView<'a> {
             let mut key = Atom::num(1);
 
             for (p, v) in t.exponents.iter().zip(xs) {
+                if p.is_zero() {
+                    continue;
+                }
+
                 let mut pow = Atom::new();
                 pow.to_pow(v.as_atom_view(), Atom::num(p.to_i32() as i64).as_view());
                 key *= pow;
