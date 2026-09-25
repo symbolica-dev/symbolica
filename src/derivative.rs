@@ -524,16 +524,14 @@ impl AtomView<'_> {
 
                         let mut d = a.clone();
                         for i in 1..=depth {
-                            d = d.as_view().derivative(x);
+                            // Collect repeated calls before differentiating again, to prevent exponential growth.
+                            d = d.as_view().derivative(x).collect_symbol::<i32>(symbol);
 
                             if d.is_zero() {
                                 break;
                             }
 
-                            let rep = d
-                                .replace(x.clone())
-                                .with(expansion_point.to_owned())
-                                .expand();
+                            let rep = d.replace(x.clone()).with(expansion_point.to_owned());
 
                             result = &result
                                 + &info
