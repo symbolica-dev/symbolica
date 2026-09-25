@@ -2115,6 +2115,60 @@ class RootLocation(Enum):
     Imaginary = ...
     Zero = ...
 
+class Citation:
+    """A scientific reference with explanations of its relevance to a computation.
+
+    Fields are read-only. Reasons and description may contain Markdown.
+    """
+
+    def __new__(
+        cls,
+        id: str,
+        reference: str,
+        bibtex: str,
+        *,
+        reasons: Sequence[str] = (),
+        description: str = "",
+        relevance: int | None = None,
+    ) -> Citation:
+        """Create a citation. Relevance is a nonnegative library-defined score."""
+
+    @property
+    def id(self) -> str:
+        """The stable identity of the citation, preferably a DOI or arXiv ID."""
+    @property
+    def reference(self) -> str:
+        """The human-readable bibliographic reference."""
+    @property
+    def bibtex(self) -> str:
+        """The ready-to-export BibTeX entry."""
+    @property
+    def reasons(self) -> list[str]:
+        """The reasons for including this citation, optionally formatted as Markdown."""
+    @property
+    def description(self) -> str:
+        """A description of the citation, optionally formatted as Markdown."""
+    @property
+    def relevance(self) -> int | None:
+        """The relevance score, or None if unknown."""
+
+    def __str__(self) -> str:
+        """Display the reference, identifier, description, reasons and known relevance."""
+
+    def __repr__(self) -> str:
+        """Return a compact representation suitable for lists of citations."""
+
+    def to_markdown(self, include_bibtex: bool = False) -> str:
+        """Return a Markdown report, optionally including a fenced BibTeX entry."""
+
+    def to_bibtex(self) -> str:
+        """Return the original BibTeX entry unchanged, ready to write to a .bib file."""
+
+    def _repr_markdown_(self) -> str: ...
+    def _repr_html_(self) -> str:
+        """Display an HTML report, with description and reasons as escaped text."""
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None: ...
+
 class FormattedOutput:
     """A formatted string with rich notebook display representations."""
 
