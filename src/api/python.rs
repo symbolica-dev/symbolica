@@ -149,6 +149,7 @@ static LATEX_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
     });
 
 mod atom;
+mod citation;
 mod condition;
 mod evaluator;
 mod expression;
@@ -163,6 +164,7 @@ mod series;
 mod symbolic_integration;
 
 pub use atom::*;
+pub use citation::Citation;
 pub use evaluator::*;
 pub use expression::*;
 pub use graph::*;
@@ -215,6 +217,12 @@ pub trait SymbolicaCommunityModule {
     /// Initialize the community module. Called when the submodule is imported.
     fn initialize(_py: Python) -> PyResult<()> {
         Ok(())
+    }
+
+    /// Get the citations to scientific literature used by this community
+    /// package.
+    fn get_citations() -> Vec<Citation> {
+        vec![]
     }
 }
 
@@ -432,6 +440,7 @@ pub fn create_symbolica_module<'a, 'b>(
     let _license_guard = bypass_license_check_internal();
 
     register_python_floats(m)?;
+    m.add_class::<Citation>()?;
     m.add_class::<PythonFormattedOutput>()?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
