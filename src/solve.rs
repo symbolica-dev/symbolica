@@ -687,7 +687,7 @@ impl AtomView<'_> {
 
         let base = Self::substitute_algebraic_solution(auxiliary.base.as_view(), solution);
         let expected = base.pow(auxiliary.exponent.clone());
-        let difference = (candidate.clone() - expected.clone()).expand();
+        let difference = candidate.clone() - expected.clone();
         if let Some(is_zero) = Self::algebraically_zero(&difference) {
             return Ok(is_zero);
         }

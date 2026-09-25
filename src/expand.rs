@@ -439,7 +439,7 @@ impl AtomView<'_> {
 
     pub(crate) fn expand_num_into(&self, out: &mut Atom) {
         Workspace::get_local().with(|ws| {
-            self.expand_with_ws_into(ws, None, out);
+            self.expand_num_impl(ws, out);
         })
     }
 
