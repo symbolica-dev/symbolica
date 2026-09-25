@@ -2625,15 +2625,23 @@ mod test {
         const NAMESPACE: &str = "symbolica::printer_test_atoms";
         let a = parse!("f(x,y^2)^(x+z)/5+3", default_namespace = NAMESPACE);
 
-        if AnsiWrap::<&str>::should_colorize() {
+        // These symbols are in a private namespace, so only operators and brackets are colored.
+        for (color_mode, expected) in [
+            (
+                ColorMode::Always,
+                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*f\u{1b}[0;38;5;25m(\u{1b}[0mx,y^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0mx+z\u{1b}[0;38;5;244m)\u{1b}[0m",
+            ),
+            (ColorMode::Never, "3+1/5*f(x,y^2)^(x+z)"),
+        ] {
             assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*\u{1b}[0;38;5;5mf\u{1b}[0m\u{1b}[0;38;5;25m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m,\u{1b}[0;38;5;5my\u{1b}[0m^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m+\u{1b}[0;38;5;5mz\u{1b}[0m\u{1b}[0;38;5;244m)\u{1b}[0m"
-            );
-        } else {
-            assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3+1/5*f(x,y^2)^(x+z)"
+                format!(
+                    "{}",
+                    a.printer(PrintOptions {
+                        color_mode,
+                        ..PrintOptions::short()
+                    })
+                ),
+                expected
             );
         }
 
