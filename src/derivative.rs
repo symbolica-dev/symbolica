@@ -530,10 +530,7 @@ impl AtomView<'_> {
                                 break;
                             }
 
-                            let rep = d
-                                .replace(x.clone())
-                                .with(expansion_point.to_owned())
-                                .expand();
+                            let rep = d.replace(x.clone()).with(expansion_point.to_owned());
 
                             result = &result
                                 + &info
