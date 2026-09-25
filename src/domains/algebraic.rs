@@ -3600,9 +3600,9 @@ impl Root<Q> {
             let c = c / a;
             let discriminant = Atom::num(&b * &b - c * Rational::from(4));
             return if self.index == 0 {
-                ((-b - discriminant.sqrt()) / Rational::from(2)).expand()
+                ((-b - discriminant.sqrt()) / Rational::from(2)).expand_num()
             } else {
-                ((-b + discriminant.sqrt()) / Rational::from(2)).expand()
+                ((-b + discriminant.sqrt()) / Rational::from(2)).expand_num()
             };
         }
 
@@ -3738,7 +3738,7 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
                 } else {
                     -linear_expression + discriminant
                 };
-                return Some((numerator / Atom::num(2)).expand());
+                return Some((numerator / Atom::num(2)).expand_num());
             }
         }
 
