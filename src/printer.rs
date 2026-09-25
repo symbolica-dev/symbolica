@@ -1126,6 +1126,8 @@ impl FormattedPrintNum for NumView<'_> {
             "\u{1b}\u{5b}\u{33}\u{35}\u{6d}\u{1d456}\u{1b}\u{5b}\u{30}\u{6d}"
         } else if opts.mode.is_mathematica() {
             "I"
+        } else if opts.mode.is_latex() {
+            "i"
         } else {
             "𝑖"
         };
@@ -1254,11 +1256,11 @@ impl FormattedPrintNum for NumView<'_> {
                     }
 
                     if !imag.is_integer() && opts.mode.is_latex() {
-                        f.write_fmt(format_args!(
-                            "\\frac{{{}}}{{{}}}𝑖",
-                            imag.numerator_ref().abs(),
-                            imag.denominator_ref(),
-                        ))?;
+                        f.write_str("\\frac{")?;
+                        if !suppress_imaginary_one {
+                            f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
+                        }
+                        f.write_fmt(format_args!("{i_str}}}{{{}}}", imag.denominator_ref()))?;
                     } else {
                         if !suppress_imaginary_one {
                             f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
@@ -2507,7 +2509,7 @@ mod test {
 
         assert_eq!(
             parse!("-1i").format_string(&PrintOptions::latex(), PrintState::new()),
-            "-𝑖"
+            "-i"
         );
         assert_eq!(
             parse!("-1i").format_string(&PrintOptions::mathematica(), PrintState::new()),
