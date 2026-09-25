@@ -2380,7 +2380,7 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             .iter()
             .enumerate()
             .map(|(index, v)| {
-                if self.degree(index) == E::zero() {
+                if !self.contains(index) {
                     return None;
                 }
 
@@ -2394,16 +2394,28 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             .collect();
 
         let mut sorted_vars = (0..vars.len()).collect::<Vec<_>>();
-        sorted_vars.sort_by_key(|&i| vars[i].clone());
+
+        sorted_vars.sort_by(|&i, &j| match (&vars[i], &vars[j]) {
+            (Some(a), Some(b)) => a.as_view().cmp_factors(&b.as_view()),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        });
 
         for monomial in self {
             let mul = mul_h.to_mul();
 
+            if !self.ring().is_one(monomial.coefficient) {
+                monomial
+                    .coefficient
+                    .coefficient_to_expression(&self.ring(), &mut num_h);
+                mul.extend(num_h.as_view());
+            }
+
             for i in &sorted_vars {
-                let var = &vars[*i];
                 let pow = monomial.exponents[*i];
                 if pow != E::zero() {
-                    let var = var
+                    let var = vars[*i]
                         .as_ref()
                         .expect("an active polynomial variable must have an expression");
                     if pow != E::one() {
@@ -2416,10 +2428,6 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
                 }
             }
 
-            monomial
-                .coefficient
-                .coefficient_to_expression(&self.ring(), &mut num_h);
-            mul.extend(num_h.as_view());
             add.extend(mul_h.as_view());
         }
 
