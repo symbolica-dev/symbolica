@@ -1423,68 +1423,6 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Get the lowest positive power of `x` in all the terms in which `x` appears.
-    /// Returns 0 if `x` does not appear in the expression.
-    fn get_lowest_power(&self, x: AtomView) -> Integer {
-        if *self == x {
-            return 1.into();
-        }
-
-        match self {
-            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => 0.into(),
-            AtomView::Add(a) => {
-                let mut lowest_power = 0.into();
-                for arg in a {
-                    let p = arg.get_lowest_power(x);
-                    if p > 0 && (lowest_power == 0 || p < lowest_power) {
-                        lowest_power = p;
-
-                        if lowest_power == 1 {
-                            return lowest_power;
-                        }
-                    }
-                }
-
-                lowest_power
-            }
-            AtomView::Mul(m) => {
-                for arg in m {
-                    if arg == x {
-                        return 1.into();
-                    }
-
-                    if let AtomView::Pow(p) = arg
-                        && let (b, e) = p.get_base_exp()
-                        && b == x
-                        && let AtomView::Num(n) = e
-                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                        && ni == 0
-                        && d == 1
-                        && n > 0
-                    {
-                        return n.into();
-                    }
-                }
-
-                0.into()
-            }
-            AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
-                if b == x
-                    && let AtomView::Num(n) = e
-                    && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                    && ni == 0
-                    && d == 1
-                    && n > 0
-                {
-                    n.into()
-                } else {
-                    0.into()
-                }
-            }
-        }
-    }
-
     /// Construct a Horner scheme for the given variables. If no variables are provided,
     /// a heuristically determined near-optimal ordering is used.
     pub(crate) fn horner_scheme<'b>(
@@ -1522,8 +1460,14 @@ impl<'a> AtomView<'a> {
         xs: &[Indeterminate],
         enter_functions: bool,
     ) -> Atom {
+        // map every indeterminate to its position in the ordering, the first position wins
+        let mut index = HashMap::default();
+        for (i, x) in xs.iter().enumerate() {
+            index.entry(x.as_view()).or_insert(i);
+        }
+
         Workspace::get_local().with(|ws| {
-            let r = self.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+            let r = self.horner_scheme_impl_no_norm(ws, xs, &index, 0, enter_functions);
 
             let mut out = Atom::new();
             r.as_view().normalize(ws, &mut out);
@@ -1531,13 +1475,87 @@ impl<'a> AtomView<'a> {
         })
     }
 
-    pub(crate) fn horner_scheme_impl_no_norm(
+    /// If `atom` is the indeterminate `x` or `x^n` with a positive integer `n`, return `n`.
+    fn horner_power_of(atom: AtomView, x: AtomView) -> Option<i64> {
+        if atom == x {
+            return Some(1);
+        }
+
+        if let AtomView::Pow(p) = atom
+            && let (b, e) = p.get_base_exp()
+            && b == x
+            && let AtomView::Num(n) = e
+            && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
+            && n > 0
+        {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// If `atom` is an indeterminate `x` at position `start` or later in the ordering, or
+    /// `x^n` with a positive integer `n`, return the position of `x` and the power `n`.
+    fn horner_indeterminate<'b>(
+        atom: AtomView<'b>,
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
+    ) -> Option<(usize, i64)> {
+        match atom {
+            AtomView::Var(_) | AtomView::Fun(_) => {
+                index.get(&atom).filter(|&&i| i >= start).map(|&i| (i, 1))
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                if matches!(b, AtomView::Var(_) | AtomView::Fun(_))
+                    && let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
+                    && n > 0
+                    && let Some(&i) = index.get(&b)
+                    && i >= start
+                {
+                    Some((i, n))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Find the first indeterminate in the ordering, at position `start` or later, that `term`
+    /// contains as a factor with a positive integer power. Return its position and power.
+    fn horner_first_indeterminate<'b>(
+        term: AtomView<'b>,
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
+    ) -> Option<(usize, i64)> {
+        if let AtomView::Mul(m) = term {
+            let mut first: Option<(usize, i64)> = None;
+            for arg in m {
+                if let Some((i, p)) = Self::horner_indeterminate(arg, index, start)
+                    && first.is_none_or(|(j, _)| i < j)
+                {
+                    first = Some((i, p));
+                }
+            }
+            first
+        } else {
+            Self::horner_indeterminate(term, index, start)
+        }
+    }
+
+    /// Apply the Horner scheme for the indeterminates `xs[start..]`, where `index` maps every
+    /// indeterminate to its position in `xs`. The result is not normalized.
+    fn horner_scheme_impl_no_norm<'b>(
         &self,
         ws: &Workspace,
-        mut xs: &[Indeterminate],
+        xs: &'b [Indeterminate],
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
         enter_functions: bool,
     ) -> AtomOrView<'a> {
-        if xs.is_empty() {
+        if start >= xs.len() {
             return self.into();
         }
 
@@ -1549,7 +1567,8 @@ impl<'a> AtomView<'a> {
                     let fun = tmp.to_fun(f.get_symbol());
 
                     for arg in f {
-                        let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                        let r =
+                            arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
                         fun.add_arg(r.as_view());
                     }
 
@@ -1561,8 +1580,8 @@ impl<'a> AtomView<'a> {
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
-                let bb = b.horner_scheme_impl_no_norm(ws, xs, enter_functions);
-                let ee = e.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                let bb = b.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
+                let ee = e.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
 
                 if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
                     let mut pow = Atom::new();
@@ -1578,7 +1597,7 @@ impl<'a> AtomView<'a> {
 
                 let mut changed = false;
                 for arg in m {
-                    let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
                     changed |= matches!(r, AtomOrView::Atom(_));
                     mul.extend(r.as_view());
                 }
@@ -1590,118 +1609,108 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Add(a) => {
-                let mut min_power = self.get_lowest_power(xs[0].as_view());
-                while min_power == 0 {
-                    xs = &xs[1..];
-
-                    if xs.is_empty() {
-                        return self.into();
+                // Partition the terms by the first indeterminate in the ordering that they
+                // contain. Terms without any indeterminate are kept as they are. This is
+                // done in a single pass so that the cost does not grow with the number of
+                // indeterminates and no copies of the remaining terms are made.
+                let mut rest = Vec::new();
+                let mut grouped = Vec::new();
+                for term in a {
+                    match Self::horner_first_indeterminate(term, index, start) {
+                        Some((i, p)) => grouped.push((i, p, term)),
+                        None => rest.push(term),
                     }
-
-                    min_power = self.get_lowest_power(xs[0].as_view());
                 }
 
-                let x = xs[0].as_view();
+                if grouped.is_empty() {
+                    return self.into();
+                }
 
-                let mut coeff = ws.new_atom();
-                let coeff_sum = coeff.to_add();
+                let mut res = ws.new_atom();
+                let res_sum = res.to_add();
+                for term in rest {
+                    res_sum.extend(term);
+                }
 
-                let mut rest = ws.new_atom();
-                let rest_sum = rest.to_add();
+                // the stable sort keeps the order of the terms within every group
+                grouped.sort_by_key(|(i, _, _)| *i);
 
+                // divide every group by the lowest power of its indeterminate
+                let mut coeffs = Vec::new();
                 let mut new_arg = ws.new_atom();
-                for sum_arg in a {
-                    if sum_arg == x {
-                        coeff_sum.extend(ws.new_num(1).as_view());
-                        continue;
-                    } else if let AtomView::Pow(p) = sum_arg
-                        && let (b, e) = p.get_base_exp()
-                        && b == x
-                        && let AtomView::Num(n) = e
-                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                        && ni == 0
-                        && d == 1
-                        && n > 0
-                    {
-                        if n == min_power {
+                let mut pow = ws.new_atom();
+                for group in grouped.chunk_by(|a, b| a.0 == b.0) {
+                    let i = group[0].0;
+                    let x = xs[i].as_view();
+                    let min_power = group.iter().map(|(_, p, _)| *p).min().unwrap();
+
+                    let mut coeff = ws.new_atom();
+                    let coeff_sum = coeff.to_add();
+                    for &(_, p, term) in group {
+                        if let AtomView::Mul(m) = term {
+                            let new_mul = new_arg.to_mul();
+                            for m_arg in m {
+                                if let Some(n) = Self::horner_power_of(m_arg, x) {
+                                    if n > min_power {
+                                        let exp = ws.new_num(n - min_power);
+                                        pow.to_pow(x, exp.as_view());
+                                        new_mul.extend(pow.as_view());
+                                    }
+                                } else {
+                                    new_mul.extend(m_arg);
+                                }
+                            }
+                            coeff_sum.extend(new_arg.as_view());
+                        } else if p == min_power {
                             coeff_sum.extend(ws.new_num(1).as_view());
                         } else {
-                            let exp = ws.new_num(n - &min_power);
+                            let exp = ws.new_num(p - min_power);
                             new_arg.to_pow(x, exp.as_view());
                             coeff_sum.extend(new_arg.as_view());
                         }
-                    } else if let AtomView::Mul(m) = sum_arg {
-                        let new_mul = new_arg.to_mul();
-
-                        let mut found = false;
-                        let mut pow = ws.new_atom();
-                        for m_arg in m {
-                            if m_arg == x {
-                                found = true;
-                            } else if let AtomView::Pow(p) = m_arg
-                                && let (b, e) = p.get_base_exp()
-                                && b == x
-                                && let AtomView::Num(n) = e
-                                && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                                && ni == 0
-                                && d == 1
-                                && n > 0
-                            {
-                                if n > min_power {
-                                    let exp = ws.new_num(n - &min_power);
-                                    pow.to_pow(x, exp.as_view());
-                                    new_mul.extend(pow.as_view());
-                                }
-                                found = true;
-                            } else {
-                                new_mul.extend(m_arg);
-                            }
-                        }
-
-                        if found {
-                            coeff_sum.extend(new_arg.as_view());
-                        } else {
-                            rest_sum.extend(sum_arg);
-                        }
-                    } else {
-                        rest_sum.extend(sum_arg);
                     }
+
+                    coeffs.push((i, min_power, coeff));
                 }
 
-                let mut res = rest
-                    .as_view()
-                    .horner_scheme_impl_no_norm(ws, &xs[1..], enter_functions)
-                    .into_owned();
-                if min_power > 0 {
-                    let new_key = (if coeff_sum.get_nargs() == 1 {
-                        coeff_sum.to_add_view().iter().next().unwrap()
+                // free the bookkeeping before recursing, as the recursion may be deep
+                drop(grouped);
+
+                for (i, min_power, coeff) in coeffs {
+                    let x = xs[i].as_view();
+
+                    // higher powers of x may remain in the coefficient, so start from x again
+                    let new_key = (if let AtomView::Add(c) = coeff.as_view()
+                        && c.get_nargs() == 1
+                    {
+                        c.iter().next().unwrap()
                     } else {
                         coeff.as_view()
                     })
-                    .horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                    .horner_scheme_impl_no_norm(
+                        ws,
+                        xs,
+                        index,
+                        i,
+                        enter_functions,
+                    );
+
                     let v = if min_power == 1 {
                         new_key.as_view().mul_no_norm(ws, x)
                     } else {
-                        new_key
-                            .as_view()
-                            .mul_no_norm(ws, x.pow(min_power).as_view())
+                        let exp = ws.new_num(min_power);
+                        let xp = x.pow_no_norm(ws, exp.as_view());
+                        new_key.as_view().mul_no_norm(ws, xp.as_view())
                     };
-
-                    if let Atom::Add(a) = &mut res {
-                        a.extend(v.as_view());
-                    } else {
-                        res = res.as_view().add_no_norm(ws, v.as_view()).into_inner();
-                    }
+                    res_sum.extend(v.as_view());
                 }
 
-                if let AtomView::Add(a) = res.as_view()
-                    && a.get_nargs() == 1
-                {
-                    new_arg.set_from_view(&a.iter().next().unwrap());
-                    std::mem::swap(&mut res, &mut new_arg);
+                if res_sum.get_nargs() == 1 {
+                    new_arg.set_from_view(&res_sum.to_add_view().iter().next().unwrap());
+                    return new_arg.into_inner().into();
                 }
 
-                res.into()
+                res.into_inner().into()
             }
         }
     }
