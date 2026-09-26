@@ -921,6 +921,13 @@ macro_rules! create_hyperdual_from_components {
             }
 
             #[inline(always)]
+            fn set_precision(&mut self, precision: u32) {
+                for value in &mut self.values {
+                    value.set_precision(precision);
+                }
+            }
+
+            #[inline(always)]
             fn get_epsilon(&self) -> f64 {
                 self.values[0].get_epsilon()
             }
@@ -2002,6 +2009,13 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
     #[inline(always)]
     fn get_precision(&self) -> u32 {
         self.values[0].get_precision()
+    }
+
+    #[inline(always)]
+    fn set_precision(&mut self, precision: u32) {
+        for value in &mut self.values {
+            value.set_precision(precision);
+        }
     }
 
     #[inline(always)]

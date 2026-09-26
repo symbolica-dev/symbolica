@@ -87,6 +87,9 @@ impl FloatLike for f64 {
     }
 
     #[inline(always)]
+    fn set_precision(&mut self, _precision: u32) {}
+
+    #[inline(always)]
     fn get_epsilon(&self) -> f64 {
         f64::EPSILON / 2.
     }
@@ -409,6 +412,11 @@ impl FloatLike for F64 {
     #[inline(always)]
     fn get_precision(&self) -> u32 {
         self.0.get_precision()
+    }
+
+    #[inline(always)]
+    fn set_precision(&mut self, precision: u32) {
+        self.0.set_precision(precision);
     }
 
     #[inline(always)]

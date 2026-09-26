@@ -804,6 +804,12 @@ impl<T: FloatLike> FloatLike for Complex<T> {
     }
 
     #[inline]
+    fn set_precision(&mut self, precision: u32) {
+        self.re.set_precision(precision);
+        self.im.set_precision(precision);
+    }
+
+    #[inline]
     fn mul_add(&self, a: &Self, b: &Self) -> Self {
         self.clone() * a + b
     }

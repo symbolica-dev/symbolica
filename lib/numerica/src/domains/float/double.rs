@@ -233,6 +233,9 @@ impl FloatLike for DoubleFloat {
     }
 
     #[inline(always)]
+    fn set_precision(&mut self, _precision: u32) {}
+
+    #[inline(always)]
     fn get_epsilon(&self) -> f64 {
         f64::EPSILON * f64::EPSILON / 2.0
     }

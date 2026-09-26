@@ -110,6 +110,11 @@ pub trait FloatLike:
 
     /// Get the number of precise binary digits.
     fn get_precision(&self) -> u32;
+    /// Set the working precision to `precision` binary digits. Types that loosely track
+    /// their precision discard the tracked loss, whereas certified enclosures stay valid.
+    /// The value is rounded when the precision is lowered. Types with a fixed precision
+    /// ignore this call.
+    fn set_precision(&mut self, precision: u32);
     fn get_epsilon(&self) -> f64;
     /// Return true iff the precision is fixed, or false
     /// if the precision is changed dynamically.

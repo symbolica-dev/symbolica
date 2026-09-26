@@ -957,6 +957,11 @@ impl FloatLike for Float {
     }
 
     #[inline(always)]
+    fn set_precision(&mut self, precision: u32) {
+        self.set_prec(precision);
+    }
+
+    #[inline(always)]
     fn get_epsilon(&self) -> f64 {
         2.0f64.powi(-(self.prec() as i32))
     }
