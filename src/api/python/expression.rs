@@ -8387,7 +8387,7 @@ impl PythonExpression {
     /// init: Float | int | float | str | Decimal
     ///     The initial guess for Newton's method.
     /// prec: float
-    ///     The numerical tolerance for the Newton iteration.
+    ///     The absolute tolerance on the Newton step, independent of the scale of the expression.
     /// max_iterations: int
     ///     The maximum number of Newton iterations.
     #[gen_stub(override_return_type(type_repr = "Float"))]
@@ -8452,7 +8452,7 @@ impl PythonExpression {
     /// init: Sequence[Float | int | float | str | Decimal]
     ///     The initial guess for Newton's method.
     /// prec: float
-    ///     The numerical tolerance for the Newton iteration.
+    ///     The absolute tolerance on each component of the Newton step, independent of the scale of the equations.
     /// max_iterations: int
     ///     The maximum number of Newton iterations.
     #[pyo3(signature =

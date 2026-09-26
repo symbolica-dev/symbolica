@@ -745,6 +745,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
+    /// The iteration stops once the Newton step is smaller than `prec` in absolute value,
+    /// independent of the overall scale of the function. This does not certify the root.
     ///
     /// # Example
     ///
@@ -770,6 +772,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
+    /// The iteration stops once every component of the Newton step is smaller than `prec`
+    /// in absolute value, independent of the scale of each equation. This does not certify the root.
     ///
     /// # Example
     ///

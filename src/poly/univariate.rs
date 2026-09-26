@@ -1636,6 +1636,12 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     ///
+    /// The tolerance bounds the Newton step of every root `z`, relative to `max(1, |z|)`
+    /// and independent of the scale of the coefficients. Every returned root is also an exact
+    /// root of a polynomial whose coefficients are relatively perturbed by at most the tolerance,
+    /// or by the roundoff level if that is larger. Neither condition certifies the error of a
+    /// root, and the tracked precision of a multi-precision root is not an error bound either.
+    ///
     /// For better performance, square-free factor the polynomial first.
     pub fn roots(
         &self,
@@ -1658,25 +1664,66 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
             }
         }
 
-        let upper = self.get_root_upper_bound();
-        let lower = self.get_root_lower_bound();
-        let radius_span = upper.clone() - &lower;
-        let golden_angle = upper.pi() * (upper.from_usize(3) - upper.from_usize(5).sqrt());
-        let degree = self.degree();
+        self.roots_hot_start(max_iterations, tolerance, self.aberth_initial_guesses())
+    }
 
-        let n: Vec<_> = (0..degree)
-            .map(|i| {
-                let radius_fraction = upper.from_usize(i + 1) / upper.from_usize(degree + 1);
-                let r = lower.clone() + radius_span.clone() * &radius_fraction;
-                let phi = golden_angle.clone() * upper.from_usize(i + 1);
-                Complex::from_polar_coordinates(r, phi)
-            })
-            .collect();
+    /// Initial approximations for Aberth's method from the Newton polygon of the coefficient
+    /// magnitudes (Bini, 1996, section 5, https://doi.org/10.1007/BF02207694).
+    ///
+    /// Every edge of the upper convex hull of the points `(k, log|a_k|)`, going from exponent
+    /// `k1` to `k2`, accounts for `k2 - k1` roots of modulus close to `|a_k1 / a_k2|^(1/(k2 - k1))`.
+    /// That many approximations are spread over the corresponding circle, with a rotation per
+    /// circle that keeps them off the real axis and away from the points on other circles.
+    /// The constant coefficient must be nonzero.
+    fn aberth_initial_guesses(&self) -> Vec<Complex<R>> {
+        let representative = self.ring.one().re;
+        let points = self
+            .coefficients
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_zero())
+            .map(|(k, c)| (k, c.norm().re.log()))
+            .collect::<Vec<_>>();
 
-        self.roots_hot_start(max_iterations, tolerance, n)
+        // Monotone chain over increasing exponents: drop the middle point whenever the
+        // three last points do not make a clockwise turn.
+        let mut hull: Vec<&(usize, R)> = Vec::with_capacity(points.len());
+        for point in &points {
+            while let [.., a, b] = hull[..] {
+                let cross = representative.from_usize(b.0 - a.0) * (point.1.clone() - &a.1)
+                    - (b.1.clone() - &a.1) * representative.from_usize(point.0 - a.0);
+                if cross >= representative.zero() {
+                    hull.pop();
+                } else {
+                    break;
+                }
+            }
+            hull.push(point);
+        }
+
+        let golden_angle = representative.pi()
+            * (representative.from_usize(3) - representative.from_usize(5).sqrt());
+        let two_pi = representative.pi() * representative.from_usize(2);
+
+        let mut guesses = Vec::with_capacity(self.degree());
+        for (circle, edge) in hull.windows(2).enumerate() {
+            let (k1, log1) = (edge[0].0, &edge[0].1);
+            let (k2, log2) = (edge[1].0, &edge[1].1);
+            let count = k2 - k1;
+            let radius = ((log1.clone() - log2) / representative.from_usize(count)).exp();
+            let rotation = golden_angle.clone() * representative.from_usize(circle + 1);
+            for j in 0..count {
+                let phi = two_pi.clone() * representative.from_usize(j)
+                    / representative.from_usize(count)
+                    + &rotation;
+                guesses.push(Complex::from_polar_coordinates(radius.clone(), phi));
+            }
+        }
+        guesses
     }
 
     /// Compute all complex roots of the polynomial using Aberth's method with an initial guess for each root.
+    /// See [`Self::roots`] for the meaning of the tolerance.
     pub fn roots_hot_start(
         &self,
         max_iterations: usize,
@@ -1712,8 +1759,29 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
             Err(roots)
         };
 
-        let t_sq = tolerance.clone() * tolerance;
+        // Allowance for roundoff in the complex Horner evaluation of p(z)
+        // (Bini, 1996, section 4, https://doi.org/10.1007/BF02207694).
+        // It only relaxes the backward error test, not the correction tolerance.
+        let representative = self.ring.one().re;
+        let working_precision = representative.get_precision();
+        let roundoff = representative
+            .from_usize(2)
+            .inv()
+            .pow(working_precision as u64)
+            * representative.from_usize(8 * self.coefficients.len());
+        let backward_tolerance = if *tolerance > roundoff {
+            tolerance.clone()
+        } else {
+            roundoff
+        };
+        let coefficient_magnitudes = self
+            .coefficients
+            .iter()
+            .map(|c| c.norm().re)
+            .collect::<Vec<_>>();
+
         for _ in 0..max_iterations {
+            let mut converged = true;
             for i in 0..n.len() {
                 let p_at_i = self.evaluate(&n[i]);
                 let df_at_i = df.evaluate(&n[i]);
@@ -1725,6 +1793,18 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                 if !e.is_finite() {
                     return finite_error(&n);
                 }
+                // The Newton correction is independent of the coefficient scale.
+                // Check it as well as the Aberth step, which the repulsion between
+                // approximations can make artificially small. Both are measured
+                // relative to max(1, |z|), as an absolute bound is not attainable
+                // for roots much larger than one.
+                let magnitude = n[i].norm().re;
+                let step_tolerance = if magnitude > representative.one() {
+                    tolerance.clone() * &magnitude
+                } else {
+                    tolerance.clone()
+                };
+                converged &= e.norm().re < step_tolerance;
 
                 let mut rep = e.zero();
                 for j in 0..n.len() {
@@ -1755,14 +1835,25 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                 if !correction.is_finite() {
                     return finite_error(&n);
                 }
+                converged &= correction.norm().re < step_tolerance;
 
                 let updated = n[i].clone() - correction;
                 if !updated.is_finite() {
                     return finite_error(&n);
                 }
                 n[i] = updated;
+                // Only the value of an iterate matters, as the iteration corrects
+                // earlier roundoff. Discard the precision loss tracked by the update,
+                // which would otherwise accumulate over the iterations.
+                n[i].set_precision(working_precision);
             }
-            if n.iter().all(|x| self.evaluate(x).norm_squared() < t_sq) {
+
+            if converged
+                && n.iter().all(|z| {
+                    self.relative_backward_error(z, &coefficient_magnitudes)
+                        .is_some_and(|error| error <= backward_tolerance)
+                })
+            {
                 n.sort_unstable_by(|a, b| {
                     a.re.partial_cmp(&b.re)
                         .unwrap_or(Ordering::Equal)
@@ -1778,6 +1869,60 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                 .then(a.im.partial_cmp(&b.im).unwrap_or(Ordering::Equal))
         });
         Err(n)
+    }
+
+    /// The relative coefficient backward error `|p(z)| / sum_k |a_k| |z|^k` of an approximate
+    /// root `z`, which is the smallest relative perturbation of the coefficients that makes `z`
+    /// an exact root. Returns `None` when it cannot be evaluated in finite arithmetic.
+    fn relative_backward_error(&self, z: &Complex<R>, coefficient_magnitudes: &[R]) -> Option<R> {
+        let representative = self.ring.one().re;
+
+        // Prefer the original coefficients: normalizing them can underflow tiny
+        // coefficients in polynomials with a large dynamic range.
+        let residual = self.evaluate(z).norm().re;
+        let radius = z.norm().re;
+        let scale = coefficient_magnitudes
+            .iter()
+            .rev()
+            .fold(representative.zero(), |sum, c| sum * &radius + c);
+        if residual.is_finite() && scale.is_finite() && !scale.is_zero() {
+            return Some(residual / scale);
+        }
+
+        // On overflow, normalize the coefficients by their largest component and, for
+        // |z| > 1, evaluate the reversed polynomial `z^-degree p(z)` at `1/z` instead.
+        // Both Horner recurrences then only multiply by numbers of norm at most one.
+        let coefficient_scale = self
+            .coefficients
+            .iter()
+            .flat_map(|c| [c.re.norm(), c.im.norm()])
+            .fold(representative.zero(), |a, b| if a > b { a } else { b });
+        if !coefficient_scale.is_finite() || coefficient_scale.is_zero() {
+            return None;
+        }
+
+        let reverse = radius > representative.one();
+        let argument = if reverse { z.inv() } else { z.clone() };
+        let radius = argument.norm().re;
+        let mut value = argument.zero();
+        let mut scale = representative.zero();
+        for i in 0..self.coefficients.len() {
+            let index = if reverse {
+                i
+            } else {
+                self.coefficients.len() - 1 - i
+            };
+            let c = &self.coefficients[index];
+            let c = Complex::new(
+                c.re.clone() / &coefficient_scale,
+                c.im.clone() / &coefficient_scale,
+            );
+            scale = scale * &radius + c.norm().re;
+            value = value * &argument + c;
+        }
+
+        let residual = value.norm().re;
+        (residual.is_finite() && scale.is_finite() && !scale.is_zero()).then(|| residual / scale)
     }
 }
 

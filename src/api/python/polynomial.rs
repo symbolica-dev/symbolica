@@ -1566,7 +1566,8 @@ impl PythonPolynomial {
     /// max_iterations: int
     ///     The maximum number of iterations for the root finder.
     /// tolerance: float
-    ///     The convergence tolerance for the root finder.
+    ///     The tolerance on a root `z`, relative to `max(1, abs(z))` and independent
+    ///     of the scale of the coefficients.
     /// decimal_digit_precision: int | None
     ///     The decimal precision of the numerical type used for root finding.
     #[pyo3(signature = (max_iterations, tolerance, decimal_digit_precision = None))]
