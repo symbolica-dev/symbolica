@@ -117,7 +117,7 @@ optional = true
 version = "0.28"
 
 [dependencies]
-numerica = { version = "3.0", default-features = false }
+numerica = { version = "3.0.1", default-features = false }
 graphica = { version = "3.0", default-features = false }
 
 ahash = "0.8.7"

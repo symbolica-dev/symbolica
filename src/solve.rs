@@ -992,15 +992,31 @@ impl AtomView<'_> {
         let mut cur = init.clone();
 
         for _ in 0..max_iterations {
-            let df_val = df_e.evaluate_single(std::slice::from_ref(&cur));
             let f_val = f_e.evaluate_single(std::slice::from_ref(&cur));
+            if !f_val.is_finite() {
+                return Err(SolveError::NoConvergence);
+            }
+            if f_val.is_zero() {
+                return Ok(cur);
+            }
+            let df_val = df_e.evaluate_single(std::slice::from_ref(&cur));
 
             if !df_val.is_finite() || df_val.is_zero() {
                 return Err(SolveError::ZeroDerivative);
             }
 
-            cur -= f_val.clone() / df_val;
-            if f_val.norm() < prec {
+            // The Newton correction is invariant under rescaling the equation.
+            // A residual threshold instead demands extra precision for large
+            // coefficients and can accept inaccurate roots for small ones.
+            let correction = f_val / df_val;
+            if !correction.is_finite() {
+                return Err(SolveError::NoConvergence);
+            }
+            cur -= correction.clone();
+            if !cur.is_finite() {
+                return Err(SolveError::NoConvergence);
+            }
+            if correction.norm() < prec {
                 return Ok(cur);
             }
         }
@@ -1114,12 +1130,21 @@ impl AtomView<'_> {
                 .iter_mut()
                 .map(|a| a.evaluate_single(&cur))
                 .collect::<Vec<_>>();
+            if f.iter().any(|value| !value.is_finite()) {
+                return Err(SolveError::NoConvergence);
+            }
+            if f.iter().all(|value| value.is_zero()) {
+                return Ok(cur);
+            }
             let f = Matrix::new_vec(f, field.clone());
 
             let df = jacobian
                 .iter_mut()
                 .map(|a| a.evaluate_single(&cur))
                 .collect::<Vec<_>>();
+            if df.iter().any(|value| !value.is_finite()) {
+                return Err(SolveError::SingularJacobian);
+            }
 
             let df = Matrix::from_linear(df, system.len() as u32, vars.len() as u32, field.clone())
                 .unwrap();
@@ -1130,11 +1155,20 @@ impl AtomView<'_> {
 
             let mut ci = Matrix::new_vec(cur.to_vec(), field.clone());
 
-            ci -= &(&i * &f);
+            let correction = &i * &f;
+            if correction.iter().any(|value| !value.is_finite()) {
+                return Err(SolveError::NoConvergence);
+            }
+            ci -= &correction;
 
             cur = ci.into_vec();
+            if cur.iter().any(|value| !value.is_finite()) {
+                return Err(SolveError::NoConvergence);
+            }
 
-            if f.into_iter().all(|x| x.norm() < prec) {
+            // Measure convergence in the variables, independent of the scale
+            // of each equation in the system.
+            if correction.into_iter().all(|x| x.norm() < prec) {
                 return Ok(cur);
             }
         }
