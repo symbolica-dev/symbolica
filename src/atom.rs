@@ -3037,17 +3037,6 @@ impl AtomView<'_> {
         }
     }
 
-    /// Add two atoms and return the buffer that contains the unnormalized result.
-    pub(crate) fn add_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
-        let mut e = workspace.new_atom();
-        let a = e.to_add();
-
-        // TODO: check if self or rhs is add
-        a.extend(*self);
-        a.extend(rhs);
-        e
-    }
-
     /// Subtract two atoms and return the buffer that contains the unnormalized result.
     pub(crate) fn sub_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
         let mut e = workspace.new_atom();
