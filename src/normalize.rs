@@ -1593,79 +1593,111 @@ impl AtomView<'_> {
                 }
                 let out_add = out.to_add();
 
-                let mut last_buf = workspace.new_atom();
-                last_buf.set_from_view(&atom_sort_buf[0].0);
-
                 let mut helper = workspace.new_atom();
-                let mut cur_len = 0;
+                let mut helper2 = workspace.new_atom();
                 let mut second_pass = false;
 
-                for (cur, _) in atom_sort_buf.iter().skip(1) {
-                    if !last_buf.merge_terms(*cur, &mut helper) {
-                        // we are done merging
-                        let v = last_buf.as_view();
-                        if let AtomView::Num(n) = v {
-                            let coeff = n.get_coeff_view();
-                            if matches!(
-                                coeff,
+                for b in atom_sort_buf.chunk_by(|x, y| x.1 == y.1) {
+                    if b.len() == 1 {
+                        let first = b[0].0;
+                        if let AtomView::Num(n) = first
+                            && matches!(
+                                n.get_coeff_view(),
                                 CoefficientView::Indeterminate | CoefficientView::Infinity(_)
-                            ) {
-                                out.set_from_view(&v);
-                                return;
-                            }
-
-                            if !n.is_zero() {
-                                out_add.extend(v);
-                                cur_len += 1;
-                            }
-                        } else {
-                            out_add.extend(v);
-                            cur_len += 1;
+                            )
+                        {
+                            out.set_from_view(&first);
+                            return;
                         }
-
-                        // TODO: prevent this copy, as it occurs on every non-merge
-                        cur.clone_into(&mut last_buf);
-                    } else if let AtomView::Add(_) = last_buf.as_view() {
-                        // a sub-addition was created during the merge, e.g. (x+y)/2+(x+y)/2 = x+y
-                        // we need a second pass to normalize the addition
-                        second_pass = true;
+                        out_add.extend(first);
+                        continue;
                     }
-                }
 
-                if cur_len == 0 {
-                    out.set_from_view(&last_buf.as_view());
-                } else {
-                    if second_pass {
-                        out_add.extend(last_buf.as_view());
-                        out.as_view().normalize(workspace, &mut helper);
-                        out.set_from_view(&helper.as_view());
+                    let coefficient = |cur: AtomView<'_>| match cur {
+                        AtomView::Num(n) => n.get_coeff_view().to_owned(),
+                        AtomView::Mul(m) => {
+                            if let Some(AtomView::Num(n)) = m.get_coefficient() {
+                                n.get_coeff_view().to_owned()
+                            } else {
+                                Coefficient::one()
+                            }
+                        }
+                        _ => Coefficient::one(),
+                    };
+                    // Start in the coefficient's domain (an integer zero cannot
+                    // be added to a finite-field element).
+                    let mut coeff = coefficient(b[0].0);
+                    for (cur, _) in &b[1..] {
+                        coeff = coeff + coefficient(*cur);
+                    }
+
+                    let first = b[0].0;
+                    if coeff.is_zero() {
+                        continue;
+                    }
+
+                    if matches!(first, AtomView::Num(_)) {
+                        if matches!(coeff, Coefficient::Indeterminate | Coefficient::Infinity(_)) {
+                            out.to_num(coeff);
+                            return;
+                        }
+                        helper.to_num(coeff);
+                        out_add.extend(helper.as_view());
+                        continue;
+                    }
+                    if matches!(coeff, Coefficient::Indeterminate) {
+                        out.to_num(coeff);
                         return;
                     }
 
-                    let v = last_buf.as_view();
-                    if let AtomView::Num(n) = v {
-                        let coeff = n.get_coeff_view();
-                        if matches!(
-                            coeff,
-                            CoefficientView::Indeterminate | CoefficientView::Infinity(_)
-                        ) {
-                            out.set_from_view(&v);
-                            return;
+                    let has_coeff = !coeff.is_one();
+                    if !has_coeff {
+                        let single = match first {
+                            AtomView::Mul(m) => {
+                                let factors =
+                                    m.to_slice().fast_forward(usize::from(m.has_coefficient()));
+                                (factors.len() == 1).then(|| factors.get(0))
+                            }
+                            _ => Some(first),
+                        };
+                        if let Some(term) = single {
+                            // Removing the coefficient can expose a sum:
+                            // (x+y)/2 + (x+y)/2 = x+y. Flatten and re-sort it.
+                            second_pass |= matches!(term, AtomView::Add(_));
+                            out_add.extend(term);
+                            continue;
                         }
+                    }
 
-                        if !n.is_zero() {
-                            out_add.extend(v);
-                            out_add.set_normalized(true);
-                        } else if cur_len == 1 {
-                            // downgrade
-                            last_buf.set_from_view(&out_add.to_add_view().to_slice().get(0));
-                            out.set_from_view(&last_buf.as_view());
-                        } else {
-                            out_add.set_normalized(true);
+                    let m = helper.to_mul();
+                    if has_coeff {
+                        m.extend(helper2.to_num(coeff).as_view());
+                    }
+                    if let AtomView::Mul(mm) = first {
+                        for x in mm.iter().skip(usize::from(mm.has_coefficient())) {
+                            m.extend(x);
                         }
                     } else {
-                        out_add.extend(v);
-                        out_add.set_normalized(true);
+                        m.extend(first);
+                    }
+                    m.set_has_coefficient(has_coeff);
+                    m.set_normalized(true);
+                    out_add.extend(m.as_view());
+                }
+
+                if second_pass {
+                    out.as_view().normalize(workspace, &mut helper);
+                    out.set_from_view(&helper.as_view());
+                } else {
+                    match out_add.get_nargs() {
+                        0 => {
+                            out.to_num(Coefficient::zero());
+                        }
+                        1 => {
+                            helper.set_from_view(&out_add.to_add_view().to_slice().get(0));
+                            out.set_from_view(&helper.as_view());
+                        }
+                        _ => out_add.set_normalized(true),
                     }
                 }
             }
