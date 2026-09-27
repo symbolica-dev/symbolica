@@ -26,8 +26,12 @@ codegen-units = 1
 lto = true
 
 [profile.bench]
-codegen-units = 1
-lto = true
+opt-level = 3
+debug = true
+debug-assertions = false
+codegen-units = 16
+lto = "off"
+incremental = true
 
 [profile.dev.package."*"]
 opt-level = 3
