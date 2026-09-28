@@ -6,6 +6,21 @@ use dyn_clone::DynClone;
 
 use crate::atom::{Atom, AtomView};
 
+thread_local! {
+    static HASH_STATE: ahash::RandomState = ahash::RandomState::new();
+}
+
+/// Returns a clone of this thread's randomized hash state for internal maps and sets.
+///
+/// `RandomState::new()` updates a process-global atomic counter. Initializing once
+/// per thread and copying the keys avoids contention when creating many maps.
+/// Calls on the same thread reuse the same keys; this does not provide fresh keys
+/// for each map. The returned state is owned and can be moved between threads.
+#[inline]
+pub(crate) fn thread_local_hash_state() -> ahash::RandomState {
+    HASH_STATE.with(Clone::clone)
+}
+
 /// A wrapper around a mutable reference that tracks if the value
 /// has been mutably accessed.
 #[derive(Debug)]

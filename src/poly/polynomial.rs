@@ -807,9 +807,27 @@ impl<E: std::fmt::Debug + Display> std::error::Error for PositiveRealRootCountEr
 
 /// Shared coefficient ring and variable map of a multivariate polynomial.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[repr(C)]
 struct PolynomialContext<F: Ring> {
+    /// Keeps the fields that are read on every operation (`ring`, `nvars`, `variables`)
+    /// off the cache line of the `Arc` reference counts, which every clone and drop of a
+    /// polynomial writes.
+    _pad: [u64; 14],
     ring: F,
+    nvars: usize,
     variables: Arc<Vec<PolyVariable>>,
+}
+
+impl<F: Ring> PolynomialContext<F> {
+    #[inline]
+    fn new(ring: F, variables: Arc<Vec<PolyVariable>>) -> Self {
+        PolynomialContext {
+            _pad: [0; 14],
+            ring,
+            nvars: variables.len(),
+            variables,
+        }
+    }
 }
 
 #[cfg(feature = "bincode")]
@@ -850,7 +868,7 @@ where
         Ok(MultivariatePolynomial {
             coefficients,
             exponents,
-            context: Arc::new(PolynomialContext { ring, variables }),
+            context: Arc::new(PolynomialContext::new(ring, variables)),
             _phantom: PhantomData,
         })
     }
@@ -881,7 +899,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         if Arc::ptr_eq(&self.context.variables, &variables) {
             return;
         }
-        Arc::make_mut(&mut self.context).variables = variables;
+        let context = Arc::make_mut(&mut self.context);
+        context.nvars = variables.len();
+        context.variables = variables;
     }
 
     /// Constructs a zero polynomial. Instead of using this constructor,
@@ -892,10 +912,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self {
             coefficients: Vec::with_capacity(cap.unwrap_or(0)),
             exponents: Vec::with_capacity(cap.unwrap_or(0) * variables.len()),
-            context: Arc::new(PolynomialContext {
-                ring: ring.clone(),
-                variables,
-            }),
+            context: Arc::new(PolynomialContext::new(ring.clone(), variables)),
             _phantom: PhantomData,
         }
     }
@@ -903,7 +920,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// Constructs an empty polynomial with capacity, sharing `context`.
     #[inline]
     fn from_context(cap: Option<usize>, context: Arc<PolynomialContext<F>>) -> Self {
-        let nvars = context.variables.len();
+        let nvars = context.nvars;
         Self {
             coefficients: Vec::with_capacity(cap.unwrap_or(0)),
             exponents: Vec::with_capacity(cap.unwrap_or(0) * nvars),
@@ -924,7 +941,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self {
             coefficients,
             exponents,
-            context: Arc::new(PolynomialContext { ring, variables }),
+            context: Arc::new(PolynomialContext::new(ring, variables)),
             _phantom: PhantomData,
         }
     }
@@ -937,10 +954,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self {
             coefficients: vec![],
             exponents: vec![],
-            context: Arc::new(PolynomialContext {
-                ring: ring.clone(),
-                variables: Arc::new(vec![]),
-            }),
+            context: Arc::new(PolynomialContext::new(ring.clone(), Arc::new(vec![]))),
             _phantom: PhantomData,
         }
     }
@@ -953,10 +967,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self {
             coefficients: vec![ring.one()],
             exponents: vec![],
-            context: Arc::new(PolynomialContext {
-                ring: ring.clone(),
-                variables: Arc::new(vec![]),
-            }),
+            context: Arc::new(PolynomialContext::new(ring.clone(), Arc::new(vec![]))),
             _phantom: PhantomData,
         }
     }
@@ -972,6 +983,44 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     #[inline]
     pub fn zero_with_capacity(&self, cap: usize) -> Self {
         Self::from_context(Some(cap), self.context.clone())
+    }
+
+    /// Constructs a zero polynomial with an equal field and variable map held in a new
+    /// context (and a new variable-map allocation) that no other polynomial shares.
+    ///
+    /// Every clone or drop of a polynomial updates the atomic reference count of its context.
+    /// When many threads work on polynomials that share one context, these updates move the
+    /// same cache line between cores. A thread can create one such template and use
+    /// [`Self::clone_with_context_of`] to work on shared, read-only polynomials without
+    /// touching their context.
+    pub fn zero_with_new_context(&self) -> Self {
+        Self::from_context(
+            None,
+            Arc::new(PolynomialContext::new(
+                self.ring().clone(),
+                Arc::new(self.variables().as_ref().clone()),
+            )),
+        )
+    }
+
+    /// Clones `self` onto the context of `other`, whose field and variable map must be equal
+    /// to those of `self`. Unlike [`Clone::clone`], this does not update the reference count
+    /// of `self`'s context; see [`Self::zero_with_new_context`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fields or the variable maps differ.
+    pub fn clone_with_context_of(&self, other: &Self) -> Self {
+        assert!(
+            self.ring() == other.ring() && self.variables() == other.variables(),
+            "clone_with_context_of: the field and the variable map must be equal"
+        );
+        Self {
+            coefficients: self.coefficients.clone(),
+            exponents: self.exponents.clone(),
+            context: other.context.clone(),
+            _phantom: PhantomData,
+        }
     }
 
     /// Constructs a constant polynomial,
@@ -1082,7 +1131,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// Returns the number of variables in the polynomial.
     #[inline]
     pub fn nvars(&self) -> usize {
-        self.variables().len()
+        self.context.nvars
     }
 
     /// Returns true if the polynomial is constant.
@@ -2078,10 +2127,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         MultivariatePolynomial {
             coefficients,
             exponents,
-            context: Arc::new(PolynomialContext {
-                ring: field,
-                variables: self.variables().clone(),
-            }),
+            context: Arc::new(PolynomialContext::new(field, self.variables().clone())),
             _phantom: PhantomData,
         }
     }
@@ -2338,13 +2384,25 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Create a polynomial from an unordered list of coefficients and flattened exponents.
     pub fn from_coefficient_list(
-        mut coefficients: Vec<F::Element>,
+        coefficients: Vec<F::Element>,
         exponents: Vec<E>,
         vars: Arc<Vec<PolyVariable>>,
         ring: &F,
     ) -> Self {
+        let poly = Self::new(ring, Some(coefficients.len()), vars);
+        Self::fill_coefficient_list(poly, coefficients, exponents)
+    }
+
+    /// Fill an empty polynomial, preserving its context.
+    fn fill_coefficient_list(
+        mut poly: Self,
+        mut coefficients: Vec<F::Element>,
+        exponents: Vec<E>,
+    ) -> Self {
+        debug_assert!(poly.coefficients.is_empty() && poly.exponents.is_empty());
         let nterms = coefficients.len();
-        let nvars = vars.len();
+        let nvars = poly.nvars();
+        assert_eq!(exponents.len(), nterms * nvars);
         let mut indices = (0..nterms).collect::<Vec<_>>();
         indices.sort_unstable_by(|&i, &j| {
             O::cmp(
@@ -2353,13 +2411,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             )
         });
 
-        let mut poly = MultivariatePolynomial::new(ring, Some(nterms), vars);
-
         for i in indices {
-            poly.append_monomial_back(
-                std::mem::replace(&mut coefficients[i], ring.zero()),
-                &exponents[i * nvars..(i + 1) * nvars],
-            );
+            let coefficient = std::mem::replace(&mut coefficients[i], poly.ring().zero());
+            poly.append_monomial_back(coefficient, &exponents[i * nvars..(i + 1) * nvars]);
         }
 
         poly
@@ -2626,11 +2680,10 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             exponent[n] = E::zero();
         }
 
-        Self::from_coefficient_list(
+        Self::fill_coefficient_list(
+            self.zero_with_capacity(coefficients.len()),
             coefficients,
             exponents,
-            self.variables().clone(),
-            &self.ring(),
         )
     }
 
@@ -3477,18 +3530,30 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         xs: &[usize],
         include: bool,
     ) -> HashMap<SmallVec<[E; INLINED_EXPONENTS]>, MultivariatePolynomial<F, E, LexOrder>> {
+        let hasher = crate::utils::thread_local_hash_state();
         if self.coefficients.is_empty() {
-            return HashMap::new();
+            return HashMap::with_hasher(hasher);
         }
 
+        // All outputs share one context created for this call, instead of each output cloning
+        // (and later dropping) `self`'s context, which may be shared by many threads.
+        let template = Self::from_context(
+            None,
+            Arc::new(PolynomialContext::new(
+                self.ring().clone(),
+                self.variables().clone(),
+            )),
+        );
+        let nvars = self.nvars();
         let mut tm: HashMap<
             SmallVec<[E; INLINED_EXPONENTS]>,
             MultivariatePolynomial<F, E, LexOrder>,
-        > = HashMap::new();
-        let mut e_not_in_xs = smallvec![E::zero(); self.nvars()];
-        let mut e_in_xs = smallvec![E::zero(); self.nvars()];
-        for t in self {
-            for (i, ee) in t.exponents.iter().enumerate() {
+        > = HashMap::with_hasher(hasher);
+        let mut e_not_in_xs = smallvec![E::zero(); nvars];
+        let mut e_in_xs = smallvec![E::zero(); nvars];
+        for (term, coefficient) in self.coefficients.iter().enumerate() {
+            let exponents = &self.exponents[term * nvars..(term + 1) * nvars];
+            for (i, ee) in exponents.iter().enumerate() {
                 e_not_in_xs[i] = *ee;
                 e_in_xs[i] = E::zero();
             }
@@ -3500,24 +3565,14 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
             if include {
                 tm.entry(e_in_xs.clone())
-                    .and_modify(|x| x.append_monomial(t.coefficient.clone(), &e_not_in_xs))
+                    .and_modify(|x| x.append_monomial(coefficient.clone(), &e_not_in_xs))
                     .or_insert_with(|| {
-                        MultivariatePolynomial::monomial(
-                            self,
-                            t.coefficient.clone(),
-                            e_not_in_xs.to_vec(),
-                        )
+                        template.monomial(coefficient.clone(), e_not_in_xs.to_vec())
                     });
             } else {
                 tm.entry(e_not_in_xs.clone())
-                    .and_modify(|x| x.append_monomial(t.coefficient.clone(), &e_in_xs))
-                    .or_insert_with(|| {
-                        MultivariatePolynomial::monomial(
-                            self,
-                            t.coefficient.clone(),
-                            e_in_xs.to_vec(),
-                        )
-                    });
+                    .and_modify(|x| x.append_monomial(coefficient.clone(), &e_in_xs))
+                    .or_insert_with(|| template.monomial(coefficient.clone(), e_in_xs.to_vec()));
             }
         }
 
