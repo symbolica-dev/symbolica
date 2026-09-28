@@ -416,9 +416,7 @@ impl Coefficient {
         }
     }
 
-    /// Test for the unit coefficient. For a rational-polynomial representation,
-    /// this checks the numerator; use the borrowed view to test both numerator
-    /// and denominator.
+    /// Test for the unit coefficient.
     pub fn is_one(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
@@ -428,7 +426,7 @@ impl Coefficient {
                 let f = State::get_finite_field(*field);
                 f.is_one(num)
             }
-            Coefficient::RationalPolynomial(r) => r.numerator.is_one(),
+            Coefficient::RationalPolynomial(r) => r.numerator.is_one() && r.denominator.is_one(),
         }
     }
 
