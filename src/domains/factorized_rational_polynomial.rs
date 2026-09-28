@@ -1498,7 +1498,7 @@ where
 {
     /// Compute the partial fraction decomposition of the rational polynomial in `var`.
     pub fn apart(&self, var: usize) -> Vec<Self> {
-        if self.denominators.len() == 1 {
+        if self.denominators.len() <= 1 {
             return vec![self.clone()];
         }
 

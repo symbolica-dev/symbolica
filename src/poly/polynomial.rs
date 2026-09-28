@@ -2344,7 +2344,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         ring: &F,
     ) -> Self {
         let nterms = coefficients.len();
-        let nvars = exponents.len() / coefficients.len();
+        let nvars = vars.len();
         let mut indices = (0..nterms).collect::<Vec<_>>();
         indices.sort_unstable_by(|&i, &j| {
             O::cmp(
