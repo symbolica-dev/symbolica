@@ -3,12 +3,12 @@ use std::{ops::DerefMut, sync::Arc};
 use smallvec::SmallVec;
 
 use crate::{
-    atom::{Atom, AtomView},
+    atom::{Atom, AtomView, ListIterator},
     coefficient::CoefficientView,
     combinatorics::CombinationWithReplacementIterator,
     domains::{integer::Integer, rational::Q},
     poly::{Exponent, PolyVariable},
-    state::{RecycledAtom, Workspace},
+    state::Workspace,
 };
 
 impl AtomView<'_> {
@@ -323,68 +323,61 @@ impl AtomView<'_> {
             }
             AtomView::Mul(m) => {
                 let mut changed = false;
+                let mut sum = workspace.new_atom();
+                let mut new_sum = workspace.new_atom();
+                let mut new_arg = workspace.new_atom();
+                let mut term = workspace.new_atom();
+                // An unrelated sum in expand_in() must remain a single factor.
+                let mut expand_sum = false;
 
-                let mut sum: SmallVec<[RecycledAtom; 10]> = SmallVec::new();
-                let mut new_sum: SmallVec<[RecycledAtom; 10]> = SmallVec::new();
-
-                for arg in m {
-                    let mut new_arg = workspace.new_atom();
+                for (factor_index, arg) in m.iter().enumerate() {
                     changed |= arg.expand_with_ws_into(workspace, var, &mut new_arg);
 
-                    let contains_var = if let Some(s) = var
-                        && !new_arg.as_view().contains_literally_or_as_symbol(s)
-                    {
-                        false
-                    } else {
-                        true
-                    };
+                    let expand_arg = matches!(new_arg.as_view(), AtomView::Add(_))
+                        && var.is_none_or(|s| new_arg.as_view().contains_literally_or_as_symbol(s));
+                    changed |= expand_arg;
 
-                    // expand (1+x)*y
-                    if let AtomView::Add(a) = new_arg.as_view()
-                        && contains_var
-                    {
-                        changed = true;
+                    if factor_index == 0 {
+                        std::mem::swap(&mut sum, &mut new_arg);
+                        expand_sum = expand_arg;
+                        continue;
+                    }
 
-                        for child in a {
-                            for s in &sum {
-                                let mut b = workspace.new_atom();
-                                b.set_from_view(&s.as_view());
+                    if expand_arg || expand_sum {
+                        let terms = match sum.as_view() {
+                            AtomView::Add(a) if expand_sum => a.iter(),
+                            a => ListIterator::from_one(a),
+                        };
+                        let args = match new_arg.as_view() {
+                            AtomView::Add(a) if expand_arg => a.iter(),
+                            a => ListIterator::from_one(a),
+                        };
 
-                                if let Atom::Mul(m) = b.deref_mut() {
-                                    m.extend(child);
-                                    new_sum.push(b);
-                                } else {
-                                    let mut mul_h = workspace.new_atom();
-                                    let mul = mul_h.to_mul();
-                                    mul.extend(b.as_view());
-                                    mul.extend(child);
-                                    new_sum.push(mul_h);
-                                }
-                            }
-
-                            if sum.is_empty() {
-                                let mut b = workspace.new_atom();
-                                b.set_from_view(&child);
-                                new_sum.push(b);
+                        let add = new_sum.to_add();
+                        for child in args {
+                            for s in terms {
+                                let mul = term.to_mul();
+                                mul.extend(s);
+                                mul.extend(child);
+                                add.extend(term.as_view());
                             }
                         }
 
+                        // Fuse terms before the next factor. The final product
+                        // is normalized by the caller.
+                        if expand_arg && factor_index + 1 < m.get_nargs() {
+                            new_sum.as_view().normalize(workspace, &mut sum);
+                        } else {
+                            std::mem::swap(&mut sum, &mut new_sum);
+                        }
+                        expand_sum = matches!(sum.as_view(), AtomView::Add(_));
+                    } else if let Atom::Mul(m) = sum.deref_mut() {
+                        m.extend(new_arg.as_view());
+                    } else {
+                        let mul = new_sum.to_mul();
+                        mul.extend(sum.as_view());
+                        mul.extend(new_arg.as_view());
                         std::mem::swap(&mut sum, &mut new_sum);
-                        new_sum.clear();
-                    } else if sum.is_empty() {
-                        sum.push(new_arg);
-                    } else {
-                        for summand in &mut sum {
-                            if let Atom::Mul(m) = summand.deref_mut() {
-                                m.extend(new_arg.as_view());
-                            } else {
-                                let mut mul_h = workspace.new_atom();
-                                let mul = mul_h.to_mul();
-                                mul.extend(summand.as_view());
-                                mul.extend(new_arg.as_view());
-                                *summand = mul_h;
-                            }
-                        }
                     }
                 }
 
@@ -393,17 +386,7 @@ impl AtomView<'_> {
                     return false;
                 }
 
-                debug_assert!(!sum.is_empty());
-
-                if sum.len() == 1 {
-                    sum[0].as_view().normalize(workspace, out);
-                } else {
-                    let add = out.to_add();
-                    for x in sum {
-                        add.extend(x.as_view());
-                    }
-                }
-
+                std::mem::swap(out, &mut sum);
                 changed
             }
             AtomView::Add(a) => {
