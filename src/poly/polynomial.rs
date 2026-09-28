@@ -2384,13 +2384,25 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Create a polynomial from an unordered list of coefficients and flattened exponents.
     pub fn from_coefficient_list(
-        mut coefficients: Vec<F::Element>,
+        coefficients: Vec<F::Element>,
         exponents: Vec<E>,
         vars: Arc<Vec<PolyVariable>>,
         ring: &F,
     ) -> Self {
+        let poly = Self::new(ring, Some(coefficients.len()), vars);
+        Self::fill_coefficient_list(poly, coefficients, exponents)
+    }
+
+    /// Fill an empty polynomial, preserving its context.
+    fn fill_coefficient_list(
+        mut poly: Self,
+        mut coefficients: Vec<F::Element>,
+        exponents: Vec<E>,
+    ) -> Self {
+        debug_assert!(poly.coefficients.is_empty() && poly.exponents.is_empty());
         let nterms = coefficients.len();
-        let nvars = vars.len();
+        let nvars = poly.nvars();
+        assert_eq!(exponents.len(), nterms * nvars);
         let mut indices = (0..nterms).collect::<Vec<_>>();
         indices.sort_unstable_by(|&i, &j| {
             O::cmp(
@@ -2399,13 +2411,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             )
         });
 
-        let mut poly = MultivariatePolynomial::new(ring, Some(nterms), vars);
-
         for i in indices {
-            poly.append_monomial_back(
-                std::mem::replace(&mut coefficients[i], ring.zero()),
-                &exponents[i * nvars..(i + 1) * nvars],
-            );
+            let coefficient = std::mem::replace(&mut coefficients[i], poly.ring().zero());
+            poly.append_monomial_back(coefficient, &exponents[i * nvars..(i + 1) * nvars]);
         }
 
         poly
@@ -2672,11 +2680,10 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             exponent[n] = E::zero();
         }
 
-        Self::from_coefficient_list(
+        Self::fill_coefficient_list(
+            self.zero_with_capacity(coefficients.len()),
             coefficients,
             exponents,
-            self.variables().clone(),
-            &self.ring(),
         )
     }
 
