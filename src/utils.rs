@@ -4,6 +4,8 @@ use std::ops::{Deref, DerefMut};
 
 use dyn_clone::DynClone;
 
+use crate::atom::{Atom, AtomView};
+
 /// A wrapper around a mutable reference that tracks if the value
 /// has been mutably accessed.
 #[derive(Debug)]
@@ -40,9 +42,25 @@ impl<'a, T> From<&'a mut T> for Settable<'a, T> {
 }
 
 impl<T> Settable<'_, T> {
+    /// Return a reference to the value if it has been mutably accessed.
+    /// This does not mark the value as set.
+    #[inline]
+    pub fn get(&self) -> Option<&T> {
+        if self.is_set { Some(self.value) } else { None }
+    }
+
     /// Check if the value has been set.
     pub fn is_set(&self) -> bool {
         self.is_set
+    }
+}
+
+impl Settable<'_, Atom> {
+    /// Return the output's view if set, or `fallback` otherwise.
+    /// This does not mark the value as set.
+    #[inline]
+    pub fn as_view_or<'a>(&'a self, fallback: AtomView<'a>) -> AtomView<'a> {
+        self.get().map(Atom::as_view).unwrap_or(fallback)
     }
 }
 

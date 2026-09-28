@@ -729,11 +729,7 @@ impl Atom {
 
                     tmp.as_view().rename_no_norm(&state_map, ws, &mut settable);
 
-                    if settable.is_set() {
-                        a.extend(tmp2.as_view());
-                    } else {
-                        a.extend(tmp.as_view());
-                    }
+                    a.extend(settable.as_view_or(tmp.as_view()));
                 }
 
                 a.as_view().normalize(ws, &mut tmp);
@@ -2132,9 +2128,9 @@ impl<'a> AtomView<'a> {
             let mut set = Settable::from(&mut out);
             self.rename_no_norm(state_map, ws, &mut set);
 
-            if set.is_set() {
+            if let Some(value) = set.get() {
                 let mut a = ws.new_atom();
-                set.as_view().normalize(ws, &mut a);
+                value.as_view().normalize(ws, &mut a);
                 std::mem::swap(&mut out, &mut a);
             } else {
                 self.normalize(ws, &mut out);
@@ -2194,11 +2190,7 @@ impl<'a> AtomView<'a> {
                         fun_o.add_arg(set.as_view());
                         fun = Some(fun_o);
                     } else if let Some(fun) = &mut fun {
-                        if set.is_set() {
-                            fun.add_arg(set.as_view());
-                        } else {
-                            fun.add_arg(arg);
-                        }
+                        fun.add_arg(set.as_view_or(arg));
                     }
                 }
             }
@@ -2213,12 +2205,8 @@ impl<'a> AtomView<'a> {
                 let mut exp_set = Settable::from(&mut *exp_h);
                 exp.rename_no_norm(state_map, ws, &mut exp_set);
 
-                if base_set.is_set() && exp_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp_set.as_view());
-                } else if base_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp);
-                } else if exp_set.is_set() {
-                    out.to_pow(base, exp_set.as_view());
+                if base_set.is_set() || exp_set.is_set() {
+                    out.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
                 }
             }
             AtomView::Mul(mm) => {
@@ -2238,11 +2226,7 @@ impl<'a> AtomView<'a> {
                         mul_o.extend(set.as_view());
                         mul = Some(mul_o);
                     } else if let Some(mul_o) = &mut mul {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -2263,11 +2247,7 @@ impl<'a> AtomView<'a> {
                         add_o.extend(set.as_view());
                         add = Some(add_o);
                     } else if let Some(mul_o) = &mut add {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }

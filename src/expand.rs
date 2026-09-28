@@ -9,6 +9,7 @@ use crate::{
     domains::{integer::Integer, rational::Q},
     poly::{Exponent, PolyVariable},
     state::Workspace,
+    utils::Settable,
 };
 
 impl AtomView<'_> {
@@ -42,15 +43,29 @@ impl AtomView<'_> {
         var: Option<AtomView>,
         out: &mut Atom,
     ) -> bool {
-        let changed = self.expand_no_norm(workspace, var, out);
-
-        if changed {
-            let mut a = workspace.new_atom();
-            out.as_view().normalize(workspace, &mut a);
-            std::mem::swap(out, &mut a);
+        let mut set = Settable::from(&mut *out);
+        self.expand_with_ws_into_settable(workspace, var, &mut set);
+        let changed = set.is_set();
+        if !changed {
+            out.set_from_view(self);
         }
 
         changed
+    }
+
+    /// Expand and normalize, leaving `out` unset if no expansion was needed.
+    fn expand_with_ws_into_settable(
+        &self,
+        workspace: &Workspace,
+        var: Option<AtomView>,
+        out: &mut Settable<'_, Atom>,
+    ) {
+        self.expand_no_norm(workspace, var, out);
+        if let Some(value) = out.get() {
+            let mut a = workspace.new_atom();
+            value.as_view().normalize(workspace, &mut a);
+            std::mem::swap(&mut **out, &mut a);
+        }
     }
 
     /// Check if the expression is expanded, optionally in only the variable or function `var`.
@@ -171,13 +186,18 @@ impl AtomView<'_> {
         }
     }
 
-    /// Expand an expression, but do not normalize the result.
-    fn expand_no_norm(&self, workspace: &Workspace, var: Option<AtomView>, out: &mut Atom) -> bool {
+    /// Expand an expression without final normalization, leaving `out` unset
+    /// if no expansion was needed.
+    fn expand_no_norm(
+        &self,
+        workspace: &Workspace,
+        var: Option<AtomView>,
+        out: &mut Settable<'_, Atom>,
+    ) {
         if let Some(s) = var
             && !self.contains_literally_or_as_symbol(s)
         {
-            out.set_from_view(self);
-            return false;
+            return;
         }
 
         match self {
@@ -185,27 +205,34 @@ impl AtomView<'_> {
                 let (base, exp) = p.get_base_exp();
 
                 let mut new_base = workspace.new_atom();
-                let mut changed = base.expand_with_ws_into(workspace, var, &mut new_base);
+                let mut base_set = Settable::from(new_base.deref_mut());
+                base.expand_with_ws_into_settable(workspace, var, &mut base_set);
 
                 let mut new_exp = workspace.new_atom();
-                changed |= exp.expand_with_ws_into(workspace, var, &mut new_exp);
+                let mut exp_set = Settable::from(new_exp.deref_mut());
+                exp.expand_with_ws_into_settable(workspace, var, &mut exp_set);
+
+                let changed = base_set.is_set() || exp_set.is_set();
+                let base = base_set.as_view_or(base);
+                let exp = exp_set.as_view_or(exp);
 
                 let (negative, num) = 'get_num: {
-                    if let AtomView::Num(n) = new_exp.as_view()
+                    if let AtomView::Num(n) = exp
                         && let CoefficientView::Natural(n, 1, 0, 1) = n.get_coeff_view()
                         && n.unsigned_abs() <= u32::MAX as u64
                     {
                         break 'get_num (n < 0, n.unsigned_abs() as u32);
                     }
 
-                    let mut pow_h = workspace.new_atom();
-                    let pow = pow_h.to_pow(new_base.as_view(), new_exp.as_view());
-                    pow.set_normalized(!changed);
-                    pow_h.as_view().normalize(workspace, out);
-                    return changed;
+                    if changed {
+                        let mut pow_h = workspace.new_atom();
+                        pow_h.to_pow(base, exp);
+                        pow_h.as_view().normalize(workspace, out);
+                    }
+                    return;
                 };
 
-                if let AtomView::Add(a) = new_base.as_view() {
+                if let AtomView::Add(a) = base {
                     // expand (a+b+c+..)^n
                     let mut rest_buffer = workspace.new_atom();
                     let mut args: SmallVec<[AtomView; 10]> = SmallVec::with_capacity(a.get_nargs());
@@ -254,29 +281,37 @@ impl AtomView<'_> {
                         hh.as_view().normalize(workspace, &mut normalized_child);
 
                         let mut expanded_child = workspace.new_atom();
-                        normalized_child.as_view().expand_with_ws_into(
+                        let mut child_set = Settable::from(expanded_child.deref_mut());
+                        normalized_child.as_view().expand_with_ws_into_settable(
                             workspace,
                             var,
-                            &mut expanded_child,
+                            &mut child_set,
                         );
+                        // The normalized child is already owned, so reuse it
+                        // directly when recursive expansion leaves it unchanged.
+                        let child = if child_set.is_set() {
+                            expanded_child.deref_mut()
+                        } else {
+                            normalized_child.deref_mut()
+                        };
 
                         let coeff_f = Integer::multinom(new_term);
                         if coeff_f != Integer::one() {
                             let mut coeff_h = workspace.new_atom();
                             coeff_h.to_num(coeff_f);
 
-                            if let Atom::Mul(m) = expanded_child.deref_mut() {
+                            if let Atom::Mul(m) = child {
                                 m.extend(coeff_h.as_view());
-                                add.extend(expanded_child.as_view());
+                                add.extend(child.as_view());
                             } else {
                                 let mut mul_h = workspace.new_atom();
                                 let mul = mul_h.to_mul();
-                                mul.extend(expanded_child.as_view());
+                                mul.extend(child.as_view());
                                 mul.extend(coeff_h.as_view());
                                 add.extend(mul_h.as_view());
                             }
                         } else {
-                            add.extend(expanded_child.as_view());
+                            add.extend(child.as_view());
                         }
                     }
 
@@ -291,9 +326,7 @@ impl AtomView<'_> {
                     } else {
                         add_h.as_view().normalize(workspace, out);
                     }
-
-                    true
-                } else if let AtomView::Mul(m) = new_base.as_view() {
+                } else if let AtomView::Mul(m) = base {
                     let mut mul_h = workspace.new_atom();
                     let mul = mul_h.to_mul();
 
@@ -311,14 +344,10 @@ impl AtomView<'_> {
                     }
 
                     mul_h.as_view().normalize(workspace, out);
-
-                    true
-                } else {
+                } else if changed {
                     let mut pow_h = workspace.new_atom();
-                    let pow = pow_h.to_pow(new_base.as_view(), new_exp.as_view());
-                    pow.set_normalized(!changed);
+                    pow_h.to_pow(base, exp);
                     pow_h.as_view().normalize(workspace, out);
-                    changed
                 }
             }
             AtomView::Mul(m) => {
@@ -331,16 +360,35 @@ impl AtomView<'_> {
                 let mut expand_sum = false;
 
                 for (factor_index, arg) in m.iter().enumerate() {
-                    changed |= arg.expand_with_ws_into(workspace, var, &mut new_arg);
+                    let mut arg_set = Settable::from(new_arg.deref_mut());
+                    arg.expand_with_ws_into_settable(workspace, var, &mut arg_set);
+                    let arg = arg_set.as_view_or(arg);
 
-                    let expand_arg = matches!(new_arg.as_view(), AtomView::Add(_))
-                        && var.is_none_or(|s| new_arg.as_view().contains_literally_or_as_symbol(s));
-                    changed |= expand_arg;
+                    let expand_arg = matches!(arg, AtomView::Add(_))
+                        && var.is_none_or(|s| arg.contains_literally_or_as_symbol(s));
 
-                    if factor_index == 0 {
-                        std::mem::swap(&mut sum, &mut new_arg);
-                        expand_sum = expand_arg;
-                        continue;
+                    if !changed {
+                        if !arg_set.is_set() && !expand_arg {
+                            continue;
+                        }
+                        changed = true;
+
+                        if factor_index == 0 {
+                            if arg_set.is_set() {
+                                std::mem::swap(&mut sum, &mut new_arg);
+                            } else {
+                                sum.set_from_view(&arg);
+                            }
+                            expand_sum = expand_arg;
+                            continue;
+                        }
+
+                        // Materialize the unchanged prefix only when a factor
+                        // changes or needs distribution.
+                        let prefix = sum.to_mul();
+                        for factor in m.iter().take(factor_index) {
+                            prefix.extend(factor);
+                        }
                     }
 
                     if expand_arg || expand_sum {
@@ -348,7 +396,7 @@ impl AtomView<'_> {
                             AtomView::Add(a) if expand_sum => a.iter(),
                             a => ListIterator::from_one(a),
                         };
-                        let args = match new_arg.as_view() {
+                        let args = match arg {
                             AtomView::Add(a) if expand_arg => a.iter(),
                             a => ListIterator::from_one(a),
                         };
@@ -372,41 +420,39 @@ impl AtomView<'_> {
                         }
                         expand_sum = matches!(sum.as_view(), AtomView::Add(_));
                     } else if let Atom::Mul(m) = sum.deref_mut() {
-                        m.extend(new_arg.as_view());
+                        m.extend(arg);
                     } else {
                         let mul = new_sum.to_mul();
                         mul.extend(sum.as_view());
-                        mul.extend(new_arg.as_view());
+                        mul.extend(arg);
                         std::mem::swap(&mut sum, &mut new_sum);
                     }
                 }
 
-                if !changed {
-                    out.set_from_view(self);
-                    return false;
+                if changed {
+                    std::mem::swap(&mut **out, &mut sum);
                 }
-
-                std::mem::swap(out, &mut sum);
-                changed
             }
             AtomView::Add(a) => {
-                let mut changed = false;
-
-                let add = out.to_add();
-
+                let mut add = None;
                 let mut new_arg = workspace.new_atom();
-                for arg in a {
-                    changed |= arg.expand_no_norm(workspace, var, &mut new_arg);
-                    add.extend(new_arg.as_view());
-                }
+                for (i, arg) in a.iter().enumerate() {
+                    let mut arg_set = Settable::from(new_arg.deref_mut());
+                    arg.expand_no_norm(workspace, var, &mut arg_set);
 
-                add.set_normalized(!changed);
-                changed
+                    if add.is_none() && arg_set.is_set() {
+                        let new_add = out.to_add();
+                        for child in a.iter().take(i) {
+                            new_add.extend(child);
+                        }
+                        new_add.extend(arg_set.as_view());
+                        add = Some(new_add);
+                    } else if let Some(add) = &mut add {
+                        add.extend(arg_set.as_view_or(arg));
+                    }
+                }
             }
-            _ => {
-                out.set_from_view(self);
-                false
-            }
+            _ => {}
         }
     }
 
@@ -414,61 +460,75 @@ impl AtomView<'_> {
     /// `2*(x+y)` -> `2*x+2*y`.
     pub(crate) fn expand_num(&self) -> Atom {
         let mut a = Atom::new();
-        Workspace::get_local().with(|ws| {
-            self.expand_num_impl(ws, &mut a);
-        });
+        self.expand_num_into(&mut a);
         a
     }
 
     pub(crate) fn expand_num_into(&self, out: &mut Atom) {
         Workspace::get_local().with(|ws| {
-            self.expand_num_impl(ws, out);
+            let mut set = Settable::from(&mut *out);
+            self.expand_num_impl(ws, &mut set);
+            if !set.is_set() {
+                out.set_from_view(self);
+            }
         })
     }
 
-    pub(crate) fn expand_num_impl(&self, ws: &Workspace, out: &mut Atom) -> bool {
+    /// Distribute numbers, leaving `out` unset if no expansion was needed.
+    fn expand_num_impl(&self, ws: &Workspace, out: &mut Settable<'_, Atom>) {
         match self {
-            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {
-                out.set_from_view(self);
-                false
-            }
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => {}
             AtomView::Pow(pow_view) => {
                 let (base, exp) = pow_view.get_base_exp();
                 let mut new_base = ws.new_atom();
-                let mut changed = base.expand_num_impl(ws, &mut new_base);
+                let mut base_set = Settable::from(new_base.deref_mut());
+                base.expand_num_impl(ws, &mut base_set);
 
                 let mut new_exp = ws.new_atom();
-                changed |= exp.expand_num_impl(ws, &mut new_exp);
+                let mut exp_set = Settable::from(new_exp.deref_mut());
+                exp.expand_num_impl(ws, &mut exp_set);
 
-                let mut pow_h = ws.new_atom();
-                pow_h.to_pow(new_base.as_view(), new_exp.as_view());
-                pow_h.as_view().normalize(ws, out);
-
-                changed
+                if base_set.is_set() || exp_set.is_set() {
+                    let mut pow_h = ws.new_atom();
+                    pow_h.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
+                    pow_h.as_view().normalize(ws, out);
+                }
             }
             AtomView::Mul(mul_view) => {
-                let mut changed = false;
-
-                // propagate to all arguments
+                // Rebuild only after a child changes.
                 let mut new_mul = ws.new_atom();
-                let m = new_mul.to_mul();
+                let mut mul = None;
                 let mut new_arg = ws.new_atom();
-                for arg in mul_view {
-                    changed |= arg.expand_num_impl(ws, &mut new_arg);
-                    m.extend(new_arg.as_view());
+                for (i, arg) in mul_view.iter().enumerate() {
+                    let mut set = Settable::from(new_arg.deref_mut());
+                    arg.expand_num_impl(ws, &mut set);
+                    if mul.is_none() && set.is_set() {
+                        let m = new_mul.to_mul();
+                        for child in mul_view.iter().take(i) {
+                            m.extend(child);
+                        }
+                        m.extend(set.as_view());
+                        mul = Some(m);
+                    } else if let Some(m) = &mut mul {
+                        m.extend(set.as_view_or(arg));
+                    }
                 }
 
-                if changed {
+                if mul.is_some() {
                     new_mul.as_view().normalize(ws, &mut new_arg);
                     new_arg.as_view().expand_num_impl(ws, out);
-                    return true;
+                    // A child changed even if the normalized product needs
+                    // no further expansion. Transfer that result to the caller.
+                    if !out.is_set() {
+                        std::mem::swap(&mut **out, &mut new_arg);
+                    }
+                    return;
                 }
 
                 if !mul_view.has_coefficient()
                     || !mul_view.iter().any(|a| matches!(a, AtomView::Add(_)))
                 {
-                    out.set_from_view(self);
-                    return false;
+                    return;
                 }
 
                 let mut args: Vec<_> = mul_view.iter().collect();
@@ -517,28 +577,30 @@ impl AtomView<'_> {
                 m2.extend(m.as_view());
 
                 m2.as_view().normalize(ws, out);
-
-                true
             }
             AtomView::Add(add_view) => {
-                let mut changed = false;
-
                 let mut new = ws.new_atom();
-                let add = new.to_add();
+                let mut add = None;
 
                 let mut new_arg = ws.new_atom();
-                for arg in add_view {
-                    changed |= arg.expand_num_impl(ws, &mut new_arg);
-                    add.extend(new_arg.as_view());
+                for (i, arg) in add_view.iter().enumerate() {
+                    let mut set = Settable::from(new_arg.deref_mut());
+                    arg.expand_num_impl(ws, &mut set);
+                    if add.is_none() && set.is_set() {
+                        let a = new.to_add();
+                        for child in add_view.iter().take(i) {
+                            a.extend(child);
+                        }
+                        a.extend(set.as_view());
+                        add = Some(a);
+                    } else if let Some(a) = &mut add {
+                        a.extend(set.as_view_or(arg));
+                    }
                 }
 
-                if !changed {
-                    out.set_from_view(self);
-                    return false;
+                if add.is_some() {
+                    new.as_view().normalize(ws, out);
                 }
-
-                new.as_view().normalize(ws, out);
-                true
             }
         }
     }
@@ -554,6 +616,32 @@ mod test {
         let exp = parse!("5+2*v3*(v1-v2)*(v4+v5)").expand_num();
         let res = parse!("5+v3*(v4+v5)*(2*v1-2*v2)");
         assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn expand_num_sparse_and_collapsed_children() {
+        let mut out = parse!("stale+output");
+        for (input, expected) in [
+            ("2*x*(y+z)", "x*(2*y+2*z)"),
+            ("a+2*b*(x+y)+z^2", "a+b*(2*x+2*y)+z^2"),
+            ("(2*(x+y))^z", "(2*x+2*y)^z"),
+            ("a^(2*(x+y))", "a^(2*x+2*y)"),
+            ("b*(c+2*(x+y))", "b*(c+2*x+2*y)"),
+            ("2*(c+3*(x+y))", "2*c+6*x+6*y"),
+            ("b*(2*(x+y)-2*x-2*y)", "0"),
+            ("b*(1+2*(x+y)-2*x-2*y)", "b"),
+            ("-3*(x+y)", "-3*x-3*y"),
+        ] {
+            let input = parse!(input);
+            input.as_view().expand_num_into(&mut out);
+            assert_eq!(out, parse!(expected), "{input}");
+            assert_eq!(out.expand_num(), out, "{input}");
+        }
+        for expr in ["7", "x", "f(2*(x+y))", "x^y", "x*y", "x+y", "(x+y)*(z+w)"] {
+            let input = parse!(expr);
+            input.as_view().expand_num_into(&mut out);
+            assert_eq!(out, input, "{expr}");
+        }
     }
 
     #[test]

@@ -188,9 +188,9 @@ impl AtomView<'_> {
                     if let Some(custom_der) = &f.get_symbol().get_global_data().custom_derivative {
                         let mut setter = fn_der.deref_mut().into();
                         custom_der(*self, index, &mut setter);
-                        if setter.is_set() {
+                        if let Some(value) = setter.get() {
                             let m = mul.to_mul();
-                            m.extend(fn_der.as_view());
+                            m.extend(value.as_view());
                             m.extend(arg_der.as_view());
                             a.extend(m.as_view());
                             continue;
