@@ -42,6 +42,7 @@ use crate::{
     error,
     poly::{INLINED_EXPONENTS, PolyVariable, polynomial::MultivariatePolynomial},
     state::{FiniteFieldIndex, State, Workspace},
+    utils::Settable,
     warn,
 };
 
@@ -3140,6 +3141,22 @@ impl AtomView<'_> {
         workspace: &Workspace,
         out: &mut Atom,
     ) -> bool {
+        let mut set = Settable::from(&mut *out);
+        self.set_coefficient_ring_impl(vars, workspace, &mut set);
+        let changed = set.is_set();
+        if !changed {
+            out.set_from_view(self);
+        }
+        changed
+    }
+
+    /// Change the coefficient ring, leaving `out` unset if it is already suitable.
+    fn set_coefficient_ring_impl(
+        &self,
+        vars: &Arc<Vec<PolyVariable>>,
+        workspace: &Workspace,
+        out: &mut Settable<'_, Atom>,
+    ) {
         match self {
             AtomView::Num(n) => {
                 if let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
@@ -3154,7 +3171,6 @@ impl AtomView<'_> {
                                 denominator: d,
                             };
                             out.to_num(Coefficient::RationalPolynomial(r));
-                            true
                         } else {
                             let mut n1 = workspace.new_atom();
                             r.numerator.to_expression_with_map(
@@ -3164,11 +3180,9 @@ impl AtomView<'_> {
                             );
 
                             let mut n1_conv = workspace.new_atom();
-                            n1.as_view().set_coefficient_ring_with_ws_into(
-                                vars,
-                                workspace,
-                                &mut n1_conv,
-                            );
+                            let mut n1_set = Settable::from(&mut *n1_conv);
+                            n1.as_view()
+                                .set_coefficient_ring_impl(vars, workspace, &mut n1_set);
 
                             let mut n2 = workspace.new_atom();
                             r.denominator.to_expression_with_map(
@@ -3178,32 +3192,23 @@ impl AtomView<'_> {
                             );
 
                             let mut n2_conv = workspace.new_atom();
-                            n2.as_view().set_coefficient_ring_with_ws_into(
-                                vars,
-                                workspace,
-                                &mut n2_conv,
-                            );
+                            let mut n2_set = Settable::from(&mut *n2_conv);
+                            n2.as_view()
+                                .set_coefficient_ring_impl(vars, workspace, &mut n2_set);
 
                             // create n1/n2
                             let mut n3 = workspace.new_atom();
                             let mut exp = workspace.new_atom();
                             exp.to_num(Coefficient::Complex(Rational::from(-1i64).into()));
-                            n3.to_pow(n2_conv.as_view(), exp.as_view());
+                            n3.to_pow(n2_set.as_view_or(n2.as_view()), exp.as_view());
 
                             let mut m = workspace.new_atom();
                             let mm = m.to_mul();
-                            mm.extend(n1_conv.as_view());
+                            mm.extend(n1_set.as_view_or(n1.as_view()));
                             mm.extend(n3.as_view());
                             m.as_view().normalize(workspace, out);
-                            true
                         }
-                    } else {
-                        out.set_from_view(self);
-                        false
                     }
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Var(v) => {
@@ -3220,76 +3225,71 @@ impl AtomView<'_> {
                         numerator: poly,
                         denominator: den,
                     }));
-                    true
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
                 let mut nb = workspace.new_atom();
-                if base.set_coefficient_ring_with_ws_into(vars, workspace, &mut nb) {
+                let mut base_set = Settable::from(&mut *nb);
+                base.set_coefficient_ring_impl(vars, workspace, &mut base_set);
+                if let Some(base) = base_set.get() {
                     let mut o = workspace.new_atom();
-                    o.to_pow(nb.as_view(), exp);
+                    o.to_pow(base.as_view(), exp);
 
                     o.as_view().normalize(workspace, out);
-                    true
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Mul(m) => {
                 let mut o = workspace.new_atom();
-                let mul = o.to_mul();
-
-                let mut changed = false;
+                let mut mul = None;
 
                 let mut arg_o = workspace.new_atom();
-                for arg in m {
-                    changed |= arg.set_coefficient_ring_with_ws_into(vars, workspace, &mut arg_o);
-                    mul.extend(arg_o.as_view());
+                for (i, arg) in m.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_o);
+                    arg.set_coefficient_ring_impl(vars, workspace, &mut set);
+                    if mul.is_none() && set.is_set() {
+                        let new_mul = o.to_mul();
+                        for child in m.iter().take(i) {
+                            new_mul.extend(child);
+                        }
+                        new_mul.extend(set.as_view());
+                        mul = Some(new_mul);
+                    } else if let Some(mul) = &mut mul {
+                        mul.extend(set.as_view_or(arg));
+                    }
                 }
 
-                mul.set_normalized(!changed);
-
-                if !changed {
-                    mul.set_has_coefficient(m.has_coefficient());
-                    std::mem::swap(out, &mut o);
-                    false
-                } else {
+                if mul.is_some() {
                     o.as_view().normalize(workspace, out);
-                    true
                 }
             }
             AtomView::Add(a) => {
                 let mut o = workspace.new_atom();
-                let mul = o.to_add();
-
-                let mut changed = false;
+                let mut add = None;
 
                 let mut arg_o = workspace.new_atom();
-                for arg in a {
-                    changed |= arg.set_coefficient_ring_with_ws_into(vars, workspace, &mut arg_o);
-                    mul.extend(arg_o.as_view());
+                for (i, arg) in a.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_o);
+                    arg.set_coefficient_ring_impl(vars, workspace, &mut set);
+                    if add.is_none() && set.is_set() {
+                        let new_add = o.to_add();
+                        for child in a.iter().take(i) {
+                            new_add.extend(child);
+                        }
+                        new_add.extend(set.as_view());
+                        add = Some(new_add);
+                    } else if let Some(add) = &mut add {
+                        add.extend(set.as_view_or(arg));
+                    }
                 }
 
-                mul.set_normalized(!changed);
-
-                if !changed {
-                    std::mem::swap(out, &mut o);
-                    false
-                } else {
+                if add.is_some() {
                     o.as_view().normalize(workspace, out);
-                    true
                 }
             }
             AtomView::Fun(_) => {
                 // do not propagate into functions
-                out.set_from_view(self);
-                false
             }
         }
     }
@@ -3711,6 +3711,64 @@ mod test {
         let a = a.replace(v2).with(Atom::num(3)).expand();
 
         assert_eq!(a, expr);
+    }
+
+    #[test]
+    fn coefficient_ring_sparse_changes_and_reused_output() {
+        let x = symbol!("x");
+        let vars = Arc::new(vec![x.into()]);
+        crate::state::Workspace::get_local().with(|ws| {
+            let mut out = parse!("stale+output");
+            for expr in ["x", "a+x*b+c", "x*y*z", "y*(x+1)^-1", "x^2*y+x*z"] {
+                let input = parse!(expr);
+                assert!(
+                    input
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                let converted = out.clone();
+                assert!(
+                    !converted
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                assert_eq!(out, converted);
+                let restored = out.set_coefficient_ring(&Arc::new(vec![]));
+                assert_eq!(restored.expand(), input.expand(), "{expr}");
+            }
+            // Function arguments and power exponents are intentionally opaque.
+            for expr in ["7", "y", "f(x)", "y^x", "a+y*z+c"] {
+                let input = parse!(expr);
+                assert!(
+                    !input
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                assert_eq!(out, input, "{expr}");
+            }
+        });
+    }
+
+    #[test]
+    fn coefficient_ring_remapping_preserves_expression() {
+        let (x, y, z) = symbol!("x", "y", "z");
+        let initial = Arc::new(vec![x.into(), y.into()]);
+        let empty = Arc::new(vec![]);
+        for expr in ["x*y+x+y+1", "(x+y+1)/(x+2)", "x+1", "1/(y+1)"] {
+            let input = parse!(expr);
+            let converted = input.set_coefficient_ring(&initial);
+            for vars in [
+                vec![y.into(), x.into(), z.into()],
+                vec![x.into()],
+                vec![y.into()],
+                vec![z.into()],
+                vec![],
+            ] {
+                let remapped = converted.set_coefficient_ring(&Arc::new(vars));
+                let restored = remapped.set_coefficient_ring(&empty);
+                assert_eq!(restored.expand(), input.expand(), "{expr}");
+            }
+        }
     }
 
     #[test]
