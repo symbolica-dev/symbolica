@@ -1542,47 +1542,76 @@ impl AtomView<'_> {
                 let mut new_sum = workspace.new_atom();
                 let ns = new_sum.to_add();
 
-                let mut atom_sort_buf: SmallVec<[_; 20]> = SmallVec::new();
+                let mut atom_sort_buf: SmallVec<[(AtomView<'_>, &[u8]); 20]> =
+                    SmallVec::with_capacity(a.get_nargs());
 
-                let mut norm_arg = workspace.new_atom();
-                for a in a {
-                    let r = if a.needs_normalization() {
-                        // TODO: if a is a nested addition, prevent a sort
-                        a.normalize(workspace, &mut norm_arg);
-                        norm_arg.as_view()
-                    } else {
-                        a
-                    };
-
-                    if let AtomView::Add(new_add) = r {
-                        for c in new_add.iter() {
-                            if let AtomView::Num(n) = c
-                                && n.is_zero()
-                            {
-                                continue;
-                            }
-
-                            ns.extend(c);
-                        }
-                    } else {
+                let mut norm_arg = None;
+                let mut staged_prefix = None;
+                for x in a {
+                    if x.needs_normalization() {
+                        let norm_arg = norm_arg.get_or_insert_with(|| workspace.new_atom());
+                        x.normalize(workspace, norm_arg);
+                        let r = norm_arg.as_view();
                         if let AtomView::Num(n) = r {
-                            let coeff = n.get_coeff_view();
-                            if matches!(coeff, CoefficientView::Indeterminate) {
+                            if matches!(n.get_coeff_view(), CoefficientView::Indeterminate) {
                                 out.set_from_view(&r);
                                 return;
-                            }
-
-                            if n.is_zero() {
+                            } else if n.is_zero() {
                                 continue;
                             }
                         }
 
-                        ns.extend(r); // TODO: prevent copy?
+                        let count = if let AtomView::Add(sum) = r {
+                            sum.get_nargs()
+                        } else {
+                            1
+                        };
+                        ns.extend(r);
+                        // Preserve the input order without borrowing ns while
+                        // it can still reallocate. The original dirty view marks
+                        // each slot to replace once the buffer is complete.
+                        if atom_sort_buf.is_empty() {
+                            // Delay these slots until an input view is borrowed.
+                            // If every term changes, just read ns in one pass.
+                            staged_prefix = Some(x);
+                        } else {
+                            atom_sort_buf.resize(atom_sort_buf.len() + count, (x, &[]));
+                        }
+                    } else {
+                        if let AtomView::Num(n) = x {
+                            if matches!(n.get_coeff_view(), CoefficientView::Indeterminate) {
+                                out.set_from_view(&x);
+                                return;
+                            } else if n.is_zero() {
+                                continue;
+                            }
+                        }
+                        if let Some(marker) = staged_prefix.take() {
+                            atom_sort_buf.resize(ns.get_nargs(), (marker, &[]));
+                        }
+                        if let AtomView::Add(sum) = x {
+                            for term in sum {
+                                atom_sort_buf.push((term, term.get_term_cmp_slice()));
+                            }
+                        } else {
+                            atom_sort_buf.push((x, x.get_term_cmp_slice()));
+                        }
                     }
                 }
 
-                for x in ns.to_add_view().iter() {
-                    atom_sort_buf.push((x, x.get_term_cmp_slice()));
+                if staged_prefix.is_some() {
+                    for term in ns.to_add_view().iter() {
+                        atom_sort_buf.push((term, term.get_term_cmp_slice()));
+                    }
+                } else if ns.get_nargs() != 0 {
+                    let mut normalized = ns.to_add_view().iter();
+                    for entry in &mut atom_sort_buf {
+                        if entry.0.needs_normalization() {
+                            let term = normalized.next().unwrap();
+                            *entry = (term, term.get_term_cmp_slice());
+                        }
+                    }
+                    debug_assert!(normalized.next().is_none());
                 }
 
                 atom_sort_buf.sort_unstable_by(|a, b| a.1.cmp(b.1));
@@ -1613,23 +1642,39 @@ impl AtomView<'_> {
                         continue;
                     }
 
-                    let coefficient = |cur: AtomView<'_>| match cur {
-                        AtomView::Num(n) => n.get_coeff_view().to_owned(),
-                        AtomView::Mul(m) => {
-                            if let Some(AtomView::Num(n)) = m.get_coefficient() {
-                                n.get_coeff_view().to_owned()
-                            } else {
-                                Coefficient::one()
+                    fn coefficient(cur: AtomView<'_>) -> CoefficientView<'_> {
+                        match cur {
+                            AtomView::Num(n) => n.get_coeff_view(),
+                            AtomView::Mul(m) => {
+                                if let Some(AtomView::Num(n)) = m.get_coefficient() {
+                                    n.get_coeff_view()
+                                } else {
+                                    CoefficientView::Natural(1, 1, 0, 1)
+                                }
                             }
+                            _ => CoefficientView::Natural(1, 1, 0, 1),
                         }
-                        _ => Coefficient::one(),
-                    };
-                    // Start in the coefficient's domain (an integer zero cannot
-                    // be added to a finite-field element).
-                    let mut coeff = coefficient(b[0].0);
-                    for (cur, _) in &b[1..] {
-                        coeff = coeff + coefficient(*cur);
                     }
+                    // Most term coefficients are small integers. Avoid general
+                    // rational arithmetic until a different domain or overflow
+                    // requires it. Restarting preserves the original addition
+                    // order and does not introduce integer zero into a field.
+                    let integer_sum = b.iter().try_fold(0i64, |sum, (cur, _)| {
+                        if let CoefficientView::Natural(n, 1, 0, 1) = coefficient(*cur) {
+                            sum.checked_add(n)
+                        } else {
+                            None
+                        }
+                    });
+                    let coeff = if let Some(sum) = integer_sum {
+                        Coefficient::from(sum)
+                    } else {
+                        let mut coeff = coefficient(b[0].0).to_owned();
+                        for (cur, _) in &b[1..] {
+                            coeff = coeff + coefficient(*cur).to_owned();
+                        }
+                        coeff
+                    };
 
                     let first = b[0].0;
                     if coeff.is_zero() {
