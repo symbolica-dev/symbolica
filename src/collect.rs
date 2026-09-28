@@ -125,11 +125,7 @@ impl<'a> AtomView<'a> {
                 let mut handle = workspace.new_atom();
                 let mut set = Settable::from(handle.deref_mut());
                 key_map(key, &mut set);
-                if set.is_set() {
-                    mul.extend(handle.as_view());
-                } else {
-                    mul.extend(key);
-                }
+                mul.extend(set.as_view_or(key));
             } else {
                 mul.extend(key);
             }
@@ -138,11 +134,7 @@ impl<'a> AtomView<'a> {
                 let mut handle = workspace.new_atom();
                 let mut set = Settable::from(handle.deref_mut());
                 coeff_map(coeff.as_view(), &mut set);
-                if set.is_set() {
-                    mul.extend(handle.as_view());
-                } else {
-                    mul.extend(coeff.as_view());
-                }
+                mul.extend(set.as_view_or(coeff.as_view()));
             } else {
                 mul.extend(coeff.as_view());
             }
@@ -1183,9 +1175,9 @@ impl<'a> AtomView<'a> {
                 |term, _, out| {
                     term.collect_num_exact_no_norm_impl(ws, out);
 
-                    if out.is_set() {
+                    if let Some(value) = out.get() {
                         let mut n = ws.new_atom();
-                        out.as_view().normalize(ws, &mut n);
+                        value.as_view().normalize(ws, &mut n);
                         std::mem::swap(&mut **out, &mut n);
                     }
                 },
