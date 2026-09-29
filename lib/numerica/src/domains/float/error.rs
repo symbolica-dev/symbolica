@@ -513,6 +513,14 @@ impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
         self.value.get_precision()
     }
 
+    fn set_precision(&mut self, precision: u32) {
+        self.value.set_precision(precision);
+        // reset the tracked error to the roundoff of the value
+        let scale = self.value.to_f64().abs();
+        self.abs_err =
+            if scale == 0. { 1. } else { scale } * 2f64.powf(-(self.value.get_precision() as f64));
+    }
+
     fn get_epsilon(&self) -> f64 {
         2.0f64.powi(-(self.value.get_precision() as i32))
     }

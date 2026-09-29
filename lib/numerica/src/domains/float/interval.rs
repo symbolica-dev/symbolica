@@ -534,6 +534,16 @@ impl FloatLike for RealBall {
         self.center.get_precision().min(self.radius.get_precision())
     }
 
+    fn set_precision(&mut self, precision: u32) {
+        if self.center.is_finite() && self.radius.is_finite() {
+            // Round the endpoints outward so that the enclosure stays certified.
+            *self = Self::from_outward_bounds(self.lower_bound(), self.upper_bound(), precision);
+        } else {
+            self.center.set_precision(precision);
+            self.radius.set_precision(precision);
+        }
+    }
+
     fn get_epsilon(&self) -> f64 {
         2.0f64.powi(-(self.get_precision() as i32))
     }
