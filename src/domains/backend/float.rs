@@ -323,7 +323,11 @@ mod astro {
         while digits.len() <= kept_digits {
             digits.push('0');
         }
-        let round_up = digits.as_bytes()[kept_digits] >= b'5';
+        let discarded = &digits.as_bytes()[kept_digits..];
+        let round_up = discarded[0] > b'5'
+            || (discarded[0] == b'5'
+                && (discarded[1..].iter().any(|&d| d != b'0')
+                    || (digits.as_bytes()[kept_digits - 1] - b'0') % 2 != 0));
         let mut digits = digits.as_bytes()[..kept_digits].to_vec();
         let mut exponent = exponent.to_owned();
 
@@ -1180,13 +1184,29 @@ mod astro {
 
     impl Display for MultiPrecisionFloat {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            Display::fmt(&format_value(&self.value, Radix::Dec), f)
+            // Display precision counts significant digits for this backend,
+            // as it does for MPFR. Forwarding it to String::fmt truncates the
+            // entire string and can silently remove the scientific exponent.
+            let text = format_lower_exp_value(
+                &self.value,
+                f.precision().map(|digits| digits.saturating_sub(1)),
+            );
+            f.pad_integral(
+                !text.starts_with('-'),
+                "",
+                text.strip_prefix('-').unwrap_or(&text),
+            )
         }
     }
 
     impl std::fmt::LowerExp for MultiPrecisionFloat {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            f.write_str(&format_lower_exp_value(&self.value, f.precision()))
+            let text = format_lower_exp_value(&self.value, f.precision());
+            f.pad_integral(
+                !text.starts_with('-'),
+                "",
+                text.strip_prefix('-').unwrap_or(&text),
+            )
         }
     }
 

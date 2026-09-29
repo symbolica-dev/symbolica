@@ -252,6 +252,68 @@ fn complex_small_components_and_branch_cuts() {
 }
 
 #[test]
+fn complex_sqrt_scalar_limits() {
+    fn check<T: Real + RealLike>(at: impl Fn(f64) -> T) {
+        // Probe the sign before conversion: DoubleFloat::to_f64 adds its two
+        // words, which can turn a negative zero into a positive zero.
+        let negative = |x: &T| x.one().copy_sign(x).to_f64().is_sign_negative();
+        for sign in [-1.0f64, 1.0] {
+            for x in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -2.0, 0.0, 2.0] {
+                let root = Complex::new(at(x), at(sign * f64::INFINITY)).sqrt();
+                assert_eq!(root.re.to_f64(), f64::INFINITY);
+                assert_eq!(root.im.to_f64(), sign * f64::INFINITY);
+            }
+            for y in [0.0, 2.0] {
+                let root = Complex::new(at(f64::INFINITY), at(sign * y)).sqrt();
+                assert_eq!(root.re.to_f64(), f64::INFINITY);
+                assert_eq!(root.im.to_f64(), 0.0);
+                assert_eq!(negative(&root.im), sign.is_sign_negative());
+
+                let root = Complex::new(at(f64::NEG_INFINITY), at(sign * y)).sqrt();
+                assert_eq!(root.re.to_f64(), 0.0);
+                assert!(!negative(&root.re));
+                assert_eq!(root.im.to_f64(), sign * f64::INFINITY);
+            }
+            for x in [-4.0, -0.0, 0.0, 4.0] {
+                let root = Complex::new(at(x), at(sign * 0.0)).sqrt();
+                assert_eq!(root.re.to_f64(), if x < 0.0 { 0.0 } else { x.abs().sqrt() });
+                assert!(!negative(&root.re));
+                assert_eq!(root.im.to_f64(), if x < 0.0 { 2.0 * sign } else { 0.0 });
+                assert_eq!(negative(&root.im), sign.is_sign_negative());
+            }
+        }
+        for (x, y) in [(f64::NAN, 0.0), (0.0, f64::NAN), (f64::NAN, f64::NAN)] {
+            let root = Complex::new(at(x), at(y)).sqrt();
+            assert!(root.re.to_f64().is_nan());
+            assert!(root.im.to_f64().is_nan());
+        }
+        let root = Complex::new(at(f64::INFINITY), at(f64::NAN)).sqrt();
+        assert_eq!(root.re.to_f64(), f64::INFINITY);
+        assert!(root.im.to_f64().is_nan());
+        let root = Complex::new(at(f64::NEG_INFINITY), at(f64::NAN)).sqrt();
+        assert!(root.re.to_f64().is_nan());
+        assert!(root.im.to_f64().is_infinite());
+    }
+
+    check(|x| x);
+    check(super::F64::from);
+    check(DoubleFloat::from);
+    check(|x| Float::with_val(128, x));
+}
+
+#[test]
+fn complex_sqrt_simd_preserves_lane_semantics() {
+    let re = [3.0, -3.0, 5.0, -5.0];
+    let im = [4.0, -4.0, -12.0, 12.0];
+    let root = Complex::new(wide::f64x4::from(re), wide::f64x4::from(im)).sqrt();
+    for i in 0..4 {
+        let expected = Complex::new(re[i], im[i]).sqrt();
+        close(root.re.to_array()[i], expected.re);
+        close(root.im.to_array()[i], expected.im);
+    }
+}
+
+#[test]
 fn complex_overflow_preserves_finite_components() {
     for x in [1000.0, -1000.0] {
         let z = Complex::new(x, 0.0);

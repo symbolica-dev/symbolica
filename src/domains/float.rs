@@ -70,6 +70,14 @@ pub trait FloatLike:
         None
     }
 
+    /// Classify a scalar float for exceptional-value handling.
+    /// Return `None` for domains without a scalar floating-point classification,
+    /// such as complex numbers, SIMD vectors, or exact types.
+    #[inline]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        None
+    }
+
     /// Request scaled arithmetic for zero, subnormal or non-finite intermediates.
     /// The default opts out of scalar range guards (for example for exact types
     /// or types with multiple independently scaled components).
@@ -102,6 +110,11 @@ pub trait FloatLike:
 
     /// Get the number of precise binary digits.
     fn get_precision(&self) -> u32;
+    /// Set the working precision to `precision` binary digits. Types that loosely track
+    /// their precision discard the tracked loss, whereas certified enclosures stay valid.
+    /// The value is rounded when the precision is lowered. Types with a fixed precision
+    /// ignore this call.
+    fn set_precision(&mut self, precision: u32);
     fn get_epsilon(&self) -> f64;
     /// Return true iff the precision is fixed, or false
     /// if the precision is changed dynamically.
@@ -172,16 +185,25 @@ pub trait Real: FloatLike {
     #[inline]
     fn hypot(&self, other: &Self) -> Self {
         let (mut a, mut b) = (self.norm(), other.norm());
+
         match a.real_cmp(&b) {
             Some(std::cmp::Ordering::Less) => std::mem::swap(&mut a, &mut b),
             Some(_) => {}
             None => return (self.clone() * self + other.clone() * other).sqrt(),
         }
+
         if b.is_fully_zero() {
             return a;
         }
+
+        let one = if a.get_precision() >= b.get_precision() {
+            a.one()
+        } else {
+            b.one()
+        };
+
         let r = b / &a;
-        a * (r.one() + r.clone() * r).sqrt()
+        a * (one + r.clone() * r).sqrt()
     }
 
     /// Absolute value with the sign of `sign`, including signed zero where supported.
