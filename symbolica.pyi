@@ -4292,14 +4292,31 @@ class Expression:
         Create an iterator over all terms in the expression.
         """
 
-    def __getitem__(self, idx: int) -> Expression:
+    @overload
+    def __getitem__(self, idx: int, /) -> Expression:
+        """Get a child expression by index. Negative indices count from the end."""
+
+    @overload
+    def __getitem__(self, idx: slice, /) -> list[Expression]:
         """
-        Get the `idx`th component of the expression.
+        Get a slice of the expression's immediate children as a list.
+
+        Slices follow Python's usual bounds and step rules, including reverse
+        slices, and use the same child order as iteration. Leaf expressions
+        cannot be indexed or sliced.
+
+        Examples
+        --------
+        >>> f, x, y, z = S('f', 'x', 'y', 'z')
+        >>> f(x, y, z)[1:]
+        [y, z]
+        >>> f(x, y, z)[::-1]
+        [z, y, x]
 
         Parameters
         ----------
-        idx: int
-            The zero-based index to access.
+        idx: slice
+            The slice to access.
         """
 
     def map(
