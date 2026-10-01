@@ -1,6 +1,7 @@
 use super::*;
 use crate::atom::{FunctionBuilder, NormalizationFunction};
 use crate::utils::Settable;
+use pyo3::types::{PySlice, PySliceMethods};
 
 /// A deferred symbolic computation. Call the object to execute it.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
@@ -5847,13 +5848,27 @@ impl PythonExpression {
         }
     }
 
-    /// Get the `idx`th component of the expression.
+    /// Get a component or a slice of the expression's immediate children.
+    ///
+    /// An integer returns one expression; a slice returns a list of expressions
+    /// in the same order as iteration. Negative indices count from the end.
+    /// Slices follow Python's usual bounds and step rules, including reverse slices.
+    /// Leaf expressions cannot be indexed or sliced.
+    ///
+    /// Examples
+    /// --------
+    /// >>> f, x, y, z = S('f', 'x', 'y', 'z')
+    /// >>> f(x, y, z)[1:]
+    /// [y, z]
+    /// >>> f(x, y, z)[::-1]
+    /// [z, y, x]
     ///
     /// Parameters
     /// ----------
-    /// idx: int
-    ///     The zero-based index to access.
-    fn __getitem__(&self, idx: isize) -> PyResult<PythonExpression> {
+    /// idx: int | slice
+    ///     The zero-based index or slice to access.
+    #[gen_stub(skip)]
+    fn __getitem__(&self, idx: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let slice = match self.expr.as_view() {
             AtomView::Add(a) => a.to_slice(),
             AtomView::Mul(m) => m.to_slice(),
@@ -5862,19 +5877,45 @@ impl PythonExpression {
             _ => Err(PyIndexError::new_err("Cannot access child of leaf node"))?,
         };
 
-        if idx.unsigned_abs() < slice.len() {
-            Ok(if idx < 0 {
-                slice
-                    .get(slice.len() - idx.unsigned_abs())
-                    .to_owned()
-                    .into()
+        if let Ok(range) = idx.cast::<PySlice>() {
+            let indices = range.indices(slice.len() as isize)?;
+            let mut children: Vec<PythonExpression> = if indices.slicelength == 0 {
+                Vec::new()
             } else {
-                slice.get(idx as usize).to_owned().into()
-            })
+                let step = indices.step.unsigned_abs();
+                // Scan the packed children once, even for reverse slices.
+                let start = if indices.step < 0 {
+                    indices.start as usize - (indices.slicelength - 1) * step
+                } else {
+                    indices.start as usize
+                };
+                slice
+                    .fast_forward(start)
+                    .iter()
+                    .step_by(step)
+                    .take(indices.slicelength)
+                    .map(|child| child.to_owned().into())
+                    .collect()
+            };
+            if indices.step < 0 {
+                children.reverse();
+            }
+            return children.into_py_any(idx.py());
+        }
+
+        let index = idx.extract::<isize>()?;
+        let position = if index < 0 {
+            slice.len().checked_sub(index.unsigned_abs())
+        } else {
+            Some(index as usize)
+        };
+        if let Some(position) = position.filter(|&position| position < slice.len()) {
+            let child: PythonExpression = slice.get(position).to_owned().into();
+            child.into_py_any(idx.py())
         } else {
             Err(PyIndexError::new_err(format!(
                 "Index {} out of bounds: the atom only has {} children.",
-                idx,
+                index,
                 slice.len(),
             )))
         }
@@ -9813,6 +9854,57 @@ args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat
                 type_ignored: None,
                 is_overload: true,
             }
+        ],
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+submit! {
+    PyMethodsInfo {
+        struct_id: std::any::TypeId::of::<PythonExpression>,
+        attrs: &[],
+        getters: &[],
+        setters: &[],
+        file: file!(),
+        line: line!(),
+        column: column!(),
+        methods: &[
+            MethodInfo {
+                name: "__getitem__",
+                parameters: &[
+                    ParameterInfo {
+                        name: "idx",
+                        kind: ParameterKind::PositionalOnly,
+                        default: ParameterDefault::None,
+                        type_info: || isize::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || PythonExpression::type_output(),
+                doc: "Get a child expression by index. Negative indices count from the end. Leaf expressions cannot be indexed.",
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
+            MethodInfo {
+                name: "__getitem__",
+                parameters: &[
+                    ParameterInfo {
+                        name: "idx",
+                        kind: ParameterKind::PositionalOnly,
+                        default: ParameterDefault::None,
+                        type_info: || PySlice::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || Vec::<PythonExpression>::type_output(),
+                doc: "Get a list of immediate children using Python slice bounds and step rules, in iteration order. Leaf expressions cannot be sliced.",
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
         ],
     }
 }
