@@ -371,7 +371,7 @@ impl LicenseManager {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn connect() -> Result<TcpStream, String> {
-        let mut ip = ("symbolica.io", 12012)
+        let mut ip = ("auth.symbolica.io", 12012)
             .to_socket_addrs()
             .map_err(|e| format!("{RESOLVE_ERROR}\nError: {e}"))?;
         let Some(n) = ip.next() else {
