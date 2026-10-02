@@ -601,11 +601,11 @@ impl PythonSeries {
             custom_print_mode,
         );
 
-        Ok(PythonFormattedOutput {
+        Ok(PythonFormattedOutput::new(
             text,
-            html: Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
-            latex: Some(latex),
-        })
+            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(latex),
+        ))
     }
 
     pub fn sin(&self) -> PyResult<Self> {
