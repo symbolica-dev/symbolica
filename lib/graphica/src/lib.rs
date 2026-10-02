@@ -615,13 +615,13 @@ impl<N, E: Eq + Ord + Hash> Graph<N, E> {
     /// Get the number of different ways to permute the multi-edges, leading
     /// to the same graph, while keeping the vertices fixed.
     ///
-    /// Every self-loop yields an additional factor two.
+    /// Every undirected self-loop yields an additional factor two.
     pub fn get_edge_automorphism_group_size(&self) -> Integer {
         let mut count = Integer::one();
         let mut h = HashMap::default();
 
         for e in &self.edges {
-            if e.vertices.0 == e.vertices.1 {
+            if !e.directed && e.vertices.0 == e.vertices.1 {
                 count *= 2;
             }
 
