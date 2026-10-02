@@ -4,6 +4,7 @@
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     fs::File,
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
@@ -31,6 +32,7 @@ use pyo3::{
     pybacked::PyBackedStr,
     pyclass::CompareOp,
     pyfunction, pymethods,
+    sync::PyOnceLock,
     types::{
         PyAnyMethods, PyBytes, PyBytesMethods, PyCode, PyComplex, PyDict, PyDictMethods, PyInt,
         PyIterator, PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
@@ -372,6 +374,57 @@ impl From<PythonPrintMode> for PrintMode {
     }
 }
 
+/// A representation produced by [`PythonFormattedOutput::lazy`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormattedOutputBackend {
+    Text,
+    Html,
+    Latex,
+}
+
+impl FormattedOutputBackend {
+    fn index(self) -> usize {
+        match self {
+            Self::Text => 0,
+            Self::Html => 1,
+            Self::Latex => 2,
+        }
+    }
+}
+
+type FormattedOutputRenderer =
+    dyn Fn(Python<'_>, FormattedOutputBackend) -> PyResult<Option<String>> + Send + Sync;
+
+struct NotebookOutput {
+    create: Box<dyn Fn(Python<'_>) -> PyResult<Py<PyAny>> + Send + Sync>,
+    value: PyOnceLock<Py<PyAny>>,
+}
+
+enum FormattedOutputContent {
+    Ready([Option<String>; 3]),
+    Lazy {
+        renderer: Box<FormattedOutputRenderer>,
+        outputs: [PyOnceLock<Option<String>>; 3],
+    },
+}
+
+thread_local! {
+    // PyOnceLock handles concurrent requests, but recursive initialization would
+    // deadlock. Track active callbacks without holding a borrow across user code.
+    static FORMATTED_OUTPUT_RENDERING: RefCell<Vec<(usize, FormattedOutputBackend)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+struct FormattedOutputRenderGuard;
+
+impl Drop for FormattedOutputRenderGuard {
+    fn drop(&mut self) {
+        FORMATTED_OUTPUT_RENDERING.with(|active| {
+            active.borrow_mut().pop();
+        });
+    }
+}
+
 /// A formatted string with rich notebook display representations.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
@@ -381,9 +434,93 @@ impl From<PythonPrintMode> for PrintMode {
 )]
 #[derive(Clone)]
 pub struct PythonFormattedOutput {
-    pub text: String,
-    pub html: Option<String>,
-    pub latex: Option<String>,
+    content: Arc<FormattedOutputContent>,
+    notebook: Option<Arc<NotebookOutput>>,
+}
+
+impl PythonFormattedOutput {
+    /// Defer formatting until a representation is requested.
+    ///
+    /// The renderer runs attached to Python and must return text for `Text`;
+    /// `Html` and `Latex` may return `None` when unsupported. Successful results,
+    /// including `None`, are cached independently and shared by clones. Errors
+    /// propagate to the caller and may be retried on the next request.
+    /// Recursively requesting a backend currently rendering on the same thread
+    /// raises `RuntimeError` instead of blocking.
+    pub fn lazy(
+        renderer: impl Fn(Python<'_>, FormattedOutputBackend) -> PyResult<Option<String>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            notebook: None,
+            content: Arc::new(FormattedOutputContent::Lazy {
+                renderer: Box::new(renderer),
+                outputs: std::array::from_fn(|_| PyOnceLock::new()),
+            }),
+        }
+    }
+
+    /// Attach an optional live notebook representation, without eagerly rendering it.
+    pub fn with_notebook(
+        mut self,
+        create: impl Fn(Python<'_>) -> PyResult<Py<PyAny>> + Send + Sync + 'static,
+    ) -> Self {
+        self.notebook = Some(Arc::new(NotebookOutput {
+            create: Box::new(create),
+            value: PyOnceLock::new(),
+        }));
+        self
+    }
+
+    fn notebook_value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.notebook
+            .as_ref()
+            .map(|provider| {
+                provider
+                    .value
+                    .get_or_try_init(py, || (provider.create)(py))
+                    .map(|value| value.clone_ref(py))
+            })
+            .transpose()
+    }
+
+    /// Obtain one representation, rendering and caching it if necessary.
+    pub fn render(
+        &self,
+        py: Python<'_>,
+        backend: FormattedOutputBackend,
+    ) -> PyResult<Option<String>> {
+        match self.content.as_ref() {
+            FormattedOutputContent::Ready(outputs) => Ok(outputs[backend.index()].clone()),
+            FormattedOutputContent::Lazy { renderer, outputs } => {
+                let output = &outputs[backend.index()];
+                if let Some(value) = output.get(py) {
+                    return Ok(value.clone());
+                }
+                let key = (Arc::as_ptr(&self.content) as usize, backend);
+                if FORMATTED_OUTPUT_RENDERING.with(|active| active.borrow().contains(&key)) {
+                    return Err(exceptions::PyRuntimeError::new_err(format!(
+                        "recursive {backend:?} rendering of FormattedOutput"
+                    )));
+                }
+                output
+                    .get_or_try_init(py, || {
+                        FORMATTED_OUTPUT_RENDERING.with(|active| active.borrow_mut().push(key));
+                        let _guard = FormattedOutputRenderGuard;
+                        let value = renderer(py, backend)?;
+                        if backend == FormattedOutputBackend::Text && value.is_none() {
+                            return Err(exceptions::PyRuntimeError::new_err(
+                                "FormattedOutput renderer must provide plain text",
+                            ));
+                        }
+                        Ok(value)
+                    })
+                    .cloned()
+            }
+        }
+    }
 }
 
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
@@ -394,37 +531,94 @@ impl PythonFormattedOutput {
     #[new]
     #[pyo3(signature = (text, html = None, latex = None))]
     pub fn new(text: String, html: Option<String>, latex: Option<String>) -> Self {
-        Self { text, html, latex }
+        Self {
+            notebook: None,
+            content: Arc::new(FormattedOutputContent::Ready([Some(text), html, latex])),
+        }
     }
 
     /// Convert the formatted output into plain text.
-    pub fn __str__(&self) -> String {
-        self.text.clone()
+    pub fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.format_plain(py)
     }
 
     /// Convert the formatted output into plain text.
-    pub fn __repr__(&self) -> String {
-        self.text.clone()
+    pub fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.format_plain(py)
     }
 
     /// Convert the formatted output into plain text.
-    pub fn format_plain(&self) -> String {
-        self.text.clone()
+    pub fn format_plain(&self, py: Python<'_>) -> PyResult<String> {
+        // Both constructors and lazy rendering enforce the mandatory text backend.
+        Ok(self.render(py, FormattedOutputBackend::Text)?.unwrap())
+    }
+
+    /// Supply a live display to marimo, or the existing static representation.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.notebook_value(py)? {
+            return Ok(value.call_method0(py, "_display_")?);
+        }
+        let html = match self.render(py, FormattedOutputBackend::Html)? {
+            Some(html) => html,
+            None => crate::printer::AnsiHtmlFormatter::escape_html(&self.format_plain(py)?),
+        };
+        Ok(py
+            .import("marimo")?
+            .getattr("Html")?
+            .call1((html,))?
+            .unbind())
+    }
+
+    /// Supply a live Jupyter representation when the producer supports it.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.notebook_value(py)? {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("include", include)?;
+            kwargs.set_item("exclude", exclude)?;
+            return value.call_method(py, "_repr_mimebundle_", (), Some(&kwargs));
+        }
+        let bundle = PyDict::new(py);
+        for (mime, backend) in [
+            ("text/plain", FormattedOutputBackend::Text),
+            ("text/html", FormattedOutputBackend::Html),
+            ("text/latex", FormattedOutputBackend::Latex),
+        ] {
+            if include.as_ref().is_none_or(|v| v.iter().any(|s| s == mime))
+                && !exclude
+                    .as_ref()
+                    .is_some_and(|v| v.iter().any(|s| s == mime))
+            {
+                if let Some(value) = self.render(py, backend)? {
+                    bundle.set_item(mime, value)?;
+                }
+            }
+        }
+        Ok(bundle.into_any().unbind())
     }
 
     /// Convert the formatted output into an HTML representation.
-    pub fn _repr_html_(&self) -> Option<String> {
-        self.html.clone()
+    pub fn _repr_html_(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.render(py, FormattedOutputBackend::Html)
     }
 
     /// Convert the formatted output into a LaTeX representation.
-    pub fn _repr_latex_(&self) -> Option<String> {
-        self.latex.clone()
+    pub fn _repr_latex_(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.render(py, FormattedOutputBackend::Latex)
     }
 
     /// Convert the formatted output into a pretty string representation.
     pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
-        let text = if cycle { "..." } else { &self.text };
+        let text = if cycle {
+            "...".into()
+        } else {
+            self.format_plain(pretty.py())?
+        };
         pretty.call_method1("text", (text,))?;
         Ok(())
     }
@@ -2198,6 +2392,201 @@ tags: Sequence[str] | None = None
             column: column!(),
             index: 0,
         }
+}
+
+#[cfg(test)]
+mod formatted_output_tests {
+    use std::sync::{Barrier, OnceLock, atomic::AtomicUsize};
+
+    use pyo3::types::PyStringMethods;
+
+    use super::*;
+
+    #[test]
+    fn notebook_provider_is_lazy_and_shared_by_clones() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let output =
+            PythonFormattedOutput::lazy(|_, _| Ok(Some("plain".into()))).with_notebook(move |py| {
+                observed.fetch_add(1, Relaxed);
+                Ok(py
+                    .import("types")?
+                    .getattr("SimpleNamespace")?
+                    .call0()?
+                    .unbind())
+            });
+        Python::initialize();
+        Python::attach(|py| {
+            assert_eq!(output.format_plain(py).unwrap(), "plain");
+            assert_eq!(calls.load(Relaxed), 0);
+            let first = output.notebook_value(py).unwrap().unwrap();
+            let second = output.clone().notebook_value(py).unwrap().unwrap();
+            assert!(first.is(&second));
+            assert_eq!(calls.load(Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn ready_formatted_output_preserves_python_protocols() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let class = py.get_type::<PythonFormattedOutput>();
+            let output = class.call1(("plain", "<b>rich</b>"))?;
+            assert_eq!(output.str()?.to_str()?, "plain");
+            assert_eq!(output.repr()?.to_str()?, "plain");
+            assert_eq!(
+                output.call_method0("format_plain")?.extract::<String>()?,
+                "plain"
+            );
+            assert_eq!(
+                output.call_method0("_repr_html_")?.extract::<String>()?,
+                "<b>rich</b>"
+            );
+            assert!(output.call_method0("_repr_latex_")?.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn lazy_backends_are_requested_independently_and_shared_by_clones() {
+        let calls = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
+        let observed = calls.clone();
+        let output = PythonFormattedOutput::lazy(move |_, backend| {
+            observed[backend.index()].fetch_add(1, Relaxed);
+            Ok(match backend {
+                FormattedOutputBackend::Text => Some("plain".into()),
+                FormattedOutputBackend::Html => Some("<b>rich</b>".into()),
+                FormattedOutputBackend::Latex => None,
+            })
+        });
+        let cloned = output.clone();
+        assert!(Arc::ptr_eq(&output.content, &cloned.content));
+        assert!(calls.iter().all(|count| count.load(Relaxed) == 0));
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let pretty = py.import("types")?.getattr("SimpleNamespace")?.call0()?;
+            let recorded = pyo3::types::PyList::empty(py);
+            pretty.setattr("text", recorded.getattr("append")?)?;
+            output._repr_pretty_(&pretty, true)?;
+            assert!(calls.iter().all(|count| count.load(Relaxed) == 0));
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("<b>rich</b>"));
+            assert_eq!(cloned._repr_html_(py)?.as_deref(), Some("<b>rich</b>"));
+            assert_eq!(calls[0].load(Relaxed), 0);
+            assert_eq!(calls[2].load(Relaxed), 0);
+            assert_eq!(output.__str__(py)?, "plain");
+            assert_eq!(output.__repr__(py)?, "plain");
+            assert_eq!(cloned.format_plain(py)?, "plain");
+            output._repr_pretty_(&pretty, false)?;
+            assert_eq!(recorded.extract::<Vec<String>>()?, ["...", "plain"]);
+            assert_eq!(output._repr_latex_(py)?, None);
+            assert_eq!(cloned._repr_latex_(py)?, None);
+            Ok(())
+        })
+        .unwrap();
+        assert!(calls.iter().all(|count| count.load(Relaxed) == 1));
+    }
+
+    #[test]
+    fn failed_backends_retry_without_invalidating_other_backends() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let output = PythonFormattedOutput::lazy(move |_, backend| {
+            if backend == FormattedOutputBackend::Html && observed.fetch_add(1, Relaxed) == 0 {
+                return Err(exceptions::PyValueError::new_err(
+                    "temporary renderer failure",
+                ));
+            }
+            Ok(Some("rendered".into()))
+        });
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            assert_eq!(output.format_plain(py)?, "rendered");
+            let error = output._repr_html_(py).unwrap_err();
+            assert!(error.is_instance_of::<exceptions::PyValueError>(py));
+            assert_eq!(output.format_plain(py)?, "rendered");
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("rendered"));
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("rendered"));
+            assert_eq!(attempts.load(Relaxed), 2);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_text_is_an_error_but_optional_backends_can_be_absent() {
+        let output = PythonFormattedOutput::lazy(|_, _| Ok(None));
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(
+                output
+                    .format_plain(py)
+                    .unwrap_err()
+                    .is_instance_of::<exceptions::PyRuntimeError>(py)
+            );
+            assert_eq!(output._repr_html_(py).unwrap(), None);
+            assert_eq!(output._repr_latex_(py).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn recursive_rendering_raises_and_leaves_the_backend_retryable() {
+        let slot = Arc::new(OnceLock::<PythonFormattedOutput>::new());
+        let weak = Arc::downgrade(&slot);
+        let first = AtomicBool::new(true);
+        let output = PythonFormattedOutput::lazy(move |py, backend| {
+            if first.swap(false, Relaxed) {
+                return weak.upgrade().unwrap().get().unwrap().render(py, backend);
+            }
+            Ok(Some("recovered".into()))
+        });
+        assert!(slot.set(output.clone()).is_ok());
+        Python::initialize();
+        Python::attach(|py| {
+            let error = output._repr_html_(py).unwrap_err();
+            assert!(error.is_instance_of::<exceptions::PyRuntimeError>(py));
+            assert!(error.to_string().contains("recursive Html rendering"));
+            assert_eq!(
+                output._repr_html_(py).unwrap().as_deref(),
+                Some("recovered")
+            );
+        });
+    }
+
+    #[test]
+    fn concurrent_requests_render_once_while_releasing_python() {
+        Python::initialize();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let output = PythonFormattedOutput::lazy(move |py, _| {
+            observed.fetch_add(1, Relaxed);
+            // Other attached threads must wait for the cache without retaining
+            // the GIL, since this callback needs to reattach before completing.
+            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(25)));
+            let rendered = py
+                .import("builtins")?
+                .getattr("str")?
+                .call1(("rendered",))?;
+            Ok(Some(rendered.extract()?))
+        });
+        let barrier = Arc::new(Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let output = output.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Python::attach(|py| {
+                        assert_eq!(output._repr_html_(py).unwrap().as_deref(), Some("rendered"));
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(calls.load(Relaxed), 1);
+    }
 }
 
 #[cfg(test)]

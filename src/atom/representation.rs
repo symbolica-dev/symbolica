@@ -2262,6 +2262,21 @@ pub struct ListIterator<'a> {
     length: usize,
 }
 
+impl<'a> ListIterator<'a> {
+    /// Resume at a previously visited boundary within this list.
+    ///
+    /// # Safety
+    /// `data` must be a suffix of this iterator's original data starting at an
+    /// atom boundary, and `length` must be the exact number of remaining atoms.
+    /// The underlying expression must not have changed since recording it.
+    pub unsafe fn resume_at(self, data: &'a [u8], length: usize) -> Self {
+        assert!(data.as_ptr() >= self.data.as_ptr());
+        assert_eq!(data.as_ptr_range().end, self.data.as_ptr_range().end);
+        assert!(length <= self.length);
+        Self { data, length }
+    }
+}
+
 impl<'a> Iterator for ListIterator<'a> {
     type Item = AtomView<'a>;
 

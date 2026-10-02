@@ -575,11 +575,11 @@ impl PythonPolynomial {
             custom_print_mode,
         );
 
-        Ok(PythonFormattedOutput {
+        Ok(PythonFormattedOutput::new(
             text,
-            html: Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
-            latex: Some(latex),
-        })
+            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(latex),
+        ))
     }
 
     /// Convert the polynomial into a portable string.
