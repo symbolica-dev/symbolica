@@ -21,8 +21,8 @@ use std::{
 use ahash::{HashMap, HashSet};
 use brotli::CompressorWriter;
 use numpy::{
-    AllowTypeChange, Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLikeDyn,
-    ndarray::{ArrayD, Axis, CowArray, IxDyn},
+    Complex64,
+    ndarray::{ArrayD, Axis, CowArray, Ix1, IxDyn},
 };
 use pyo3::{
     Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyRef,
@@ -150,6 +150,7 @@ static LATEX_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
         ..PrintOptions::latex()
     });
 
+mod array;
 mod atom;
 mod citation;
 mod condition;
@@ -165,6 +166,7 @@ mod polynomial;
 mod series;
 mod symbolic_integration;
 
+use array::EvaluationInput;
 pub use atom::*;
 pub use citation::Citation;
 pub use evaluator::*;

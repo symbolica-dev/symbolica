@@ -897,7 +897,8 @@ impl PythonExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the result.
-    /// For best performance, use `numpy` arrays instead of lists.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     ///
     /// On the first call, the expression is JIT compiled using SymJIT.
     ///
@@ -926,9 +927,9 @@ impl PythonExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         if self.rational_constants.iter().any(|c| !c.is_real()) {
             return Err(exceptions::PyValueError::new_err(
                 "Evaluator contains complex coefficients. Use evaluate_complex_flat instead.",
@@ -994,7 +995,7 @@ impl PythonExpressionEvaluator {
                     );
                 }
             }
-            return Ok(out.into_pyarray(py));
+            return inputs.output(out, py);
         }
 
         let eval = self.eval_real.as_mut().unwrap();
@@ -1010,7 +1011,7 @@ impl PythonExpressionEvaluator {
             .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         }
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 
     /// Evaluate the expression for a single input. The precision of the input parameters is honored, and
@@ -1075,8 +1076,9 @@ impl PythonExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the result.
-    /// For best performance, use `numpy` arrays and `np.complex128` instead of lists and
-    /// `complex`.
+    /// For best performance, use NumPy arrays with dtype `np.complex128` for input;
+    /// results are returned as NumPy arrays when NumPy is installed and as nested
+    /// Python lists otherwise.
     ///
     /// On the first call, the expression is JIT compiled using SymJIT.
     ///
@@ -1106,8 +1108,8 @@ impl PythonExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
+        inputs: EvaluationInput<'py, Complex64, IxDyn>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         #[cfg(feature = "native_code_generation")]
         if self.jit_compile && self.jit_complex.is_none() {
             self.jit_complex = Some(
@@ -1180,7 +1182,7 @@ impl PythonExpressionEvaluator {
                     eval.evaluate(sc, os);
                 }
             }
-            return Ok(out.into_pyarray(py));
+            return inputs.output(out, py);
         }
 
         for (i, mut o) in arr.axis_iter(Axis(0)).zip(out.axis_iter_mut(Axis(0))) {
@@ -1201,7 +1203,7 @@ impl PythonExpressionEvaluator {
                 .try_evaluate(sc, os)
                 .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
         }
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 
     /// Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts.
@@ -2338,6 +2340,8 @@ impl PythonCompiledRealExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.float64]",
         imports = ("numpy.typing", "numpy")
@@ -2348,9 +2352,9 @@ impl PythonCompiledRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2367,7 +2371,7 @@ impl PythonCompiledRealExpressionEvaluator {
             );
         }
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }
 
@@ -2399,6 +2403,8 @@ impl PythonCompiledSimdRealExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.float64]",
         imports = ("numpy.typing", "numpy")
@@ -2409,9 +2415,9 @@ impl PythonCompiledSimdRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2430,7 +2436,7 @@ impl PythonCompiledSimdRealExpressionEvaluator {
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Batch error: {}", e)))?;
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }
 
@@ -2477,6 +2483,8 @@ impl PythonCompiledCudaRealExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.float64]",
         imports = ("numpy.typing", "numpy")
@@ -2487,9 +2495,9 @@ impl PythonCompiledCudaRealExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<f64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2507,7 +2515,7 @@ impl PythonCompiledCudaRealExpressionEvaluator {
             )
             .map_err(|e| exceptions::PyValueError::new_err(format!("Evaluation error: {}", e)))?;
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }
 
@@ -2554,6 +2562,8 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.complex128]",
         imports = ("numpy.typing", "numpy")
@@ -2564,9 +2574,9 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, Complex64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2590,7 +2600,7 @@ impl PythonCompiledCudaComplexExpressionEvaluator {
             .evaluate(sc, os)
             .map_err(|e| exceptions::PyValueError::new_err(format!("Evaluation error: {}", e)))?;
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }
 
@@ -2622,6 +2632,8 @@ impl PythonCompiledComplexExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.complex128]",
         imports = ("numpy.typing", "numpy")
@@ -2632,9 +2644,9 @@ impl PythonCompiledComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, Complex64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2657,7 +2669,7 @@ impl PythonCompiledComplexExpressionEvaluator {
             self.eval.evaluate(sc, os);
         }
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }
 
@@ -2689,6 +2701,8 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
     }
 
     /// Evaluate the expression for multiple inputs and return the results.
+    /// For best performance, use NumPy arrays for input; results are returned as
+    /// NumPy arrays when NumPy is installed and as nested Python lists otherwise.
     #[gen_stub(override_return_type(
         type_repr = "numpy.typing.NDArray[numpy.complex128]",
         imports = ("numpy.typing", "numpy")
@@ -2699,9 +2713,9 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLikeDyn<'py, Complex64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, Complex64, IxDyn>,
         py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<Complex64>>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let arr =
             reshape_evaluator_inputs(CowArray::from(inputs.as_array()), self.eval.get_input_len())?;
 
@@ -2725,6 +2739,6 @@ impl PythonCompiledSimdComplexExpressionEvaluator {
             .evaluate_batch(n_inputs, sc, os)
             .map_err(|e| exceptions::PyValueError::new_err(format!("Batch error: {}", e)))?;
 
-        Ok(out.into_pyarray(py))
+        inputs.output(out, py)
     }
 }

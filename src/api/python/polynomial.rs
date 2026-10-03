@@ -1318,7 +1318,7 @@ impl PythonPolynomial {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, Ix1>,
     ) -> PyResult<f64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
@@ -1355,7 +1355,7 @@ impl PythonPolynomial {
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, Complex64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, Complex64, Ix1>,
     ) -> PyResult<Complex64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
