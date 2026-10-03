@@ -11601,7 +11601,8 @@ class Evaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
-        For best performance, use `numpy` arrays instead of lists.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         On the first call, the expression is JIT compiled using SymJIT.
 
@@ -11656,8 +11657,9 @@ class Evaluator:
     def evaluate_complex(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
-        For best performance, use `numpy` arrays and `np.complex128` instead of lists and
-        `complex`.
+        For best performance, use NumPy arrays with dtype `np.complex128` for input;
+        results are returned as NumPy arrays when NumPy is installed and as nested
+        Python lists otherwise.
 
         On the first call, the expression is JIT compiled using SymJIT.
 
@@ -11737,6 +11739,8 @@ class CompiledRealEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
@@ -11769,6 +11773,8 @@ class CompiledComplexEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
@@ -11801,6 +11807,8 @@ class CompiledSimdRealEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
@@ -11833,6 +11841,8 @@ class CompiledSimdComplexEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
@@ -11871,6 +11881,8 @@ class CompiledCudaRealEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
@@ -11909,6 +11921,8 @@ class CompiledCudaComplexEvaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
