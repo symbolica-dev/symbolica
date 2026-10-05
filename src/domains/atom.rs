@@ -245,7 +245,7 @@ impl Ring for AtomField {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(a) {
+        if <Self as Ring>::is_zero(self, a) {
             None
         } else {
             Some(self.inv(a))
@@ -253,7 +253,7 @@ impl Ring for AtomField {
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(b) {
+        if <Self as Ring>::is_zero(self, b) {
             None
         } else {
             Some(self.div(a, b))
