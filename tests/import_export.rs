@@ -186,6 +186,155 @@ fn partial_state_export() {
     );
 }
 
+// All registry-reset scenarios stay in this integration test's single thread.
+// The callback schedules registration exactly between a count and its payload,
+// without relying on a probabilistic race between OS threads.
+fn export_registry_snapshot() {
+    use std::io::{self, Write};
+
+    #[derive(Clone, Copy)]
+    enum Registration {
+        Symbol,
+        FiniteField,
+        Polynomial,
+    }
+
+    struct RegisteringWriter {
+        bytes: Vec<u8>,
+        offset: usize,
+        registration: Registration,
+        triggered: bool,
+    }
+    impl Write for RegisteringWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let offset = self.bytes.len();
+            self.bytes.extend_from_slice(bytes);
+            if offset == self.offset {
+                assert!(!self.triggered);
+                self.triggered = true;
+                match self.registration {
+                    Registration::Symbol => {
+                        symbol!("snapshot_registered_in_writer");
+                    }
+                    Registration::FiniteField => {
+                        let _ = finite_field_atom(7);
+                    }
+                    Registration::Polynomial => {
+                        let parameter = symbol!("snapshot_polynomial_parameter");
+                        let _ = (parameter.to_atom() + 1).set_coefficient_ring(parameter);
+                    }
+                }
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    for full_state in [false, true] {
+        for registration in [
+            Registration::Symbol,
+            Registration::FiniteField,
+            Registration::Polynomial,
+        ] {
+            unsafe { State::reset() };
+            let atom = Atom::num(1);
+            let mut control = Vec::new();
+            if full_state {
+                State::export(&mut control).unwrap();
+            } else {
+                atom.export(&mut control).unwrap();
+            }
+            let offset = if full_state {
+                match registration {
+                    Registration::Symbol => 7, // symbol count follows magic/version/flags
+                    Registration::FiniteField => control.len() - 16,
+                    Registration::Polynomial => control.len() - 8,
+                }
+            } else {
+                match registration {
+                    // New coefficient-variable symbols must not enter a partial
+                    // export after its symbol-dependency closure was collected.
+                    Registration::Symbol => 0,
+                    Registration::FiniteField => 15,
+                    Registration::Polynomial => 23,
+                }
+            };
+            let mut writer = RegisteringWriter {
+                bytes: Vec::new(),
+                offset,
+                registration: if !full_state && matches!(registration, Registration::Symbol) {
+                    Registration::Polynomial
+                } else {
+                    registration
+                },
+                triggered: false,
+            };
+            if full_state {
+                State::export(&mut writer).unwrap();
+            } else {
+                atom.export(&mut writer).unwrap();
+            }
+            assert!(writer.triggered);
+            assert_eq!(writer.bytes, control);
+
+            // Import against different identifiers; the serialized export must
+            // be self-contained, independent of the writer's new registrations.
+            unsafe { State::reset() };
+            symbol!("snapshot_import_padding");
+            let _ = finite_field_atom(19);
+            let padding = symbol!("snapshot_import_polynomial_padding");
+            let _ = (padding.to_atom() + 1).set_coefficient_ring(padding);
+            let mut source = writer.bytes.as_slice();
+            let imported = if full_state {
+                let map = State::import(&mut source, None).unwrap();
+                let mut atom_bytes = Vec::new();
+                atom.as_view().write(&mut atom_bytes).unwrap();
+                Atom::import_with_map(&mut atom_bytes.as_slice(), &map).unwrap()
+            } else {
+                Atom::import(&mut source, None).unwrap()
+            };
+            assert!(source.is_empty());
+            assert_eq!(imported, Atom::num(1));
+        }
+    }
+}
+
+fn export_inside_symbol_generator() {
+    use std::sync::{Arc, Mutex};
+    use symbolica::{atom::SymbolBuilder, wrap_symbol};
+
+    unsafe { State::reset() };
+    let original = parse!("snapshot_existing^2 + 1");
+    let mut expected_atom = Vec::new();
+    original.export(&mut expected_atom).unwrap();
+    let mut expected_state = Vec::new();
+    State::export(&mut expected_state).unwrap();
+    let output = Arc::new(Mutex::new(None));
+    let callback_output = output.clone();
+    let callback_atom = original.clone();
+    let builder =
+        SymbolBuilder::new(wrap_symbol!("snapshot_generated")).with_generator(move |_, builder| {
+            let mut atom = Vec::new();
+            callback_atom.export(&mut atom).unwrap();
+            let mut state = Vec::new();
+            State::export(&mut state).unwrap();
+            *callback_output.lock().unwrap() = Some((atom, state));
+            builder
+        });
+    SymbolBuilder::build_group(vec![builder]).unwrap();
+    let (atom, state) = output.lock().unwrap().take().unwrap();
+    assert_eq!(atom, expected_atom);
+    assert_eq!(state, expected_state);
+    let mut source = atom.as_slice();
+    assert_eq!(Atom::import(&mut source, None).unwrap(), original);
+    assert!(source.is_empty());
+    let mut source = state.as_slice();
+    State::import(&mut source, None).unwrap();
+    assert!(source.is_empty());
+}
+
 #[test]
 fn rational_rename() {
     symbol!("x");
@@ -215,4 +364,6 @@ fn rational_rename() {
     partial_state_export();
     finite_field_offset();
     user_data_resources();
+    export_registry_snapshot();
+    export_inside_symbol_generator();
 }
