@@ -111,8 +111,10 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
         if self.im.is_zero() {
             self.re.export_wrapped_with(wrapper)
         } else {
+            // Components are already wrapped as complex values. Combine them
+            // arithmetically to retain exact divisions and custom number types.
             format!(
-                "{wrapper}({}, {})",
+                "({} + {wrapper}(0, 1) * {})",
                 self.re.export_wrapped_with(wrapper),
                 self.im.export_wrapped_with(wrapper)
             )

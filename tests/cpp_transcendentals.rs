@@ -261,6 +261,92 @@ fn complex_transcendental_forwards() {
 }
 
 #[test]
+fn complex_constants_compile_in_both_translation_modes() {
+    let expressions = [
+        parse!("1i*x"),
+        parse!("(1/3+2/7*1i)*x"),
+        parse!("2/5-3/11*1i"),
+        parse!("1i"),
+        parse!("3/5"),
+    ];
+    let inputs = [Complex::new(2., 3.)];
+    let expected = [
+        Complex::new(-3., 2.),
+        Complex::new(-4. / 21., 11. / 7.),
+        Complex::new(2. / 5., -3. / 11.),
+        Complex::new(0., 1.),
+        Complex::new(3. / 5., 0.),
+    ];
+
+    for direct in [true, false] {
+        let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+            .direct_translation(direct)
+            .build()
+            .unwrap();
+        let floating = evaluator
+            .clone()
+            .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        let mut interpreted = vec![Complex::new(0., 0.); expressions.len()];
+        floating.clone().evaluate(&inputs, &mut interpreted);
+        for (actual, expected) in interpreted.iter().zip(&expected) {
+            assert!((actual.re - expected.re).abs() < 1e-14);
+            assert!((actual.im - expected.im).abs() < 1e-14);
+        }
+
+        // Exercise both Python's floating constants and the exact rational
+        // exporter: unwrapped "1/3" would silently perform integer division.
+        let settings = ExportSettings::default().inline_asm(InlineASM::None);
+        for (kind, code) in [
+            (
+                "rational",
+                evaluator
+                    .export_cpp_str::<Complex<f64>>("constants", settings.clone())
+                    .unwrap(),
+            ),
+            (
+                "floating",
+                floating
+                    .export_cpp_str::<Complex<f64>>("constants", settings)
+                    .unwrap(),
+            ),
+        ] {
+            run_cpp(
+                &TestFiles::new(&format!("complex_constants_{direct}_{kind}")),
+                &code,
+                &cpp_case(
+                    "std::complex<double>",
+                    "constants_complexf64",
+                    &inputs,
+                    &expected,
+                ),
+            );
+        }
+    }
+}
+
+#[test]
+fn complex_constants_preserve_custom_wrapper_precision() {
+    use symbolica::domains::rational::Rational;
+
+    // This real part differs from one beyond double precision. Component
+    // construction must retain the requested wrapper and exact divisions.
+    let constant = Complex::new(
+        Rational::from((1_152_921_504_606_846_977_i64, 1_152_921_504_606_846_976_i64)),
+        Rational::from((1, 7)),
+    );
+    let exported = constant.export_wrapped_with("PreciseComplex");
+    let code = "#include <complex>\n#include <limits>\n#include <cmath>\n\
+                using PreciseComplex = std::complex<long double>;\n";
+    let cases = format!(
+        "const PreciseComplex value = {exported};\n\
+         if (!(std::abs(value.imag() - 1.L/7.L) < 1e-18L)) return 1;\n\
+         if (std::numeric_limits<long double>::digits > 60 &&\n\
+             value.real() - 1.L != std::ldexp(1.L, -60)) return 2;\n"
+    );
+    run_cpp(&TestFiles::new("complex_custom_wrapper"), code, &cases);
+}
+
+#[test]
 fn cpp17_special_function_forwards() {
     // libc++ does not provide the optional C++17 mathematical special functions.
     // Set SYMBOLICA_TEST_CXX to a compiler using libstdc++ to exercise these.
