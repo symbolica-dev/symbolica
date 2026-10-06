@@ -946,6 +946,7 @@ impl SymbolBuilder {
     }
 
     /// Set symbol aliases. All aliases will refer to the same symbol.
+    /// Aliases must satisfy the same namespace and name rules as symbols.
     ///
     /// # Examples
     ///
@@ -1292,6 +1293,9 @@ impl Symbol {
 
     /// Parse a symbol from a string with optional namespace and attributes.
     ///
+    /// Existing symbols are reused if they have all specified attributes and tags,
+    /// preserving any additional properties such as aliases and custom functions.
+    ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
     pub fn parse<T: AsRef<str>>(
         name: T,
@@ -1311,6 +1315,9 @@ impl Symbol {
     }
 
     /// Parse a symbol from a string with optional namespace and attributes.
+    ///
+    /// Existing symbols are reused if they have all specified attributes and tags,
+    /// preserving any additional properties such as aliases and custom functions.
     ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
     pub fn parse_with_default_namespace<T: AsRef<str>>(

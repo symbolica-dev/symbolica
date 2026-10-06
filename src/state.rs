@@ -834,6 +834,10 @@ impl State {
                 )
                 .into());
             }
+
+            let (namespace, symbol) = alias.rsplit_once("::").unwrap();
+            crate::parser::Token::check_symbol_namespace(namespace)?;
+            crate::parser::Token::check_symbol_name(symbol)?;
         }
 
         match self.str_to_id.entry(name.symbol.into()) {
