@@ -747,6 +747,7 @@ impl AtomView<'_> {
                 }
             } else if let AtomView::Mul(_) = cur {
                 matches!(s, AtomView::Add(_))
+                    || matches!(s, AtomView::Num(n) if !n.get_coeff_view().is_real())
             } else {
                 false
             }

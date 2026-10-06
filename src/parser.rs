@@ -677,7 +677,8 @@ impl Token {
         Ok(out)
     }
 
-    /// Parse a symbol with potential attributes.
+    /// Parse a symbol with potential attributes and tags. Existing symbols may
+    /// have additional properties, but must have all specified attributes and tags.
     pub(crate) fn parse_symbol<T>(
         x: &str,
         namespace: &DefaultNamespace<T>,
@@ -718,11 +719,24 @@ impl Token {
 
                 let symbol_whole = format!("{}::{}", namespace, symbol);
 
-                SymbolBuilder::new(crate::atom::NamespacedSymbol::parse(&symbol_whole))
-                    .with_attributes(attributes)
-                    .with_tags(tags)
-                    .build_with_state(state)
-                    .map_err(|e| e.to_string())
+                // Parsed references do not carry aliases, callbacks, or user data.
+                // Reuse a compatible definition rather than redefining it.
+                if let Some(existing) = state.fetch_symbol(&symbol_whole)
+                    && attributes.iter().all(|attr| {
+                        existing
+                            .get_attributes_tuple()
+                            .contains(&(attr.clone(), true))
+                    })
+                    && tags.iter().all(|tag| existing.has_tag(tag))
+                {
+                    Ok(existing)
+                } else {
+                    SymbolBuilder::new(NamespacedSymbol::parse(&symbol_whole))
+                        .with_attributes(attributes)
+                        .with_tags(tags)
+                        .build_with_state(state)
+                        .map_err(|e| e.to_string())
+                }
             } else {
                 Err(format!("Malformatted attribute section in {}", x))
             }
