@@ -10,6 +10,7 @@ use crate::{
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     error,
+    id::Pattern,
     poly::{
         PolyVariable,
         series::{Series, SeriesDepth, SeriesError},
@@ -511,7 +512,9 @@ impl AtomView<'_> {
                         }
                         let a = f_eval.finish();
 
-                        let constant = a.replace(x.clone()).with(expansion_point.to_owned());
+                        let constant = a
+                            .replace(Pattern::Literal(Atom::from(x.clone())))
+                            .with(Pattern::Literal(expansion_point.to_owned()));
 
                         // TODO: depth is an overestimate
                         let order = info.absolute_order();
@@ -531,7 +534,9 @@ impl AtomView<'_> {
                                 break;
                             }
 
-                            let rep = d.replace(x.clone()).with(expansion_point.to_owned());
+                            let rep = d
+                                .replace(Pattern::Literal(Atom::from(x.clone())))
+                                .with(Pattern::Literal(expansion_point.to_owned()));
 
                             result = &result
                                 + &info
