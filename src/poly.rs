@@ -1533,7 +1533,15 @@ impl AtomView<'_> {
         &self,
         var_map: &Arc<Vec<PolyVariable>>,
     ) -> MultivariatePolynomial<AtomField, E> {
-        let poly = MultivariatePolynomial::<_, E>::new(&AtomField::new(), None, var_map.clone());
+        self.to_polynomial_in_vars_with_field(var_map, &AtomField::new())
+    }
+
+    pub(crate) fn to_polynomial_in_vars_with_field<E: Exponent>(
+        &self,
+        var_map: &Arc<Vec<PolyVariable>>,
+        field: &AtomField,
+    ) -> MultivariatePolynomial<AtomField, E> {
+        let poly = MultivariatePolynomial::<_, E>::new(field, None, var_map.clone());
         let mut polynomial = self.to_polynomial_in_vars_impl(var_map, &poly);
         polynomial.reduce_rational_power_variable_basis();
         polynomial
@@ -1549,9 +1557,9 @@ impl AtomView<'_> {
         var_map: &Arc<Vec<PolyVariable>>,
         poly: &MultivariatePolynomial<AtomField, E>,
     ) -> MultivariatePolynomial<AtomField, E> {
-        let field = AtomField::new();
+        let field = poly.ring();
         // see if the current term can be cast into a polynomial using a fast routine
-        if let Ok(num) = self.to_polynomial_expanded(&field, Some(var_map), false) {
+        if let Ok(num) = self.to_polynomial_expanded(field, Some(var_map), false) {
             return num;
         }
 
@@ -1639,7 +1647,7 @@ impl AtomView<'_> {
                         coefficients,
                         exponents,
                         var_map.clone(),
-                        &field,
+                        field,
                     )
                 }
             }
