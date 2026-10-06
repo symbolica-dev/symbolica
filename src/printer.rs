@@ -1165,6 +1165,9 @@ impl FormattedPrintNum for NumView<'_> {
 
             let suppress_imaginary_one =
                 !opts.mode.is_mathematica() && imag.numerator_ref().abs().is_one();
+            // Typst's slash only includes the adjacent factor unless the numerator is grouped.
+            let group_imaginary_numerator =
+                opts.mode.is_typst() && !imag.is_integer() && !suppress_imaginary_one;
 
             if !opts.mode.is_latex()
                 && (opts.number_thousands_separator.is_some() || print_state.superscript)
@@ -1203,6 +1206,9 @@ impl FormattedPrintNum for NumView<'_> {
                     if !global_negative && imag.is_negative() {
                         f.write_char('-')?;
                     }
+                    if group_imaginary_numerator {
+                        f.write_char('(')?;
+                    }
                     if !suppress_imaginary_one {
                         AtomPrinter::format_digits(
                             imag.numerator_ref().abs().to_string(),
@@ -1212,6 +1218,9 @@ impl FormattedPrintNum for NumView<'_> {
                         )?;
                     }
                     f.write_str(i_str)?;
+                    if group_imaginary_numerator {
+                        f.write_char(')')?;
+                    }
                     if !imag.is_integer() {
                         f.write_char('/')?;
                         AtomPrinter::format_digits(
@@ -1262,10 +1271,16 @@ impl FormattedPrintNum for NumView<'_> {
                         }
                         f.write_fmt(format_args!("{i_str}}}{{{}}}", imag.denominator_ref()))?;
                     } else {
+                        if group_imaginary_numerator {
+                            f.write_char('(')?;
+                        }
                         if !suppress_imaginary_one {
                             f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
                         }
                         f.write_str(i_str)?;
+                        if group_imaginary_numerator {
+                            f.write_char(')')?;
+                        }
                         if !imag.is_integer() {
                             f.write_fmt(format_args!("/{}", imag.denominator_ref()))?;
                         }
@@ -2445,6 +2460,33 @@ mod test {
         printer::{AnsiHtmlFormatter, AnsiWrap, AtomPrinter, ColorMode, PrintOptions, PrintState},
         symbol,
     };
+
+    #[test]
+    fn typst_imaginary_fractions() {
+        for separator in [None, Some('_')] {
+            let opts = PrintOptions {
+                number_thousands_separator: separator,
+                ..PrintOptions::typst()
+            };
+            for (input, expected) in [
+                ("81i/64", "(81𝑖)/64"),
+                ("-81i/64", "-(81𝑖)/64"),
+                ("2+81i/64", "2+(81𝑖)/64"),
+                ("2-81i/64", "2-(81𝑖)/64"),
+                ("1i/64", "𝑖/64"),
+                ("-1i/64", "-𝑖/64"),
+                ("81i", "81𝑖"),
+                ("81/64", "81/64"),
+                (
+                    "123456789012345678901234567891i/64",
+                    "(123456789012345678901234567891𝑖)/64",
+                ),
+            ] {
+                let output = parse!(input).format_string(&opts, PrintState::new());
+                assert_eq!(output.replace('_', ""), expected, "{input}");
+            }
+        }
+    }
 
     #[test]
     fn unicode_imaginary_unit() {
