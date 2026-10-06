@@ -1314,11 +1314,34 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         var_map: impl IntoVariableMap,
     ) -> MultivariatePolynomial<AtomField, E> {
+        self.to_polynomial_in_vars_with_field(var_map, &AtomField::new())
+    }
+
+    /// Convert to a polynomial in specific variables using the supplied
+    /// expression coefficient field. Other parts remain expression coefficients.
+    ///
+    /// Unlike [`AtomCore::to_polynomial_in_vars`], this permits configuring
+    /// coefficient normalization and zero testing settings.
+    ///
+    /// ```
+    /// use symbolica::{prelude::*, domains::atom::AtomField};
+    /// let field = AtomField { statistical_zero_test: false, ..AtomField::new() };
+    /// let expression = parse!("t*(x+y)^100");
+    /// let polynomial = expression.to_polynomial_in_vars_with_field::<u32>(symbol!("t"), &field);
+    /// assert_eq!(polynomial.nterms(), 1);
+    /// assert!(!polynomial.ring().statistical_zero_test);
+    /// ```
+    fn to_polynomial_in_vars_with_field<E: Exponent>(
+        &self,
+        var_map: impl IntoVariableMap,
+        field: &AtomField,
+    ) -> MultivariatePolynomial<AtomField, E> {
         let var_map = var_map
             .into_var_map()
             .expect("Could not convert variables to a variable map")
             .expect("A variable map is required");
-        self.as_atom_view().to_polynomial_in_vars(&var_map)
+        self.as_atom_view()
+            .to_polynomial_in_vars_with_field(&var_map, field)
     }
 
     /// Convert the atom to a rational polynomial, optionally in the variable ordering
