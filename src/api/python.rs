@@ -94,7 +94,6 @@ use crate::{
         ComplexEvaluatorSettings, Dualizer, ExportedInstructions, ExportedSubEvaluator,
         ExpressionEvaluator, FunctionMap, Instruction, OptimizationSettings, Slot,
     },
-    graph::{GenerationSettings, Graph, HalfEdge},
     id::{
         Condition, ConditionResult, Evaluate, Match, MatchSettings, MatchStack, Pattern,
         PatternAtomTreeIterator, PatternRestriction, Relation, ReplaceIterator, ReplaceSettings,
@@ -156,7 +155,6 @@ mod citation;
 mod condition;
 mod evaluator;
 mod expression;
-mod graph;
 mod integer;
 #[cfg(feature = "python_stubgen")]
 pub use integer::stub_info;
@@ -171,7 +169,6 @@ pub use atom::*;
 pub use citation::Citation;
 pub use evaluator::*;
 pub use expression::*;
-pub use graph::*;
 pub use integer::*;
 pub use integration::*;
 pub use matrix::*;
@@ -694,8 +691,6 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonPatternRestriction>()?;
     m.add_class::<PythonTermStreamer>()?;
     m.add_class::<PythonSeries>()?;
-    m.add_class::<PythonHalfEdge>()?;
-    m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
 
     m.add("Integers", PythonSolveDomain::Integers)?;
