@@ -2,7 +2,7 @@ use super::*;
 
 impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Inline generated scalar instructions without dualizing them again.
-    fn inline_vector_components(
+    pub(super) fn inline_vector_components(
         &self,
         args: &[Slot],
         ins: &mut InstructionList<T>,
@@ -200,7 +200,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 }
             }
         }
-        let old_constants_num = constants.len();
 
         let mut slot_map = HashMap::default();
         for x in 0..self.reserved_indices {
@@ -217,17 +216,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                     Slot::Const($i - self.param_count)
                 } else {
                     Slot::Temp($i - self.reserved_indices)
-                }
-            };
-        }
-
-        macro_rules! from_slot {
-            ($i:expr) => {
-                match $i {
-                    Slot::Param(x) => x,
-                    Slot::Const(x) => x + self.param_count,
-                    Slot::Temp(x) => x + self.reserved_indices,
-                    Slot::Out(_) => unreachable!(),
                 }
             };
         }
@@ -378,108 +366,22 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             );
         }
 
-        self.stack.clear();
-        self.stack.resize(self.param_count, T::default());
-        self.stack.extend(ins.constants);
-
-        let stack_shift = self.stack.len() - old_constants_num - self.param_count;
-
-        let mut new_result_indices = vec![];
-        for x in 0..self.result_indices.len() {
-            let mut p = slot_map[&self.result_indices[x]];
-            if p >= self.reserved_indices {
-                p += stack_shift;
-            }
-
-            for i in 0..v.get_dimension() {
-                new_result_indices.push(p + i);
-            }
-        }
-
-        self.reserved_indices += stack_shift;
-        self.result_indices = new_result_indices;
-
-        for i in ins.instructions {
-            let out = self.instructions.len() + self.reserved_indices;
-            match i {
-                VectorInstruction::Add(slot, slot1) => {
-                    let mut s1 = from_slot!(slot);
-                    let mut s2 = from_slot!(slot1);
-                    if s1 > s2 {
-                        (s1, s2) = (s2, s1);
-                    }
-
-                    self.instructions
-                        .push((Instr::Add(out, vec![s1, s2]), ComplexPhase::Any));
-                }
-                VectorInstruction::Assign(slot) => {
-                    self.instructions
-                        .push((Instr::Add(out, vec![from_slot!(slot)]), ComplexPhase::Any));
-                }
-                VectorInstruction::Mul(slot, slot1) => {
-                    let mut s1 = from_slot!(slot);
-                    let mut s2 = from_slot!(slot1);
-                    if s1 > s2 {
-                        (s1, s2) = (s2, s1);
-                    }
-
-                    self.instructions
-                        .push((Instr::Mul(out, vec![s1, s2]), ComplexPhase::Any));
-                }
-                VectorInstruction::Pow(slot, e) => {
-                    self.instructions
-                        .push((Instr::Pow(out, from_slot!(slot), e), ComplexPhase::Any));
-                }
-                VectorInstruction::Powf(slot, slot1) => {
-                    self.instructions.push((
-                        Instr::Powf(out, from_slot!(slot), from_slot!(slot1)),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::BuiltinFun(builtin_symbol, slot) => {
-                    self.instructions.push((
-                        Instr::BuiltinFun(out, builtin_symbol, from_slot!(slot)),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::ExternalFun(f, args) => {
-                    self.instructions.push((
-                        Instr::ExternalFun(out, f, args.iter().map(|x| from_slot!(*x)).collect()),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::IfElse(cond, label) => {
-                    self.instructions
-                        .push((Instr::IfElse(from_slot!(cond), label), ComplexPhase::Any));
-                }
-                VectorInstruction::Goto(label) => {
-                    self.instructions
-                        .push((Instr::Goto(label), ComplexPhase::Any));
-                }
-                VectorInstruction::Label(label) => {
-                    self.instructions
-                        .push((Instr::Label(label), ComplexPhase::Any));
-                }
-                VectorInstruction::Join(cond, t, f) => {
-                    self.instructions.push((
-                        Instr::Join(out, from_slot!(cond), from_slot!(t), from_slot!(f)),
-                        ComplexPhase::Any,
-                    ));
-                }
-            }
-        }
-
-        self.stack.resize(
-            self.reserved_indices + self.instructions.len(),
-            T::default(),
-        );
-        self.external_fns = new_external_fns;
-
-        self.remove_common_pairs();
-        self.optimize_stack();
-        self.fix_labels();
-
-        Ok(self)
+        let results = self
+            .result_indices
+            .iter()
+            .flat_map(|index| {
+                let slot = get_slot!(slot_map[index]);
+                (0..v.get_dimension()).map(move |component| slot.index(component))
+            })
+            .collect();
+        Ok(Self::from_instruction_list(
+            self.param_count,
+            ins,
+            new_external_fns,
+            results,
+            self.settings,
+            Some(1),
+        ))
     }
 }
 
