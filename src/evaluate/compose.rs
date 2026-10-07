@@ -1,4 +1,5 @@
 use super::*;
+mod optimize;
 
 /// Assemble scalar evaluator programs using their existing input/output slots.
 ///
@@ -79,22 +80,32 @@ impl<T: Default + Clone> EvaluatorComposer<T> {
     }
 
     /// Finish the program with selected/reordered outputs and native optimization.
+    /// Straight-line programs discard instructions and callback constants that do
+    /// not contribute to an output. Programs with control flow are kept intact.
+    /// Literal and callback constants are deduplicated before native CSE/CPE.
     pub fn finish(
-        self,
+        mut self,
         outputs: &[Slot],
         settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<T>, String> {
+    ) -> Result<ExpressionEvaluator<T>, String>
+    where
+        T: Eq + Hash,
+    {
         if let Some(slot) = outputs.iter().find(|slot| !self.valid(**slot)) {
             return Err(format!("Invalid evaluator composition output slot {slot}"));
         }
         let rounds = settings.cpe_iterations;
+        let mut outputs = outputs.to_vec();
+        self.prune_unused(&mut outputs);
+        self.deduplicate_constants(&mut outputs);
         Ok(ExpressionEvaluator::from_instruction_list(
             self.parameters,
             self.instructions,
             self.external_functions,
-            outputs.to_vec(),
+            outputs,
             settings,
             rounds,
+            true,
         ))
     }
 }
@@ -108,6 +119,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         outputs: Vec<Slot>,
         settings: OptimizationSettings,
         cpe_rounds: Option<usize>,
+        eliminate_common_instructions: bool,
     ) -> Self {
         let reserved_indices = param_count + instructions.constants.len();
         let index = |slot| match slot {
@@ -161,8 +173,22 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             external_fns,
             settings,
         };
+        if eliminate_common_instructions {
+            loop {
+                if evaluator.settings.abort_level > 0 || evaluator.remove_common_instructions() == 0
+                {
+                    evaluator.settings.abort_level = 0;
+                    break;
+                }
+            }
+        }
         for _ in 0..cpe_rounds.unwrap_or(usize::MAX) {
-            if evaluator.remove_common_pairs() == 0 {
+            if (eliminate_common_instructions && evaluator.settings.abort_level > 0)
+                || evaluator.remove_common_pairs() == 0
+            {
+                if eliminate_common_instructions {
+                    evaluator.settings.abort_level = 0;
+                }
                 break;
             }
         }

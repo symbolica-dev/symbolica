@@ -7,7 +7,7 @@ fn composition_preserves_native_control_flow_callbacks_and_admission() {
     let settings = OptimizationSettings::new()
         .horner_iterations(0)
         .cores(1)
-        .cpe_iterations(Some(0));
+        .cpe_iterations(Some(1000));
     let p = Atom::evaluator_multiple(
         &[
             parse!("x+y+x*y"),
@@ -143,4 +143,117 @@ fn composition_preserves_native_control_flow_callbacks_and_admission() {
     println!(
         "PASS: appended nested branch programs repeatedly toggle both conditions; reordered/fanout/repeated outputs; dynamic gamma and precision-aware gamma constants; huge negative exact rational; zero-input constants; failed append atomicity after valid work (arity, all slot kinds, non-inlined function); empty output and invalid finish; eager and SymJIT O2 agree with independent native program calls."
     );
+}
+
+#[test]
+fn selected_outputs_prune_dead_jets_and_callbacks_before_optimization() {
+    use symbolica::{domains::dual::HyperDual, evaluate::Dualizer};
+    let settings = OptimizationSettings::new()
+        .horner_iterations(0)
+        .cores(1)
+        .cpe_iterations(Some(0));
+    let original = Atom::evaluator_multiple(
+        &[parse!("x+x^2+x^3+x^4"), parse!("gamma(x)+gamma(1/2)")],
+        &[parse!("x")],
+    )
+    .optimization_settings(settings.clone())
+    .build()
+    .unwrap();
+    let shape = (0..5).map(|i| vec![i]).collect::<Vec<_>>();
+    let lowered = original
+        .vectorize(&Dualizer::new(
+            HyperDual::<Complex<Rational>>::new(shape),
+            vec![],
+        ))
+        .unwrap();
+    let original_instructions = lowered.export_instructions().instructions.len();
+    let seed = Atom::evaluator_multiple(
+        &[
+            parse!("x"),
+            Atom::num(1),
+            Atom::num(0),
+            Atom::num(0),
+            Atom::num(0),
+        ],
+        &[parse!("x")],
+    )
+    .optimization_settings(settings.clone())
+    .build()
+    .unwrap();
+    let mut composed = EvaluatorComposer::new(1);
+    let input = composed.append(&seed, &[Slot::Param(0)]).unwrap();
+    let output = composed.append(&lowered, &input).unwrap();
+    let exact = composed
+        .finish(&[output[0], output[1]], settings.clone())
+        .unwrap();
+    let exported = exact.export_instructions();
+    assert!(exported.instructions.len() < original_instructions);
+    assert!(exported.constant_functions.is_empty());
+    let mut evaluator = exact.map_coeff(&|c| c.re.to_f64());
+    for x in [0., 0.25, 1., 2.] {
+        let mut values = [0.; 2];
+        evaluator.evaluate(&[x], &mut values);
+        assert_eq!(
+            values,
+            [
+                x + x * x + x * x * x + x * x * x * x,
+                1. + 2. * x + 3. * x * x + 4. * x * x * x
+            ]
+        );
+    }
+
+    // A dead callback-only owner contributes neither a constant nor a callback.
+    let callback = parse!("gamma(1/2)")
+        .evaluator(&[] as &[Atom])
+        .optimization_settings(settings.clone())
+        .build()
+        .unwrap();
+    let mut unused = EvaluatorComposer::new(1);
+    unused.append(&callback, &[]).unwrap();
+    let passthrough = unused.finish(&[Slot::Param(0)], settings).unwrap();
+    let exported = passthrough.export_instructions();
+    assert!(exported.instructions.iter().all(|instruction| matches!(
+        instruction,
+        symbolica::evaluate::Instruction::Assign(Slot::Out(0), Slot::Param(0))
+    )));
+    assert!(exported.constants.is_empty());
+    assert!(exported.constant_functions.is_empty());
+}
+
+#[test]
+fn repeated_constants_and_instructions_share_native_storage() {
+    let settings = OptimizationSettings::new()
+        .horner_iterations(0)
+        .cores(1)
+        .cpe_iterations(Some(0));
+    let original = Atom::evaluator_multiple(
+        &[
+            parse!("(x+2)^3+gamma(1/2)"),
+            Atom::num(0),
+            parse!("gamma(1/3)"),
+        ],
+        &[parse!("x")],
+    )
+    .optimization_settings(settings.clone())
+    .build()
+    .unwrap();
+    let mut c = EvaluatorComposer::new(1);
+    let first = c.append(&original, &[Slot::Param(0)]).unwrap();
+    let second = c.append(&original, &[Slot::Param(0)]).unwrap();
+    let exact = c
+        .finish(&[first[0], second[0], first[1], second[2]], settings)
+        .unwrap();
+    let exported = exact.export_instructions();
+    assert_eq!(exported.constant_functions.len(), 2);
+    assert_eq!(exported.constants.len(), original.get_constants().len());
+    assert_eq!(exact.count_operations(), original.count_operations());
+    let mut expected = original.map_coeff(&|c| c.re.to_f64());
+    let mut actual = exact.map_coeff(&|c| c.re.to_f64());
+    for x in [-2., 0., 2.] {
+        let mut e = [0.; 3];
+        let mut a = [0.; 4];
+        expected.evaluate(&[x], &mut e);
+        actual.evaluate(&[x], &mut a);
+        assert_eq!(a, [e[0], e[0], 0., e[2]]);
+    }
 }

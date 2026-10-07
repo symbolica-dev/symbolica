@@ -381,6 +381,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             results,
             self.settings,
             Some(1),
+            false,
         ))
     }
 }
