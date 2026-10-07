@@ -244,8 +244,13 @@ impl bincode::Encode for Integer {
                 val.get().encode(encoder)
             }
             Integer::Large(val) => {
-                2u8.encode(encoder)?;
-                let bytes = mp_to_be_bytes(val);
+                let bytes = if val.is_negative() {
+                    3u8.encode(encoder)?;
+                    mp_to_be_bytes(&val.as_abs())
+                } else {
+                    2u8.encode(encoder)?;
+                    mp_to_be_bytes(val)
+                };
                 bytes.encode(encoder)
             }
         }
@@ -269,11 +274,11 @@ impl<Context> bincode::Decode<Context> for Integer {
                 let val = i128::decode(decoder)?;
                 Ok(Integer::from_double(val))
             }
-            2 => {
+            2 | 3 => {
                 let b = Vec::<u8>::decode(decoder)?;
                 let val =
                     mp_from_be_bytes(&b).map_err(|e| bincode::error::DecodeError::Other(e))?;
-                Ok(Integer::Large(val))
+                Ok(Integer::Large(if variant == 3 { -val } else { val }))
             }
             _ => Err(bincode::error::DecodeError::OtherString(format!(
                 "Invalid variant for Integer: {}",
