@@ -13,6 +13,8 @@ pub struct Citation {
     pub reference: String,
     /// A ready-to-export BibTeX entry.
     pub bibtex: String,
+    /// A hyperlink to the work.
+    pub url: String,
     /// The reasons for including this citation, optionally formatted as Markdown.
     pub reasons: Vec<String>,
     /// A description of the citation, optionally formatted as Markdown.
@@ -39,29 +41,34 @@ impl Citation {
     /// Create a citation. Reasons and description may contain Markdown.
     /// Relevance is a library-defined score; None means unknown, not zero.
     #[new]
-    #[pyo3(signature = (id, reference, bibtex, *, reasons = Vec::new(), description = String::new(), relevance = None))]
+    #[pyo3(signature = (id, reference, bibtex, *, reasons = Vec::new(), description = String::new(), url = String::new(), relevance = None))]
     pub fn new(
         id: String,
         reference: String,
         bibtex: String,
         reasons: Vec<String>,
         description: String,
+        url: String,
         relevance: Option<usize>,
     ) -> Self {
         Self {
             id,
             reference,
             bibtex,
+            url,
             reasons,
             description,
             relevance,
         }
     }
 
-    /// Display the reference, identifier, description, reasons and known relevance.
+    /// Display the reference, identifier, URL, description, reasons and known relevance.
     /// The BibTeX entry is available separately through to_bibtex().
     pub fn __str__(&self) -> String {
         let mut sections = vec![self.reference.clone(), format!("ID: {}", self.id)];
+        if !self.url.is_empty() {
+            sections.push(format!("URL: {}", self.url));
+        }
         if !self.description.is_empty() {
             sections.push(self.description.clone());
         }
@@ -93,10 +100,20 @@ impl Citation {
     /// Reasons and description are preserved as Markdown.
     #[pyo3(signature = (include_bibtex = false))]
     pub fn to_markdown(&self, include_bibtex: bool) -> String {
-        let mut sections = vec![
-            escape_markdown(&self.reference),
-            format!("**ID:** {}", escape_markdown(&self.id)),
-        ];
+        let mut id = escape_markdown(&self.id);
+        if !self.url.is_empty() {
+            // Angle-bracket destinations allow spaces and parentheses. Encode characters
+            // that could escape the destination or introduce a new Markdown line.
+            let destination = self
+                .url
+                .replace('\\', "%5C")
+                .replace('<', "%3C")
+                .replace('>', "%3E")
+                .replace('\r', "%0D")
+                .replace('\n', "%0A");
+            id = format!("[{id}](<{destination}>)");
+        }
+        let mut sections = vec![escape_markdown(&self.reference), format!("**ID:** {id}")];
         if !self.description.is_empty() {
             sections.push(self.description.clone());
         }
@@ -144,12 +161,15 @@ impl Citation {
     /// use to_markdown() to export their Markdown formatting.
     pub fn _repr_html_(&self) -> String {
         let escape = crate::printer::AnsiHtmlFormatter::escape_html;
+        let mut id = format!("<code>{}</code>", escape(&self.id));
+        if !self.url.is_empty() {
+            id = format!("<a href=\"{}\">{id}</a>", escape(&self.url));
+        }
         let mut html = format!(
             "<div class=\"symbolica-citation\">\
              <p style=\"white-space: pre-wrap\"><strong>{}</strong></p>\
-             <p><strong>ID:</strong> <code>{}</code></p>",
+             <p><strong>ID:</strong> {id}</p>",
             escape(&self.reference),
-            escape(&self.id),
         );
         if !self.description.is_empty() {
             html.push_str(&format!(
