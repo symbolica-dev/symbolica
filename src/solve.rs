@@ -8,6 +8,12 @@
 
 use std::{ops::Neg, sync::Arc};
 
+mod bracketed;
+pub use bracketed::{
+    BracketedRoot, BracketedRootConvergence, BracketedRootError, BracketedRootOptions,
+    BracketedRootTermination, nsolve_bracketed,
+};
+
 use ahash::{HashMap, HashSet};
 use numerica::domains::{
     Field, RealEmbedding, Ring, RingOps,
