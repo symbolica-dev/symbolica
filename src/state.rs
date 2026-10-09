@@ -283,6 +283,55 @@ thread_local!(
     static RUNNING_STATE_INITIALIZER: Cell<bool> = const { Cell::new(false) }
 );
 
+// Registry entries are append-only and immutable, but can depend on each other
+// in both directions: polynomial variables reference symbols, while symbol user
+// data can reference coefficient domains. Two equal collections of monotonic
+// bounds establish an overlapping unchanged interval across all registries.
+// Never acquire the State lock here: build_group invokes public generators while
+// holding it, and those generators may export existing atoms. Caller Write code
+// may also register new entries, which the captured prefixes must exclude.
+// As with existing atoms, unsafe State::reset must not overlap this operation.
+#[derive(PartialEq, Eq)]
+struct ExportSnapshot {
+    symbol_offset: usize,
+    symbols: usize,
+    finite_field_offset: usize,
+    finite_fields: usize,
+    variable_list_offset: usize,
+    variable_lists: usize,
+}
+
+impl ExportSnapshot {
+    fn capture() -> Self {
+        if ID_TO_STR.len() == 0 {
+            State::initialize_state();
+        }
+        let mut snapshot = Self::read_prefixes();
+        loop {
+            let next = Self::read_prefixes();
+            if snapshot == next {
+                return snapshot;
+            }
+            snapshot = next;
+            std::hint::spin_loop();
+        }
+    }
+
+    fn read_prefixes() -> Self {
+        let symbol_offset = SYMBOL_OFFSET.load(Ordering::Relaxed);
+        let finite_field_offset = FINITE_FIELDS_OFFSET.load(Ordering::Relaxed);
+        let variable_list_offset = VARIABLE_LIST_OFFSET.load(Ordering::Relaxed);
+        Self {
+            symbol_offset,
+            symbols: ID_TO_STR.len() - symbol_offset,
+            finite_field_offset,
+            finite_fields: FINITE_FIELDS.len() - finite_field_offset,
+            variable_list_offset,
+            variable_lists: VARIABLE_LISTS.len() - variable_list_offset,
+        }
+    }
+}
+
 /// A global state, that stores mappings from variable and function names to ids.
 pub struct State {
     str_to_id: HashMap<String, Symbol>,
@@ -1233,31 +1282,37 @@ impl State {
     /// Write the state to a binary stream.
     #[inline(always)]
     pub fn export<W: Write>(dest: &mut W) -> Result<(), std::io::Error> {
-        if ID_TO_STR.len() == 0 {
-            Self::initialize_state();
-        }
+        let snapshot = ExportSnapshot::capture();
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
         dest.write_u8(FULL_STATE_EXPORT_FLAG)?;
 
-        dest.write_u64::<LittleEndian>(
-            ID_TO_STR.len() as u64 - SYMBOL_OFFSET.load(Ordering::Relaxed) as u64,
-        )?;
+        dest.write_u64::<LittleEndian>(snapshot.symbols as u64)?;
 
-        for (s, _) in State::symbol_iter() {
+        for (s, _) in ID_TO_STR
+            .iter()
+            .skip(snapshot.symbol_offset)
+            .take(snapshot.symbols)
+        {
             s.export(dest)?;
         }
 
-        let finite_field_start = FINITE_FIELDS_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64 - finite_field_start as u64)?;
-        for x in FINITE_FIELDS.iter().skip(finite_field_start) {
+        dest.write_u64::<LittleEndian>(snapshot.finite_fields as u64)?;
+        for x in FINITE_FIELDS
+            .iter()
+            .skip(snapshot.finite_field_offset)
+            .take(snapshot.finite_fields)
+        {
             dest.write_u64::<LittleEndian>(x.get_prime())?;
         }
 
-        let start = VARIABLE_LIST_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(VARIABLE_LISTS.len() as u64 - start as u64)?;
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        dest.write_u64::<LittleEndian>(snapshot.variable_lists as u64)?;
+        for x in VARIABLE_LISTS
+            .iter()
+            .skip(snapshot.variable_list_offset)
+            .take(snapshot.variable_lists)
+        {
             dest.write_u64::<LittleEndian>(x.len() as u64)?;
             for y in x.iter() {
                 match y {
@@ -1311,12 +1366,12 @@ impl State {
         dest: &mut W,
         mut symbols: HashSet<Symbol>,
     ) -> Result<(), std::io::Error> {
-        if ID_TO_STR.len() == 0 {
-            Self::initialize_state();
-        }
-
-        let start = VARIABLE_LIST_OFFSET.load(Ordering::Relaxed);
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        let snapshot = ExportSnapshot::capture();
+        for x in VARIABLE_LISTS
+            .iter()
+            .skip(snapshot.variable_list_offset)
+            .take(snapshot.variable_lists)
+        {
             for y in x.iter() {
                 match y {
                     PolyVariable::Symbol(s) => {
@@ -1341,21 +1396,33 @@ impl State {
 
         dest.write_u64::<LittleEndian>(symbols.len() as u64)?;
 
-        for (i, (s, _)) in State::symbol_iter().enumerate() {
-            if symbols.contains(&s) {
+        for (i, (s, _)) in ID_TO_STR
+            .iter()
+            .skip(snapshot.symbol_offset)
+            .take(snapshot.symbols)
+            .enumerate()
+        {
+            if symbols.contains(s) {
                 dest.write_u32::<LittleEndian>(i as u32)?;
                 s.export(dest)?;
             }
         }
 
-        let finite_field_start = FINITE_FIELDS_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64 - finite_field_start as u64)?;
-        for x in FINITE_FIELDS.iter().skip(finite_field_start) {
+        dest.write_u64::<LittleEndian>(snapshot.finite_fields as u64)?;
+        for x in FINITE_FIELDS
+            .iter()
+            .skip(snapshot.finite_field_offset)
+            .take(snapshot.finite_fields)
+        {
             dest.write_u64::<LittleEndian>(x.get_prime())?;
         }
 
-        dest.write_u64::<LittleEndian>(VARIABLE_LISTS.len() as u64 - start as u64)?;
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        dest.write_u64::<LittleEndian>(snapshot.variable_lists as u64)?;
+        for x in VARIABLE_LISTS
+            .iter()
+            .skip(snapshot.variable_list_offset)
+            .take(snapshot.variable_lists)
+        {
             dest.write_u64::<LittleEndian>(x.len() as u64)?;
             for y in x.iter() {
                 match y {
