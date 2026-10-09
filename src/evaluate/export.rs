@@ -428,7 +428,7 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                     res += &format!(
                         "static const simd {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
                         function_name,
-                        self.reserved_indices - self.param_count + 2,
+                        self.reserved_indices - self.param_count + 3,
                         {
                             let mut nums = (self.param_count..self.reserved_indices)
                                 .map(|i| {
@@ -441,6 +441,10 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                                 .collect::<Vec<_>>();
                             nums.push("-0.".to_string()); // used for inversion
                             nums.push("1".to_string()); // used for real inversion
+                            nums.push(format!(
+                                "simd(std::complex<double>({0:e}, {0:e}))",
+                                f64::MAX
+                            ));
                             nums.join(",")
                         }
                     );
@@ -484,7 +488,12 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                 res += "\treturn;\n}\n";
             }
             InlineASM::None => {
-                res += &self.export_generic_cpp_str(function_name, &settings, NumberClass::RealF64);
+                let number_class = if complex {
+                    NumberClass::ComplexF64
+                } else {
+                    NumberClass::RealF64
+                };
+                res += &self.export_generic_cpp_str(function_name, &settings, number_class);
 
                 res += &format!(
                     "\nextern \"C\" {{\n\tvoid {function_name}(simd *params, simd *buffer, simd *out) {{\n\t\t{function_name}_gen(params, buffer, out);\n\t\treturn;\n\t}}\n}}\n"
@@ -866,7 +875,7 @@ extern "C" {{
         res += &format!(
             "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
             function_name,
-            self.reserved_indices - self.param_count + 2,
+            self.reserved_indices - self.param_count + 3,
             {
                 let mut nums = (self.param_count..self.reserved_indices)
                     .map(|i| {
@@ -876,6 +885,7 @@ extern "C" {{
                     .collect::<Vec<_>>();
                 nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
                 nums.push("1".to_string()); // used for real inversion
+                nums.push(format!("std::complex<double>({0:e}, {0:e})", f64::MAX));
                 nums.join(",")
             }
         );
@@ -955,6 +965,12 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                     "std::complex<double>(0, -0.)".to_string()
                 });
                 constants.push("1".to_string());
+                let limit = format!("std::complex<double>({0:e}, {0:e})", f64::MAX);
+                constants.push(if asm == InlineASM::AVX2 {
+                    format!("simd({limit})")
+                } else {
+                    limit
+                });
                 output.push_str(&format!(
                     "static const {number_type} {function_name}_CONSTANTS_complex[{}] = {{{}}};\n\n",
                     constants.len(),
@@ -1551,7 +1567,20 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
 
                     match o {
                         MemOrReg::Reg(out_reg) => {
-                            if let Some(j) = a.iter().find(|x| **x == MemOrReg::Reg(*out_reg)) {
+                            let destination = *out_reg;
+                            // A repeated input must retain its original value throughout
+                            // the operation, even when its register is reused for the output.
+                            let out_reg = if a
+                                .iter()
+                                .filter(|x| **x == MemOrReg::Reg(destination))
+                                .count()
+                                > 1
+                            {
+                                15 // reserved scratch register
+                            } else {
+                                destination
+                            };
+                            if let Some(j) = a.iter().find(|x| **x == MemOrReg::Reg(out_reg)) {
                                 // we can recycle the register completely
                                 let mut first_skipped = false;
                                 for i in a {
@@ -1728,6 +1757,26 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                             InlineASM::None => unreachable!(),
                                         }
                                     }
+                                }
+                            }
+                            if out_reg != destination {
+                                match asm_flavour {
+                                    InlineASM::X64 => {
+                                        *out += &format!(
+                                            "\t\t\"movapd %%xmm{out_reg}, %%xmm{destination}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::AVX2 => {
+                                        *out += &format!(
+                                            "\t\t\"vmovapd %%ymm{out_reg}, %%ymm{destination}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::AArch64 => {
+                                        *out += &format!(
+                                            "\t\t\"fmov d{destination}, d{out_reg}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::None => unreachable!(),
                                 }
                             }
                         }
@@ -1933,7 +1982,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                                 );
 
                                                 *out += &format!(
-                                                    "\t\t\"vdivsd %%ymm{tmp_reg}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
+                                                    "\t\t\"vdivpd %%ymm{tmp_reg}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
                                                 );
                                             } else {
                                                 panic!("No free registers for division")
@@ -2711,8 +2760,8 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                 InlineASM::AVX2 => {
                                     if $real {
                                         *out += &format!(
-                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0\\n\\t\"\n",
-                                            $i + 1
+                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0, %%ymm0\\n\\t\"\n",
+                                            2 * $i
                                         );
                                         *out +=
                                             &format!("\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\""); // im = 0
@@ -2823,17 +2872,32 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                         addr_o.0
                                     );
                                 } else {
+                                    // Normalize by the largest component before squaring,
+                                    // then divide by that scale after the normalized norm.
+                                    // Clamp infinite scales to retain non-finite division behavior.
                                     *out += &format!(
                                         "\t\t\"movupd {}, %%xmm0\\n\\t\"
 \t\t\"movupd {}(%1), %%xmm1\\n\\t\"
 \t\t\"movapd %%xmm0, %%xmm2\\n\\t\"
+\t\t\"xorpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"subpd %%xmm2, %%xmm3\\n\\t\"
+\t\t\"maxpd %%xmm3, %%xmm2\\n\\t\"
+\t\t\"movapd %%xmm2, %%xmm3\\n\\t\"
+\t\t\"shufpd $1, %%xmm3, %%xmm3\\n\\t\"
+\t\t\"maxpd %%xmm3, %%xmm2\\n\\t\"
+\t\t\"movupd {}(%1), %%xmm4\\n\\t\"
+\t\t\"minpd %%xmm4, %%xmm2\\n\\t\"
+\t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
 \t\t\"xorpd %%xmm1, %%xmm0\\n\\t\"
-\t\t\"mulpd %%xmm2, %%xmm2\\n\\t\"
-\t\t\"haddpd %%xmm2, %%xmm2\\n\\t\"
+\t\t\"movapd %%xmm0, %%xmm3\\n\\t\"
+\t\t\"mulpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"haddpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"divpd %%xmm3, %%xmm0\\n\\t\"
 \t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
 \t\t\"movupd %%xmm0, {}\\n\\t\"\n",
                                         addr_b.0,
                                         (self.reserved_indices - self.param_count) * 16,
+                                        (self.reserved_indices - self.param_count + 2) * 16,
                                         addr_o.0
                                     );
                                 }
@@ -2858,6 +2922,16 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                     *out += &format!(
                                         "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
 \t\t\"vmovupd {1}, %%ymm1\\n\\t\"
+\t\t\"vxorpd %%ymm2, %%ymm2, %%ymm2\\n\\t\"
+\t\t\"vsubpd %%ymm0, %%ymm2, %%ymm3\\n\\t\"
+\t\t\"vmaxpd %%ymm3, %%ymm0, %%ymm3\\n\\t\"
+\t\t\"vsubpd %%ymm1, %%ymm2, %%ymm4\\n\\t\"
+\t\t\"vmaxpd %%ymm4, %%ymm1, %%ymm4\\n\\t\"
+\t\t\"vmaxpd %%ymm4, %%ymm3, %%ymm2\\n\\t\"
+\t\t\"vbroadcastsd {5}(%1), %%ymm5\\n\\t\"
+\t\t\"vminpd %%ymm5, %%ymm2, %%ymm2\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm0, %%ymm0\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vmulpd %%ymm0, %%ymm0, %%ymm3\\n\\t\"
 \t\t\"vmulpd %%ymm1, %%ymm1, %%ymm4\\n\\t\"
 \t\t\"vaddpd %%ymm3, %%ymm4, %%ymm3\\n\\t\"
@@ -2865,13 +2939,16 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
 \t\t\"vbroadcastsd {2}(%1), %%ymm4\\n\\t\"
 \t\t\"vxorpd %%ymm4, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vdivpd %%ymm3, %%ymm1, %%ymm1\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm0, %%ymm0\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vmovupd %%ymm0, {3}\\n\\t\"
 \t\t\"vmovupd %%ymm1, {4}\\n\\t\"\n",
                                         addr_b.0,
                                         addr_b.1,
                                         (self.reserved_indices - self.param_count) * 64,
                                         addr_o.0,
-                                        addr_o.1
+                                        addr_o.1,
+                                        (self.reserved_indices - self.param_count + 2) * 64
                                     );
                                 }
                             }
@@ -2891,12 +2968,24 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                                         (self.reserved_indices - self.param_count + 1) * 16
                                     );
                                 } else {
-                                    *out += "
-\t\t\"fmul    d2, d0, d0\\n\\t\"
-\t\t\"fmadd   d2, d1, d1, d2\\n\\t\"
-\t\t\"fneg    d1, d1\\n\\t\"
+                                    *out += &format!(
+                                        "
+\t\t\"fabs    d2, d0\\n\\t\"
+\t\t\"fabs    d3, d1\\n\\t\"
+\t\t\"fmax    d2, d2, d3\\n\\t\"
+\t\t\"ldr     d4, [%1, {}]\\n\\t\"
+\t\t\"fminnm  d2, d2, d4\\n\\t\"
 \t\t\"fdiv    d0, d0, d2\\n\\t\"
-\t\t\"fdiv    d1, d1, d2\\n\\t\"\n";
+\t\t\"fdiv    d1, d1, d2\\n\\t\"
+\t\t\"fmul    d3, d0, d0\\n\\t\"
+\t\t\"fmadd   d3, d1, d1, d3\\n\\t\"
+\t\t\"fneg    d1, d1\\n\\t\"
+\t\t\"fdiv    d0, d0, d3\\n\\t\"
+\t\t\"fdiv    d1, d1, d3\\n\\t\"
+\t\t\"fdiv    d0, d0, d2\\n\\t\"
+\t\t\"fdiv    d1, d1, d2\\n\\t\"\n",
+                                        (self.reserved_indices - self.param_count + 2) * 16
+                                    );
                                 }
 
                                 let addr_o = asm_load!(*o);

@@ -2376,12 +2376,6 @@ impl CompiledNumber for Complex<wide::f64x4> {
         function_name: &str,
         settings: ExportSettings,
     ) -> Result<String, String> {
-        if !eval.stack.iter().all(|x| x.is_real()) {
-            return Err(
-                "Cannot create real evaluator with complex coefficients. Use Complex<f64>".into(),
-            );
-        }
-
         Ok(match settings.inline_asm {
             // assume AVX2 for X64
             InlineASM::X64 => eval.export_simd_str(function_name, settings, true, InlineASM::AVX2),

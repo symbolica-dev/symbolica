@@ -5,7 +5,7 @@ use std::{path::PathBuf, process::Command};
 use symbolica::{
     atom::{Atom, AtomCore, EvaluationInfo},
     domains::float::Complex,
-    evaluate::{ExportNumber, ExportSettings, InlineASM},
+    evaluate::{ComplexEvaluatorSettings, ExportNumber, ExportSettings, InlineASM},
     parse, symbol,
 };
 
@@ -42,6 +42,10 @@ fn compiler() -> String {
 }
 
 fn run_cpp(files: &TestFiles, code: &str, cases: &str) {
+    run_cpp_with_args(files, code, cases, &[]);
+}
+
+fn run_cpp_with_args(files: &TestFiles, code: &str, cases: &str, args: &[String]) {
     // A standalone executable also exercises compilers whose runtime cannot
     // safely be unloaded from a Rust test thread (notably GCC on macOS).
     std::fs::write(
@@ -51,6 +55,7 @@ fn run_cpp(files: &TestFiles, code: &str, cases: &str) {
     .unwrap();
     let output = Command::new(compiler())
         .args(["-std=c++17", "-O2"])
+        .args(args)
         .arg(files.source())
         .arg("-o")
         .arg(files.executable())
@@ -67,6 +72,56 @@ fn run_cpp(files: &TestFiles, code: &str, cases: &str) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn avx2_compile_args() -> Option<Vec<String>> {
+    let mut args = vec!["-mavx2".to_owned()];
+    if cfg!(target_arch = "x86_64") {
+        #[cfg(target_arch = "x86_64")]
+        if !std::is_x86_feature_detected!("avx2") {
+            return None;
+        }
+    } else if cfg!(all(target_arch = "aarch64", target_os = "macos")) {
+        // Rosetta can run the exported x86 kernels even when Rust runs on ARM.
+        if !Command::new("/usr/bin/arch")
+            .args(["-x86_64", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return None;
+        }
+        args.extend(["-arch".to_owned(), "x86_64".to_owned()]);
+    } else {
+        return None;
+    }
+    let include = std::env::var_os("SYMBOLICA_TEST_XSIMD_INCLUDE");
+    if let Some(include) = &include {
+        args.extend(["-I".to_owned(), include.to_string_lossy().into_owned()]);
+    }
+    let output = Command::new(compiler())
+        .args(&args)
+        .args([
+            "-std=c++17",
+            "-fsyntax-only",
+            "-x",
+            "c++",
+            "-include",
+            "xsimd/xsimd.hpp",
+            "-",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        assert!(
+            include.is_none(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("Skipping SIMD execution: xsimd is unavailable for the selected compiler");
+        return None;
+    }
+    Some(args)
 }
 
 fn cpp_case<T: ExportNumber>(kind: &str, function: &str, inputs: &[T], expected: &[T]) -> String {
@@ -148,6 +203,280 @@ fn check_real(name: &str, expressions: &[Atom], parameters: &[Atom], inputs: &[f
             &files,
             &code,
             &cpp_case("double", "forward_test_realf64", inputs, &expected),
+        );
+    }
+}
+
+#[test]
+fn reused_registers_preserve_repeated_operands() {
+    let parameters = [
+        parse!("x"),
+        parse!("y"),
+        parse!("z"),
+        parse!("w"),
+        parse!("a"),
+    ];
+    for (case, expression) in [
+        "(x+y)*(z+w)+(x+y)*z+(x+y)*w+(x+y)*a",
+        "(x+y)*(z+w)+(x+y)*z+(x+y)*w+(x+y)*z+(x+y)*w+(x+y)*a",
+        "a*(x+y)*(x*z+y*z)",
+        "a*(x+y)*(x*z+y*z)*(x*w+y*w)",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let evaluator = parse!(expression)
+            .evaluator(&parameters)
+            .direct_translation(false)
+            .build()
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        for (index, asm) in [InlineASM::None, InlineASM::default()]
+            .into_iter()
+            .enumerate()
+        {
+            let files = TestFiles::new(&format!("repeated_operands_{case}_{index}"));
+            let code = evaluator
+                .export_cpp_str::<f64>("repeated_operands", ExportSettings::new().inline_asm(asm))
+                .unwrap();
+            let mut cases = String::new();
+            for (inputs, expected) in [
+                ([1., 2., 3., 4., 5.], [57., 78., 135., 1620.][case]),
+                ([2., -1., -3., 4., -2.], [0., 1., 6., 24.][case]),
+            ] {
+                let mut result = [0.];
+                evaluator.clone().evaluate(&inputs, &mut result);
+                assert_eq!(result, [expected]);
+                cases += &cpp_case("double", "repeated_operands_realf64", &inputs, &[expected]);
+            }
+            run_cpp(&files, &code, &cases);
+        }
+    }
+}
+
+#[test]
+fn avx2_reciprocal_reuses_its_input_register() {
+    let Some(args) = avx2_compile_args() else {
+        return;
+    };
+    let evaluator = parse!("1/(x+y)+z")
+        .evaluator(&[parse!("x"), parse!("y"), parse!("z")])
+        .direct_translation(false)
+        .build()
+        .unwrap();
+    let code = evaluator
+        .export_cpp_str::<wide::f64x4>(
+            "reciprocal",
+            ExportSettings::new().inline_asm(InlineASM::AVX2),
+        )
+        .unwrap();
+    // Each lane has a different denominator; scalar division cannot pass this.
+    let cases = r#"
+        double x[] = {1, 2, 3, 4}, y[] = {2, 3, 4, 5}, z[] = {-1, 0, 1, 2};
+        simd params[] = {simd::load_unaligned(x), simd::load_unaligned(y), simd::load_unaligned(z)};
+        std::vector<simd> buffer(reciprocal_simd_realf64_get_buffer_len());
+        simd result[1];
+        reciprocal_simd_realf64(params, buffer.data(), result);
+        double actual[4]; result[0].store_unaligned(actual);
+        for (int i = 0; i < 4; ++i)
+            if (std::abs(actual[i] - (1/(x[i]+y[i]) + z[i])) > 1e-12) return 1;
+    "#;
+    run_cpp_with_args(&TestFiles::new("avx2_reciprocal"), &code, cases, &args);
+}
+
+#[test]
+fn complex_simd_multiplication_with_real_parameters() {
+    let Some(args) = avx2_compile_args() else {
+        return;
+    };
+    let parameters = ["x", "y", "z", "w", "a", "b", "c", "d"].map(|p| parse!(p));
+    // Exercise both preloaded operands and the serial path for long products.
+    let expressions = [
+        parse!("x*y*z"),
+        parse!("x*y*z*w*a*b"),
+        parse!("x*y*z*w*a*b*c*d"),
+    ];
+    for real_count in [3, 8] {
+        let mut evaluator = Atom::evaluator_multiple(&expressions, &parameters)
+            .direct_translation(false)
+            .build()
+            .unwrap();
+        evaluator
+            .set_real_params(
+                &(0..real_count).collect::<Vec<_>>(),
+                ComplexEvaluatorSettings::default(),
+            )
+            .unwrap();
+        let code = evaluator
+            .export_cpp_str::<Complex<wide::f64x4>>(
+                "product",
+                ExportSettings::new().inline_asm(InlineASM::AVX2),
+            )
+            .unwrap();
+        let cases = format!(
+            r#"
+            using C = std::complex<double>;
+            C scalar[8][4]; simd params[8];
+            for (int p = 0; p < 8; ++p) {{
+                for (int lane = 0; lane < 4; ++lane)
+                    scalar[p][lane] = C(p+lane+2, p < {real_count} ? 0 : lane+1);
+                params[p] = simd::load_unaligned(scalar[p]);
+            }}
+            std::vector<simd> buffer(product_simd_complexf64_get_buffer_len());
+            simd result[3]; product_simd_complexf64(params, buffer.data(), result);
+            const int lengths[] = {{3,6,8}};
+            for (int output = 0; output < 3; ++output) {{
+                C actual[4]; result[output].store_unaligned(actual);
+                for (int lane = 0; lane < 4; ++lane) {{
+                    C expected(1);
+                    for (int p = 0; p < lengths[output]; ++p) expected *= scalar[p][lane];
+                    if (std::abs(actual[lane]-expected) > 1e-12*std::abs(expected)) return 1;
+                }}
+            }}
+        "#
+        );
+        run_cpp_with_args(
+            &TestFiles::new(&format!("complex_simd_product_{real_count}")),
+            &code,
+            &cases,
+            &args,
+        );
+    }
+}
+
+#[test]
+fn complex_simd_accepts_complex_coefficients() {
+    let args = avx2_compile_args();
+    let expressions = [
+        parse!("1i*x"),
+        parse!("(1/3+2/7*1i)*x"),
+        parse!("1i"),
+        parse!("3/5"),
+    ];
+    for direct in [true, false] {
+        let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+            .direct_translation(direct)
+            .build()
+            .unwrap();
+        // Export must work even on machines without SIMD execution dependencies.
+        for (index, asm) in [InlineASM::None, InlineASM::AVX2].into_iter().enumerate() {
+            let code = evaluator
+                .export_cpp_str::<Complex<wide::f64x4>>(
+                    "constants",
+                    ExportSettings::new().inline_asm(asm),
+                )
+                .unwrap();
+            if let Some(args) = &args {
+                let cases = r#"
+                    using C = std::complex<double>;
+                    C input[] = {C(2,3), C(-1,2), C(0,-4), C(5,0)};
+                    simd params[] = {simd::load_unaligned(input)}, result[4];
+                    std::vector<simd> buffer(constants_simd_complexf64_get_buffer_len());
+                    constants_simd_complexf64(params, buffer.data(), result);
+                    for (int output = 0; output < 4; ++output) {
+                        C actual[4]; result[output].store_unaligned(actual);
+                        for (int lane = 0; lane < 4; ++lane) {
+                            C expected[] = {C(0,1)*input[lane], C(1./3.,2./7.)*input[lane], C(0,1), C(3./5.,0)};
+                            if (std::abs(actual[lane]-expected[output]) > 1e-12) return 1;
+                        }
+                    }
+                "#;
+                run_cpp_with_args(
+                    &TestFiles::new(&format!("complex_simd_constants_{direct}_{index}")),
+                    &code,
+                    cases,
+                    args,
+                );
+            }
+        }
+    }
+}
+
+const COMPLEX_RECIPROCAL_CASES: &str = r#"
+    using C = std::complex<double>;
+    C inputs[] = {C(1e200,1e200), C(1e-200,1e-200), C(1e308,1e308), C(1e-308,1e-308),
+                  C(1e200,0), C(0,1e200), C(1e200,1e100), C(1e-200,1e-100), C(-1e200,1e200), C(3,4),
+                  C(INFINITY,1), C(1,INFINITY), C(NAN,1), C(0,0)};
+    C expected[] = {C(5e-201,-5e-201), C(5e199,-5e199), C(5e-309,-5e-309), C(5e307,-5e307),
+                    C(1e-200,0), C(0,-1e-200), C(1e-200,-1e-300), C(1,-1e100), C(-5e-201,-5e-201), C(.12,-.16),
+                    C(NAN,0), C(0,NAN), C(NAN,NAN), C(NAN,NAN)};
+    constexpr int count = sizeof(inputs)/sizeof(inputs[0]);
+    auto close = [](double a, double b) { return std::isnan(b) ? std::isnan(a) : b == 0 ? a == 0 : std::isfinite(a) && std::abs((a-b)/b) < 2e-12; };
+"#;
+
+#[test]
+fn complex_reciprocals_avoid_norm_overflow_and_underflow() {
+    use symbolica::evaluate::{FunctionRegistrationOptions, InliningPolicy};
+
+    let evaluator = Atom::evaluator_multiple(
+        &[parse!("1/x"), parse!("complex_inverse_regression(x)")],
+        &[parse!("x")],
+    )
+    .add_function_with_options(
+        symbol!("complex_inverse_regression"),
+        vec![symbol!("x")],
+        parse!("1/x"),
+        FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let avx2_args = avx2_compile_args();
+    let mut targets = vec![(InlineASM::default(), Vec::new())];
+    if InlineASM::default() != InlineASM::X64
+        && let Some(args) = &avx2_args
+    {
+        targets.push((InlineASM::X64, args.clone()));
+    }
+    for (index, (asm, args)) in targets.into_iter().enumerate() {
+        let code = evaluator
+            .export_cpp_str::<Complex<f64>>("inverse", ExportSettings::new().inline_asm(asm))
+            .unwrap();
+        let cases = COMPLEX_RECIPROCAL_CASES.to_owned()
+            + r#"
+            std::vector<C> buffer(inverse_complexf64_get_buffer_len());
+            for (int i = 0; i < count; ++i) {
+                C result[2]; inverse_complexf64(&inputs[i], buffer.data(), result);
+                for (const auto& value : result) if (!close(value.real(),expected[i].real()) || !close(value.imag(),expected[i].imag())) {
+                    std::cerr << inputs[i] << ": " << value << " expected " << expected[i] << std::endl; return 1;
+                }
+            }
+        "#;
+        run_cpp_with_args(
+            &TestFiles::new(&format!("complex_inverse_{index}")),
+            &code,
+            &cases,
+            &args,
+        );
+    }
+    if let Some(args) = avx2_args {
+        let code = evaluator
+            .export_cpp_str::<Complex<wide::f64x4>>(
+                "inverse",
+                ExportSettings::new().inline_asm(InlineASM::AVX2),
+            )
+            .unwrap();
+        let cases = COMPLEX_RECIPROCAL_CASES.to_owned()
+            + r#"
+            std::vector<simd> buffer(inverse_simd_complexf64_get_buffer_len());
+            for (int start = 0; start < count; ++start) {
+                C lane_inputs[4]; for (int i = 0; i < 4; ++i) lane_inputs[i] = inputs[(start+i)%count];
+                simd params[] = {simd::load_unaligned(lane_inputs)}, result[2];
+                inverse_simd_complexf64(params, buffer.data(), result);
+                for (const auto& value : result) {
+                    C actual[4]; value.store_unaligned(actual);
+                    for (int i = 0; i < 4; ++i) {
+                        C e = expected[(start+i)%count];
+                        if (!close(actual[i].real(),e.real()) || !close(actual[i].imag(),e.imag())) return 1;
+                    }
+                }
+            }
+        "#;
+        run_cpp_with_args(
+            &TestFiles::new("complex_simd_inverse"),
+            &code,
+            &cases,
+            &args,
         );
     }
 }
