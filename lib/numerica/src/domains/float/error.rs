@@ -641,6 +641,24 @@ impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
         }
     }
 
+    fn hypot(&self, other: &Self) -> Self {
+        let value = self.value.hypot(&other.value);
+        if value.is_zero() || !value.is_finite() {
+            // Keep the existing arithmetic at the nondifferentiable origin and
+            // for exceptional inputs, without inventing an uncertainty bound.
+            return (self.clone() * self + other.clone() * other).sqrt();
+        }
+        // Form bounded derivative weights in the original numeric domain.
+        // Squaring either input first can overflow or underflow unnecessarily.
+        let x_weight = (self.value.clone() / &value).to_f64().abs();
+        let y_weight = (other.value.clone() / &value).to_f64().abs();
+        ErrorPropagatingFloat {
+            abs_err: self.abs_err * x_weight + other.abs_err * y_weight,
+            value,
+        }
+        .truncate()
+    }
+
     fn sqrt(&self) -> Self {
         let v = self.value.sqrt();
         let r = v.to_f64().abs();
