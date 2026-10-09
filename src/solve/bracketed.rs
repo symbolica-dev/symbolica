@@ -177,33 +177,61 @@ where
         if !tolerance.is_finite() {
             return Err(Error::NonFinite);
         }
-        let half_width = upper.clone() / &two - lower.clone() / &two;
         let newton = if derivative.is_zero() {
             None
         } else {
             let correction = value / derivative;
             let candidate = current.clone() - &correction;
-            (correction.is_finite()
-                && candidate.is_finite()
-                && candidate >= lower
-                && candidate <= upper)
-                .then_some((candidate, correction))
+            (correction.is_finite() && candidate.is_finite()).then_some((candidate, correction))
         };
         if let Some((candidate, correction)) = &newton {
+            // A final rounded Newton correction may land just outside a narrow
+            // sign bracket. Admit it only if the bracket enlarged to contain
+            // it still meets the coordinate tolerance. Keeping the correction
+            // preserves tracked coefficient uncertainty at the returned root.
+            let enclosing_lower = if candidate < &lower {
+                candidate
+            } else {
+                &lower
+            };
+            let enclosing_upper = if candidate > &upper {
+                candidate
+            } else {
+                &upper
+            };
+            let enclosing_half_width =
+                enclosing_upper.clone() / &two - enclosing_lower.clone() / &two;
             let termination = if numerical_zero {
                 Some(BracketedRootTermination::NumericalZero)
             } else if options.convergence == BracketedRootConvergence::NewtonOrBracket
                 && correction.norm() <= tolerance
                 && !tolerance.is_zero()
+                && candidate >= &lower
+                && candidate <= &upper
             {
                 Some(BracketedRootTermination::NewtonCorrection)
-            } else if half_width <= tolerance.clone() / &two && !tolerance.is_zero() {
+            } else if enclosing_half_width <= tolerance.clone() / &two && !tolerance.is_zero() {
                 Some(BracketedRootTermination::BracketWidth)
             } else {
                 None
             };
             if let Some(termination) = termination {
                 let (residual, _) = checked(candidate)?;
+                if candidate < &lower {
+                    if !residual.is_zero() && (residual > zero) != (lower_value > zero) {
+                        upper = lower;
+                        upper_value = lower_value;
+                    }
+                    lower = candidate.clone();
+                    lower_value = residual.clone();
+                } else if candidate > &upper {
+                    if !residual.is_zero() && (residual > zero) != (upper_value > zero) {
+                        lower = upper;
+                        lower_value = upper_value;
+                    }
+                    upper = candidate.clone();
+                    upper_value = residual.clone();
+                }
                 return Ok(BracketedRoot {
                     root: candidate.clone(),
                     lower,

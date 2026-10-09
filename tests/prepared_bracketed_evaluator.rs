@@ -108,4 +108,19 @@ fn prepared_jit_evaluator_is_borrowed_across_refinements() {
         .unwrap();
         assert!((answer.root * a.sqrt() - 1.).abs() < 1e-13);
     }
+    // Prepared floating programs can give the final correction just beyond a
+    // narrow numerical sign bracket. This coefficient set exposed a spurious
+    // stagnation after the requested tolerance had already been reached.
+    settings.initial_guess = Some(1. / f64::sqrt(74.));
+    for sign in [1., -1.] {
+        let answer = nsolve_bracketed(0., 1., &settings, |x| {
+            program.evaluate(&[*x, 74., 124., 21.], &mut output);
+            (sign * output[0], sign * output[1])
+        })
+        .unwrap();
+        assert!(answer.lower <= answer.root && answer.root <= answer.upper);
+        assert!(answer.upper - answer.lower <= 1e-14 * answer.root);
+        assert!(sign * answer.lower_value <= 0. && sign * answer.upper_value >= 0.);
+        assert!(answer.residual.abs() < 1e-13);
+    }
 }
