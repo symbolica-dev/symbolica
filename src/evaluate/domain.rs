@@ -39,6 +39,25 @@ impl EvaluationDomain for Complex<Rational> {
     }
 }
 
+/// Allow exact-coefficient evaluators to be mapped to real balls.
+///
+/// Map rational coefficients with `RealBall::from_rational_ball` and the
+/// requested precision. The default conversion from an already rounded
+/// `Complex<Float>` deliberately remains unsupported: it cannot enclose the
+/// unknown rounding error of a mathematical constant. Only explicitly
+/// registered ball callbacks are resolved, without a floating-point fallback.
+/// Evaluator support does not make inherited transcendental ball operations
+/// certifying; restrict certified computations to the documented ball algebra.
+impl EvaluationDomain for crate::domains::float::RealBall {
+    const FIXED_PRECISION: Option<u32> = None;
+}
+
+/// Complex counterpart of the real-ball domain, with the same restrictions on
+/// coefficient conversion, callbacks and certified arithmetic.
+impl EvaluationDomain for crate::domains::float::ComplexBall {
+    const FIXED_PRECISION: Option<u32> = None;
+}
+
 impl EvaluationDomain for f64 {
     const FIXED_PRECISION: Option<u32> = Some(53);
 
