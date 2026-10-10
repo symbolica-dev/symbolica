@@ -4199,7 +4199,7 @@ impl<'a> AtomView<'a> {
         self.evaluate_impl(map, &mut cache, binary_prec)
     }
 
-    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
+    pub(super) fn evaluate_impl<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
         map: &StdHashMap<A, T, impl BuildHasher>,
         cache: &mut HashMap<AtomView<'a>, T>,
