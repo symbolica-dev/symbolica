@@ -886,10 +886,8 @@ impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
 }
 
 #[cfg(feature = "serde")]
-impl<
-    'de,
-    T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy + serde::Deserialize<'de>,
-> serde::Deserialize<'de> for JITCompiledEvaluator<T>
+impl<'de, T: JITCompiledNumber + EvaluationDomain + Clone + serde::Deserialize<'de>>
+    serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let (fs, compressed_ir, settings): (
