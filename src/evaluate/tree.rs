@@ -1330,6 +1330,9 @@ impl<'a> AtomView<'a> {
                         )),
                         false,
                     ));
+                    // Use the same scope-local cache as arithmetic expressions.
+                    // This branch returns before the common insertion below.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else {
                     return Err(EvaluationError::UndefinedFunction {
