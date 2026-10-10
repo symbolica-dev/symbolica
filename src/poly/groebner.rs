@@ -1007,9 +1007,6 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                 self.print_stats,
             );
 
-            // perform simplifications using a copy of the current basis, as the basis may be modified in-place
-            let simplification_basis = basis.clone();
-
             // construct new polynomials
             for m in &matrix {
                 let lmi = sorted_monomial_indices[m[0].1];
@@ -1030,36 +1027,11 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                     simplifications.push(vec![(vec![E::zero(); nvars], poly.clone())]);
 
                     Self::update(&mut basis, &mut critical_pairs, poly, new_index);
-                } else {
-                    // update entries in the tab with simpler polynomials
-                    let mut diff = vec![E::zero(); nvars];
-                    'bf: for (g_ind, g) in &simplification_basis {
-                        if poly
-                            .last_exponents()
-                            .iter()
-                            .zip(g.last_exponents())
-                            .all(|(pi, gi)| *pi >= *gi)
-                        {
-                            for ((d, pi), gi) in diff
-                                .iter_mut()
-                                .zip(poly.last_exponents())
-                                .zip(g.last_exponents())
-                            {
-                                *d = *pi - *gi;
-                            }
-
-                            for (diff_e, p) in &mut simplifications[*g_ind] {
-                                if diff == *diff_e {
-                                    *p = poly.clone();
-                                    continue 'bf;
-                                }
-                            }
-
-                            // new polynomial
-                            simplifications[*g_ind].push((diff.clone(), poly.clone()));
-                        }
-                    }
                 }
+                // `simplifications` caches exact monomial multiples only.
+                // Substituting a different row with the same leading monomial
+                // can identify the two representatives of a later critical
+                // pair and silently discard its nonzero S-polynomial.
             }
         }
 
