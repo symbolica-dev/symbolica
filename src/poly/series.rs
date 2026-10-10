@@ -275,8 +275,7 @@ impl<F: Ring> Series<F> {
             field: field.clone(),
             variable,
             shift: 0,
-            order: order.numerator().to_i64().unwrap() as usize
-                * order.denominator().to_i64().unwrap() as usize,
+            order: order.numerator().to_i64().unwrap() as usize,
             ramification: order.denominator().to_i64().unwrap() as usize,
         }
     }
@@ -291,7 +290,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -310,7 +309,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -324,7 +323,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -363,8 +362,8 @@ impl<F: Ring> Series<F> {
             field: self.field.clone(),
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
-            shift: n * d as isize,
-            order: self.order * ram / d,
+            shift: n * (ram / d) as isize,
+            order: self.order * (ram / self.ramification),
             ramification: ram,
         }
     }
@@ -376,15 +375,7 @@ impl<F: Ring> Series<F> {
             return self.monomial(self.field.one(), (1, 1).into());
         }
 
-        Self {
-            coefficients: vec![coeff, self.field.one()],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: 0,
-            order: self.order,
-            ramification: 1,
-        }
+        self.constant(coeff) + self.monomial(self.field.one(), (1, 1).into())
     }
 
     /// Get the field of the series coefficients.
@@ -1486,6 +1477,7 @@ impl Series<AtomField> {
 
             let mut r = self.clone();
             r.shift *= pow.numerator().to_i64().unwrap() as isize;
+            r.order *= pow.numerator().to_i64().unwrap() as usize;
             r.ramification *= pow.denominator().to_i64().unwrap() as usize;
             return Ok(r);
         }
@@ -1513,10 +1505,8 @@ impl Series<AtomField> {
             r = r + p;
         }
 
-        let pow_ram = pow.denominator().to_i64().unwrap() as usize;
-        r.change_ramification(pow_ram);
-
         let p = Rational::from((self.shift as i64, self.ramification as i64)) * &pow;
+        r.change_ramification(p.denominator().to_i64().unwrap() as usize);
 
         let shift = p.numerator().to_i64().unwrap() as isize
             * (r.ramification / p.denominator().to_i64().unwrap() as usize) as isize;
