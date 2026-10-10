@@ -123,7 +123,13 @@ impl<F: Ring> UnivariatePolynomial<F> {
             self.ring.mul_assign(&mut b1_power, b1);
         }
 
-        result
+        // Homogeneous evaluation gives b1^m * self(-b0/b1), which is
+        // Res(linear, self). Swapping the arguments contributes (-1)^m.
+        if self.degree() % 2 == 1 {
+            self.ring.neg(&result)
+        } else {
+            result
+        }
     }
 }
 
@@ -1080,7 +1086,7 @@ mod test {
         assert_eq!(q_constant.resultant_euclidean(&q_zero), 0u64);
 
         let expected =
-            parse!("-2*y^7+243*z*y^2+2187*y+2187").to_polynomial::<_, u8>(&Z, Some(vars.clone()));
+            parse!("2*y^7-243*z*y^2-2187*y-2187").to_polynomial::<_, u8>(&Z, Some(vars.clone()));
         let high = high.to_univariate(0);
         let linear = linear.to_univariate(0);
         assert_eq!(high.resultant_brown(&linear), expected);
