@@ -1845,7 +1845,8 @@ impl<F: Field> Matrix<F> {
             Err(MatrixError::NotSquare)?;
         }
 
-        if self.nrows != self.partial_row_reduce(self.nrows) {
+        let (rank, odd_swaps) = self.partial_row_reduce_with_swaps(self.nrows);
+        if self.nrows != rank {
             return Ok(self.field.zero());
         }
 
@@ -1855,24 +1856,35 @@ impl<F: Field> Matrix<F> {
                 .mul_assign(&mut det, &self.data[(x + self.nrows * x) as usize]);
         }
 
-        Ok(det)
+        if odd_swaps {
+            Ok(self.field.neg(&det))
+        } else {
+            Ok(det)
+        }
     }
 
     /// Write the first `max_col` columns of the matrix in (non-reduced) echelon form.
     /// Returns the matrix rank.
     pub fn partial_row_reduce(&mut self, max_col: u32) -> u32 {
+        self.partial_row_reduce_with_swaps(max_col).0
+    }
+
+    /// Return the rank and whether row reduction made an odd number of swaps.
+    fn partial_row_reduce_with_swaps(&mut self, max_col: u32) -> (u32, bool) {
         if self.nrows == 0 {
-            return 0;
+            return (0, false);
         }
         let zero = self.field.zero();
 
         let mut i = 0;
+        let mut odd_swaps = false;
         for j in 0..max_col.min(self.ncols) {
             if self.field.is_zero(&self[(i, j)]) {
                 // Select a non-zero pivot.
                 for k in i + 1..self.nrows {
                     if !self.field.is_zero(&self[(k, j)]) {
                         self.swap_rows(i, k, j);
+                        odd_swaps = !odd_swaps;
                         break;
                     }
                 }
@@ -1902,7 +1914,7 @@ impl<F: Field> Matrix<F> {
             }
         }
 
-        i
+        (i, odd_swaps)
     }
 
     /// Create a row-reduced matrix from a matrix in echelon form.
