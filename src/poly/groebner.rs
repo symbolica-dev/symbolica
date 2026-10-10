@@ -767,20 +767,24 @@ impl<E: Exponent, O: MonomialOrder> Ord for OrderedMonomial<E, O> {
 impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O> {
     /// Construct a Groebner basis for a polynomial ideal.
     ///
+    /// Zero generators are ignored. The zero ideal has an empty basis.
+    ///
     /// Progress can be monitored with `print_stats`.
     pub fn new(
         ideal: &[MultivariatePolynomial<R, E, O>],
         print_stats: bool,
     ) -> GroebnerBasis<R, E, O> {
+        let mut ideal = ideal.to_vec();
+        MultivariatePolynomial::unify_variables_list(&mut ideal);
+        // F4 normalizes every generator by its leading coefficient. Preserve
+        // the common variable map, then remove zeros before that division.
+        ideal.retain(|polynomial| !polynomial.is_zero());
         if ideal.is_empty() {
             return GroebnerBasis {
                 system: Vec::new(),
                 print_stats,
             };
         }
-
-        let mut ideal = ideal.to_vec();
-        MultivariatePolynomial::unify_variables_list(&mut ideal);
 
         let mut b = GroebnerBasis {
             system: ideal,
