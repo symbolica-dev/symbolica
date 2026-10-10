@@ -738,8 +738,18 @@ impl<'a> AtomView<'a> {
                 }
                 Instruction::Fun(o, b, _) => {
                     let (sym, tags, args) = *b;
+                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                    let key = (sym, tags.clone(), None);
 
-                    if sym.is_fixed_builtin() {
+                    // A tagged derivative can have an explicitly registered
+                    // non-inlined body, despite using a fixed builtin symbol.
+                    // Ordinary builtins retain their native unary lowering.
+                    let registered_body = sym.is_fixed_builtin()
+                        && context
+                            .external_indices
+                            .get(&key)
+                            .is_some_and(|index| context.external_functions[*index].body.is_some());
+                    if sym.is_fixed_builtin() && !registered_body {
                         if args.len() != 1 {
                             return Err(EvaluationError::UnsupportedBuiltinArity {
                                 function: sym,
@@ -754,16 +764,12 @@ impl<'a> AtomView<'a> {
                         continue;
                     }
 
-                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
-                    let index = *context
-                        .external_indices
-                        .entry((sym, tags.clone(), None))
-                        .or_insert_with(|| {
-                            context
-                                .external_functions
-                                .push(ExternalFunctionContainer::new(sym, tags, vec![]));
-                            context.external_functions.len() - 1
-                        });
+                    let index = *context.external_indices.entry(key).or_insert_with(|| {
+                        context
+                            .external_functions
+                            .push(ExternalFunctionContainer::new(sym, tags, vec![]));
+                        context.external_functions.len() - 1
+                    });
 
                     instructions.push((
                         Instr::ExternalFun(
