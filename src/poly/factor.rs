@@ -5,7 +5,6 @@ use std::{
     borrow::Cow,
     cmp::Reverse,
     collections::{BinaryHeap, hash_map::Entry},
-    ops::RangeInclusive,
 };
 
 use ahash::{HashMap, HashSet, HashSetExt};
@@ -17,10 +16,11 @@ use crate::{
     combinatorics::CombinationIterator,
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
+        UniformlySampleableRing,
         algebraic::{AlgebraicExtension, GaloisField},
         finite_field::{
-            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
-            PrimeIteratorU64, ToFiniteField, Zp,
+            FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldSamplingPolicy,
+            FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Zp,
         },
         integer::{Integer, IntegerRing, Z, gcd_unsigned},
         rational::{Q, RationalField},
@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     LexOrder, PositiveExponent,
-    gcd::{MAX_RNG_PREFACTOR, POW_CACHE_SIZE, PolynomialGCD},
+    gcd::{POW_CACHE_SIZE, PolynomialGCD},
     polynomial::MultivariatePolynomial,
 };
 
@@ -1125,12 +1125,12 @@ impl<'a, E: PositiveExponent> DenseZpEqualDegreeContext<'a, E> {
     /// Find one proper factor of the current equal-degree block.
     fn split<R: Rng + ?Sized>(&mut self, rng: &mut R) -> MultivariatePolynomial<Zp, E, LexOrder> {
         let degree = self.modulus.len() - 1;
-        let sampling_range = 0..=i64::from(self.field.get_prime() - 1);
+        let sampling_policy = FiniteFieldSamplingPolicy::default();
 
         loop {
             self.random_residue.clear();
             self.random_residue
-                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_range)));
+                .extend((0..degree).map(|_| self.field.sample(rng, &sampling_policy)));
             DenseZpDistinctDegreeContext::<E>::trim(&self.field, &mut self.random_residue);
             if self.random_residue.len() <= 1 {
                 continue;
@@ -5102,9 +5102,7 @@ impl<E: PositiveExponent> Factorize
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>>
-        + PolynomialGCD<E>
-        + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
     E: PositiveExponent,
 > Factorize for MultivariatePolynomial<F, E, LexOrder>
 where
@@ -5263,9 +5261,7 @@ where
 
 impl<
     UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>>
-        + PolynomialGCD<E>
-        + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+    F: GaloisField<Base = FiniteField<UField>> + PolynomialGCD<E>,
     E: PositiveExponent,
 > MultivariatePolynomial<F, E, LexOrder>
 where
@@ -5487,8 +5483,6 @@ where
         let mut random_poly = self.zero_with_capacity(d);
         let mut exp = vec![E::zero(); self.nvars()];
 
-        let characteristic = self.ring().characteristic();
-
         // compute inverse
         let mut s_rev = s.clone();
         s_rev.reverse();
@@ -5499,10 +5493,7 @@ where
             random_poly.clear();
 
             for i in 0..n {
-                let upper_bound = characteristic.to_i64().unwrap_or(i64::MAX);
-                let r = self
-                    .ring()
-                    .sample(&mut rng, &(0..=upper_bound.saturating_sub(1)));
+                let r = self.ring().sample_uniform(&mut rng);
                 if !self.ring().is_zero(&r) {
                     exp[var] = E::from_u32(i as u32);
                     random_poly.append_monomial(r, &exp);
@@ -5692,7 +5683,12 @@ where
         let mut i = 0;
         let mut rng = rng();
         loop {
-            i += 1;
+            if self.degree(main_var) == uni_f.degree(main_var)
+                && uni_f.gcd(&uni_f.derivative(main_var)).is_constant()
+            {
+                break;
+            }
+
             if self.ring().size() == Some(i.into()) {
                 let field = self
                     .ring()
@@ -5713,14 +5709,15 @@ where
                     .collect();
             }
 
-            if self.degree(main_var) == uni_f.degree(main_var)
-                && uni_f.gcd(&uni_f.derivative(main_var)).is_constant()
-            {
-                break;
-            }
-
-            sample_point = self.ring().sample(&mut rng, &(0..=i));
+            // After zero, try a small constant before sampling the whole field.
+            let policy = if i == 0 {
+                self.ring().sampling_policy(Some(0), (0..=1).into())
+            } else {
+                self.ring().uniform_sampling_policy()
+            };
+            sample_point = self.ring().sample(&mut rng, &policy);
             uni_f = self.replace(interpolation_var, &sample_point);
+            i += 1;
         }
 
         let mut d = self.degree(interpolation_var).to_u32();
@@ -6182,10 +6179,16 @@ where
                     .collect();
             }
 
+            // Constants are cheap, but retries must also reach points outside
+            // the prime subfield, including after a field upgrade.
+            let policy = if sample_fail.is_one() {
+                self.ring()
+                    .sampling_policy(Some(0), (0..=coefficient_upper_bound).into())
+            } else {
+                self.ring().uniform_sampling_policy()
+            };
             for s in &mut sample_points {
-                s.1 = self
-                    .ring()
-                    .nth(rng.random_range(0..=coefficient_upper_bound).into());
+                s.1 = self.ring().sample(&mut rng, &policy);
             }
 
             biv_f = self.clone();
@@ -6340,9 +6343,7 @@ where
     }
 }
 
-impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: PositiveExponent>
-    MultivariatePolynomial<F, E, LexOrder>
-{
+impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     fn multivariate_diophantine(
         univariate_deltas: &[Self],
         univariate_factors: &mut [Self],
@@ -6472,7 +6473,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         skeletons: &[Self],
         order: &[usize],
         context: &mut SparseDiophantineContext<Self, F::Element>,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if prods.len() != skeletons.len() {
             return None;
         }
@@ -7098,7 +7102,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         skeletons: &[Self],
         order: &[usize],
         context: &mut SparseDiophantineContext<Self, F::Element>,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != 2 || prods.len() != 2 || skeletons.len() != 2 || order.len() < 2 {
             return None;
         }
@@ -7277,7 +7284,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         error: &Self,
         skeletons: &[Self],
         order: &[usize],
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != skeletons.len() || factors.len() != prods.len() || order.len() < 2 {
             return None;
         }
@@ -7435,23 +7445,13 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         poly: &Self,
         sample_vars: &[usize],
         rng: &mut impl rand::RngCore,
-    ) -> Vec<(usize, F::Element)> {
-        let upper = match poly.ring().characteristic().to_i64() {
-            Some(characteristic) if characteristic > 0 => characteristic - 1,
-            _ => MAX_RNG_PREFACTOR as i64 - 1,
-        };
-        let policy = 0..=upper;
+    ) -> Vec<(usize, F::Element)>
+    where
+        F: UniformlySampleableRing,
+    {
         sample_vars
             .iter()
-            .map(|v| {
-                let mut value = poly.ring().sample(rng, &policy);
-                let mut attempts = 0;
-                while poly.ring().is_zero(&value) && attempts < 8 {
-                    value = poly.ring().sample(rng, &policy);
-                    attempts += 1;
-                }
-                (*v, value)
-            })
+            .map(|v| (*v, poly.ring().sample_uniform_nonzero(rng)))
             .collect()
     }
 
@@ -7624,7 +7624,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         order: &[usize],
         last_degree: usize,
         verify_product: bool,
-    ) -> Option<Vec<Self>> {
+    ) -> Option<Vec<Self>>
+    where
+        F: UniformlySampleableRing,
+    {
         if factors.len() != 2 || order.len() <= 2 {
             return None;
         }
@@ -8024,7 +8027,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         true_lcoeffs: Option<&[Self]>,
         order: &[usize],
         context: MultivariateHenselContext,
-    ) -> Result<Vec<Self>, MultivariateHenselError> {
+    ) -> Result<Vec<Self>, MultivariateHenselError>
+    where
+        F: UniformlySampleableRing,
+    {
         debug!("Hensel lift {} with order {:?}", self, order);
 
         let mut degrees: Vec<_> = order
@@ -8142,7 +8148,10 @@ impl<F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>, E: Positiv
         degrees: &mut [usize],
         context: MultivariateHenselContext,
         used_evaluated_lift: &mut bool,
-    ) -> Result<Vec<Self>, MultivariateHenselError> {
+    ) -> Result<Vec<Self>, MultivariateHenselError>
+    where
+        F: UniformlySampleableRing,
+    {
         let last_var = *order.last().unwrap();
         let last_degree = *degrees.last().unwrap();
 
@@ -16994,6 +17003,54 @@ mod test {
         let mut r = poly.factor();
         r.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn galois_multivariate_sampling_escapes_the_prime_subfield() {
+        let field =
+            AlgebraicExtension::galois_field(Z2, 4, crate::poly::PolyVariable::Temporary(0));
+        let mut factors = [
+            parse!("x*(y^2+y)*(z^2+z)+1").to_polynomial::<_, u16>(&field, None),
+            parse!("x+y+z").to_polynomial::<_, u16>(&field, None),
+        ];
+        super::MultivariatePolynomial::unify_variables_list(&mut factors);
+        let product = &factors[0] * &factors[1];
+        let mut order = ["x", "y", "z"].map(|name| {
+            product
+                .variables()
+                .iter()
+                .position(|v| v == &symbol!(name))
+                .unwrap()
+        });
+
+        // Every prime-subfield evaluation of y or z destroys the x degree.
+        // Start with the multivariate path directly to exercise its retries.
+        let actual = product.multivariate_factorization(&mut order, 10, None);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], product);
+
+        // Starting in GF(2) also requires upgrading before any sample can work.
+        let prime_product = product.map_coeff(|c| c.poly().get_constant(), Z2);
+        let actual = prime_product.multivariate_factorization(&mut order, 10, None);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], prime_product);
+    }
+
+    #[test]
+    fn galois_bivariate_sampling_escapes_the_prime_subfield() {
+        let field =
+            AlgebraicExtension::galois_field(Z2, 4, crate::poly::PolyVariable::Temporary(0));
+        let product = parse!("(x*(y^2+y)+1)*(x+y)").to_polynomial::<_, u16>(&field, None);
+        let [x, y] = ["x", "y"].map(|name| {
+            product
+                .variables()
+                .iter()
+                .position(|v| v == &symbol!(name))
+                .unwrap()
+        });
+        let actual = product.bivariate_factorization(x, y);
+        assert_eq!(actual.len(), 2);
+        assert_eq!(&actual[0] * &actual[1], product);
     }
 
     #[test]

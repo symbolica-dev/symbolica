@@ -6,7 +6,7 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::cmp::{Ordering, max, min};
 use std::mem;
-use std::ops::{Add, RangeInclusive};
+use std::ops::Add;
 use tracing::{debug, instrument};
 
 use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
@@ -21,7 +21,7 @@ use crate::domains::integer::{
 };
 use crate::domains::rational::{Q, Rational, RationalField};
 use crate::domains::{
-    EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, Set,
+    EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set, UniformlySampleableRing,
 };
 use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
 use crate::poly::INLINED_EXPONENTS;
@@ -92,28 +92,6 @@ fn select_univariate_integer_gcd(
         UnivariateIntegerGcdAlgorithm::Modular
     } else {
         UnivariateIntegerGcdAlgorithm::Scalar
-    }
-}
-
-/// The upper bound of the range to be sampled during the computation of multiple gcds
-pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
-
-/// Samples a nonzero field element while allowing every extension-basis
-/// coefficient to range over the full prime field.
-fn sample_nonzero_field_element<F>(ring: &F, rng: &mut impl rand::RngCore) -> F::Element
-where
-    F: Field + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
-{
-    let upper = match ring.characteristic().to_i64() {
-        Some(characteristic) if characteristic > 0 => characteristic - 1,
-        _ => MAX_RNG_PREFACTOR as i64 - 1,
-    };
-    let policy = 0..=upper;
-    loop {
-        let value = ring.sample(rng, &policy);
-        if !ring.is_zero(&value) {
-            return value;
-        }
     }
 }
 
@@ -216,11 +194,11 @@ impl<F: Field> GcdBoundSamplingContext<F> {
     /// Samples one nonzero point per variable and prepares its power tables.
     fn sample_points(&mut self, rng: &mut impl rand::RngCore)
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         for index in 0..self.sampled_variables.len() {
             let variable = self.sampled_variables[index];
-            let point = sample_nonzero_field_element(&self.ring, rng);
+            let point = self.ring.sample_uniform_nonzero(rng);
             self.set_point(variable, point);
         }
     }
@@ -338,7 +316,7 @@ impl<F: Field> GcdBoundSamplingContext<F> {
         right: &MultivariatePolynomial<F, E>,
     ) -> Option<SmallVec<[E; INLINED_EXPONENTS]>>
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         let mut rng = rand::rng();
         let mut fail_count = 0;
@@ -2140,7 +2118,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// sample point, but this is rare.
     fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         let mut rng = rand::rng();
 
@@ -2174,7 +2152,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r: Vec<_> = vars
                 .iter()
-                .map(|i| (*i, sample_nonzero_field_element(ap.ring(), &mut rng)))
+                .map(|i| (*i, ap.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let a1 = ap.sample_polynomial(var, &r, &mut cache, &mut tm);
@@ -2211,7 +2189,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]>
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         let mut bounds = (0..ap.nvars())
             .map(|_| E::zero())
@@ -2402,7 +2380,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         shape: &[(MultivariatePolynomial<F, E>, E)],
     ) -> Result<MultivariatePolynomial<F, E>, GCDError>
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         if vars.is_empty() {
             // return gcd divided by the single scale factor
@@ -2482,7 +2460,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
+                .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -2671,7 +2649,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         shape: &[(MultivariatePolynomial<F, E>, E)],
     ) -> Result<MultivariatePolynomial<F, E>, GCDError>
     where
-        F: SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
+        F: UniformlySampleableRing,
     {
         let mut rng = rand::rng();
 
@@ -2708,7 +2686,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
+                .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -3078,10 +3056,8 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 }
 
-impl<
-    F: Field + PolynomialGCD<E> + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
-    E: PositiveExponent,
-> MultivariatePolynomial<F, E>
+impl<F: Field + PolynomialGCD<E> + UniformlySampleableRing, E: PositiveExponent>
+    MultivariatePolynomial<F, E>
 {
     /// Compute the gcd shape of two polynomials in a finite field by filling in random
     /// numbers.
@@ -3167,7 +3143,7 @@ impl<
 
             let mut sample_fail_count = 0i64;
             let (v, gamma_value) = loop {
-                let r = sample_nonzero_field_element(a.ring(), &mut rng);
+                let r = a.ring().sample_uniform_nonzero(&mut rng);
                 let gamma_value = gamma.evaluate_univariate_horner(lastvar, &r);
                 if !gamma.ring().is_zero(&gamma_value) {
                     break (r, gamma_value);
@@ -3263,7 +3239,7 @@ impl<
                 }
 
                 let (v, gamma_value) = loop {
-                    let v = sample_nonzero_field_element(a.ring(), &mut rng);
+                    let v = a.ring().sample_uniform_nonzero(&mut rng);
                     let gamma_value = gamma.evaluate_univariate_horner(lastvar, &v);
                     if !gamma.ring().is_zero(&gamma_value) {
                         // we need unique sampling points
@@ -3369,7 +3345,7 @@ impl<
                 let r: Vec<_> = vars
                     .iter()
                     .skip(1)
-                    .map(|i| (*i, sample_nonzero_field_element(a.ring(), &mut rng)))
+                    .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                     .collect();
 
                 let g1 = gc.replace_except(vars[0], &r, &mut cache);
@@ -7659,11 +7635,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
     }
 }
 
-impl<
-    UField: FiniteFieldWorkspace,
-    F: GaloisField<Base = FiniteField<UField>> + SampleableRing<SamplingPolicy = RangeInclusive<i64>>,
-    E: PositiveExponent,
-> PolynomialGCD<E> for F
+impl<UField: FiniteFieldWorkspace, F: GaloisField<Base = FiniteField<UField>>, E: PositiveExponent>
+    PolynomialGCD<E> for F
 where
     FiniteField<UField>: FiniteFieldCore<UField>,
     <FiniteField<UField> as Set>::Element: Copy,

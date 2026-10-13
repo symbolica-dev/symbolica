@@ -39,7 +39,7 @@ use crate::{
 
 use super::{
     EuclideanDomain, Field, InternalOrdering, OrderedRing, RealEmbedding, Ring, SampleableRing,
-    SelfRing,
+    SelfRing, UniformlySampleableRing,
     finite_field::{FiniteField, FiniteFieldCore, FiniteFieldWorkspace, ToFiniteField},
     integer::{Integer, IntegerRing, Z},
     rational::Rational,
@@ -47,15 +47,65 @@ use super::{
 
 mod kernels;
 
+/// Sampling policy for an algebraic extension or quotient.
+///
+/// Each coefficient up to the chosen degree is sampled independently. Higher
+/// coefficients are zero. The bound is clipped to the degree of the defining
+/// polynomial minus one; it does not force the leading coefficient to be nonzero.
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let field = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+/// let constants = AlgebraicSamplingPolicy {
+///     max_degree: Some(0),
+///     coefficient: FiniteFieldSamplingPolicy::Full,
+/// };
+/// let mut rng = rand::rng();
+/// assert!(field.sample(&mut rng, &constants).poly().is_constant());
+/// // With no degree bound, every field element is available.
+/// let full = AlgebraicSamplingPolicy::default();
+/// let value = field.sample_nonzero(&mut rng, &full);
+/// assert!(!field.is_zero(&value));
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AlgebraicSamplingPolicy<P> {
+    /// Maximum degree in the extension generator. `None` permits the entire basis.
+    /// Use `Some(0)` to sample only elements of the coefficient ring.
+    pub max_degree: Option<usize>,
+    /// Distribution used independently for each permitted basis coefficient.
+    pub coefficient: P,
+}
+
+impl<P> AlgebraicSamplingPolicy<P> {
+    /// Allow every basis coefficient, sampling each according to `coefficient`.
+    pub fn new(coefficient: P) -> Self {
+        Self {
+            max_degree: None,
+            coefficient,
+        }
+    }
+}
+
 /// A Galois field `GF(p,n)` is a finite field with `p^n` elements.
 /// It provides methods to upgrade and downgrade to Galois fields with the
 /// same prime but with a different power.
-pub trait GaloisField: Field {
+pub trait GaloisField: Field + UniformlySampleableRing {
     /// Prime finite field over which this extension is defined.
-    type Base: Field;
+    type Base: Field + UniformlySampleableRing;
 
     /// Return the degree over [`Self::Base`].
     fn extension_degree(&self) -> u64;
+
+    /// Choose the coefficient distribution and maximum degree of sampled elements.
+    ///
+    /// `Some(0)` samples only constants from the prime subfield. `None` allows
+    /// every basis coefficient. Prime fields ignore the degree bound.
+    fn sampling_policy(
+        &self,
+        max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy;
 
     /// Upgrade the field to `GF(p,new_pow)`.
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<Self::Base>
@@ -87,6 +137,14 @@ where
 
     fn extension_degree(&self) -> u64 {
         1
+    }
+
+    fn sampling_policy(
+        &self,
+        _max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy {
+        coefficient
     }
 
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<FiniteField<UField>>
@@ -360,6 +418,17 @@ where
 
     fn extension_degree(&self) -> u64 {
         self.poly.degree(0) as u64
+    }
+
+    fn sampling_policy(
+        &self,
+        max_degree: Option<usize>,
+        coefficient: <Self::Base as SampleableRing>::SamplingPolicy,
+    ) -> Self::SamplingPolicy {
+        AlgebraicSamplingPolicy {
+            max_degree,
+            coefficient,
+        }
     }
 
     fn upgrade(&self, new_pow: usize) -> AlgebraicExtension<Self::Base>
@@ -2116,28 +2185,35 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
     }
 }
 
+impl<R> UniformlySampleableRing for AlgebraicExtension<R>
+where
+    R: EuclideanDomain + UniformlySampleableRing,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        AlgebraicSamplingPolicy::new(self.poly.ring().uniform_sampling_policy())
+    }
+}
+
 impl<R> SampleableRing for AlgebraicExtension<R>
 where
     R: EuclideanDomain + SampleableRing,
 {
-    type SamplingPolicy = R::SamplingPolicy;
+    type SamplingPolicy = AlgebraicSamplingPolicy<R::SamplingPolicy>;
 
     fn sample<G: rand::RngCore + ?Sized>(
         &self,
         rng: &mut G,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        let coeffs: Vec<_> = (0..self.poly.degree(0))
-            .map(|_| self.poly.ring().sample(rng, policy))
-            .collect();
-
-        let mut poly = self.poly.zero_with_capacity(coeffs.len());
-        let mut exp = vec![0];
-        for (i, c) in coeffs.into_iter().enumerate() {
-            exp[0] = i as u16;
-            poly.append_monomial(c, &exp);
+        let basis_size = self.poly.degree(0) as usize;
+        let coefficients = policy.max_degree.map_or(basis_size, |degree| {
+            degree.saturating_add(1).min(basis_size)
+        });
+        let mut poly = self.poly.zero_with_capacity(coefficients);
+        for i in 0..coefficients {
+            let coefficient = self.poly.ring().sample(rng, &policy.coefficient);
+            poly.append_monomial(coefficient, &[i as u16]);
         }
-
         AlgebraicNumber { poly }
     }
 }
@@ -2403,11 +2479,20 @@ impl<R: EuclideanDomain> Ring for AlgebraicQuotient<R> {
     }
 }
 
+impl<R> UniformlySampleableRing for AlgebraicQuotient<R>
+where
+    R: EuclideanDomain + UniformlySampleableRing,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        self.as_extension().uniform_sampling_policy()
+    }
+}
+
 impl<R> SampleableRing for AlgebraicQuotient<R>
 where
     R: EuclideanDomain + SampleableRing,
 {
-    type SamplingPolicy = R::SamplingPolicy;
+    type SamplingPolicy = AlgebraicSamplingPolicy<R::SamplingPolicy>;
 
     fn sample<G: rand::RngCore + ?Sized>(
         &self,

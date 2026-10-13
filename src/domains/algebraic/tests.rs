@@ -655,6 +655,178 @@ fn galois() {
     }
 }
 
+fn check_extension_sampling<F>(field: &F, size: usize)
+where
+    F: UniformlySampleableRing,
+{
+    use rand::{SeedableRng, rngs::StdRng};
+
+    for (nonzero, expected_count) in [(false, size), (true, size - 1)] {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut seen = HashSet::new();
+        for _ in 0..1024 {
+            let sample = if nonzero {
+                field.sample_uniform_nonzero(&mut rng)
+            } else {
+                field.sample_uniform(&mut rng)
+            };
+            if nonzero {
+                assert!(!field.is_zero(&sample));
+            }
+            seen.insert(sample);
+        }
+        assert_eq!(seen.len(), expected_count);
+    }
+}
+
+#[test]
+fn extension_sampling_nonzero_covers_the_whole_extension() {
+    // Over GF(2), requiring every coefficient to be nonzero would produce
+    // only 1 + a. Both 1 and a must also be reachable.
+    let binary = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+    check_extension_sampling(&binary, 4);
+    let odd = AlgebraicExtension::new(parse!("a^2+1").to_polynomial::<_, u16>(&Zp::new(3), None));
+    check_extension_sampling(&odd, 9);
+    check_extension_sampling(&AlgebraicExtension::trivial(Z2), 2);
+}
+
+#[test]
+fn extension_sampling_nonzero_covers_nested_extensions_and_quotients() {
+    let base = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+    let mut polynomial =
+        MultivariatePolynomial::new(&base, None, Arc::new(vec![PolyVariable::Temporary(1)]));
+    polynomial.append_monomial(base.generator(), &[0]);
+    polynomial.append_monomial(base.one(), &[1]);
+    polynomial.append_monomial(base.one(), &[2]);
+
+    // b^2 + b + a defines GF(16) over GF(4).
+    check_extension_sampling(&AlgebraicExtension::new(polynomial.clone()), 16);
+    check_extension_sampling(&AlgebraicQuotient::new(polynomial.clone()), 16);
+
+    let quotient = AlgebraicQuotient::new(base.poly().clone());
+    check_extension_sampling(&quotient, 4);
+    let polynomial = polynomial.map_coeff(|c| c.clone(), quotient);
+    check_extension_sampling(&AlgebraicExtension::new(polynomial), 16);
+}
+
+#[test]
+fn extension_sampling_preserves_explicit_coefficient_ranges() {
+    use rand::{SeedableRng, rngs::StdRng};
+    let field = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+    let mut rng = StdRng::seed_from_u64(43);
+    for _ in 0..10 {
+        assert_eq!(
+            field.sample(&mut rng, &AlgebraicSamplingPolicy::new((1..=1).into())),
+            field.add(&field.one(), &field.generator()),
+        );
+        assert_eq!(
+            field.sample_nonzero(&mut rng, &AlgebraicSamplingPolicy::new((1..=1).into())),
+            field.add(&field.one(), &field.generator()),
+        );
+        assert!(
+            field.is_zero(&field.sample(&mut rng, &AlgebraicSamplingPolicy::new((0..=0).into())))
+        );
+    }
+
+    let rational = AlgebraicExtension::new(parse!("a^2-2").to_polynomial::<_, u16>(&Q, None));
+    assert_eq!(
+        rational.sample(
+            &mut rng,
+            &AlgebraicSamplingPolicy::new(Integer::from(2)..=Integer::from(2)),
+        ),
+        rational.mul(
+            &rational.nth(2.into()),
+            &rational.add(&rational.one(), &rational.generator())
+        ),
+    );
+}
+
+#[test]
+fn extension_sampling_degree_bounds() {
+    use rand::{SeedableRng, rngs::StdRng};
+    let field = AlgebraicExtension::galois_field(Z2, 3, PolyVariable::Temporary(0));
+    let quotient = AlgebraicQuotient::new(field.poly().clone());
+    let mut rng = StdRng::seed_from_u64(44);
+
+    for (bound, expected) in [
+        (Some(0), field.one()),
+        (Some(1), field.add(&field.one(), &field.generator())),
+        (
+            Some(usize::MAX),
+            field.add(
+                &field.add(&field.one(), &field.generator()),
+                &field.pow(&field.generator(), 2),
+            ),
+        ),
+        (
+            None,
+            field.add(
+                &field.add(&field.one(), &field.generator()),
+                &field.pow(&field.generator(), 2),
+            ),
+        ),
+    ] {
+        let policy = AlgebraicSamplingPolicy {
+            max_degree: bound,
+            coefficient: (1..2).into(),
+        };
+        assert_eq!(field.sample(&mut rng, &policy), expected);
+        assert_eq!(quotient.sample(&mut rng, &policy), expected);
+    }
+
+    let policy = field.sampling_policy(Some(0), field.poly.ring().uniform_sampling_policy());
+    for _ in 0..32 {
+        assert!(field.sample(&mut rng, &policy).poly().is_constant());
+        assert!(field.is_one(&field.sample_nonzero(&mut rng, &policy)));
+    }
+}
+
+#[test]
+fn extension_sampling_nested_degree_bounds_are_local() {
+    use rand::{SeedableRng, rngs::StdRng};
+    let base = AlgebraicExtension::new(parse!("a^2+a+1").to_polynomial::<_, u16>(&Z2, None));
+    let mut polynomial =
+        MultivariatePolynomial::new(&base, None, Arc::new(vec![PolyVariable::Temporary(1)]));
+    polynomial.append_monomial(base.generator(), &[0]);
+    polynomial.append_monomial(base.one(), &[1]);
+    polynomial.append_monomial(base.one(), &[2]);
+    let field = AlgebraicExtension::new(polynomial);
+    let mut rng = StdRng::seed_from_u64(45);
+    let policy = AlgebraicSamplingPolicy {
+        max_degree: Some(0),
+        coefficient: AlgebraicSamplingPolicy::new((1..=1).into()),
+    };
+    assert_eq!(
+        field.sample_nonzero(&mut rng, &policy),
+        field.constant(base.add(&base.one(), &base.generator())),
+    );
+}
+
+#[test]
+fn extension_nth_preserves_integer_embedding() {
+    let field = AlgebraicExtension::galois_field(Zp::new(3), 2, PolyVariable::Temporary(0));
+    for n in [-10, -1, 0, 1, 2, 3, 4, 10] {
+        assert_eq!(
+            field.nth(n.into()),
+            field.constant(field.poly.ring().nth(n.into()))
+        );
+        assert_eq!(
+            field.nth((n + 1).into()),
+            field.add(&field.nth(n.into()), &field.one())
+        );
+    }
+}
+
+#[test]
+fn extension_sampling_nonzero_through_a_fraction_field() {
+    use crate::domains::rational::FractionField;
+    let base = FractionField::new(Z2);
+    let polynomial = parse!("a^2+a+1")
+        .to_polynomial::<_, u16>(&Z2, None)
+        .map_coeff(|c| base.to_element_numerator(*c), base.clone());
+    check_extension_sampling(&AlgebraicExtension::new(polynomial), 4);
+}
+
 #[test]
 fn norm() {
     let a = parse!("z^4+z^3+(2+a-a^2)z^2+(1+a^2-2a^3)z-2").to_polynomial::<_, u8>(&Q, None);
