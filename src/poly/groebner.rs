@@ -862,7 +862,7 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
             selected_polys.clear();
             let mut i = critical_pairs.len() - 1;
 
-            let mut l_tmp = vec![];
+            let mut selected_multiples: HashMap<usize, HashSet<Vec<E>>> = HashMap::default();
             loop {
                 if critical_pairs[i].degree == lowest_lcm_deg {
                     let pair = critical_pairs.swap_remove(i);
@@ -872,11 +872,14 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                         (pair.index_sec, pair.lcm_diff_sec),
                     ];
                     for poly_info in e {
-                        if !l_tmp.contains(&poly_info) {
+                        if selected_multiples
+                            .entry(poly_info.0)
+                            .or_default()
+                            .insert(poly_info.1.clone())
+                        {
                             let new_f1 =
                                 Self::simplify(&mut simplifications[poly_info.0], &poly_info.1);
                             selected_polys.push(new_f1);
-                            l_tmp.push(poly_info);
                         }
                     }
                 }
@@ -939,6 +942,10 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                         }
 
                         let pp = Self::simplify(&mut simplifications[*index], &exp);
+                        selected_multiples
+                            .entry(*index)
+                            .or_default()
+                            .insert(exp.clone());
                         new_polys.push(pp);
                     }
                 }
@@ -1046,6 +1053,15 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
                                 .zip(g.last_exponents())
                             {
                                 *d = *pi - *gi;
+                            }
+
+                            // Only this batch's inputs may be replaced by its reduced rows.
+                            // Matching a leading monomial alone can erase an unprocessed pair.
+                            if !selected_multiples
+                                .get(g_ind)
+                                .is_some_and(|multiples| multiples.contains(&diff))
+                            {
+                                continue;
                             }
 
                             for (diff_e, p) in &mut simplifications[*g_ind] {
@@ -3563,5 +3579,39 @@ mod test {
             GroebnerBasis::is_groebner_basis(&basis.system),
             "F4 returned an incomplete basis"
         );
+    }
+}
+
+#[cfg(test)]
+mod f4_cache_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        domains::rational::Q,
+        poly::{PolyVariable, groebner::GroebnerBasis},
+        symbol,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn simplification_preserves_unprocessed_critical_pairs() {
+        let variables = Arc::new(
+            ["x", "u", "z", "v"]
+                .map(|name| PolyVariable::from(symbol!(format!("f4_cache_regression::{name}"))))
+                .to_vec(),
+        );
+        let parse = |text| {
+            Atom::parse(text, "f4_cache_regression", Default::default())
+                .unwrap()
+                .try_to_polynomial::<_, u16>(&Q, variables.clone())
+                .unwrap()
+        };
+        let input = ["x^2-x-z", "u-x*u-1", "2*x*v-v-1"].map(parse);
+        let basis = GroebnerBasis::new(&input, false);
+        assert!(GroebnerBasis::is_groebner_basis(&basis.system));
+        assert!(input.iter().all(|f| f.reduce(&basis.system).is_zero()));
+        // This eliminant was lost when the same reduced row replaced two
+        // cached multiples even though only one had entered the matrix.
+        assert!(parse("(z+1/4)*v^2-1/4").reduce(&basis.system).is_zero());
+        assert!(!parse("1").reduce(&basis.system).is_zero());
     }
 }
