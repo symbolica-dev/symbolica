@@ -1330,6 +1330,9 @@ impl<'a> AtomView<'a> {
                         )),
                         false,
                     ));
+                    // Use the same scope-local cache as arithmetic expressions.
+                    // This branch returns before the common insertion below.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else {
                     return Err(EvaluationError::UndefinedFunction {
@@ -4694,5 +4697,73 @@ impl<'a> AtomView<'a> {
 
             ConditionResult::Inconclusive
         }
+    }
+}
+
+#[cfg(test)]
+mod external_cache_tests {
+    use crate::{
+        atom::{Atom, AtomCore, EvaluationInfo, Symbol},
+        domains::float::{Complex, Real},
+        evaluate::OptimizationSettings,
+        function, symbol,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn settings() -> OptimizationSettings {
+        OptimizationSettings::new()
+            .direct_translation(true)
+            .horner_iterations(0)
+            .cpe_iterations(Some(0))
+    }
+
+    fn counted<T: Real>(calls: Arc<AtomicUsize>) -> impl Fn(&[T]) -> T + Clone {
+        move |arguments: &[T]| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            arguments[0].clone() * &arguments[0]
+        }
+    }
+
+    fn square(name: &str) -> (Symbol, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let f = symbol!(
+            name,
+            eval = EvaluationInfo::new()
+                .register(counted::<f64>(calls.clone()))
+                .register(counted::<Complex<f64>>(calls.clone()))
+        );
+        (f, calls)
+    }
+
+    #[test]
+    fn direct_external_calls_share_across_vector_outputs_without_optimizer() {
+        let (f, calls) = square("direct_external_cache::vector_f");
+        let x = Atom::var(symbol!("direct_external_cache::vector_x"));
+        let value = function!(f, &x);
+        let exact = Atom::evaluator_multiple(
+            &[value.clone(), &value + 1, 3 * &value],
+            std::slice::from_ref(&x),
+        )
+        .optimization_settings(settings())
+        .build()
+        .unwrap();
+        let mut real = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 3];
+        real.evaluate(&[2.], &mut output);
+        assert_eq!(output, [4., 5., 12.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        real.evaluate(&[3.], &mut output);
+        assert_eq!(output, [9., 10., 27.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        let mut complex = exact.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        let mut output = [Complex::new(0., 0.); 3];
+        complex.evaluate(&[Complex::new(2., 1.)], &mut output);
+        assert_eq!(output[0], Complex::new(3., 4.));
+        assert_eq!(output[1], Complex::new(4., 4.));
+        assert_eq!(output[2], Complex::new(9., 12.));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
