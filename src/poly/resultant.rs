@@ -426,6 +426,9 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
             next = -next;
         }
 
+        // Keep the canonical form: a vanishing subresultant must be the
+        // empty polynomial so that the main loop sees `is_zero()`.
+        next.truncate();
         next
     }
 
@@ -1245,5 +1248,51 @@ mod test {
         let res = parse!(res).to_polynomial::<_, u16>(&Z, system[0].variables().clone());
 
         assert_eq!(r, res);
+    }
+
+    #[test]
+    fn ducos_resultant_of_operands_with_a_common_factor_is_zero() {
+        // A monomial regular subresultant made Ducos' H_j sequence zero; the
+        // untruncated zero subresultant then underflowed `a.degree() -
+        // b.degree()`. Every case below shares a factor, so Res = 0.
+        let (x, y) = symbol!("x", "y");
+        let x_vars = Arc::new(vec![x.into()]);
+        for (left, right) in [
+            ("3*x^5", "-x^3-3*x"),
+            ("3000000021*x+x^3", "3*x^3"),
+            ("3*x^4+3*x^7", "3*x+3*x^7"),
+            ("(x^2+2)*(x^3+x+5)", "(x^2+2)*(x^2-7)"),
+        ] {
+            let left = parse!(left)
+                .to_polynomial::<_, u8>(&Z, Some(x_vars.clone()))
+                .to_univariate(0);
+            let right = parse!(right)
+                .to_polynomial::<_, u8>(&Z, Some(x_vars.clone()))
+                .to_univariate(0);
+            assert!(left.resultant(&right).is_zero());
+            assert!(right.resultant(&left).is_zero());
+            assert!(left.resultant_brown(&right).is_zero());
+        }
+        // The same defect with polynomial coefficients.
+        let vars = Arc::new(vec![x.into(), y.into()]);
+        let left = parse!("x^5*y+x^3*(y^2+1)")
+            .to_polynomial::<_, u8>(&Z, Some(vars.clone()))
+            .to_univariate(0);
+        let right = parse!("x^3*(y+3)+x*y^4")
+            .to_polynomial::<_, u8>(&Z, Some(vars.clone()))
+            .to_univariate(0);
+        assert!(left.resultant(&right).is_zero());
+        assert!(left.resultant_brown(&right).is_zero());
+        // Coprime operands keep the ordinary nonzero value.
+        let left = parse!("x^5+2")
+            .to_polynomial::<_, u8>(&Z, Some(x_vars.clone()))
+            .to_univariate(0);
+        let right = parse!("x^3+3*x")
+            .to_polynomial::<_, u8>(&Z, Some(x_vars))
+            .to_univariate(0);
+        assert_eq!(left.resultant(&right), left.resultant_brown(&right));
+        assert!(!left.resultant(&right).is_zero());
+        let zero = left.zero();
+        assert!(zero.mul_exp(3).is_zero());
     }
 }

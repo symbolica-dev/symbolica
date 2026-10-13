@@ -862,7 +862,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
 
     /// Multiply by a variable to the power of `exp`.
     pub fn mul_exp(&self, exp: usize) -> Self {
-        if exp == 0 {
+        if exp == 0 || self.is_zero() {
             return self.clone();
         }
 
