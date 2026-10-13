@@ -621,6 +621,9 @@ impl AtomView<'_> {
     }
 
     fn algebraically_zero(expression: &Atom) -> Option<bool> {
+        // Some(false) is also used to exclude pointwise solutions and remove
+        // nonzero guards. Identity-test False would be insufficient: x is not
+        // identically zero, but can still vanish for an admissible parameter.
         let expression = expression.expand();
         if expression.is_zero() {
             return Some(true);

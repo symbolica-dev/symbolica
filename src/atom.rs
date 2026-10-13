@@ -43,6 +43,7 @@ mod coefficient;
 mod core;
 mod properties;
 pub mod representation;
+mod zero_test;
 
 use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -64,7 +65,7 @@ use crate::{
 
 use std::{
     any::{Any, TypeId},
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     cmp::Ordering,
     hash::Hash,
     io::{Read, Write},
@@ -79,6 +80,7 @@ pub use self::representation::{
     NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
+pub use self::zero_test::ZeroTestSettings;
 pub use crate::{
     evaluate::EvaluationError,
     poly::{PolynomialConversionError, series::SeriesError},
@@ -2822,6 +2824,14 @@ pub enum AtomOrView<'a> {
     View(AtomView<'a>),
 }
 
+impl Borrow<[u8]> for AtomOrView<'_> {
+    fn borrow(&self) -> &[u8] {
+        self.as_view().get_data()
+    }
+}
+
+impl KeyLookup for AtomOrView<'_> {}
+
 impl std::fmt::Display for AtomOrView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.as_view().fmt(f)
@@ -3024,8 +3034,12 @@ impl AtomView<'_> {
         out
     }
 
+    /// Return whether the expression is already the number zero.
+    ///
+    /// An expression that is mathematically zero but has not simplified to zero
+    /// returns `false`. Use [`check_zero`](Self::check_zero) to test such identities.
+    /// See [`AtomCore::is_zero`] for examples.
     #[inline]
-    /// Return whether this view is a numerical zero; no symbolic simplification is performed.
     pub fn is_zero(&self) -> bool {
         if let AtomView::Num(n) = self {
             n.is_zero()
@@ -3444,10 +3458,60 @@ impl Atom {
         }
     }
 
+    /// Return whether the expression is already the number zero.
+    ///
+    /// An expression that is mathematically zero but has not simplified to zero
+    /// returns `false`. Use [`check_zero`](Self::check_zero) to test such identities.
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// assert!(parse!("0").is_zero());
+    /// let identity = parse!("(x+1)^2-x^2-2*x-1");
+    /// assert!(!identity.is_zero());
+    /// assert_eq!(identity.check_zero(), ConditionResult::True);
+    /// ```
     #[inline]
-    /// Return whether this atom is a numerical zero; no symbolic simplification is performed.
     pub fn is_zero(&self) -> bool {
         self.as_view().is_zero()
+    }
+
+    /// Test whether this expression is identically zero using the default settings.
+    ///
+    /// Returns `True` for a zero identity, `False` for a nonzero result, or
+    /// `Inconclusive` if undecided. See [`AtomCore::check_zero`] for examples and
+    /// the numerical and user-defined function limitations on nonzero results.
+    #[inline]
+    pub fn check_zero(&self) -> crate::id::ConditionResult {
+        self.as_view().check_zero()
+    }
+
+    /// Test for an identically zero expression with configurable sampling and precision.
+    /// Defaults match [`check_zero`](Self::check_zero). See [`AtomCore::check_zero_with`]
+    /// for examples and the interpretation of floating coefficients.
+    #[inline]
+    pub fn check_zero_with(&self, settings: &ZeroTestSettings) -> crate::id::ConditionResult {
+        self.as_view().check_zero_with(settings)
+    }
+
+    /// Test whether two expressions are mathematically equal using the default settings.
+    ///
+    /// Returns `True`, `False`, or `Inconclusive`. See [`AtomCore::check_equal`]
+    /// for examples and the numerical and user-defined function limitations.
+    #[inline]
+    pub fn check_equal<'a, T: Into<AtomOrView<'a>>>(&self, other: T) -> crate::id::ConditionResult {
+        self.as_view().check_equal(other)
+    }
+
+    /// Test mathematical equality with configurable sampling and precision.
+    /// See [`AtomCore::check_equal_with`] for examples and the interpretation of
+    /// floating coefficients in both expressions.
+    #[inline]
+    pub fn check_equal_with<'a, T: Into<AtomOrView<'a>>>(
+        &self,
+        other: T,
+        settings: &ZeroTestSettings,
+    ) -> crate::id::ConditionResult {
+        self.as_view().check_equal_with(other, settings)
     }
 
     #[inline]

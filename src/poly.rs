@@ -63,6 +63,11 @@ where
 pub enum PolynomialConversionError {
     /// The requested polynomial variables are invalid, with an explanation.
     InvalidVariableMap(String),
+    /// A negative power has an identically zero base after polynomial conversion.
+    ZeroDenominator {
+        /// The expression containing the zero denominator.
+        expression: Atom,
+    },
     /// An expression cannot be represented as a polynomial in the requested ring.
     PolynomialConversionFailed {
         /// The expression that could not be converted.
@@ -130,6 +135,9 @@ impl std::fmt::Display for PolynomialConversionError {
         match self {
             PolynomialConversionError::InvalidVariableMap(e) => {
                 write!(f, "invalid variable map: {e}")
+            }
+            PolynomialConversionError::ZeroDenominator { expression } => {
+                write!(f, "zero denominator in {expression}")
             }
             PolynomialConversionError::PolynomialConversionFailed { expression, reason } => {
                 write!(
@@ -1809,6 +1817,11 @@ impl AtomView<'_> {
                         .to_rational_polynomial_impl(field, out_field, var_map)?;
 
                     return if nn < 0 {
+                        if b.is_zero() {
+                            return Err(PolynomialConversionError::ZeroDenominator {
+                                expression: self.to_owned(),
+                            });
+                        }
                         let b_inv = b.inv();
                         Ok(b_inv.pow(-nn as u64))
                     } else {
@@ -2009,6 +2022,11 @@ impl AtomView<'_> {
                         .to_factorized_rational_polynomial_impl(field, out_field, var_map)?;
 
                     return if nn < 0 {
+                        if b.is_zero() {
+                            return Err(PolynomialConversionError::ZeroDenominator {
+                                expression: self.to_owned(),
+                            });
+                        }
                         // invert first to prevent expansion of b^|nn|
                         let b_inv = b.inv();
                         Ok(b_inv.pow(nn.unsigned_abs()))

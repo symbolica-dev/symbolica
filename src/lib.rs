@@ -90,7 +90,7 @@ pub mod prelude {
         AliasedAtom, Atom, AtomCore, AtomIndex, AtomOrView, AtomType, AtomView, EvaluationError,
         EvaluationInfo, FunctionArgument, FunctionBuilder, Indeterminate, InlineNum, InlineVar,
         PolynomialConversionError, SeriesError, Symbol, TensorCanonicalizationError, UserData,
-        UserDataKey,
+        UserDataKey, ZeroTestSettings,
     };
 
     pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};

@@ -38,6 +38,16 @@ const NUM_MASK: u8 = 0b00001111;
 const DEN_MASK: u8 = 0b01110000;
 const SIGN: u8 = 0b10000000;
 
+/// Inspect a canonical one-byte integer atom without general coefficient dispatch.
+#[inline]
+pub(crate) fn small_integer_atom(data: &[u8]) -> Option<i64> {
+    if (data[1] | SIGN) != (U8_NUM | SIGN) {
+        return None;
+    }
+    let n = i64::from(data[2]);
+    Some(if data[1] & SIGN == 0 { n } else { -n })
+}
+
 /// Read only the length when traversing an atom; avoid the full fraction dispatch.
 #[inline(always)]
 pub(crate) fn read_packed_u64(data: &[u8]) -> (u64, &[u8]) {

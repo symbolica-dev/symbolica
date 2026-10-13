@@ -17,7 +17,9 @@ use crate::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    poly::{Exponent, factor::Factorize, polynomial::MultivariatePolynomial},
+    poly::{
+        Exponent, PolynomialConversionError, factor::Factorize, polynomial::MultivariatePolynomial,
+    },
     state::Workspace,
     utils::Settable,
 };
@@ -157,7 +159,15 @@ impl<'a> AtomView<'a> {
             .map(|x| x.as_atom_view().to_owned().try_into().unwrap())
             .collect::<Vec<_>>();
 
-        let p = self.to_polynomial_in_vars::<E>(&Arc::new(vars));
+        // Coefficients can contain opaque functions; an unresolved identity must
+        // not cause collection to discard them.
+        let p = self.to_polynomial_in_vars_with_field::<E>(
+            &Arc::new(vars),
+            &crate::domains::atom::AtomField {
+                statistical_zero_test: false,
+                ..crate::domains::atom::AtomField::new()
+            },
+        );
 
         let mut coeffs = vec![];
         for t in p.into_iter() {
@@ -263,7 +273,12 @@ impl<'a> AtomView<'a> {
         if self.has_complex_coefficients() {
             let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
-            if let Ok(p) = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None) {
+            let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None);
+            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+                out.set_from_view(self);
+                return;
+            }
+            if let Ok(p) = poly {
                 let num = Atom::num(Complex::new(
                     p.numer_coeff.poly.get_constant(),
                     p.numer_coeff
@@ -306,18 +321,23 @@ impl<'a> AtomView<'a> {
                 *out = num / den;
                 return;
             }
-        } else if let Ok(poly) =
-            self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None)
-        {
-            let num = Atom::num(poly.numer_coeff) * poly.numerator.to_expression();
-
-            let mut den = Atom::num(poly.denom_coeff);
-            for (x, e) in poly.denominators {
-                den *= x.to_expression().pow(e);
+        } else {
+            let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None);
+            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+                out.set_from_view(self);
+                return;
             }
+            if let Ok(poly) = poly {
+                let num = Atom::num(poly.numer_coeff) * poly.numerator.to_expression();
 
-            *out = num / den;
-            return;
+                let mut den = Atom::num(poly.denom_coeff);
+                for (x, e) in poly.denominators {
+                    den *= x.to_expression().pow(e);
+                }
+
+                *out = num / den;
+                return;
+            }
         }
 
         // expression contains floats or cannot be converted to rational polynomial for other reasons

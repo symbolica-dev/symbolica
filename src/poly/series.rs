@@ -1198,6 +1198,28 @@ impl<F: EuclideanDomain> Series<F> {
 }
 
 impl Series<AtomField> {
+    /// Remove coefficients at the lowest powers that the zero test proves zero.
+    pub(crate) fn normalize_trailing_coefficient(&mut self) {
+        let zeros = self
+            .coefficients
+            .iter()
+            .take_while(|c| c.check_zero().is_true())
+            .count();
+        if zeros == 0 {
+            return;
+        }
+
+        if zeros == self.coefficients.len() {
+            self.coefficients.clear();
+            self.shift += self.order as isize;
+            self.order = 0;
+        } else {
+            self.coefficients.drain(..zeros);
+            self.shift += zeros as isize;
+            self.order -= zeros;
+        }
+    }
+
     /// Extract powers of `x` from an expression that comes from simplifying an exponential with logs
     /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`.
     fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, SeriesError> {
@@ -1473,31 +1495,32 @@ impl Series<AtomField> {
             return Ok(self.npow(pow.numerator().to_i64().unwrap() as usize));
         }
 
-        let c = self.get_trailing_coefficient();
-
-        if c.is_zero() {
+        let mut base = self.clone();
+        base.normalize_trailing_coefficient();
+        if base.is_zero() {
             if pow.is_negative() {
                 return Err(SeriesError::DivisionByZero);
             }
 
-            let mut r = self.clone();
-            r.shift *= pow.numerator().to_i64().unwrap() as isize;
-            r.order *= pow.numerator().to_i64().unwrap() as usize;
-            r.ramification *= pow.denominator().to_i64().unwrap() as usize;
-            return Ok(r);
+            base.shift *= pow.numerator().to_i64().unwrap() as isize;
+            base.order *= pow.numerator().to_i64().unwrap() as usize;
+            base.ramification *= pow.denominator().to_i64().unwrap() as usize;
+            return Ok(base);
         }
 
-        let c = self.coefficients[0].clone();
+        let c = base.coefficients[0].clone();
+        let order = base.order;
+        let shift = base.shift;
+        let p = Rational::from((base.shift as i64, base.ramification as i64)) * &pow;
+        let mut r = base.one();
+        let mut x = base.one();
 
         // normalize the series to 1 + ...
-        let cc = self.clone().div_coeff(&c).mul_exp_units(-self.shift) - self.one();
-
-        let mut r = self.one();
-        let mut x = self.one();
+        let cc = base.div_coeff(&c).mul_exp_units(-shift) - r.one();
 
         let mut num = Rational::one();
 
-        for i in 1..=self.order {
+        for i in 1..=order {
             num = &num * &(&pow - &(i as i64 - 1).into());
 
             x = x * &cc;
@@ -1510,7 +1533,6 @@ impl Series<AtomField> {
             r = r + p;
         }
 
-        let p = Rational::from((self.shift as i64, self.ramification as i64)) * &pow;
         r.change_ramification(p.denominator().to_i64().unwrap() as usize);
 
         let shift = p.numerator().to_i64().unwrap() as isize
@@ -1674,6 +1696,88 @@ mod tests {
 
         let b = a.map_coeff(|x| x.expand());
         assert_eq!(b.get_trailing_exponent(), 1);
+    }
+
+    #[test]
+    fn reciprocal_retries_after_exact_coefficient_cancellation() {
+        let x = parse!("series_cancellation_x");
+        for text in [
+            "(a+1)^2-a^2-2*a-1",
+            "1/a-1/(a+1)-1/(a*(a+1))",
+            "(a+1i*b)^2-a^2-2i*a*b+b^2",
+            "sin(a)^2+cos(a)^2-1",
+            "sqrt(2)*sqrt(3)-sqrt(6)",
+        ] {
+            let c = parse!(text);
+            assert!(!c.is_zero(), "{text}");
+            assert!(c.check_zero().is_true(), "{text}");
+            for power in [1, 2, 4, 10] {
+                // Start with the original 1/(c+x) regression, then cancel two
+                // coefficients and force deeper expansion to find a nonzero one.
+                let zeros = if power == 1 { c.clone() } else { &c * (&x + 1) };
+                let input = (zeros + x.pow(power)).pow(-1);
+                let result = input
+                    .series(
+                        symbol!("series_cancellation_x"),
+                        0,
+                        SeriesDepth::absolute(1),
+                    )
+                    .unwrap();
+                assert_eq!(result.to_atom(), x.pow(-power), "{input}");
+                assert_eq!(result.get_trailing_exponent(), -power, "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn rational_powers_remove_exact_zero_leading_coefficients() {
+        let x = symbol!("series_rpow_cancellation_x");
+        let c = parse!("1/a-1/(a+1)-1/(a*(a+1))");
+        let vanishing = &c * parse!("1+sqrt(series_rpow_cancellation_x)");
+        for text in [
+            "series_rpow_cancellation_x^2*(1+series_rpow_cancellation_x)",
+            "series_rpow_cancellation_x^(3/2)*(1+sqrt(series_rpow_cancellation_x))",
+        ] {
+            let clean = parse!(text).series(x, 0, SeriesDepth::absolute(4)).unwrap();
+            let base = (parse!(text) + &vanishing)
+                .series(x, 0, SeriesDepth::absolute(4))
+                .unwrap();
+            for power in [(-1, 1), (1, 2), (-1, 2)] {
+                let actual = base.rpow(power.into()).unwrap();
+                let expected = clean.rpow(power.into()).unwrap();
+                assert_eq!(actual.to_atom(), expected.to_atom(), "{text}, {power:?}");
+                assert_eq!(actual.absolute_order(), expected.absolute_order());
+            }
+        }
+
+        let zero = vanishing.series(x, 0, SeriesDepth::absolute(4)).unwrap();
+        assert!(matches!(
+            zero.rpow((-1, 1).into()),
+            Err(super::SeriesError::DivisionByZero)
+        ));
+        let root = zero.rpow((1, 2).into()).unwrap();
+        assert!(root.is_zero());
+        assert_eq!(
+            root.absolute_order(),
+            zero.absolute_order() / super::Rational::from(2)
+        );
+    }
+
+    #[test]
+    fn coefficient_cleanup_preserves_nonzero_and_unresolved_terms() {
+        for text in ["(a+1)^2-a^2-2*a-1+1/10^100", "log(2)+log(3)-log(6)"] {
+            let coefficient = parse!(text);
+            assert!(!coefficient.together().is_zero());
+            let mut series = (coefficient.clone() + parse!("series_cleanup_x"))
+                .series(symbol!("series_cleanup_x"), 0, SeriesDepth::absolute(2))
+                .unwrap();
+            let original = series.to_atom();
+            let order = series.absolute_order();
+            series.normalize_trailing_coefficient();
+            assert_eq!(series.get_trailing_coefficient(), coefficient);
+            assert_eq!(series.to_atom(), original);
+            assert_eq!(series.absolute_order(), order);
+        }
     }
 }
 

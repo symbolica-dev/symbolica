@@ -1143,6 +1143,11 @@ impl AlgebraicContext {
                 {
                     let base = self.rational_polynomial_from_images(base, var_map)?;
                     if exponent < 0 {
+                        if base.is_zero() {
+                            return Err(
+                                "Division by an identically zero algebraic expression".into()
+                            );
+                        }
                         Ok(base.inv().pow(exponent.unsigned_abs()))
                     } else {
                         Ok(base.pow(exponent as u64))
@@ -1164,7 +1169,12 @@ impl AlgebraicContext {
         generator: Option<&Atom>,
         element_atoms: &mut HashMap<AlgebraicNumber<Q>, Atom>,
     ) -> Result<Atom, String> {
-        let atom_field = AtomField::new();
+        // Algebraic generators are represented by opaque powers/functions here.
+        // Preserve them when the general identity checker cannot decide them.
+        let atom_field = AtomField {
+            statistical_zero_test: false,
+            ..AtomField::new()
+        };
         let field_generator = &self.field.poly.get_vars_ref()[0];
         let fallback_generator = if generator.is_none()
             && polynomial
@@ -1343,6 +1353,13 @@ impl AtomView<'_> {
                     && let Ok(numerator) = i64::try_from(r.numerator())
                     && let Ok(denominator) = u64::try_from(r.denominator())
                 {
+                    if ring.is_zero(&base_converted) {
+                        return if r.is_negative() || r.is_zero() {
+                            Err("Nonpositive power of zero".into())
+                        } else {
+                            Ok(ring.zero())
+                        };
+                    }
                     if r.is_integer() {
                         if r.is_negative() {
                             return Ok(
@@ -1352,6 +1369,18 @@ impl AtomView<'_> {
                         return Ok(ring.pow(&base_converted, numerator.unsigned_abs()));
                     }
 
+                    if !ring.is_positive_real(&base_converted)? {
+                        let root = ring.principal_radical(&base_converted, denominator)?;
+                        let mut value =
+                            ring.embedded_rational_root(root.polynomial(), root.index())?;
+                        if numerator < 0 {
+                            value = ring.inv(&value);
+                        }
+                        return Ok(ring.pow(&value, numerator.unsigned_abs()));
+                    }
+                    if denominator > u16::MAX as u64 {
+                        return Err("Algebraic root degree exceeds the exponent range".into());
+                    }
                     let var = ring.fresh_variable();
                     let mut poly = MultivariatePolynomial::<_, u16>::new(
                         ring,
@@ -1512,7 +1541,14 @@ impl AtomView<'_> {
                     if let Some(c) = cur {
                         // create min poly and adjoin if needed
                         let base_converted = b.to_algebraic(&c).ok()?;
+                        if c.is_zero(&base_converted) {
+                            return Some(c);
+                        }
                         if !c.is_positive_real(&base_converted).ok()? {
+                            let root = c.principal_radical(&base_converted, denominator).ok()?;
+                            return c.with_adjoined_rational_root(root.polynomial(), root.index());
+                        }
+                        if denominator > u16::MAX as u64 {
                             return None;
                         }
 
@@ -1579,7 +1615,18 @@ impl AtomView<'_> {
                             cur = Some(c.adjoin_with_embedding(&ext, None).0);
                         }
                     } else if let Ok(rat_base) = Rational::try_from(b) {
-                        if rat_base.is_negative() || rat_base.is_zero() {
+                        if rat_base.is_zero() {
+                            return None;
+                        }
+                        if rat_base.is_negative() {
+                            let field = AlgebraicExtension::trivial(Q);
+                            let root = field
+                                .principal_radical(&field.constant(rat_base), denominator)
+                                .ok()?;
+                            return field
+                                .with_adjoined_rational_root(root.polynomial(), root.index());
+                        }
+                        if denominator > u16::MAX as u64 {
                             return None;
                         }
 
@@ -2886,6 +2933,57 @@ impl<R: Field + PolynomialGCD<E>, E: PositiveExponent>
 }
 
 impl AlgebraicExtension<Q> {
+    /// Select the principal d-th root of a nonzero, nonpositive-real element.
+    /// Among its nonreal d-th roots the principal value has the largest real
+    /// part, with positive imaginary part breaking the tie on the negative
+    /// real axis. Root ordering and matching use certified rational enclosures.
+    fn principal_radical(&self, base: &AlgebraicNumber<Q>, degree: u64) -> Result<Root<Q>, String> {
+        if degree < 2 || self.is_zero(base) {
+            return Err("Expected a nonzero radical of degree at least two".into());
+        }
+        let minimal = self.minimal_polynomial_of_element(base);
+        let base_index = self.root_index_of_element(base, &minimal)?;
+        let base_root = minimal
+            .to_univariate_from_univariate(0)
+            .root(base_index)
+            .ok_or("Missing algebraic embedding")?;
+        let mut polynomial = minimal.zero();
+        for term in &minimal {
+            let exponent = u64::from(term.exponents[0])
+                .checked_mul(degree)
+                .and_then(|e| u16::try_from(e).ok())
+                .ok_or("Algebraic root degree exceeds the exponent range")?;
+            polynomial.append_monomial(term.coefficient.clone(), &[exponent]);
+        }
+        let mut candidates = polynomial
+            .to_univariate_from_univariate(0)
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        let power = minimal
+            .zero()
+            .monomial(Rational::one(), vec![degree as u16])
+            .to_univariate_from_univariate(0);
+        let matches = base_root
+            .matching_roots(None, &mut candidates, Some(&power), degree as usize)
+            .map_err(|error| error.to_string())?;
+        for index in matches.into_iter().rev() {
+            let candidate = &mut candidates[index];
+            if matches!(
+                candidate.classify_location(),
+                RootLocation::Complex | RootLocation::Imaginary
+            ) {
+                let polynomial = candidate
+                    .defining_polynomial()
+                    .map_coeff(|c| c.re.clone(), Q)
+                    .to_multivariate::<u16>();
+                return Root::new(polynomial, candidate.index());
+            }
+        }
+        Err("Could not select the principal complex radical".into())
+    }
+
     /// Return the selected primitive root, using its structural embedding
     /// witness when this field was built from explicitly selected roots.
     fn isolated_embedding(&self) -> Option<IsolatedRoot> {

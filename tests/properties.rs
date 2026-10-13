@@ -120,6 +120,7 @@ fn normalization_still_uses_proven_weak_inequalities() {
 fn structural_checks_and_truth_conversions_remain_explicit() {
     let x = parse!("property_structural_unknown");
     assert!(!x.is_zero());
+    assert_eq!(x.check_zero(), False);
     assert!(!x.is_one());
     assert!(!x.is_constant());
     assert!(x.pow(-1).is_finite()); // No explicit infinity; does not exclude poles.

@@ -1065,10 +1065,15 @@ where
             }
             CoefficientView::Natural(n, d, i, _) => {
                 if i == 0 {
-                    Ok(self.div(
-                        &Integer::new(n).to_finite_field(self),
-                        &Integer::new(d).to_finite_field(self),
-                    ))
+                    let denom = Integer::new(d).to_finite_field(self);
+                    if self.is_zero(&denom) {
+                        return Err(
+                            "Cannot convert rational number with zero denominator to finite field"
+                                .to_owned(),
+                        );
+                    }
+
+                    Ok(self.div(&Integer::new(n).to_finite_field(self), &denom))
                 } else {
                     Err("Cannot convert complex number to finite field".to_owned())
                 }
@@ -1076,6 +1081,14 @@ where
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     let l = r.to_rat();
+                    let denom = l.denominator().to_finite_field(self);
+
+                    if self.is_zero(&denom) {
+                        return Err(
+                            "Cannot convert rational number with zero denominator to finite field"
+                                .to_owned(),
+                        );
+                    }
                     Ok(self.div(
                         &l.numerator().to_finite_field(self),
                         &l.denominator().to_finite_field(self),

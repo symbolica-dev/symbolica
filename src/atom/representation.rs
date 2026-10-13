@@ -1675,6 +1675,19 @@ impl<'b> PartialEq<NumView<'b>> for NumView<'_> {
 }
 
 impl<'a> NumView<'a> {
+    /// Inspect small signed integer exponents without general coefficient decoding.
+    #[inline]
+    pub(crate) fn small_integer(&self) -> Option<i64> {
+        super::coefficient::small_integer_atom(self.data)
+    }
+
+    /// The identity check can keep canonical small integers on their existing
+    /// header-only path without dispatching the general coefficient encoding.
+    #[inline]
+    pub(crate) fn small_integer_is_zero(&self) -> Option<bool> {
+        self.data.is_small_int().then(|| self.data.is_zero_rat())
+    }
+
     #[inline]
     /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Num {

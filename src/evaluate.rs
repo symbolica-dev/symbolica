@@ -71,11 +71,9 @@ use crate::{
         rational::Rational,
     },
     error, get_symbol,
-    id::ConditionResult,
     info,
     license::LicenseManager,
     numerical_integration::MonteCarloRng,
-    state::State,
     utils::AbortCheck,
 };
 
@@ -175,7 +173,6 @@ mod test {
             FunctionMap, FunctionRegistrationOptions, InlineASM, InliningPolicy, Instruction,
             JITCompilationSettings, OptimizationSettings, Slot,
         },
-        id::ConditionResult,
         parse, symbol,
     };
 
@@ -1268,17 +1265,6 @@ mod test {
             .unwrap();
         assert_eq!(*symbol, external);
         assert!(tags.is_empty());
-    }
-
-    #[test]
-    fn zero_test() {
-        let e = parse!(
-            "(sin(v1)^2-sin(v1))(sin(v1)^2+sin(v1))^2 - (1/4 sin(2v1)^2-1/2 sin(2v1)cos(v1)-2 cos(v1)^2+1/2 sin(2v1)cos(v1)^3+3 cos(v1)^4-cos(v1)^6)"
-        );
-        assert_eq!(e.zero_test(10, f64::EPSILON), ConditionResult::Inconclusive);
-
-        let e = parse!("x + (1+x)^2 + (x+2)*5");
-        assert_eq!(e.zero_test(10, f64::EPSILON), ConditionResult::False);
     }
 
     #[test]
