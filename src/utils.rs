@@ -1,6 +1,9 @@
 //! Utility traits and structures.
 
-use std::ops::{Deref, DerefMut};
+use std::{
+    cmp::Ordering,
+    ops::{Deref, DerefMut},
+};
 
 use dyn_clone::DynClone;
 
@@ -19,6 +22,43 @@ thread_local! {
 #[inline]
 pub(crate) fn thread_local_hash_state() -> ahash::RandomState {
     HASH_STATE.with(Clone::clone)
+}
+
+/// Find a lexicographically minimal cyclic rotation using a total-order comparator.
+/// Returns zero for an empty slice. Uses O(n) comparisons and O(1) extra space.
+pub(crate) fn minimum_rotation_by<T>(
+    values: &[T],
+    mut compare: impl FnMut(&T, &T) -> Ordering,
+) -> usize {
+    let n = values.len();
+    let (mut left, mut right, mut matched) = (0, 1, 0);
+    while left < n && right < n && matched < n {
+        match compare(
+            &values[(left + matched) % n],
+            &values[(right + matched) % n],
+        ) {
+            Ordering::Equal => {
+                matched += 1;
+                continue;
+            }
+            // After a mismatch, none of the matched + 1 starts on the losing
+            // side can be minimal: each has a strictly smaller counterpart.
+            Ordering::Less => {
+                right += matched + 1;
+                if right == left {
+                    right += 1;
+                }
+            }
+            Ordering::Greater => {
+                left += matched + 1;
+                if left == right {
+                    left += 1;
+                }
+            }
+        }
+        matched = 0;
+    }
+    left.min(right)
 }
 
 /// A wrapper around a mutable reference that tracks if the value
@@ -148,3 +188,50 @@ impl<T> Deref for BorrowedOrOwned<'_, T> {
 pub trait AbortCheck: Fn() -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(AbortCheck);
 impl<T: Clone + Send + Sync + Fn() -> bool> AbortCheck for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::minimum_rotation_by;
+
+    #[test]
+    fn minimum_rotation_matches_exhaustive_search() {
+        // Includes empty, singleton, periodic and repeated-prefix inputs.
+        for n in 0..=9 {
+            for mut encoding in 0..3usize.pow(n as u32) {
+                let values: Vec<_> = (0..n)
+                    .map(|_| {
+                        let value = (encoding % 3) as u8;
+                        encoding /= 3;
+                        value
+                    })
+                    .collect();
+                for reverse in [false, true] {
+                    let start = minimum_rotation_by(&values, |left, right| {
+                        if reverse {
+                            right.cmp(left)
+                        } else {
+                            left.cmp(right)
+                        }
+                    });
+                    let mut actual = values.clone();
+                    actual.rotate_left(start);
+                    let expected = (0..n)
+                        .map(|shift| {
+                            let mut rotated = values.clone();
+                            rotated.rotate_left(shift);
+                            rotated
+                        })
+                        .min_by(|left, right| {
+                            if reverse {
+                                right.cmp(left)
+                            } else {
+                                left.cmp(right)
+                            }
+                        })
+                        .unwrap_or_default();
+                    assert_eq!(actual, expected, "input={values:?}, reverse={reverse}");
+                }
+            }
+        }
+    }
+}

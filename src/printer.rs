@@ -14,6 +14,7 @@ use crate::{
     coefficient::CoefficientView,
     domains::{SelfRing, finite_field::FiniteFieldCore, float::Complex, rational::Rational},
     state::State,
+    utils::minimum_rotation_by,
 };
 
 pub use numerica::printer::*;
@@ -838,6 +839,11 @@ impl AtomView<'_> {
                 // taken into account in the input, by the canonical_string_sign_fix() function
                 if f.is_symmetric() || f.is_antisymmetric() {
                     args.sort();
+                } else if f.is_cyclesymmetric() {
+                    // Atom ordering depends on registration; choose a rotation
+                    // only after recursively rendering the canonical arguments.
+                    let start = minimum_rotation_by(&args, Ord::cmp);
+                    args.rotate_left(start);
                 }
 
                 for (i, arg) in args.iter().enumerate() {
@@ -2839,6 +2845,80 @@ mod test {
             r2,
             "-3*symbolica::canon_antisymmetric::{antisymmetric,linear}::f_l(symbolica::canon_antisymmetric::{antisymmetric}::f(symbolica::canon_antisymmetric::{}::x,symbolica::canon_antisymmetric::{}::y),symbolica::canon_antisymmetric::{}::x)"
         );
+    }
+
+    #[test]
+    fn canon_cyclic_registration_order() {
+        const CHILD: &str = "SYMBOLICA_CANON_CYCLIC_CHILD";
+        if let Ok(order) = std::env::var(CHILD) {
+            // Each registration order runs in a fresh process: the symbol
+            // registry is global, and in-process reordering cannot test this.
+            if order == "forward" {
+                let _ = symbol!("x", "y", "z");
+            } else {
+                let _ = symbol!("z", "y", "x");
+            }
+            let _ = symbol!("c"; Cyclesymmetric);
+            let _ = symbol!("a"; Antisymmetric);
+            let _ = symbol!("al"; Antisymmetric, Linear);
+            let expressions = [
+                "c(x,y,z)",
+                "c(y,z,x)",
+                "c(z,x,y)",
+                "c(x,z,y)",
+                "c()",
+                "c(x)",
+                "c(x,y,x,y)",
+                "c(y,x,y,x)",
+                "a(c(x,y,z),c(x,z,y))",
+                "a(c(x,z,y),c(x,y,z))",
+                "c(a(x,y),z,x)",
+                "al(c(x,y,z)+x,c(x,z,y))",
+                "(1+2i/3)*c(x+y,y*z,z^-2)^2+c(z,x,y)",
+                "c(canon_other::x,x,y)",
+            ];
+            let atoms: Vec<_> = expressions.iter().map(|input| parse!(input)).collect();
+            assert_eq!(atoms[0], atoms[1]);
+            assert_eq!(atoms[0], atoms[2]);
+            assert_ne!(atoms[0], atoms[3]);
+            assert_eq!(atoms[6], atoms[7]);
+            assert_eq!(atoms[8], -&atoms[9]);
+            for (index, atom) in atoms.iter().enumerate() {
+                let text = atom.to_canonical_string();
+                assert_eq!(parse!(text.as_str()), *atom, "roundtrip {index}");
+                println!("CANONICAL[{index}]={text}");
+            }
+            return;
+        }
+        let outputs: Vec<Vec<String>> = ["forward", "reverse"]
+            .into_iter()
+            .map(|order| {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "printer::test::canon_cyclic_registration_order",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, order)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "child {order}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let rows: Vec<_> = String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.starts_with("CANONICAL["))
+                    .map(str::to_owned)
+                    .collect();
+                assert_eq!(rows.len(), 14);
+                rows
+            })
+            .collect();
+        assert_eq!(outputs[0], outputs[1]);
     }
 
     #[test]

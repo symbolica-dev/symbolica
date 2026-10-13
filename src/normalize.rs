@@ -15,6 +15,7 @@ use crate::{
     },
     poly::PolyVariable,
     state::{RecycledAtom, State, Workspace},
+    utils::minimum_rotation_by,
     warn,
 };
 
@@ -1722,20 +1723,7 @@ impl AtomView<'_> {
                 args.push(a);
             }
 
-            let mut best_shift = 0;
-            'shift: for shift in 1..args.len() {
-                for i in 0..args.len() {
-                    match args[(i + best_shift) % args.len()].cmp(&args[(i + shift) % args.len()]) {
-                        std::cmp::Ordering::Equal => {}
-                        std::cmp::Ordering::Less => {
-                            continue 'shift;
-                        }
-                        std::cmp::Ordering::Greater => break,
-                    }
-                }
-
-                best_shift = shift;
-            }
+            let best_shift = minimum_rotation_by(&args, AtomView::cmp);
 
             let mut f = workspace.new_atom();
             let ff = f.to_fun(id);
@@ -2264,6 +2252,64 @@ mod test {
         f.set_from_symbol(head);
         f.add_arg(arg.as_view());
         assert_eq!(normalize(&f), reference);
+    }
+
+    #[test]
+    fn cyclic_normalization_preserves_structural_order() {
+        use crate::atom::Fun;
+
+        let head = crate::symbol!("normalize_cycle"; Cyclesymmetric);
+        for input in [
+            "cycle_input()",
+            "cycle_input(x)",
+            "cycle_input(x,x,x)",
+            "cycle_input(y,x,y,x)",
+            "cycle_input(x,x,y,x,x,x,y)",
+            "cycle_input(f(x),x^2)",
+            "cycle_input(f(x),x^2,0,x,x*y,x+y)",
+            "cycle_input(x+y,x*y,x,0,x^2,f(x))",
+        ] {
+            let input = parse!(input);
+            let AtomView::Fun(input) = input.as_view() else {
+                unreachable!()
+            };
+            let args: Vec<_> = input.iter().collect();
+            // Exhaustively compare rotations with the original type-aware order.
+            let expected = (0..args.len())
+                .map(|shift| {
+                    let mut rotated = args.clone();
+                    rotated.rotate_left(shift);
+                    rotated
+                })
+                .min_by(|left, right| {
+                    left.iter()
+                        .zip(right)
+                        .map(|(a, b)| a.cmp(b))
+                        .find(|order| !order.is_eq())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_default();
+            if args.len() == 2 {
+                // Raw-byte Ord puts functions before powers; normalization must not.
+                assert!(matches!(expected[0], AtomView::Pow(_)));
+                assert!(Ord::cmp(&expected[0], &expected[1]).is_gt());
+            }
+            Workspace::get_local().with(|ws| {
+                for shift in 0..args.len().max(1) {
+                    let mut f = Fun::new_into(head, Vec::new());
+                    for arg in args[shift..].iter().chain(&args[..shift]) {
+                        f.add_arg(*arg);
+                    }
+                    let mut out = Atom::new();
+                    f.as_view().normalize(ws, &mut out);
+                    let AtomView::Fun(normalized) = out.as_view() else {
+                        unreachable!()
+                    };
+                    assert_eq!(normalized.iter().collect::<Vec<_>>(), expected);
+                    assert!(!out.as_view().needs_normalization());
+                }
+            });
+        }
     }
 
     #[test]
