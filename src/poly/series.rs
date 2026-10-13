@@ -275,8 +275,7 @@ impl<F: Ring> Series<F> {
             field: field.clone(),
             variable,
             shift: 0,
-            order: order.numerator().to_i64().unwrap() as usize
-                * order.denominator().to_i64().unwrap() as usize,
+            order: order.numerator().to_i64().unwrap() as usize,
             ramification: order.denominator().to_i64().unwrap() as usize,
         }
     }
@@ -291,7 +290,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -310,7 +309,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -324,7 +323,7 @@ impl<F: Ring> Series<F> {
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
-            ramification: 1,
+            ramification: self.ramification,
         }
     }
 
@@ -363,8 +362,8 @@ impl<F: Ring> Series<F> {
             field: self.field.clone(),
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
-            shift: n * d as isize,
-            order: self.order * ram / d,
+            shift: n * (ram / d) as isize,
+            order: self.order * (ram / self.ramification),
             ramification: ram,
         }
     }
@@ -376,15 +375,7 @@ impl<F: Ring> Series<F> {
             return self.monomial(self.field.one(), (1, 1).into());
         }
 
-        Self {
-            coefficients: vec![coeff, self.field.one()],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: 0,
-            order: self.order,
-            ramification: 1,
-        }
+        self.constant(coeff) + self.monomial(self.field.one(), (1, 1).into())
     }
 
     /// Get the field of the series coefficients.
@@ -1105,7 +1096,11 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
             shift: self.shift * r_d_s as isize + rhs.shift * r_d_o as isize,
-            order: (self.order * r_d_s).min(rhs.order * r_d_o),
+            // The infinite-precision identity can overflow when its grid is refined.
+            order: self
+                .order
+                .saturating_mul(r_d_s)
+                .min(rhs.order.saturating_mul(r_d_o)),
             ramification: r,
         };
 
@@ -1486,6 +1481,7 @@ impl Series<AtomField> {
 
             let mut r = self.clone();
             r.shift *= pow.numerator().to_i64().unwrap() as isize;
+            r.order *= pow.numerator().to_i64().unwrap() as usize;
             r.ramification *= pow.denominator().to_i64().unwrap() as usize;
             return Ok(r);
         }
@@ -1513,10 +1509,8 @@ impl Series<AtomField> {
             r = r + p;
         }
 
-        let pow_ram = pow.denominator().to_i64().unwrap() as usize;
-        r.change_ramification(pow_ram);
-
         let p = Rational::from((self.shift as i64, self.ramification as i64)) * &pow;
+        r.change_ramification(p.denominator().to_i64().unwrap() as usize);
 
         let shift = p.numerator().to_i64().unwrap() as isize
             * (r.ramification / p.denominator().to_i64().unwrap() as usize) as isize;
@@ -1611,5 +1605,49 @@ mod tests {
 
         let b = a.map_coeff(|x| x.expand());
         assert_eq!(b.get_trailing_exponent(), 1);
+    }
+}
+
+#[cfg(test)]
+mod puiseux_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        parse,
+        poly::series::SeriesDepth,
+        symbol,
+    };
+
+    #[test]
+    fn fractional_product_and_laurent_series_have_correct_coefficients() {
+        let x = symbol!("puiseux_precision::x");
+        let s = parse!("puiseux_precision::x^(1/3)*(1+puiseux_precision::x)^(1/2)")
+            .series(x, 0, SeriesDepth::absolute((7, 3)))
+            .unwrap();
+        for (exponent, coefficient) in [((1, 3), (1, 1)), ((4, 3), (1, 2)), ((7, 3), (-1, 8))] {
+            assert_eq!(s.coefficient(exponent.into()), Some(Atom::num(coefficient)));
+        }
+        let square = (&s * &s).map_coeff(|a| a.expand());
+        assert_eq!(square.coefficient((2, 3).into()), Some(Atom::num(1)));
+        assert_eq!(square.coefficient((5, 3).into()), Some(Atom::num(1)));
+        assert_eq!(square.coefficient((8, 3).into()), Some(Atom::Zero));
+        let pole = parse!("puiseux_precision::x^(-1/3)*(1+puiseux_precision::x)")
+            .series(x, 0, SeriesDepth::absolute((2, 3)))
+            .unwrap();
+        assert_eq!(pole.coefficient((-1, 3).into()), Some(Atom::num(1)));
+        assert_eq!(pole.coefficient((2, 3).into()), Some(Atom::num(1)));
+    }
+
+    #[test]
+    fn fractional_depth_at_nonzero_centre_and_integer_control() {
+        let x = symbol!("puiseux_precision::x");
+        for depth in [SeriesDepth::absolute((7, 3)), SeriesDepth::absolute(3)] {
+            let s = parse!("puiseux_precision::x^2")
+                .series(x, 2, depth)
+                .unwrap();
+            assert_eq!(s.coefficient(0.into()), Some(Atom::num(4)));
+            assert_eq!(s.coefficient(1.into()), Some(Atom::num(4)));
+            assert_eq!(s.coefficient(2.into()), Some(Atom::num(1)));
+            assert_eq!(s.coefficient((1, 3).into()), Some(Atom::Zero));
+        }
     }
 }
