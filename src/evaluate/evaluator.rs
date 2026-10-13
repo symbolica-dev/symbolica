@@ -774,7 +774,6 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let mut common_instr = HashMap::with_capacity(self.instructions.len());
         let mut new_instr = Vec::with_capacity(self.instructions.len());
-        let mut i = 0;
 
         let mut rename_map: Vec<_> = (0..self.reserved_indices).collect();
         let mut removed = 0;
@@ -782,51 +781,13 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
-        for (instr, phase) in &self.instructions {
+        for (instr, phase) in &mut self.instructions {
             let new_pos = new_instr.len() + self.reserved_indices;
 
-            let key = match &self.instructions[i].0 {
-                Instr::Add(_, a) => Some(CSE::Add(a)),
-                Instr::Mul(_, a) => Some(CSE::Mul(a)),
-                Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
-                Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
-                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
-                Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
-                _ => None,
-            };
-
-            if let Some(key) = key {
-                match common_instr.entry(key) {
-                    Entry::Occupied(mut o) => {
-                        let (old_pos, branch) = o.get_mut();
-
-                        let mut cur = current_node;
-                        while cur > *branch {
-                            cur = dag_nodes[cur];
-                        }
-
-                        if cur == *branch {
-                            removed += 1;
-                            rename_map.push(*old_pos);
-                            i += 1;
-                            continue;
-                        } else {
-                            // the previous occurrence was in a non-parent branch
-                            // that cannot be reused, so treat this occurrence
-                            // as the first
-                            *old_pos = new_pos;
-                            *branch = current_node;
-                        }
-                    }
-                    Entry::Vacant(v) => {
-                        v.insert((new_pos, current_node));
-                    }
-                }
-            }
-
-            let mut s = instr.clone();
-
-            match &mut s {
+            // Use already-renamed operands as the key, so dependent duplicate
+            // instructions collapse in the same forward pass. The original
+            // instruction storage keeps borrowed keys stable until the pass ends.
+            match instr {
                 Instr::Add(p, a) | Instr::Mul(p, a) => {
                     let mut last = 0;
                     let mut sort = false;
@@ -879,9 +840,46 @@ impl<T: Default> ExpressionEvaluator<T> {
                 _ => {}
             }
 
-            new_instr.push((s, *phase));
+            let key = match &*instr {
+                Instr::Add(_, a) => Some(CSE::Add(a)),
+                Instr::Mul(_, a) => Some(CSE::Mul(a)),
+                Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
+                Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
+                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
+                Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
+                _ => None,
+            };
+
+            if let Some(key) = key {
+                match common_instr.entry(key) {
+                    Entry::Occupied(mut o) => {
+                        let (old_pos, branch) = o.get_mut();
+
+                        let mut cur = current_node;
+                        while cur > *branch {
+                            cur = dag_nodes[cur];
+                        }
+
+                        if cur == *branch {
+                            removed += 1;
+                            rename_map.push(*old_pos);
+                            continue;
+                        } else {
+                            // the previous occurrence was in a non-parent branch
+                            // that cannot be reused, so treat this occurrence
+                            // as the first
+                            *old_pos = new_pos;
+                            *branch = current_node;
+                        }
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert((new_pos, current_node));
+                    }
+                }
+            }
+
+            new_instr.push((instr.clone(), *phase));
             rename_map.push(new_pos);
-            i += 1;
         }
 
         for x in &mut self.result_indices {
@@ -1705,5 +1703,61 @@ mod tests {
             evaluator.evaluate_single(&[1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0]),
             13.0
         );
+    }
+}
+
+#[cfg(test)]
+mod cse_tests {
+    use super::*;
+
+    fn evaluator(
+        params: usize,
+        instructions: Vec<Instr>,
+        results: Vec<usize>,
+    ) -> ExpressionEvaluator<f64> {
+        ExpressionEvaluator {
+            stack: vec![0.; params + instructions.len()],
+            param_count: params,
+            reserved_indices: params,
+            instructions: instructions
+                .into_iter()
+                .map(|instruction| (instruction, ComplexPhase::Any))
+                .collect(),
+            result_indices: results,
+            external_fns: vec![],
+            settings: OptimizationSettings::default(),
+        }
+    }
+
+    #[test]
+    fn dependent_duplicates_collapse_in_one_pass() {
+        let depth = 128;
+        let copies = 4;
+        let mut instructions = vec![];
+        let mut results = vec![];
+        for _ in 0..copies {
+            let mut input = 0;
+            for _ in 0..depth {
+                let output = instructions.len() + 1;
+                instructions.push(Instr::BuiltinFun(output, Symbol::SIN, input));
+                input = output;
+            }
+            results.push(input);
+        }
+        let mut original = evaluator(1, instructions, results);
+        let mut optimized = original.clone();
+        assert_eq!(optimized.remove_common_instructions(), (copies - 1) * depth);
+        assert_eq!(optimized.instructions.len(), depth);
+        assert_eq!(optimized.remove_common_instructions(), 0);
+        assert_eq!(optimized.result_indices, vec![depth; copies]);
+        for point in [-0.7_f64, 0., 0.3, 1.] {
+            let expected = (0..depth).fold(point, |value, _| value.sin());
+            let mut before = vec![0.; copies];
+            let mut after = vec![0.; copies];
+            original.evaluate(&[point], &mut before);
+            optimized.evaluate(&[point], &mut after);
+            assert_eq!(after, before);
+            assert!(after.iter().all(|value| (value - expected).abs() < 1e-14));
+        }
     }
 }
