@@ -1138,8 +1138,12 @@ impl AlgebraicContext {
                 let coefficient = if let Some(generator) = generator {
                     let mut coefficient = Atom::Zero;
                     for generator_term in term.coefficient.poly() {
-                        coefficient += generator.clone().pow(generator_term.exponents[0])
-                            * Atom::num(generator_term.coefficient.clone());
+                        let term = Atom::num(generator_term.coefficient.clone());
+                        coefficient += if generator_term.exponents[0] == 0 {
+                            term
+                        } else {
+                            generator.clone().pow(generator_term.exponents[0]) * term
+                        };
                     }
                     coefficient
                 } else {

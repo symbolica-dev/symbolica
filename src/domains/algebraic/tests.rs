@@ -3,6 +3,23 @@
 use super::*;
 
 #[test]
+fn contextual_conversion_of_new_rational_coefficients_with_zero_generator() {
+    let x = symbol!("rational_context_zero_generator::x");
+    let mut context = AlgebraicContext::new(AlgebraicExtension::trivial(Q));
+    context.extend(Atom::zero().as_view()).unwrap();
+    context.extend(Atom::one().as_view()).unwrap();
+    let input = Atom::one() + Atom::var(x);
+    let polynomial = context
+        .to_polynomial::<u32>(input.as_view(), Arc::new(vec![PolyVariable::from(x)]))
+        .unwrap();
+    // Arithmetic creates a coefficient absent from the context's expression
+    // cache. Its degree-zero generator term must not evaluate Atom::pow(0, 0).
+    let doubled = &polynomial + &polynomial;
+    let result = doubled.to_expression_with_context(&context).unwrap();
+    assert!((result - Atom::num(2) * input).expand().is_zero());
+}
+
+#[test]
 fn to_alg() {
     let a = crate::parse!("sqrt(2)+1");
     let ext = a.as_view().embedding_field().unwrap();
