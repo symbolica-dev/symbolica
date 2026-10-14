@@ -311,6 +311,10 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     /// You can also call `export_cpp` with types [f64], [wide::f64x4] for SIMD, [Complex] over [f64] and [wide::f64x4] for Complex SIMD, and [CudaRealf64] or
     /// [CudaComplexf64] for CUDA output.
     ///
+    /// When calling generated C++ functions directly, the input, scratch-buffer,
+    /// and output memory regions must not overlap. The Rust compiled-evaluator
+    /// wrappers provide separate storage and uphold this requirement.
+    ///
     /// # Examples
     ///
     /// Create a C++ library that evaluates the function `x + y` for `f64` inputs:
@@ -362,6 +366,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     }
 
     /// Write the evaluation tree to a C++ source string.
+    ///
+    /// Direct callers must provide non-overlapping input, scratch-buffer, and
+    /// output memory regions, as described in [`Self::export_cpp`].
     pub fn export_cpp_str<F: CompiledNumber>(
         &self,
         function_name: &str,
@@ -759,8 +766,16 @@ extern "C" {{
 
         res += &self.export_dimensions_cpp(function_name);
 
+        // C++ has no standard restrict keyword. Keep the compiler-specific
+        // qualifier local to this exported template, including headerless exports.
+        let restrict = format!("{function_name}_RESTRICT");
         res += &format!(
-            "\ntemplate<typename T>\nvoid {function_name}_gen(T* params, T* Z, T* out) {{\n"
+            "\n#if defined(_MSC_VER)\n#define {restrict} __restrict\n\
+             #elif defined(__GNUC__) || defined(__clang__)\n#define {restrict} __restrict__\n\
+             #else\n#define {restrict}\n#endif\n\n\
+             // Input, scratch, and output memory regions must not overlap.\n\
+             template<typename T>\n\
+             void {function_name}_gen(T* {restrict} params, T* {restrict} Z, T* {restrict} out) {{\n"
         );
 
         self.program()
@@ -780,6 +795,7 @@ extern "C" {{
         }
 
         res += "\treturn;\n}\n";
+        res += &format!("#undef {restrict}\n");
 
         // if there are non-reals we can not use double evaluation
         assert!(
