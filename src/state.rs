@@ -1230,34 +1230,55 @@ impl State {
         VariableListIndex(index - start)
     }
 
-    /// Write the state to a binary stream.
-    #[inline(always)]
-    pub fn export<W: Write>(dest: &mut W) -> Result<(), std::io::Error> {
+    /// Obtain the lengths of the symbol, finite field, and variable list registries, in
+    /// a way that is safe from concurrent modifications.
+    fn export_registry_lengths() -> (usize, usize, usize) {
         if ID_TO_STR.len() == 0 {
             Self::initialize_state();
         }
+
+        loop {
+            let variable_lists = VARIABLE_LISTS.len();
+            let symbols = ID_TO_STR.len();
+            if VARIABLE_LISTS.len() == variable_lists {
+                return (
+                    symbols - SYMBOL_OFFSET.load(Ordering::Relaxed),
+                    FINITE_FIELDS.len() - FINITE_FIELDS_OFFSET.load(Ordering::Relaxed),
+                    variable_lists - VARIABLE_LIST_OFFSET.load(Ordering::Relaxed),
+                );
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// Write the state to a binary stream.
+    #[inline(always)]
+    pub fn export<W: Write>(dest: &mut W) -> Result<(), std::io::Error> {
+        let (n_symbols, n_finite_fields, n_variable_lists) = Self::export_registry_lengths();
 
         dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
         dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
         dest.write_u8(FULL_STATE_EXPORT_FLAG)?;
 
-        dest.write_u64::<LittleEndian>(
-            ID_TO_STR.len() as u64 - SYMBOL_OFFSET.load(Ordering::Relaxed) as u64,
-        )?;
+        dest.write_u64::<LittleEndian>(n_symbols as u64)?;
 
-        for (s, _) in State::symbol_iter() {
+        for (s, _) in State::symbol_iter().take(n_symbols) {
             s.export(dest)?;
         }
 
         let finite_field_start = FINITE_FIELDS_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64 - finite_field_start as u64)?;
-        for x in FINITE_FIELDS.iter().skip(finite_field_start) {
+        dest.write_u64::<LittleEndian>(n_finite_fields as u64)?;
+        for x in FINITE_FIELDS
+            .iter()
+            .skip(finite_field_start)
+            .take(n_finite_fields)
+        {
             dest.write_u64::<LittleEndian>(x.get_prime())?;
         }
 
         let start = VARIABLE_LIST_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(VARIABLE_LISTS.len() as u64 - start as u64)?;
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        dest.write_u64::<LittleEndian>(n_variable_lists as u64)?;
+        for x in VARIABLE_LISTS.iter().skip(start).take(n_variable_lists) {
             dest.write_u64::<LittleEndian>(x.len() as u64)?;
             for y in x.iter() {
                 match y {
@@ -1311,12 +1332,10 @@ impl State {
         dest: &mut W,
         mut symbols: HashSet<Symbol>,
     ) -> Result<(), std::io::Error> {
-        if ID_TO_STR.len() == 0 {
-            Self::initialize_state();
-        }
+        let (n_symbols, n_finite_fields, n_variable_lists) = Self::export_registry_lengths();
 
         let start = VARIABLE_LIST_OFFSET.load(Ordering::Relaxed);
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        for x in VARIABLE_LISTS.iter().skip(start).take(n_variable_lists) {
             for y in x.iter() {
                 match y {
                     PolyVariable::Symbol(s) => {
@@ -1341,7 +1360,7 @@ impl State {
 
         dest.write_u64::<LittleEndian>(symbols.len() as u64)?;
 
-        for (i, (s, _)) in State::symbol_iter().enumerate() {
+        for (i, (s, _)) in State::symbol_iter().take(n_symbols).enumerate() {
             if symbols.contains(&s) {
                 dest.write_u32::<LittleEndian>(i as u32)?;
                 s.export(dest)?;
@@ -1349,13 +1368,17 @@ impl State {
         }
 
         let finite_field_start = FINITE_FIELDS_OFFSET.load(Ordering::Relaxed);
-        dest.write_u64::<LittleEndian>(FINITE_FIELDS.len() as u64 - finite_field_start as u64)?;
-        for x in FINITE_FIELDS.iter().skip(finite_field_start) {
+        dest.write_u64::<LittleEndian>(n_finite_fields as u64)?;
+        for x in FINITE_FIELDS
+            .iter()
+            .skip(finite_field_start)
+            .take(n_finite_fields)
+        {
             dest.write_u64::<LittleEndian>(x.get_prime())?;
         }
 
-        dest.write_u64::<LittleEndian>(VARIABLE_LISTS.len() as u64 - start as u64)?;
-        for x in VARIABLE_LISTS.iter().skip(start) {
+        dest.write_u64::<LittleEndian>(n_variable_lists as u64)?;
+        for x in VARIABLE_LISTS.iter().skip(start).take(n_variable_lists) {
             dest.write_u64::<LittleEndian>(x.len() as u64)?;
             for y in x.iter() {
                 match y {
@@ -1767,6 +1790,103 @@ mod tests {
             .get_symbol()
             .unwrap();
         assert_eq!(a.get_data(), &crate::state::UserData::Atom(parse!("z")));
+    }
+
+    #[test]
+    fn export_registry_prefixes() {
+        use crate::{
+            atom::SymbolBuilder,
+            coefficient::Coefficient,
+            domains::finite_field::{FiniteFieldCore, Zp64},
+        };
+        use std::io::{self, Write};
+
+        const CHILD: &str = "SYMBOLICA_EXPORT_PREFIX_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Other tests register symbols concurrently; keep the byte comparisons isolated.
+            assert!(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "state::tests::export_registry_prefixes"])
+                    .env(CHILD, "1")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            return;
+        }
+
+        struct RegisteringWriter<F> {
+            bytes: Vec<u8>,
+            register: Option<F>,
+        }
+        impl<F: FnOnce()> Write for RegisteringWriter<F> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                if bytes.len() == 8
+                    && let Some(register) = self.register.take()
+                {
+                    register(); // The first u64 is the symbol count, already written above.
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let atom = Atom::num(1);
+        for full in [false, true] {
+            let export = |dest: &mut Vec<u8>| {
+                if full {
+                    State::export(dest)
+                } else {
+                    atom.export(dest)
+                }
+                .unwrap()
+            };
+            let mut expected = Vec::new();
+            export(&mut expected);
+            let mut writer = RegisteringWriter {
+                bytes: Vec::new(),
+                register: Some(|| {
+                    let x = symbol!(format!("export_prefix::writer_{full}"));
+                    let _ = (x.to_atom() + 1).set_coefficient_ring(x);
+                    let field = Zp64::new(if full { 65521 } else { 65519 });
+                    let element = field.to_element(5);
+                    let _ = Atom::num(Coefficient::from_finite_field(field, element));
+                }),
+            };
+            if full {
+                State::export(&mut writer)
+            } else {
+                atom.export(&mut writer)
+            }
+            .unwrap();
+            assert!(writer.register.is_none());
+            assert_eq!(writer.bytes, expected);
+            let mut source = writer.bytes.as_slice();
+            if full {
+                State::import(&mut source, None).unwrap();
+            } else {
+                assert_eq!(Atom::import(&mut source, None).unwrap(), atom);
+            }
+            assert!(source.is_empty());
+        }
+
+        let mut expected = Vec::new();
+        State::export(&mut expected).unwrap();
+        SymbolBuilder::build_group(vec![
+            SymbolBuilder::new(wrap_symbol!("export_prefix::generator")).with_generator(
+                move |_, builder| {
+                    let mut bytes = Vec::new();
+                    State::export(&mut bytes).unwrap();
+                    assert_eq!(bytes, expected);
+                    atom.export(&mut Vec::new()).unwrap();
+                    builder
+                },
+            ),
+        ])
+        .unwrap();
     }
 
     #[test]
