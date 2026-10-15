@@ -3204,15 +3204,30 @@ fn polygamma_exact_rational(order: u32, rat: &Rational) -> Option<Atom> {
         return polygamma_order_zero_exact_rational(rat);
     }
 
-    if *rat != Rational::one() {
+    if rat.denominator() != 1 {
         return None;
     }
 
-    match order {
-        1 => Some(Atom::from(State::PI).pow(2) / 6),
-        3 => Some(Atom::from(State::PI).pow(4) / 15),
-        _ => None,
+    let argument = rat.numerator().to_i64()?;
+    if argument < 1 {
+        return None;
     }
+    let zeta_order = order.checked_add(1)?;
+
+    // DLMF 5.15.2 and 5.15.5: psi^(n)(m) = (-1)^(n+1) n!
+    // * (zeta(n+1) - sum_{k=1}^{m-1} k^(-n-1)), for n,m >= 1.
+    let mut shift = Rational::zero();
+    for k in 1..argument {
+        shift += &(Rational::one() / Rational::from(k).pow(u64::from(zeta_order)));
+    }
+    let mut factor = Integer::factorial(order);
+    if order.is_multiple_of(2) {
+        factor = -factor;
+    }
+    Some(
+        Atom::num(factor.clone()) * function!(SPECIALS.zeta, Atom::num(zeta_order))
+            - Atom::num(Rational::from(factor) * shift),
+    )
 }
 
 fn gamma_half_integer_prefactor(numerator: i64) -> Rational {
@@ -4206,6 +4221,15 @@ fn zeta_numeric_eval(s: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
 
         #[cfg(feature = "float-mpfr")]
         {
+            // Retain the existing integer-order owner for exactly represented
+            // nonnegative integers. Its MPFR zeta_u route is substantially
+            // faster at high precision than the general floating-order call.
+            if finite(s)
+                && let Some(order) = complex_float_to_integer(s)
+                && u32::try_from(order).is_ok()
+            {
+                return zeta_integer_numeric_eval(order, binary_prec);
+            }
             return Complex::new(s.re.clone().into_raw().zeta().into(), zero);
         }
 
@@ -5233,6 +5257,127 @@ mod tests {
             parse!("polygamma(0,0)"),
             Atom::num(Coefficient::complex_infinity())
         );
+    }
+
+    #[test]
+    fn polygamma_positive_integer_exact_normalization() {
+        for (input, expected) in [
+            ("polygamma(1,1)", "pi^2/6"),
+            ("polygamma(2,1)", "-2*zeta(3)"),
+            ("polygamma(3,1)", "pi^4/15"),
+            ("polygamma(4,1)", "-24*zeta(5)"),
+            ("polygamma(5,1)", "8*pi^6/63"),
+            ("polygamma(6,1)", "-720*zeta(7)"),
+            ("polygamma(1,2)", "pi^2/6-1"),
+            ("polygamma(2,2)", "2-2*zeta(3)"),
+            ("polygamma(3,3)", "pi^4/15-51/8"),
+            ("polygamma(65,1)", "gamma(66)*zeta(66)"),
+            ("polygamma(66,1)", "-gamma(67)*zeta(67)"),
+        ] {
+            assert_eq!(parse!(input), parse!(expected));
+        }
+        for order in 1..=8 {
+            for argument in [1, 2, 3, 4, 5, 65, 100] {
+                let difference = parse!(format!(
+                    "polygamma({order},{})-polygamma({order},{argument})",
+                    argument + 1
+                ));
+                let recurrence = parse!(format!(
+                    "(-1)^{order}*gamma({})/{argument}^{}",
+                    order + 1,
+                    order + 1
+                ));
+                assert!((difference - recurrence).expand().is_zero());
+            }
+        }
+    }
+
+    #[test]
+    fn polygamma_exact_normalization_respects_domain_and_integer_ranges() {
+        let native = super::polygamma();
+        for input in [
+            "polygamma(64,64)",
+            "polygamma(65,1)",
+            "polygamma(1,65)",
+            "polygamma(2,100)",
+        ] {
+            assert!(!parse!(input).contains_symbol(native), "{input}");
+        }
+        for input in [
+            "polygamma(4294967295,1)",
+            "polygamma(1,1000000000000000000000000000000)",
+            "polygamma(-1,1)",
+            "polygamma(1/2,1)",
+            "polygamma(2,1/2)",
+            "polygamma(2,1+1i)",
+            "polygamma(2,x)",
+        ] {
+            assert!(parse!(input).contains_symbol(native), "{input}");
+        }
+        for input in ["polygamma(2,0)", "polygamma(2,-1)"] {
+            assert_eq!(parse!(input), Atom::num(Coefficient::complex_infinity()));
+        }
+        assert_eq!(parse!("polygamma(0,1/2)"), parse!("-euler_gamma-2*log(2)"));
+    }
+
+    #[test]
+    fn gamma_series_uses_native_zeta_after_integer_normalization() {
+        let x = symbol!("x");
+        let series = parse!("log(gamma(1+x))").series(x, 0, 5).unwrap();
+        assert_eq!(
+            series.coefficient(3.into()).unwrap().expand(),
+            parse!("-zeta(3)/3")
+        );
+        assert_eq!(
+            series.coefficient(5.into()).unwrap().expand(),
+            parse!("-zeta(5)/5")
+        );
+        assert!(!series.to_atom().contains_symbol(super::polygamma()));
+    }
+
+    #[test]
+    #[cfg(feature = "float-mpfr")]
+    fn integer_zeta_dispatch_preserves_special_values_and_precision() {
+        use crate::domains::backend::float::MultiPrecisionFloat;
+
+        for bits in [128, 512, 66_705] {
+            for order in [0_u32, 1, 2, 3, 5, 97] {
+                let input = Complex::new(Float::with_val(bits, order), Float::new(bits));
+                let actual = super::zeta_numeric_eval(&input, bits);
+                let expected: Float =
+                    MultiPrecisionFloat::with_val(bits, MultiPrecisionFloat::zeta_u(order)).into();
+                assert_eq!(actual.re, expected);
+                assert!(actual.im.is_fully_zero());
+                if order != 1 {
+                    assert!(actual.re.is_finite());
+                    assert!(actual.re.prec() >= bits);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "float-mpfr")]
+    fn zeta_near_integers_and_negative_reals_retain_general_evaluation() {
+        let bits = 512;
+        let delta = Float::with_val(bits, 2).pow(120).inv();
+        for value in [
+            Float::with_val(bits, 3) + &delta,
+            Float::with_val(bits, 3) - &delta,
+            Float::with_val(bits, -1),
+            Float::with_val(bits, -2),
+            Float::with_val(bits, -3),
+        ] {
+            let input = Complex::new(value.clone(), Float::new(bits));
+            let actual = super::zeta_numeric_eval(&input, bits);
+            let expected: Float = value.into_raw().zeta().into();
+            assert_eq!(actual.re, expected);
+            assert!(actual.im.is_fully_zero());
+            if input.re > Float::new(bits) {
+                let integer = super::zeta_integer_numeric_eval(3, bits);
+                assert_ne!(actual.re, integer.re);
+            }
+        }
     }
 
     #[test]
