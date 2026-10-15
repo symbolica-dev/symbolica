@@ -1,6 +1,8 @@
 //! Multivariate polynomial structures and methods.
 
+mod exponents;
 mod homogeneous;
+pub use exponents::ExponentsIterator;
 mod rational_division;
 
 #[cfg(test)]
@@ -1200,16 +1202,27 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     /// Returns an iterator over the exponents of every monomial.
+    /// A nonzero constant without variables yields one empty exponent slice.
     #[inline]
-    pub fn exponents_iter(&self) -> std::slice::Chunks<'_, E> {
-        self.exponents.chunks(self.nvars())
+    pub fn exponents_iter(&self) -> ExponentsIterator<std::slice::Chunks<'_, E>> {
+        let nvars = self.nvars();
+        let constant = (nvars == 0 && !self.is_zero()).then_some(&self.exponents[..0]);
+        ExponentsIterator::new(self.exponents.chunks(nvars.max(1)), constant)
     }
 
     /// Returns an iterator over the mutable exponents of every monomial.
+    /// A nonzero constant without variables yields one empty exponent slice.
     #[inline]
-    pub fn exponents_iter_mut(&mut self) -> std::slice::ChunksMut<'_, E> {
+    pub fn exponents_iter_mut(&mut self) -> ExponentsIterator<std::slice::ChunksMut<'_, E>> {
         let nvars = self.nvars();
-        self.exponents.chunks_mut(nvars)
+        let has_constant = nvars == 0 && !self.is_zero();
+        let (constant, exponents) = if has_constant {
+            let (empty, rest) = self.exponents.split_at_mut(0);
+            (Some(empty), rest)
+        } else {
+            (None, self.exponents.as_mut_slice())
+        };
+        ExponentsIterator::new(exponents.chunks_mut(nvars.max(1)), constant)
     }
 
     /// Reset the polynomial to 0.
