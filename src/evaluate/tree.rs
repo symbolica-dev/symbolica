@@ -738,8 +738,18 @@ impl<'a> AtomView<'a> {
                 }
                 Instruction::Fun(o, b, _) => {
                     let (sym, tags, args) = *b;
+                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                    let key = (sym, tags.clone(), None);
 
-                    if sym.is_fixed_builtin() {
+                    // A tagged derivative can have an explicitly registered
+                    // non-inlined body, despite using a fixed builtin symbol.
+                    // Ordinary builtins retain their native unary lowering.
+                    let registered_body = sym.is_fixed_builtin()
+                        && context
+                            .external_indices
+                            .get(&key)
+                            .is_some_and(|index| context.external_functions[*index].body.is_some());
+                    if sym.is_fixed_builtin() && !registered_body {
                         if args.len() != 1 {
                             return Err(EvaluationError::UnsupportedBuiltinArity {
                                 function: sym,
@@ -754,16 +764,12 @@ impl<'a> AtomView<'a> {
                         continue;
                     }
 
-                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
-                    let index = *context
-                        .external_indices
-                        .entry((sym, tags.clone(), None))
-                        .or_insert_with(|| {
-                            context
-                                .external_functions
-                                .push(ExternalFunctionContainer::new(sym, tags, vec![]));
-                            context.external_functions.len() - 1
-                        });
+                    let index = *context.external_indices.entry(key).or_insert_with(|| {
+                        context
+                            .external_functions
+                            .push(ExternalFunctionContainer::new(sym, tags, vec![]));
+                        context.external_functions.len() - 1
+                    });
 
                     instructions.push((
                         Instr::ExternalFun(
@@ -4645,5 +4651,103 @@ mod external_cache_tests {
         assert_eq!(output[1], Complex::new(4., 4.));
         assert_eq!(output[2], Complex::new(9., 12.));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod registered_derivative_tests {
+    use crate::{
+        atom::{Atom, AtomCore, Symbol},
+        domains::{float::Complex, rational::Rational},
+        evaluate::{ExpressionEvaluator, FunctionMap, FunctionRegistrationOptions, InliningPolicy},
+        symbol,
+    };
+
+    fn build(policy: InliningPolicy) -> ExpressionEvaluator<Complex<Rational>> {
+        let (x, y, f) = symbol!(
+            "registered_derivative::x",
+            "registered_derivative::y",
+            "registered_derivative::f"
+        );
+        let inputs = [Atom::var(x), Atom::var(y)];
+        let body = inputs[0].pow(2) * &inputs[1] + Atom::num(3) * &inputs[0] * inputs[1].pow(2);
+        let call = f.call_args(inputs.clone());
+        let mut functions = FunctionMap::new();
+        let options = FunctionRegistrationOptions::new().inlining(policy);
+        functions
+            .add_function_with_options(f, vec![x, y], body.clone(), options.clone())
+            .unwrap();
+        for orders in [[1u32, 0u32], [1, 1], [0, 2], [1, 2]] {
+            let mut derivative = body.clone();
+            for (variable, order) in [x, y].into_iter().zip(orders) {
+                for _ in 0..order {
+                    derivative = derivative.derivative(variable);
+                }
+            }
+            functions
+                .add_tagged_function_with_options(
+                    Symbol::DERIVATIVE,
+                    vec![Atom::num(orders[0]), Atom::num(orders[1]), Atom::var(f)],
+                    vec![x, y],
+                    derivative,
+                    options.clone(),
+                )
+                .unwrap();
+        }
+        Atom::evaluator_multiple(
+            &[
+                call.clone(),
+                call.derivative(x),
+                call.derivative(x).derivative(y),
+                call.derivative(y).derivative(y),
+                call.derivative(y).derivative(y).derivative(x),
+            ],
+            &inputs,
+        )
+        .function_map(functions)
+        .horner_iterations(0)
+        .build()
+        .unwrap()
+    }
+
+    fn points() -> [[Complex<f64>; 2]; 3] {
+        [
+            [Complex::new(0., 0.), Complex::new(0., 0.)],
+            [Complex::new(2., 1.), Complex::new(3., -2.)],
+            [Complex::new(-0.5, 0.25), Complex::new(0.125, 0.5)],
+        ]
+    }
+
+    fn expected([x, y]: [Complex<f64>; 2]) -> [Complex<f64>; 5] {
+        let three = Complex::new(3., 0.);
+        let two = Complex::new(2., 0.);
+        let six = Complex::new(6., 0.);
+        [
+            x * x * y + three * x * y * y,
+            two * x * y + three * y * y,
+            two * x + six * y,
+            six * x,
+            six,
+        ]
+    }
+
+    #[test]
+    fn registered_derivatives_respect_inlining_policy() {
+        for policy in [InliningPolicy::Always, InliningPolicy::Never] {
+            let exact = build(policy);
+            let exported = exact.export_instructions();
+            assert_eq!(exported.input_count, 2);
+            assert_eq!(
+                exported.sub_evaluators.is_empty(),
+                policy == InliningPolicy::Always
+            );
+            let mut eager =
+                exact.map_coeff(&|value| Complex::new(value.re.to_f64(), value.im.to_f64()));
+            for point in points() {
+                let mut actual = [Complex::new(0., 0.); 5];
+                eager.evaluate(&point, &mut actual);
+                assert_eq!(actual, expected(point));
+            }
+        }
     }
 }
