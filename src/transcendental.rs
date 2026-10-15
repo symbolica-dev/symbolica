@@ -488,6 +488,7 @@ impl SpecialSymbols {
                 })
                 .with_evaluation_info(
                     EvaluationInfo::new().with_tags(1)
+                    .with_fixed_argument_evaluator(polygamma_fixed_arguments)
                     .register_tagged(|tags| {
                         let order = nonnegative_integer_tag("polygamma", tags).ok();
                         Box::new(move |args: &[Complex<Float>]| {
@@ -3575,6 +3576,34 @@ fn polygamma_order_zero_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Co
     }
 
     polygamma_order_zero_complex(z, binary_prec)
+}
+
+fn polygamma_fixed_arguments(
+    tags: &[AtomView],
+    args: &[Complex<Rational>],
+    binary_prec: u32,
+) -> Result<Complex<Float>, String> {
+    let order = nonnegative_integer_tag("polygamma", tags)?;
+    if binary_prec == 0 || binary_prec > MAX_WORK_BITS.saturating_sub(64) {
+        return Err("polygamma fixed-argument precision exceeds the supported budget".into());
+    }
+    let [arg] = args else {
+        return Err("polygamma requires one fixed numeric argument".into());
+    };
+    let value = Complex::new(
+        arg.re.to_multi_prec_float(binary_prec),
+        arg.im.to_multi_prec_float(binary_prec),
+    );
+    // Do not silently evaluate a nearby argument, particularly near a pole.
+    // Nonrepresentable rational inputs remain outside this narrow capability.
+    if !finite(&value) || value.re.to_rational() != arg.re || value.im.to_rational() != arg.im {
+        return Err("polygamma fixed argument is not exact at the requested precision".into());
+    }
+    let result = polygamma_numeric_eval(order, &value, binary_prec);
+    if !finite(&result) {
+        return Err("polygamma fixed-argument evaluation failed or reached a pole".into());
+    }
+    Ok(result)
 }
 
 fn polygamma_numeric_eval(order: u32, z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {

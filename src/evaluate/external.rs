@@ -270,19 +270,8 @@ impl<T> ExternalFunctionContainer<T> {
         if self.fixed_args.is_empty() {
             T2::try_from_complex_float(info.evaluate_constant(&tags, binary_prec)?)
         } else {
-            let args = self
-                .fixed_args
-                .iter()
-                .map(|c| {
-                    T2::try_from_complex_float(Complex::new(
-                        c.re.to_multi_prec_float(binary_prec),
-                        c.im.to_multi_prec_float(binary_prec),
-                    ))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let eval = T2::resolve_function(&tags, info)
-                .ok_or_else(|| format!("External constant '{}' has no implementation", self))?;
-            Ok(eval(&args))
+            info.evaluate_fixed_arguments(&tags, &self.fixed_args, binary_prec)
+                .map_err(|cause| format!("External constant '{self}': {cause}"))
         }
     }
 
@@ -335,3 +324,80 @@ impl<T> std::fmt::Display for ExternalFunctionContainer<T> {
 pub trait ExternalFunction<T>: Fn(&[T]) -> T + Send + Sync + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(<T> ExternalFunction<T>);
 impl<T, F: Clone + Send + Sync + Fn(&[T]) -> T + Send + Sync> ExternalFunction<T> for F {}
+
+#[cfg(test)]
+mod fixed_tracking_tests {
+    use crate::{
+        atom::{Atom, AtomCore},
+        domains::{
+            float::{Complex, DoubleFloat, ErrorPropagatingFloat, Float, RealLike},
+            rational::Rational,
+        },
+        evaluate::{EvaluationDomain, ExpressionEvaluator},
+    };
+    type Tracked = ErrorPropagatingFloat<Float>;
+
+    fn argument(re: Rational) -> Complex<Rational> {
+        Complex::new(re, Rational::from(0))
+    }
+    fn fixed<T: EvaluationDomain>(z: Complex<Rational>, bits: u32) -> Result<T, String> {
+        let order = Atom::num(2);
+        crate::transcendental::polygamma()
+            .get_evaluation_info()
+            .unwrap()
+            .evaluate_fixed_arguments(&[order.as_view()], &[z], bits)
+    }
+    fn exact() -> ExpressionEvaluator<Complex<Rational>> {
+        crate::transcendental::polygamma()
+            .call_args([Atom::num(2), Atom::one()])
+            .evaluator(&[] as &[Atom])
+            .build()
+            .unwrap()
+    }
+    fn eval(exact: ExpressionEvaluator<Complex<Rational>>, bits: u32) -> Tracked {
+        let mut mapped = exact.map_coeff_with_prec(
+            &|c| {
+                Tracked::try_from_complex_float(Complex::new(
+                    c.re.to_multi_prec_float(bits),
+                    c.im.to_multi_prec_float(bits),
+                ))
+                .unwrap()
+            },
+            bits,
+        );
+        let mut output = [Tracked::new(Float::new(bits), 30.)];
+        mapped.evaluate(&[], &mut output);
+        output[0].clone()
+    }
+
+    #[test]
+    fn exact_fixed_polygamma_retains_native_assumed_precision() {
+        assert!(fixed::<Tracked>(argument(Rational::from((1, 3))), 128).is_err());
+        let expected = -2.404_113_806_319_188_5;
+        let native64: ErrorPropagatingFloat<f64> = fixed(argument(Rational::from(1)), 53).unwrap();
+        assert!((native64.get_num() - expected).abs() < 1e-15);
+        assert!(native64.get_absolute_error().is_finite() && native64.get_absolute_error() > 0.);
+        let complex64: Complex<ErrorPropagatingFloat<f64>> =
+            fixed(argument(Rational::from(1)), 53).unwrap();
+        assert_eq!(complex64.re.get_num(), native64.get_num());
+        assert!(complex64.im.get_absolute_error() > 0.);
+        for bits in [128, 256] {
+            let value = eval(exact(), bits);
+            assert_eq!(value.get_num().prec(), bits);
+            assert!((value.get_num().to_f64() - expected).abs() < 1e-15);
+            assert!(value.get_absolute_error().is_finite() && value.get_absolute_error() > 0.);
+            let complex: Complex<Tracked> = fixed(argument(Rational::from(1)), bits).unwrap();
+            assert_eq!(complex.re.get_num(), value.get_num());
+            assert_eq!(complex.re.get_num().prec(), bits);
+            assert_eq!(complex.im.get_num().prec(), bits);
+            assert!(complex.re.get_absolute_error() > 0. && complex.im.get_absolute_error() > 0.);
+        }
+        // Existing Float and DoubleFloat implementations still take precedence.
+        let ordinary: Float = fixed(argument(Rational::from(1)), 128).unwrap();
+        let wide: DoubleFloat = fixed(argument(Rational::from(1)), 106).unwrap();
+        let wide_complex: Complex<DoubleFloat> = fixed(argument(Rational::from(1)), 106).unwrap();
+        assert!((ordinary.to_f64() - expected).abs() < 1e-15);
+        assert!((wide.to_f64() - expected).abs() < 1e-15);
+        assert_eq!(wide_complex.re, wide);
+    }
+}

@@ -290,12 +290,25 @@ impl EvaluationDomain for Complex<Float> {
     }
 }
 
+// A rounded Float constant carries assumed numerical precision, including when
+// its center is zero. Failure to represent that positive error is not evidence
+// that the constant is exact. Exact rational mappings do not use this conversion.
+fn checked_assumed_constant<T: RealLike>(
+    value: ErrorPropagatingFloat<T>,
+) -> Result<ErrorPropagatingFloat<T>, String> {
+    let error = value.get_absolute_error();
+    if !error.is_finite() || error <= 0. {
+        return Err("Float constant uncertainty exceeds the native tracking range".into());
+    }
+    Ok(value)
+}
+
 impl EvaluationDomain for ErrorPropagatingFloat<f64> {
     const FIXED_PRECISION: Option<u32> = f64::FIXED_PRECISION;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
         if f.is_real() {
-            Ok(ErrorPropagatingFloat::new(
+            checked_assumed_constant(ErrorPropagatingFloat::new(
                 f.re.to_f64(),
                 15.954589770191003,
             ))
@@ -313,7 +326,7 @@ impl EvaluationDomain for ErrorPropagatingFloat<Float> {
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
         let dr = -f.re.get_epsilon().log10();
         if f.is_real() {
-            Ok(ErrorPropagatingFloat::new(f.re, dr))
+            checked_assumed_constant(ErrorPropagatingFloat::new(f.re, dr))
         } else {
             Err(format!(
                 "Cannot convert from Complex<Float> to Float because the result {f} is not real"
@@ -327,8 +340,14 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
         Ok(Complex::new(
-            ErrorPropagatingFloat::new(f.re.to_f64(), 15.954589770191003),
-            ErrorPropagatingFloat::new(f.im.to_f64(), 15.954589770191003),
+            checked_assumed_constant(ErrorPropagatingFloat::new(
+                f.re.to_f64(),
+                15.954589770191003,
+            ))?,
+            checked_assumed_constant(ErrorPropagatingFloat::new(
+                f.im.to_f64(),
+                15.954589770191003,
+            ))?,
         ))
     }
 }
@@ -340,8 +359,8 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<Float>> {
         let dr = -f.re.get_epsilon().log10();
         let di = -f.im.get_epsilon().log10();
         Ok(Complex::new(
-            ErrorPropagatingFloat::new(f.re, dr),
-            ErrorPropagatingFloat::new(f.im, di),
+            checked_assumed_constant(ErrorPropagatingFloat::new(f.re, dr))?,
+            checked_assumed_constant(ErrorPropagatingFloat::new(f.im, di))?,
         ))
     }
 }
@@ -393,5 +412,43 @@ mod ball_tests {
         assert!(ComplexBall::resolve_function(&[], &info).is_none());
         assert!(RealBall::FIXED_PRECISION.is_none());
         assert!(ComplexBall::FIXED_PRECISION.is_none());
+    }
+}
+
+#[cfg(test)]
+mod constant_tracking_tests {
+    //! Independent regression for native Float-constant conversion; no fixed-function API required.
+    use crate::{
+        domains::float::{Complex, ErrorPropagatingFloat, Float, RealLike},
+        evaluate::EvaluationDomain,
+    };
+    type Tracked = ErrorPropagatingFloat<Float>;
+
+    #[test]
+    fn rounded_zero_and_nonzero_constants_keep_positive_assumed_error() {
+        for bits in [53, 128, 256] {
+            for center in [0., 1., -2.] {
+                let value = Complex::new(Float::with_val(bits, center), Float::new(bits));
+                let real = Tracked::try_from_complex_float(value.clone()).unwrap();
+                let complex = Complex::<Tracked>::try_from_complex_float(value.clone()).unwrap();
+                assert_eq!(real.get_num().prec(), bits);
+                assert_eq!(real.get_num().to_f64(), center);
+                assert!(real.get_absolute_error().is_finite() && real.get_absolute_error() > 0.);
+                assert!(
+                    complex.re.get_absolute_error() > 0. && complex.im.get_absolute_error() > 0.
+                );
+                let real64 =
+                    ErrorPropagatingFloat::<f64>::try_from_complex_float(value.clone()).unwrap();
+                let complex64 =
+                    Complex::<ErrorPropagatingFloat<f64>>::try_from_complex_float(value).unwrap();
+                assert!(
+                    real64.get_absolute_error().is_finite() && real64.get_absolute_error() > 0.
+                );
+                assert!(
+                    complex64.re.get_absolute_error() > 0.
+                        && complex64.im.get_absolute_error() > 0.
+                );
+            }
+        }
     }
 }
