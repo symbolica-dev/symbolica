@@ -5568,6 +5568,7 @@ where
     /// by Garrett Paluck. The formulation of the algorithm in other sources contain serious errors.
     // TODO: merge with an almost similar method for the integer case. A modification that needs
     // to be made here is to make the lcoeff_y=0 monic
+    #[inline(never)]
     fn bivariate_hensel_lift_bernardin(
         &self,
         interpolation_var: usize,
@@ -5657,6 +5658,7 @@ where
     }
 
     /// Compute the bivariate factorization of a square-free polynomial.
+    #[inline(never)]
     fn bivariate_factorization(&self, main_var: usize, interpolation_var: usize) -> Vec<Self> {
         assert!(main_var != interpolation_var);
 
@@ -5846,6 +5848,7 @@ where
 
     /// Precompute the leading coefficients of the polynomial factors, using an
     /// adapted version of Kaltofen's algorithm that has modifications of Martin Lee and Stanislav Poslavsky.
+    #[inline(never)]
     fn lcoeff_precomputation(
         &self,
         bivariate_factors: &[Self],
@@ -6344,6 +6347,7 @@ where
 }
 
 impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    #[inline(never)]
     fn multivariate_diophantine(
         univariate_deltas: &[Self],
         univariate_factors: &mut [Self],
@@ -7278,6 +7282,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         None
     }
 
+    #[inline(never)]
     fn sparse_multivariate_diophantine_by_sampling(
         factors: &[Self],
         prods: &[Self],
@@ -8138,6 +8143,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         Ok(reconstructed_factors)
     }
 
+    #[inline(never)]
     fn multivariate_hensel_step(
         &self,
         univariate_deltas: &[Self],
@@ -8379,6 +8385,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         self.hensel_lift_with_strategy(u, w, gamma, max_p, true)
     }
 
+    #[inline(never)]
     fn hensel_lift_with_strategy<UField: FiniteFieldWorkspace>(
         &self,
         mut u: MultivariatePolynomial<FiniteField<UField>, E, LexOrder>,
@@ -10153,6 +10160,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// to `mod y^iterations mod p^k`.
     ///
     /// Univariate factors must be monic and `lcoeff_y=0` should be as well.
+    #[inline(never)]
     fn bivariate_hensel_lift_bernardin(
         poly: &MultivariatePolynomial<FiniteField<Integer>, E, LexOrder>,
         interpolation_var: usize,
@@ -10812,6 +10820,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     // TODO: merge with the implementation for finite fields as the implementation
     // is almost identical
     #[allow(dead_code)]
+    #[inline(never)]
     fn lcoeff_precomputation(
         &self,
         bivariate_factors: &[Self],
@@ -11824,6 +11833,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// and accepting only an exact reconstruction of the input. Failed samples
     /// advance the deterministic coefficient bound and retry without growing
     /// the call stack.
+    #[inline(never)]
     fn multivariate_factorization_bivariate_start(
         &self,
         order: &mut [usize],

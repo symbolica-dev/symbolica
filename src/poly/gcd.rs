@@ -2368,6 +2368,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 
     #[instrument(level = "trace", fields(%a, %b))]
+    #[inline(never)]
     fn construct_new_image_single_scale(
         a: &MultivariatePolynomial<F, E>,
         b: &MultivariatePolynomial<F, E>,
@@ -2638,6 +2639,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// Gaussian elimination. Then, we are back in the single term case and we use a Vandermonde
     /// matrix to solve for every coefficient.
     #[instrument(level = "trace", fields(%a, %b))]
+    #[inline(never)]
     fn construct_new_image_multiple_scales(
         a: &MultivariatePolynomial<F, E>,
         b: &MultivariatePolynomial<F, E>,
@@ -3062,6 +3064,7 @@ impl<F: Field + PolynomialGCD<E> + UniformlySampleableRing, E: PositiveExponent>
     /// Compute the gcd shape of two polynomials in a finite field by filling in random
     /// numbers.
     #[instrument(level = "debug", skip_all)]
+    #[inline(never)]
     fn gcd_shape_modular(
         a: &Self,
         b: &Self,
@@ -3611,6 +3614,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
 
     /// Compute the gcd of two multivariate polynomials.
     #[instrument(skip_all)]
+    #[inline]
     pub fn gcd(&self, b: &MultivariatePolynomial<R, E>) -> MultivariatePolynomial<R, E> {
         debug!("gcd of {} and {}", self, b);
 
@@ -3619,6 +3623,12 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             return PolynomialGCD::normalize(g);
         }
 
+        self.gcd_impl(b)
+    }
+
+    // Keep the simple-GCD path inlineable; share the full multivariate algorithm.
+    #[inline(never)]
+    fn gcd_impl(&self, b: &MultivariatePolynomial<R, E>) -> MultivariatePolynomial<R, E> {
         // a and b are only copied when needed
         let mut a = Cow::Borrowed(self);
         let mut b = Cow::Borrowed(b);
@@ -5624,6 +5634,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     /// Compute the gcd using Zippel's algorithm and the supplied modular workspace.
     /// TODO: provide a parallel implementation?
     #[instrument(level = "debug", skip_all)]
+    #[inline(never)]
     fn gcd_zippel<UField: ModularGcdWorkspace>(
         &self,
         b: &Self,
@@ -7844,6 +7855,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
         MultivariatePolynomial::repeated_gcd(f)
     }
 
+    #[inline(never)]
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,

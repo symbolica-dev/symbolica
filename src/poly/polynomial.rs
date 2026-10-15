@@ -3967,6 +3967,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         }
     }
 
+    #[inline(never)]
     fn heap_mul(
         &self,
         rhs: &MultivariatePolynomial<F, E, LexOrder>,
@@ -6064,6 +6065,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Reference: "Sparse polynomial division using a heap" by Monagan, Pearce (2011)
     ///
     /// The input must not have negative exponents.
+    #[inline(never)]
     fn heap_division(
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
@@ -6313,6 +6315,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
     /// be used to check for subtraction overflow, serving as a division test.
     ///
     /// The input must not have negative exponents.
+    #[inline(never)]
     fn heap_division_packed_exp(
         mut self,
         div: &MultivariatePolynomial<F, E, LexOrder>,
