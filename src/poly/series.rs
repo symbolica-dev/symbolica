@@ -487,9 +487,10 @@ impl<F: Ring> Series<F> {
 
     /// Truncate the series to the desired absolute order.
     /// If the new order is larger, nothing happens.
+    /// An empty series retains its known order since no terms need to be removed.
     #[inline]
     pub fn truncate_absolute_order(&mut self, order: Rational) {
-        if self.absolute_order() < order {
+        if self.coefficients.is_empty() || self.absolute_order() < order {
             return;
         }
 
@@ -1548,10 +1549,78 @@ impl Series<AtomField> {
 mod tests {
     use crate::{
         atom::{Atom, AtomCore},
+        domains::rational::{Q, Rational},
         parse,
-        poly::series::SeriesDepth,
+        poly::series::{Series, SeriesDepth},
         symbol,
     };
+    use std::sync::Arc;
+
+    #[test]
+    fn absolute_truncation_preserves_finite_zero_precision() {
+        let x = symbol!("absolute_zero_precision_x");
+        for known_order in [Rational::from(6), (3, 2).into()] {
+            let prototype =
+                Series::new(&Q, None, Arc::new(x.into()), 0.into(), known_order.clone());
+            for requested in [
+                known_order.clone(),
+                (1, 3).into(),
+                0.into(),
+                (-2).into(),
+                7.into(),
+            ] {
+                let mut zero = prototype.zero();
+                zero.truncate_absolute_order(requested.clone());
+                assert_eq!(zero.absolute_order(), known_order);
+                assert_eq!(
+                    zero.coefficient(known_order.clone() - Rational::from(1)),
+                    Some(0.into())
+                );
+                assert_eq!(zero.coefficient(known_order.clone()), None);
+                zero.truncate_absolute_order(requested);
+                assert_eq!(zero.absolute_order(), known_order);
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_truncation_keeps_leading_zero_information() {
+        let x = symbol!("absolute_last_term_x");
+        let prototype = Series::new(&Q, None, Arc::new(x.into()), 0.into(), 6.into());
+        for (exponent, order) in [
+            (Rational::from(4), Rational::from(2)),
+            ((-1).into(), (-2).into()),
+            ((1, 2).into(), (1, 3).into()),
+        ] {
+            let mut series = prototype.monomial(1.into(), exponent.clone());
+            series.truncate_absolute_order(order);
+            assert!(series.is_zero());
+            assert_eq!(series.absolute_order(), exponent);
+            assert_eq!(
+                series.coefficient(exponent.clone() - Rational::from(1)),
+                Some(0.into())
+            );
+            assert_eq!(series.coefficient(exponent), None);
+        }
+    }
+
+    #[test]
+    fn absolute_truncation_after_cancellation_preserves_known_zeros() {
+        let x = symbol!("absolute_cancelled_x");
+        let series = parse!("absolute_cancelled_x^2").series(x, 0, 6).unwrap();
+        let mut zero = &series - &series;
+        let known_order = zero.absolute_order();
+        zero.truncate_absolute_order(3.into());
+        assert_eq!(zero.absolute_order(), known_order);
+        assert_eq!(zero.coefficient(6.into()), Some(Atom::Zero));
+        assert_eq!(zero.coefficient(known_order), None);
+
+        let mut nonzero = parse!("1+absolute_cancelled_x^4").series(x, 0, 6).unwrap();
+        nonzero.truncate_absolute_order(3.into());
+        assert_eq!(nonzero.coefficient(0.into()), Some(Atom::num(1)));
+        assert_eq!(nonzero.coefficient(2.into()), Some(Atom::Zero));
+        assert_eq!(nonzero.coefficient(3.into()), None);
+    }
 
     #[test]
     fn coefficient_distinguishes_unknown_from_zero() {
