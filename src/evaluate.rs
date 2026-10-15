@@ -26,6 +26,7 @@ use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
 #[cfg(feature = "native_code_generation")]
 mod backend;
+mod compose;
 mod domain;
 mod dual;
 mod evaluator;
@@ -39,6 +40,7 @@ mod tree;
 
 #[cfg(feature = "native_code_generation")]
 pub use backend::*;
+pub use compose::*;
 pub use domain::*;
 pub use dual::*;
 pub use evaluator::*;
@@ -70,8 +72,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
-    error, get_symbol,
-    info,
+    error, get_symbol, info,
     license::LicenseManager,
     numerical_integration::MonteCarloRng,
     utils::AbortCheck,
