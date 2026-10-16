@@ -367,6 +367,17 @@ pub trait DualNumberStructure {
     fn get_max_depth(&self) -> usize;
 }
 
+/// Borrow scalar components of static and dynamic dual numbers uniformly.
+///
+/// Components follow [`DualNumberStructure::get_shape`] exactly, including the
+/// primal value. Mutable access changes values without changing the shape.
+/// This permits generic evaluators to flatten and restore existing dual carriers
+/// without introducing another representation or comparing only primal values.
+pub trait DualNumber<T>: DualNumberStructure {
+    fn values(&self) -> &[T];
+    fn values_mut(&mut self) -> &mut [T];
+}
+
 /// Create a new hyperdual number, from a specification of the components.
 /// The first components must be the real value and the single derivatives of the variables in order.
 ///
@@ -451,6 +462,16 @@ macro_rules! create_hyperdual_from_components {
                     .unwrap_or_else(|| {
                         panic!("No single derivative component for variable {}", var)
                     })
+            }
+        }
+
+        impl<T> $crate::domains::dual::DualNumber<T> for $t<T> {
+            fn values(&self) -> &[T] {
+                &self.values
+            }
+
+            fn values_mut(&mut self) -> &mut [T] {
+                &mut self.values
             }
         }
 
@@ -1430,6 +1451,16 @@ impl<T: Default> HyperDual<T> {
             shape.push(s);
         }
         Self::new(shape)
+    }
+}
+
+impl<T> DualNumber<T> for HyperDual<T> {
+    fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    fn values_mut(&mut self) -> &mut [T] {
+        &mut self.values
     }
 }
 
@@ -2511,6 +2542,25 @@ mod test {
 
         assert_eq!(runtime_x.values, [2., 0., 1.]);
         assert_eq!(runtime_y.values, [3., 1., 0.]);
+    }
+
+    #[test]
+    fn generic_component_views_preserve_static_and_dynamic_shapes() {
+        use super::{DualNumber, DualNumberStructure};
+
+        fn update(dual: &mut impl DualNumber<f64>) {
+            assert_eq!(dual.values(), &[2., 0., 1.]);
+            assert_eq!(dual.get_shape(), &[&[0, 0][..], &[0, 1], &[1, 0]]);
+            dual.values_mut()[1] = 7.;
+            assert_eq!(dual.values(), &[2., 7., 1.]);
+        }
+        let mut static_dual = ReorderedDual::<f64>::new_variable(0, 2.);
+        let mut dynamic_dual =
+            HyperDual::from_values(vec![vec![0, 0], vec![0, 1], vec![1, 0]], vec![2., 0., 1.]);
+        update(&mut static_dual);
+        update(&mut dynamic_dual);
+        assert_eq!(static_dual.values(), dynamic_dual.values());
+        assert_eq!(static_dual.get_shape(), dynamic_dual.get_shape());
     }
 
     #[test]
