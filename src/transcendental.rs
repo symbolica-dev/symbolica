@@ -554,6 +554,32 @@ impl SpecialSymbols {
                         **out = function!(polylog_symbol, s.to_owned() - 1, z) / z;
                     }
                 })
+                .with_series_function(|args| {
+                    let [n, z] = args else { return None; };
+                    let order = u32::try_from(n.to_atom()).ok()?;
+                    if order < 2 || z.get_trailing_exponent() <= 0 {
+                        return None;
+                    }
+
+                    // At zero, substitution into the derivative Li_{n-1}(z)/z
+                    // loses the removable limit. Compose the defining series
+                    // instead, as in polylog_series_integer. Positive valuation
+                    // ensures that only finitely many powers survive truncation.
+                    let depth = z.absolute_order();
+                    let mut sum = z.clone();
+                    let mut power = z.clone();
+                    let mut k = Integer::from(2);
+                    loop {
+                        power = &power * z;
+                        power.truncate_absolute_order(depth.clone());
+                        if power.is_zero() {
+                            break;
+                        }
+                        sum = &sum + &power.clone().div_coeff(&Atom::num(k.clone()).pow(order));
+                        k += 1;
+                    }
+                    Some((Atom::num(1), sum.to_atom()))
+                })
                 .with_evaluation_info(
                     EvaluationInfo::new().with_tags(1)
                     .register_tagged(|tags| {
@@ -5460,6 +5486,67 @@ mod tests {
     #[test]
     fn polylog_float_normalization() {
         assert!(Complex::<Float>::try_from(parse!("polylog(2,0.5)")).is_ok());
+    }
+
+    #[test]
+    fn polylog_series_at_zero() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,x)").series(x, 0, 8).unwrap().to_atom(),
+            parse!("x+x^2/4+x^3/9+x^4/16+x^5/25+x^6/36+x^7/49+x^8/64")
+        );
+        assert_eq!(
+            parse!("polylog(3,x)").series(x, 0, 5).unwrap().to_atom(),
+            parse!("x+x^2/8+x^3/27+x^4/64+x^5/125")
+        );
+        assert_eq!(
+            parse!("polylog(2,x^5)").series(x, 0, 2).unwrap().to_atom(),
+            Atom::new()
+        );
+        assert_eq!(
+            parse!("polylog(2,x)/x").series(x, 0, 4).unwrap().to_atom(),
+            parse!("1+x/4+x^2/9+x^3/16+x^4/25")
+        );
+    }
+
+    #[test]
+    fn polylog_series_at_zero_composes_and_shifts() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,1-x)")
+                .series(x, 1, 5)
+                .unwrap()
+                .to_atom()
+                .expand(),
+            parse!("-(x-1)+(x-1)^2/4-(x-1)^3/9+(x-1)^4/16-(x-1)^5/25").expand()
+        );
+        assert_eq!(
+            parse!("polylog(2,x+x^2)")
+                .series(x, 0, 4)
+                .unwrap()
+                .to_atom(),
+            parse!("x+5*x^2/4+11*x^3/18+31*x^4/48")
+        );
+        assert_eq!(
+            parse!("polylog(2,x^(1/2))")
+                .series(x, 0, (5, 2))
+                .unwrap()
+                .to_atom(),
+            parse!("x^(1/2)+x/4+x^(3/2)/9+x^2/16+x^(5/2)/25")
+        );
+    }
+
+    #[test]
+    fn polylog_series_away_from_zero_is_unchanged() {
+        let x = symbol!("x");
+        assert_eq!(
+            parse!("polylog(2,-1+x)")
+                .series(x, 0, 2)
+                .unwrap()
+                .to_atom()
+                .expand(),
+            parse!("-pi^2/12+log(2)*x+(log(2)/2-1/4)*x^2").expand()
+        );
     }
 
     #[test]
