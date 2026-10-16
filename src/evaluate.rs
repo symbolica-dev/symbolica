@@ -26,6 +26,7 @@ use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
 #[cfg(feature = "native_code_generation")]
 mod backend;
+mod batch;
 mod compose;
 mod domain;
 mod dual;
@@ -41,6 +42,7 @@ mod tree;
 
 #[cfg(feature = "native_code_generation")]
 pub use backend::*;
+pub use batch::*;
 pub use compose::*;
 pub use domain::*;
 pub use dual::*;
