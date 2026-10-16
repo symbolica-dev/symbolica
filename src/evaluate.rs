@@ -326,6 +326,125 @@ mod test {
     }
 
     #[test]
+    fn completed_conditionals_reuse_only_their_parent_scope() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let branches = |graph: &ExportedInstructions<Complex<Rational>>| {
+            graph
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count()
+        };
+        let repeated = parse!("(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y)");
+        let exact = repeated
+            .evaluator(&params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(branches(&exact.export_instructions()), 1);
+        let heads = [
+            parse!("if(c,1/x,sqrt(x+2))+x"),
+            parse!("if(c,1/x,sqrt(x+2))+y"),
+        ];
+        let multiple = Atom::evaluator_multiple(&heads, &params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(branches(&multiple.export_instructions()), 1);
+        let mut multiple = multiple.map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 2];
+        multiple.evaluate(&[1., 2., 3.], &mut output);
+        assert_eq!(output, [2.5, 3.5]);
+        let expression =
+            parse!("if(a,(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y),if(c,1/x,sqrt(x+2))+y)");
+        let exact = expression
+            .evaluator(&[parse!("a"), parse!("c"), parse!("x"), parse!("y")])
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        // The inner expression is completed once in each sibling scope.
+        assert_eq!(branches(&exact.export_instructions()), 3);
+        let mut scalar = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let inputs = [
+            [1., 0., 0., 2.],
+            [0., 0., 0., 2.],
+            [1., 1., -2., 3.],
+            [0., 1., -2., 3.],
+        ];
+        let expected = inputs.map(|[a, c, x, y]| {
+            let selected = if c != 0. { 1. / x } else { (x + 2.).sqrt() };
+            if a != 0. {
+                (selected + x) * (selected + y)
+            } else {
+                selected + y
+            }
+        });
+        for index in [0, 3, 1, 2, 0, 1] {
+            let actual = scalar.evaluate_single(&inputs[index]);
+            assert!(actual.is_finite() && (actual - expected[index]).abs() < 1e-12);
+        }
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&exact, bincode::config::standard()).unwrap();
+            let (decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
+            assert!((decoded.evaluate_single(&inputs[0]) - expected[0]).abs() < 1e-12);
+        }
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit = scalar
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
+            for (input, expected) in inputs.iter().zip(expected) {
+                let mut output = [0.];
+                jit.evaluate(input, &mut output);
+                assert!((output[0] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn completed_shared_conditionals_preserve_captures_and_calls() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let exact = parse!("conditional_cache::f(c,x)+conditional_cache::f(c,x+1)")
+            .evaluator(&params)
+            .add_function_with_options(
+                symbol!("conditional_cache::f"),
+                vec![symbol!("b"), symbol!("z")],
+                parse!("(if(b,1/z,z+y)+z)*(if(b,1/z,z+y)+y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        let exported = exact.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let helper = &exported.sub_evaluators[0];
+        assert_eq!(helper.input_count, 3); // b,z,captured y
+        assert_eq!(
+            helper
+                .instructions
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count(),
+            1
+        );
+        let mut scalar = exact.map_coeff(&|c| c.re.to_f64());
+        for (c, x, y) in [(0., 0., 2.), (1., 2., 3.), (0., -1., 4.), (1., -3., -2.)] {
+            let selected = |z| if c != 0. { 1. / z } else { z + y };
+            let term = |z| (selected(z) + z) * (selected(z) + y);
+            let actual = scalar.evaluate_single(&[c, x, y]);
+            assert!(actual.is_finite() && (actual - term(x) - term(x + 1.)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
     fn non_inlined_function_uses_sub_evaluator() {
         fn execute_exported(
             exported: &ExportedInstructions<f64>,

@@ -1283,6 +1283,9 @@ impl<'a> AtomView<'a> {
 
                     let temp = Slot::Temp(instr.len());
                     instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
+                    // The completed result now dominates this scope. Branch-local
+                    // values remain in their cloned caches, never in the parent.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else if let Some(fun) = fn_map.get(*self) {
                     fun
