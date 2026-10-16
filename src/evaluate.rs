@@ -585,6 +585,136 @@ mod test {
     }
 
     #[test]
+    fn non_inlined_function_reuses_temporary_stack_slots() {
+        let helper = symbol!("symbolica::shared_stack::chain");
+        let argument = symbol!("symbolica::shared_stack::argument");
+        let parent = symbol!("symbolica::shared_stack::parent");
+        let captured = parse!("symbolica::shared_stack::captured");
+        let mut body = Atom::var(argument);
+        for _ in 0..64 {
+            body = symbol!("sin").call((&body,)) + &captured;
+        }
+        let expression = parent.call((parse!("x"),)) + parent.call((parse!("x+1"),));
+        let params = [parse!("x"), captured];
+        let build = |policy| {
+            expression
+                .evaluator(&params)
+                .add_function_with_options(
+                    helper,
+                    vec![argument],
+                    body.clone(),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    parent,
+                    vec![argument],
+                    helper.call((symbol!("sin").call((Atom::var(argument),)),)),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+        };
+        let exact = build(InliningPolicy::Never);
+        assert_eq!(exact.external_fns.len(), 2);
+        let shared = exact.external_fns[0].body.as_ref().unwrap();
+        assert_eq!(exact.external_fns[0].symbol, helper);
+        let parent_body = exact.external_fns[1].body.as_ref().unwrap();
+        assert!(
+            parent_body
+                .instructions
+                .iter()
+                .any(|(instruction, _)| match instruction {
+                    super::Instr::ExternalFun(target, _, args) => args.contains(target),
+                    _ => false,
+                })
+        );
+        assert_eq!(shared.param_count, 2);
+        assert!(shared.instructions.len() >= 64);
+        assert!(shared.stack_size <= shared.param_count + 3);
+        assert!(shared.result_index < shared.stack_size);
+        assert!(
+            shared
+                .instructions
+                .iter()
+                .any(|(instruction, _)| match instruction {
+                    super::Instr::Add(target, args) => args.contains(target),
+                    super::Instr::BuiltinFun(target, _, arg) => target == arg,
+                    _ => false,
+                })
+        );
+        let clone = exact.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            shared,
+            clone.external_fns[0].body.as_ref().unwrap()
+        ));
+        let exported = exact.export_instructions();
+        assert!(
+            exported.sub_evaluators[0].instructions.sub_evaluators[0]
+                .instructions
+                .temporary_count
+                <= 3
+        );
+        let mut shared = exact.map_coeff(&|c| c.re.to_f64());
+        let mut inline = build(InliningPolicy::Always).map_coeff(&|c| c.re.to_f64());
+        for inputs in [[0.2, 0.1], [-0.3, 0.4], [1.5, -0.7]] {
+            assert_eq!(
+                shared.evaluate_single(&inputs),
+                inline.evaluate_single(&inputs)
+            );
+        }
+    }
+
+    #[test]
+    fn non_inlined_stack_reuse_preserves_nested_lazy_branches() {
+        let build = |policy| {
+            parse!("shared_stack_branch::outer(c,x)+shared_stack_branch::outer(c,x+1)")
+                .evaluator(&[parse!("c"), parse!("x"), parse!("q")])
+                .add_function_with_options(
+                    symbol!("shared_stack_branch::inner"),
+                    vec![symbol!("b"), symbol!("z")],
+                    parse!("if(b,1/z+sqrt(z+2),sqrt(z+2)+q*z)+q"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    symbol!("shared_stack_branch::outer"),
+                    vec![symbol!("a"), symbol!("y")],
+                    parse!("if(a,shared_stack_branch::inner(a,y)+q*y,if(q,shared_stack_branch::inner(a,y)*q,1/(y+2)))"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+                .map_coeff(&|c| c.re.to_f64())
+        };
+        let mut shared = build(InliningPolicy::Never);
+        let mut inline = build(InliningPolicy::Always);
+        let inputs = [0., 0., 2., 1., 3., 4., 0., 0., 0., 1., 2., 1., 0., -1., 2.];
+        for index in [0, 2, 1, 4, 3, 0] {
+            let args = &inputs[3 * index..3 * index + 3];
+            let expected = inline.evaluate_single(args);
+            let result = shared.evaluate_single(args);
+            assert!(result.is_finite());
+            assert!((result - expected).abs() < 1e-12);
+        }
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit = shared
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
+            for args in inputs.as_chunks::<3>().0 {
+                let mut result = [0.];
+                jit.evaluate(args, &mut result);
+                assert!((result[0] - inline.evaluate_single(args)).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
     fn non_inlined_function_discovers_only_required_captures() {
         // Every level introduces a new argument and drops the arguments of its ancestors.
         // Rebuilding after capture pruning recursively duplicates the rest of this chain.
