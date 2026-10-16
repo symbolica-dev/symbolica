@@ -780,6 +780,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
+        let mut branch_exits = HashMap::default();
 
         for (instr, phase) in &mut self.instructions {
             let new_pos = new_instr.len() + self.reserved_indices;
@@ -821,7 +822,6 @@ impl<T: Default> ExpressionEvaluator<T> {
                     }
                 }
                 Instr::Join(p, a, b, c) => {
-                    current_node = dag_nodes[current_node];
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                     *c = rename_map[*c];
@@ -832,12 +832,17 @@ impl<T: Default> ExpressionEvaluator<T> {
                     current_node = dag_nodes.len() - 1;
                     *c = rename_map[*c];
                 }
-                Instr::Goto(_) => {
+                Instr::Goto(label) => {
                     let parent = dag_nodes[current_node];
+                    branch_exits.insert(*label, parent);
                     dag_nodes.push(parent); // enter else block (included goto and labels)
                     current_node = dag_nodes.len() - 1;
                 }
-                _ => {}
+                Instr::Label(label) => {
+                    if let Some(parent) = branch_exits.get(label) {
+                        current_node = *parent;
+                    }
+                }
             }
 
             let key = match &*instr {
@@ -920,6 +925,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut branch_id = vec![0; self.instructions.len()];
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
+        let mut branch_exits = HashMap::default();
 
         const PROMOTED_PAIR: u32 = 1 << 31;
 
@@ -997,13 +1003,19 @@ impl<T: Default> ExpressionEvaluator<T> {
                     current_node = dag_nodes.len() - 1;
                     continue;
                 }
-                Instr::Goto(_) => {
+                Instr::Goto(label) => {
                     let parent = dag_nodes[current_node];
+                    branch_exits.insert(*label, parent);
                     dag_nodes.push(parent); // enter else block (included goto and labels)
                     current_node = dag_nodes.len() - 1;
                 }
-                Instr::Join(..) => {
-                    current_node = dag_nodes[current_node];
+                Instr::Label(label) => {
+                    // One conditional can produce several Join instructions
+                    // (for example, one per vector component). Its control-flow
+                    // scope ends once, at the forward jump's target label.
+                    if let Some(parent) = branch_exits.get(label) {
+                        current_node = *parent;
+                    }
                 }
                 _ => {}
             }
@@ -1726,6 +1738,59 @@ mod cse_tests {
             result_indices: results,
             external_fns: vec![],
             settings: OptimizationSettings::default(),
+        }
+    }
+
+    #[test]
+    fn nested_multi_result_branches_keep_common_operations_in_scope() {
+        let mut original = evaluator(
+            3,
+            vec![
+                Instr::IfElse(0, Label(0)),
+                Instr::IfElse(1, Label(1)),
+                Instr::Add(5, vec![2, 2]),
+                Instr::Goto(Label(2)),
+                Instr::Label(Label(1)),
+                Instr::Mul(8, vec![2, 2]),
+                Instr::Label(Label(2)),
+                Instr::Join(10, 1, 5, 8),
+                Instr::Join(11, 1, 5, 8),
+                Instr::Mul(12, vec![2, 2]),
+                Instr::Add(13, vec![10, 11, 12]),
+                Instr::Goto(Label(3)),
+                Instr::Label(Label(0)),
+                Instr::Mul(16, vec![2, 2]),
+                Instr::Label(Label(3)),
+                Instr::Join(18, 0, 13, 16),
+            ],
+            vec![18],
+        );
+        original.fix_labels();
+        for pairs in [false, true] {
+            let mut optimized = original.clone();
+            if pairs {
+                assert!(optimized.remove_common_pairs() > 0);
+            } else {
+                optimized.remove_common_instructions();
+            }
+            optimized.optimize_stack();
+            optimized.fix_labels();
+            for (c, d) in [(0., 0.), (0., 1.), (1., 0.), (1., 1.), (0., 0.)] {
+                let input = [c, d, 3.];
+                let expected = if c == 0. {
+                    9.
+                } else if d == 0. {
+                    27.
+                } else {
+                    21.
+                };
+                assert_eq!(original.evaluate_single(&input), expected);
+                assert_eq!(
+                    optimized.evaluate_single(&input),
+                    expected,
+                    "common pairs={pairs}, c={c}, d={d}"
+                );
+            }
         }
     }
 
