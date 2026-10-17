@@ -6,7 +6,7 @@ use std::{
 
 use num_traits::FromPrimitive;
 use rand::Rng;
-use simba::scalar::RealField;
+use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
@@ -118,7 +118,7 @@ impl DoubleFloat {
         if exp >= 0 {
             Self::binary_exp(base, exp as u64)
         } else {
-            Self::binary_exp(base.recip(), exp.unsigned_abs())
+            Self::binary_exp(ComplexField::recip(base), exp.unsigned_abs())
         }
     }
 
