@@ -6,7 +6,7 @@ use std::{
 
 use num_traits::FromPrimitive;
 use rand::Rng;
-use simba::scalar::{ComplexField, RealField};
+use simba::scalar::RealField;
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
@@ -118,7 +118,7 @@ impl DoubleFloat {
         if exp >= 0 {
             Self::binary_exp(base, exp as u64)
         } else {
-            Self::binary_exp(base, exp.unsigned_abs()).recip()
+            Self::binary_exp(base.recip(), exp.unsigned_abs())
         }
     }
 
@@ -777,6 +777,28 @@ impl Hash for DoubleFloat {
 #[cfg(test)]
 mod pow_tests {
     use super::*;
+
+    #[test]
+    fn integer_powf_inverts_before_forming_an_overflowing_positive_power() {
+        for (base, expected) in [
+            (2.0f64.powi(500), 2.0f64.powi(-1000)),
+            (2.0f64.powi(520), f64::from_bits(1u64 << 34)),
+        ] {
+            let actual = DoubleFloat::from(base).powf(&DoubleFloat::from(-2.));
+            assert_eq!(actual, DoubleFloat::from(expected));
+            assert!(actual > DoubleFloat::from(0.));
+        }
+        for exponent in -8..=8 {
+            assert_eq!(
+                DoubleFloat::from(-2.).powf(&DoubleFloat::from(exponent as f64)),
+                DoubleFloat::from((-2.0f64).powi(exponent))
+            );
+        }
+        assert_eq!(
+            DoubleFloat::from(-1.).powf(&DoubleFloat::from(i64::MIN as f64)),
+            DoubleFloat::from(1.)
+        );
+    }
 
     #[test]
     fn unsigned_powers_preserve_full_width_parity_and_special_values() {
