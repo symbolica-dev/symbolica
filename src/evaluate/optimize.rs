@@ -153,6 +153,16 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
                     }
                     subcomponents[*r] = *sc;
                 }
+                Instr::Div(r, numerator, denominator) => {
+                    *sc = if subcomponents[*numerator] == ComplexPhase::Real
+                        && subcomponents[*denominator] == ComplexPhase::Real
+                    {
+                        ComplexPhase::Real
+                    } else {
+                        ComplexPhase::Any
+                    };
+                    subcomponents[*r] = *sc;
+                }
                 Instr::BuiltinFun(r, s, a) => {
                     if s.is_real() {
                         *sc = ComplexPhase::Real;
@@ -183,7 +193,7 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
 
                     subcomponents[*r] = *sc;
                 }
-                Instr::Join(r, _, t, f) => {
+                Instr::Join(r, _, t, f) | Instr::Select(r, _, t, f) => {
                     if subcomponents[*t] == subcomponents[*f] {
                         *sc = subcomponents[*t];
                     } else {
@@ -349,7 +359,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                             *b += delta;
                         }
                     }
-                    Instr::Powf(r, b, e) => {
+                    Instr::Powf(r, b, e) | Instr::Div(r, b, e) => {
                         *r += delta;
                         if *b >= self.reserved_indices {
                             *b += delta;
@@ -363,7 +373,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                             *c += delta;
                         }
                     }
-                    Instr::Join(r, c, t, f) => {
+                    Instr::Join(r, c, t, f) | Instr::Select(r, c, t, f) => {
                         *r += delta;
                         if *c >= self.reserved_indices {
                             *c += delta;
@@ -418,7 +428,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                         *b = constant_indices[*b - other.param_count];
                     }
                 }
-                Instr::Powf(r, b, e) => {
+                Instr::Powf(r, b, e) | Instr::Div(r, b, e) => {
                     *r += delta;
                     if *b >= other.reserved_indices {
                         *b += delta;
@@ -440,7 +450,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 
                     l.0 += self.instructions.len();
                 }
-                Instr::Join(r, c, t, f) => {
+                Instr::Join(r, c, t, f) | Instr::Select(r, c, t, f) => {
                     *r += delta;
                     if *c >= other.reserved_indices {
                         *c += delta;
@@ -499,6 +509,91 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// Remove unused registrations after native program partitioning. Constant
+    /// slots stay in place, so their indices and the program's stack layout do
+    /// not change. Retained bodies are copied only if a callee index changes.
+    pub(super) fn prune_unused_external_functions(&mut self) {
+        let constants = self
+            .instructions
+            .iter()
+            .flat_map(|(instruction, _)| instruction.input_indices())
+            .chain(self.result_indices.iter().copied())
+            .filter(|slot| *slot >= self.param_count && *slot < self.reserved_indices)
+            .map(|slot| slot - self.param_count)
+            .collect::<HashSet<_>>();
+        let mut pending = self
+            .instructions
+            .iter()
+            .filter_map(|(instruction, _)| match instruction {
+                Instr::ExternalFun(_, index, _) => Some(*index),
+                _ => None,
+            })
+            .chain(
+                self.external_fns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, external)| {
+                        external
+                            .constant_index
+                            .is_some_and(|slot| constants.contains(&slot))
+                            .then_some(index)
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let mut live = vec![false; self.external_fns.len()];
+        while let Some(index) = pending.pop() {
+            if std::mem::replace(&mut live[index], true) {
+                continue;
+            }
+            if let Some(body) = &self.external_fns[index].body {
+                pending.extend(body.instructions.iter().filter_map(|(instruction, _)| {
+                    match instruction {
+                        Instr::ExternalFun(_, index, _) => Some(*index),
+                        _ => None,
+                    }
+                }));
+            }
+        }
+        if live.iter().all(|live| *live) {
+            return;
+        }
+        let mut remapping = vec![usize::MAX; live.len()];
+        for (new, old) in live
+            .iter()
+            .enumerate()
+            .filter_map(|(index, live)| live.then_some(index))
+            .enumerate()
+        {
+            remapping[old] = new;
+        }
+        for (instruction, _) in &mut self.instructions {
+            if let Instr::ExternalFun(_, index, _) = instruction {
+                *index = remapping[*index];
+            }
+        }
+        self.external_fns = std::mem::take(&mut self.external_fns)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, mut external)| {
+                if !live[index] {
+                    return None;
+                }
+                if let Some(body) = &mut external.body
+                    && body.instructions.iter().any(|(instruction, _)| {
+                        matches!(instruction, Instr::ExternalFun(_, index, _) if remapping[*index] != *index)
+                    })
+                {
+                    for (instruction, _) in &mut Arc::make_mut(body).instructions {
+                        if let Instr::ExternalFun(_, index, _) = instruction {
+                            *index = remapping[*index];
+                        }
+                    }
+                }
+                Some(external)
+            })
+            .collect();
+    }
+
     /// Reduce temporary storage by reusing stack slots after their last use,
     /// remapping instructions while preserving the evaluator's results.
     pub fn optimize_stack(&mut self) {
@@ -514,11 +609,11 @@ impl<T> ExpressionEvaluator<T> {
                 Instr::Pow(_, b, _) | Instr::BuiltinFun(_, _, b) => {
                     last_use[*b] = i;
                 }
-                Instr::Powf(_, a, b) => {
+                Instr::Powf(_, a, b) | Instr::Div(_, a, b) => {
                     last_use[*a] = i;
                     last_use[*b] = i;
                 }
-                Instr::Join(_, c, a, b) => {
+                Instr::Join(_, c, a, b) | Instr::Select(_, c, a, b) => {
                     last_use[*c] = i;
                     last_use[*a] = i;
                     last_use[*b] = i;
@@ -551,9 +646,11 @@ impl<T> ExpressionEvaluator<T> {
                 | Instr::Mul(r, _)
                 | Instr::Pow(r, _, _)
                 | Instr::Powf(r, _, _)
+                | Instr::Div(r, _, _)
                 | Instr::BuiltinFun(r, _, _)
                 | Instr::ExternalFun(r, _, _)
-                | Instr::Join(r, _, _, _) => *r,
+                | Instr::Join(r, _, _, _)
+                | Instr::Select(r, _, _, _) => *r,
                 Instr::IfElse(c, _) => {
                     *c = rename_map[*c];
                     continue;
@@ -585,12 +682,12 @@ impl<T> ExpressionEvaluator<T> {
                     *r = new_reg;
                     *b = rename_map[*b];
                 }
-                Instr::Powf(r, a, b) => {
+                Instr::Powf(r, a, b) | Instr::Div(r, a, b) => {
                     *r = new_reg;
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                 }
-                Instr::Join(r, c, a, b) => {
+                Instr::Join(r, c, a, b) | Instr::Select(r, c, a, b) => {
                     *r = new_reg;
                     *c = rename_map[*c];
                     *a = rename_map[*a];
@@ -633,7 +730,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     unfold.insert(*r, index + self.reserved_indices);
                     *r = index + self.reserved_indices;
                 }
-                Instr::Powf(r, b, e) => {
+                Instr::Powf(r, b, e) | Instr::Div(r, b, e) => {
                     if *b >= self.reserved_indices {
                         *b = unfold[b];
                     }
@@ -648,7 +745,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         *r = unfold[r];
                     }
                 }
-                Instr::Join(r, c, t, f) => {
+                Instr::Join(r, c, t, f) | Instr::Select(r, c, t, f) => {
                     if *c >= self.reserved_indices {
                         *c = unfold[c];
                     }

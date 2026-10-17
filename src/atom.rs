@@ -42,6 +42,7 @@ mod alias;
 mod coefficient;
 mod core;
 mod properties;
+mod query;
 pub mod representation;
 mod zero_test;
 
@@ -75,6 +76,7 @@ use std::{
 
 pub use self::alias::{AliasedAtom, AliasedAtomPrinter};
 pub use self::core::AtomCore;
+pub use self::query::AtomQuery;
 pub use self::representation::{
     Add, AddView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice, Mul, MulView, Num,
     NumView, Pow, PowView, Var, VarView,
@@ -773,7 +775,7 @@ pub struct Symbol {
 impl serde::Serialize for Symbol {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut data = vec![];
-        self.export(&mut data);
+        self.export(&mut data).map_err(serde::ser::Error::custom)?;
         data.serialize(serializer)
     }
 }
@@ -781,8 +783,8 @@ impl serde::Serialize for Symbol {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Symbol {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut v = <&[u8]>::deserialize(deserializer)?;
-        Symbol::import(&mut v)
+        let v = Vec::<u8>::deserialize(deserializer)?;
+        Symbol::import(&mut v.as_slice())
             .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Symbol: {e}")))
     }
 }
@@ -2314,7 +2316,6 @@ impl Symbol {
 #[cfg_attr(
     feature = "bincode",
     derive(bincode_trait_derive::Encode),
-    derive(bincode_trait_derive::Decode),
     derive(bincode_trait_derive::BorrowDecodeFromDecode),
     trait_decode(trait = crate::state::HasStateMap)
 )]
@@ -2323,6 +2324,30 @@ pub enum Indeterminate {
     Symbol(Symbol, InlineVar),
     /// A function, for example f(x), sin(x), etc.
     Function(Symbol, Atom),
+}
+
+#[cfg(feature = "bincode")]
+impl<C: crate::state::HasStateMap> bincode::Decode<C> for Indeterminate {
+    fn decode<D: bincode::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        match <u32 as bincode::Decode<C>>::decode(decoder)? {
+            0 => {
+                let symbol = Symbol::decode(decoder)?;
+                // Preserve the wire format, but discard this process-local cache:
+                // importing the symbol may have assigned it a different identity.
+                let _: InlineVar = bincode::Decode::decode(decoder)?;
+                Ok(symbol.into())
+            }
+            1 => Ok(Self::Function(
+                bincode::Decode::decode(decoder)?,
+                bincode::Decode::decode(decoder)?,
+            )),
+            variant => Err(bincode::error::DecodeError::OtherString(format!(
+                "Unknown Indeterminate variant {variant}"
+            ))),
+        }
+    }
 }
 
 impl std::fmt::Display for Indeterminate {

@@ -49,6 +49,8 @@ pub enum InliningPolicy {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FunctionRegistrationOptions {
     inlining: InliningPolicy,
+    #[cfg_attr(feature = "serde", serde(default))]
+    prune_unused_arguments: bool,
 }
 
 impl FunctionRegistrationOptions {
@@ -61,6 +63,19 @@ impl FunctionRegistrationOptions {
     pub fn inlining(mut self, inlining: InliningPolicy) -> Self {
         self.inlining = inlining;
         self
+    }
+
+    /// Omit unused explicit arguments from a retained body's internal signature.
+    ///
+    /// The registered function's public arity and evaluation of its actual
+    /// arguments are unchanged. This only compacts the compiled call interface.
+    pub fn prune_unused_arguments(mut self, prune: bool) -> Self {
+        self.prune_unused_arguments = prune;
+        self
+    }
+
+    pub(crate) fn should_prune_unused_arguments(&self) -> bool {
+        self.prune_unused_arguments
     }
 
     pub(crate) fn should_inline(&self) -> bool {
@@ -291,6 +306,7 @@ pub struct EvaluatorBuilder<'a> {
     fn_map: FunctionMap,
     params: Vec<Atom>,
     optimization_settings: OptimizationSettings,
+    parameter_rows: Option<super::specialize::ParameterRows>,
 }
 
 impl<'a> EvaluatorBuilder<'a> {
@@ -300,6 +316,7 @@ impl<'a> EvaluatorBuilder<'a> {
             fn_map: FunctionMap::new(),
             params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
             optimization_settings: OptimizationSettings::default(),
+            parameter_rows: None,
         }
     }
 
@@ -309,6 +326,7 @@ impl<'a> EvaluatorBuilder<'a> {
             fn_map: FunctionMap::new(),
             params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
             optimization_settings: OptimizationSettings::default(),
+            parameter_rows: None,
         }
     }
 
@@ -318,6 +336,7 @@ impl<'a> EvaluatorBuilder<'a> {
             fn_map: FunctionMap::new(),
             params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
             optimization_settings: OptimizationSettings::default(),
+            parameter_rows: None,
         }
     }
 
@@ -325,6 +344,64 @@ impl<'a> EvaluatorBuilder<'a> {
     pub fn function_map(mut self, fn_map: FunctionMap) -> Self {
         self.fn_map = fn_map;
         self
+    }
+
+    /// Sum each output over exact assignments to a subset of its parameters.
+    ///
+    /// The selected parameters are removed from the evaluator's input list; all other
+    /// inputs keep their order. Rows have the same column order as `parameters`.
+    /// Duplicate rows contribute repeatedly, and an empty table produces zero for
+    /// each output. Functions retain their registration and inlining policies.
+    ///
+    /// Binding and static branch selection happen before evaluator optimization.
+    /// The result is an ordinary summed evaluator, not a runtime loop over rows.
+    pub fn sum_over_parameters<A: AtomCore>(
+        mut self,
+        parameters: &[A],
+        rows: &[Vec<Rational>],
+    ) -> Result<Self, EvaluationError> {
+        if self.parameter_rows.is_some() {
+            return Err(EvaluationError::EvaluatorConstructionFailed {
+                expression: Atom::Zero,
+                reason: "parameter rows have already been specified".into(),
+            });
+        }
+        self.parameter_rows = Some(super::specialize::ParameterRows::for_inputs(
+            &self.params,
+            parameters,
+            rows,
+        )?);
+        Ok(self)
+    }
+
+    /// Build a reusable program evaluated over exact parameter rows.
+    ///
+    /// Unlike [`Self::sum_over_parameters`], this keeps a row program and a
+    /// shared prelude. The returned plan owns their execution and sums outputs
+    /// componentwise in row order. Other backends can compile the ordinary
+    /// evaluators returned by [`ParameterRowEvaluator::into_parts`].
+    pub fn build_parameter_rows<A: AtomCore>(
+        self,
+        parameters: &[A],
+        rows: &[Vec<Rational>],
+    ) -> Result<ParameterRowEvaluator<Complex<Rational>>, EvaluationError> {
+        if self.parameter_rows.is_some() {
+            return Err(EvaluationError::EvaluatorConstructionFailed {
+                expression: Atom::Zero,
+                reason: "summed and repeated parameter-row layouts cannot be combined".into(),
+            });
+        }
+        let table = super::specialize::ParameterRows::for_inputs(&self.params, parameters, rows)?;
+        let positions = table.input_positions(&self.params)?;
+        let evaluator = if table.rows.is_empty() {
+            let zeros = vec![Atom::Zero; self.exprs.len()];
+            EvaluatorBuilder::new_multiple(&zeros, &self.params)
+                .optimization_settings(self.optimization_settings)
+                .build()?
+        } else {
+            self.build()?
+        };
+        ParameterRowEvaluator::new(evaluator, positions, table.rows)
     }
 
     /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
@@ -461,6 +538,14 @@ impl<'a> EvaluatorBuilder<'a> {
 
     /// Build the evaluator.
     pub fn build(self) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
+        if let Some(rows) = self.parameter_rows {
+            let (expressions, functions, parameters) =
+                rows.specialize(&self.exprs, self.fn_map, &self.params)?;
+            return EvaluatorBuilder::new_multiple(&expressions, &parameters)
+                .function_map(functions)
+                .optimization_settings(self.optimization_settings)
+                .build();
+        }
         // EvalTree::linearize expands every function call, so preserving an explicit call boundary
         // requires the direct translator even when the legacy tree optimizer was requested.
         if self.optimization_settings.direct_translation || self.fn_map.has_non_inlined_functions()

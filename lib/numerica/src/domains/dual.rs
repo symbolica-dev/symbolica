@@ -367,6 +367,135 @@ pub trait DualNumberStructure {
     fn get_max_depth(&self) -> usize;
 }
 
+/// Borrow scalar components of static and dynamic dual numbers uniformly.
+///
+/// Components follow [`DualNumberStructure::get_shape`] exactly, including the
+/// primal value. Mutable access changes values without changing the shape.
+/// This permits generic evaluators to flatten and restore existing dual carriers
+/// without introducing another representation or comparing only primal values.
+pub trait DualNumber<T>: DualNumberStructure {
+    fn values(&self) -> &[T];
+    fn values_mut(&mut self) -> &mut [T];
+}
+
+/// Shared component implementation for the static and runtime dual carriers.
+#[doc(hidden)]
+pub fn dual_norm<T: Real, D: DualNumber<T> + Clone>(value: &D) -> D {
+    if value.values().iter().all(FloatLike::is_fully_zero) {
+        return value.clone();
+    }
+    let norm = value.values()[0].norm();
+    let safe_norm = norm.select_nonzero(&norm, &norm.one());
+    // Divide directly, never multiply by the reciprocal of a subnormal norm.
+    // Renormalizing the O(1) phase also removes the relative rounding error of
+    // a subnormal scalar norm. Keep the scalar norm itself as the primal.
+    let phase = value.values()[0].clone() / &safe_norm;
+    let phase_norm = phase.norm();
+    let phase_norm = phase_norm.select_nonzero(&phase_norm, &phase_norm.one());
+    let phase = (phase / &phase_norm).conj();
+    let two = norm.from_usize(2);
+    let scale = safe_norm.sqrt() * (phase_norm * &two).sqrt();
+    let scaled_product = |left: &T, right: &T| {
+        let normalized_left = left.clone() / &scale;
+        let normalized_right = right.clone() / &scale;
+        let normalized = normalized_left.clone() * &normalized_right;
+        // If a normalized factor loses range, the numerator-first ordering
+        // retains a representable result. Select independently in SIMD lanes.
+        let fallback = (left.clone() * right) / &scale / &scale;
+        let mut result = normalized;
+        for (original, scaled) in [(left, &normalized_left), (right, &normalized_right)] {
+            let underflow = original.select_nonzero(&fallback, &result);
+            result = scaled.select_nonzero(&result, &underflow);
+            let nonfinite = scaled.clone() - scaled;
+            result = nonfinite.select_nonzero(&fallback, &result);
+        }
+        // This product is a derivative convolution term, not the primal.
+        let zero = norm.zero();
+        result = left.select_nonzero(&result, &zero);
+        right.select_nonzero(&result, &zero)
+    };
+    // Cloned carriers preserve stack-allocated arrays for static dual types.
+    let mut parallel = value.clone();
+    let mut transverse = value.clone();
+    for (index, component) in value.values().iter().enumerate() {
+        let rotated = component.clone() * &phase;
+        let conjugate = rotated.conj();
+        let difference = rotated.clone() - &conjugate;
+        let sum = rotated.clone() + &conjugate;
+        let half = rotated / &two;
+        let conjugate_half = half.conj();
+        // Divide the full projection when possible, so a subnormal component
+        // is not rounded away by halving first. The alternate ordering handles
+        // overflowing sums, independently in each SIMD lane.
+        let real =
+            (sum.clone() - &sum).select_nonzero(&(half.clone() + &conjugate_half), &(sum / &two));
+        let imaginary = (difference.clone() - &difference)
+            .select_nonzero(&(half - conjugate_half), &(difference / &two));
+        parallel.values_mut()[index] = real;
+        transverse.values_mut()[index] = imaginary;
+    }
+
+    // Write |z| = a+d in the fixed primal frame, where a is the real
+    // projection, b is the imaginary projection, and b_0=d_0=0. Then
+    // 2*a*d+d^2 = b*conj(b). This avoids cancelling large parallel squares.
+    // Each non-primal coefficient depends only on lower total degrees.
+    let mut correction = value.clone();
+    for component in correction.values_mut() {
+        *component = component.zero();
+    }
+    let shape = value.get_shape();
+    let mut order = (1..shape.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| shape[*index].iter().sum::<usize>());
+    for index in order {
+        let mut coefficient = norm.zero();
+        for &(left, right, target) in value.get_multiplication_table() {
+            if target != index || left == 0 || right == 0 {
+                continue;
+            }
+            // Scale each factor by sqrt(2*|z_0|), not by |z_0|. Normalized
+            // first derivatives would otherwise overflow before a finite
+            // second coefficient could be formed. Exact zero jet factors
+            // contribute nothing, even if a different higher coefficient has
+            // already exceeded the number type's range.
+            if !transverse.values()[left].is_fully_zero()
+                && !transverse.values()[right].is_fully_zero()
+            {
+                coefficient += scaled_product(
+                    &transverse.values()[left],
+                    &transverse.values()[right].conj(),
+                );
+            }
+            if !parallel.values()[left].is_fully_zero()
+                && !correction.values()[right].is_fully_zero()
+            {
+                coefficient -=
+                    scaled_product(&parallel.values()[left], &correction.values()[right]) * &two;
+            }
+            if !correction.values()[left].is_fully_zero()
+                && !correction.values()[right].is_fully_zero()
+            {
+                coefficient -=
+                    scaled_product(&correction.values()[left], &correction.values()[right]);
+            }
+        }
+        correction.values_mut()[index] = coefficient;
+    }
+    let mut activity = norm.clone();
+    for component in &value.values()[1..] {
+        activity += component.norm();
+    }
+    let at_zero = activity.select_nonzero(&(norm.zero() / &norm), &norm.zero());
+    parallel.values_mut()[0] = norm.clone();
+    for (component, correction) in parallel.values_mut()[1..]
+        .iter_mut()
+        .zip(&correction.values()[1..])
+    {
+        *component += correction;
+        *component = norm.select_nonzero(component, &at_zero);
+    }
+    parallel
+}
+
 /// Create a new hyperdual number, from a specification of the components.
 /// The first components must be the real value and the single derivatives of the variables in order.
 ///
@@ -451,6 +580,16 @@ macro_rules! create_hyperdual_from_components {
                     .unwrap_or_else(|| {
                         panic!("No single derivative component for variable {}", var)
                     })
+            }
+        }
+
+        impl<T> $crate::domains::dual::DualNumber<T> for $t<T> {
+            fn values(&self) -> &[T] {
+                &self.values
+            }
+
+            fn values_mut(&mut self) -> &mut [T] {
+                &mut self.values
             }
         }
 
@@ -872,6 +1011,9 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline]
             fn pow(&self, e: u64) -> Self {
+                if e == 0 {
+                    return self.one();
+                }
                 // TODO: use binary exponentiation
                 let mut res = self.clone();
                 for _ in 1..e {
@@ -1053,13 +1195,7 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline(always)]
             fn norm(&self) -> Self {
-                let n = self.values[0].norm();
-                if n == self.values[0] {
-                    return self.clone();
-                } else {
-                    let scale = n / &self.values[0];
-                    self.clone() * &scale
-                }
+                $crate::domains::dual::dual_norm(self)
             }
 
             #[inline(always)]
@@ -1427,6 +1563,16 @@ impl<T: Default> HyperDual<T> {
             shape.push(s);
         }
         Self::new(shape)
+    }
+}
+
+impl<T> DualNumber<T> for HyperDual<T> {
+    fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    fn values_mut(&mut self) -> &mut [T] {
+        &mut self.values
     }
 }
 
@@ -1963,6 +2109,9 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
+        if e == 0 {
+            return self.one();
+        }
         // TODO: use binary exponentiation
         let mut res = self.clone();
         for _ in 1..e {
@@ -2142,13 +2291,7 @@ impl<T: Real> Real for HyperDual<T> {
 
     #[inline(always)]
     fn norm(&self) -> Self {
-        let n = self.values[0].norm();
-        if n == self.values[0] {
-            return self.clone();
-        } else {
-            let scale = n / &self.values[0];
-            self.clone() * &scale
-        }
+        dual_norm(self)
     }
 
     #[inline(always)]
@@ -2385,6 +2528,317 @@ mod test {
 
     create_hyperdual_from_depths!(Dual, [1, 2, 3]);
     create_hyperdual_from_components!(ReorderedDual, [[0, 0], [0, 1], [1, 0]]);
+    create_hyperdual_from_components!(NormDual, [[0, 0], [1, 0], [0, 1], [2, 0], [1, 1]]);
+    create_hyperdual_from_components!(NormRangeDual, [[0], [1], [2]]);
+    create_hyperdual_from_components!(ReorderedNormDual, [[0, 0], [0, 1], [1, 0], [2, 0], [1, 1]]);
+
+    #[test]
+    fn norm_projection_retains_subnormal_derivative_components() {
+        use crate::domains::float::Complex;
+        for coefficient in [f64::from_bits(1), 1e308] {
+            let value = HyperDual::from_values(
+                vec![vec![0], vec![1]],
+                vec![Complex::new(1., 0.), Complex::new(coefficient, coefficient)],
+            );
+            assert_eq!(value.norm().values[1], Complex::new(coefficient, 0.));
+        }
+    }
+
+    #[test]
+    fn norm_simd_lanes_keep_independent_range_and_zero_domains() {
+        use crate::domains::float::Complex;
+        use wide::f64x4;
+        let primal = f64x4::from([1e-320, -1e308, 0., 0.]);
+        let seed = f64x4::from([1., 1., 0., 1.]);
+        let real = HyperDual::from_values(
+            vec![vec![0], vec![1], vec![2]],
+            vec![primal, seed, f64x4::ZERO],
+        )
+        .norm();
+        assert_eq!(real.values[0].to_array(), [1e-320, 1e308, 0., 0.]);
+        for (actual, expected) in real.values[1].to_array()[..3].iter().zip([1., -1., 0.]) {
+            assert!((*actual - expected).abs() < 1e-12);
+        }
+        assert_eq!(&real.values[2].to_array()[..3], &[0.; 3]);
+        assert!(real.values[1].to_array()[3].is_nan());
+        assert!(real.values[2].to_array()[3].is_nan());
+        let complex = HyperDual::from_values(
+            vec![vec![0], vec![1], vec![2]],
+            vec![
+                Complex::new(primal, f64x4::ZERO),
+                Complex::new(seed, f64x4::ZERO),
+                Complex::new(f64x4::ZERO, f64x4::ZERO),
+            ],
+        )
+        .norm();
+        for (actual, expected) in complex.values.iter().zip(&real.values) {
+            for (actual, expected) in actual.re.to_array().into_iter().zip(expected.to_array()) {
+                assert!(actual == expected || (actual.is_nan() && expected.is_nan()));
+            }
+            assert_eq!(&actual.im.to_array()[..3], &[0.; 3]);
+        }
+    }
+
+    #[test]
+    fn norm_preserves_finite_components_at_extreme_scales() {
+        use crate::domains::float::Complex;
+
+        for x in [1e-320_f64, 1e-200, 1e200] {
+            for (primal, seed, expected) in [
+                (Complex::new(x, 0.), Complex::new(0., 0.), [x, 0., 0.]),
+                (Complex::new(x, 0.), Complex::new(1., 0.), [x, 1., 0.]),
+                (Complex::new(-x, 0.), Complex::new(1., 0.), [x, -1., 0.]),
+                (
+                    Complex::new(x, 0.),
+                    Complex::new(0., 1.),
+                    [x, 0., 1. / (2. * x)],
+                ),
+                (
+                    Complex::new(x, x),
+                    Complex::new(1., 1.),
+                    [x.hypot(x), std::f64::consts::SQRT_2, 0.],
+                ),
+            ] {
+                let values = [primal, seed, Complex::new(0., 0.)];
+                let fixed = NormRangeDual { values }.norm();
+                let dynamic =
+                    HyperDual::from_values(vec![vec![0], vec![1], vec![2]], values.to_vec()).norm();
+                for result in [&fixed.values[..], &dynamic.values[..]] {
+                    assert_eq!(result[0], Complex::new(expected[0], 0.));
+                    for (actual, expected) in result[1..].iter().zip(&expected[1..]) {
+                        if expected.is_infinite() {
+                            assert_eq!(actual.re, *expected);
+                        } else {
+                            assert!(actual.re.is_finite(), "{x}: {result:?}");
+                            let scale = if *expected == 0. { 1. } else { expected.abs() };
+                            assert!(
+                                (actual.re - expected).abs() <= 64. * f64::EPSILON * scale,
+                                "{x}: {actual:?} != {expected}"
+                            );
+                        }
+                        assert_eq!(actual.im, 0.);
+                    }
+                }
+            }
+        }
+        // Squaring this derivative before dividing by the primal overflows,
+        // although the second Taylor coefficient remains representable.
+        let result = HyperDual::from_values(
+            vec![vec![0], vec![1], vec![2]],
+            vec![
+                Complex::new(1e200, 0.),
+                Complex::new(0., 1e200),
+                Complex::new(0., 0.),
+            ],
+        )
+        .norm();
+        assert!((result.values[2].re / 5e199 - 1.).abs() < 64. * f64::EPSILON);
+        assert_eq!(result.values[1], Complex::new(0., 0.));
+    }
+
+    #[test]
+    fn norm_preserves_reordered_mixed_arb_coefficients_and_zero_convention() {
+        use super::DualNumberStructure;
+        use crate::domains::float::{Complex, Float, SingleFloat};
+
+        let number = |value| Float::new(192).from_i64(value);
+        let values = [
+            Complex::new(number(3), number(4)),
+            Complex::new(number(0), number(1)),
+            Complex::new(number(1), number(0)),
+            Complex::new(number(0), number(0)),
+            Complex::new(number(0), number(0)),
+        ];
+        let fixed = ReorderedNormDual {
+            values: values.clone(),
+        }
+        .norm();
+        let dynamic = HyperDual::from_values(
+            vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![2, 0], vec![1, 1]],
+            values.to_vec(),
+        )
+        .norm();
+        assert_eq!(fixed.get_shape(), dynamic.get_shape());
+        for values in [&fixed.values[..], &dynamic.values[..]] {
+            for (actual, (numerator, denominator)) in
+                values
+                    .iter()
+                    .zip([(5, 1), (4, 5), (3, 5), (8, 125), (-12, 125)])
+            {
+                let expected = number(numerator) / number(denominator);
+                assert!((actual.re.clone() - expected).norm() < Float::with_val(192, 1e-40));
+                assert!(actual.im.norm() < Float::with_val(192, 1e-40));
+            }
+        }
+        let zero = NormRangeDual {
+            values: [Complex::new(0., 0.); 3],
+        };
+        assert_eq!(zero.norm().values, zero.values);
+        let cusp = NormRangeDual {
+            values: [
+                Complex::new(0., 0.),
+                Complex::new(1., 0.),
+                Complex::new(0., 0.),
+            ],
+        }
+        .norm();
+        assert_eq!(cusp.values[0], Complex::new(0., 0.));
+        assert!(!cusp.values[1].is_finite());
+    }
+
+    #[test]
+    fn norm_mixed_products_rescale_only_unrepresentable_intermediates() {
+        use crate::domains::float::Complex;
+
+        for (primal, first, second) in [(1e-320_f64, 1e200_f64, 1e-250_f64), (1e308, 1e-200, 1e308)]
+        {
+            let values = [
+                Complex::new(primal, 0.),
+                Complex::new(0., first),
+                Complex::new(0., second),
+                Complex::new(0., 0.),
+                Complex::new(0., 0.),
+            ];
+            let fixed = NormDual { values }.norm();
+            let dynamic = HyperDual::from_values(
+                vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+                values.to_vec(),
+            )
+            .norm();
+            let expected = (first * second) / primal;
+            for values in [&fixed.values[..], &dynamic.values[..]] {
+                assert_eq!(values[0], Complex::new(primal, 0.));
+                assert_eq!(values[1], Complex::new(0., 0.));
+                assert_eq!(values[2], Complex::new(0., 0.));
+                // The x^2 coefficient may overflow. Its independent mixed
+                // coefficient remains finite and uses its own relative scale.
+                assert!(values[4].re.is_finite());
+                assert!((values[4].re / expected - 1.).abs() < 64. * f64::EPSILON);
+                assert_eq!(values[4].im, 0.);
+            }
+        }
+    }
+
+    #[test]
+    fn integer_powers_preserve_components_precision_and_shape() {
+        use super::DualNumber;
+        use crate::domains::float::{Complex, Float, SingleFloat};
+
+        fn check<T: Real + SingleFloat, D: Real + DualNumber<Complex<T>>>(
+            prototype: &T,
+            mut value: D,
+        ) where
+            Complex<T>: Real,
+        {
+            // i*(2+x+3y+5x²+7xy), stored as Taylor coefficients.
+            for (power, imaginary, expected) in [
+                (0, false, [1, 0, 0, 0, 0]),
+                (1, true, [2, 1, 3, 5, 7]),
+                (2, false, [-4, -4, -12, -21, -34]),
+                (3, true, [-8, -12, -36, -66, -120]),
+            ] {
+                let result = value.pow(power);
+                assert_eq!(result.get_shape(), value.get_shape());
+                for (actual, expected) in result.values().iter().zip(expected) {
+                    let number = prototype.from_i64(expected);
+                    let expected = if imaginary {
+                        Complex::new(prototype.zero(), number)
+                    } else {
+                        Complex::new(number, prototype.zero())
+                    };
+                    assert_eq!(actual, &expected);
+                    assert_eq!(actual.re.get_precision(), prototype.get_precision());
+                    assert_eq!(actual.im.get_precision(), prototype.get_precision());
+                }
+            }
+            // A vanishing primal with nonzero derivatives still has power zero
+            // equal to the multiplicative identity in the original shape.
+            value.values_mut()[0] = Complex::new(prototype.zero(), prototype.zero());
+            let result = value.pow(0);
+            assert_eq!(result.get_shape(), value.get_shape());
+            assert_eq!(result.values(), value.one().values());
+        }
+
+        fn carriers<T: Real + SingleFloat>(prototype: T)
+        where
+            Complex<T>: Real,
+        {
+            let values =
+                [2, 1, 3, 5, 7].map(|v| Complex::new(prototype.zero(), prototype.from_i64(v)));
+            check(
+                &prototype,
+                NormDual {
+                    values: values.clone(),
+                },
+            );
+            check(
+                &prototype,
+                HyperDual::from_values(
+                    vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+                    values.to_vec(),
+                ),
+            );
+        }
+        carriers(0.);
+        carriers(Float::new(192));
+    }
+
+    #[test]
+    fn complex_norm_real_parameter_derivatives() {
+        use crate::domains::float::Complex;
+        let values = [
+            Complex::new(3., 4.),
+            Complex::new(1., 0.),
+            Complex::new(0., 1.),
+            Complex::new(0., 0.),
+            Complex::new(0., 0.),
+        ];
+        let fixed = NormDual { values }.norm();
+        let dynamic = HyperDual::from_values(
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+            values.to_vec(),
+        )
+        .norm();
+        for result in [&fixed.values[..], &dynamic.values[..]] {
+            for (actual, expected) in
+                result
+                    .iter()
+                    .zip([5., 3. / 5., 4. / 5., 8. / 125., -12. / 125.])
+            {
+                assert!(
+                    (actual.re - expected).abs() < 1e-12,
+                    "{actual:?} != {expected}"
+                );
+                assert!(actual.im.abs() < 1e-12);
+            }
+        }
+        // An imaginary seed at a positive real primal must still contribute to
+        // the second derivative; equality of primal values cannot justify a shortcut.
+        let actual = HyperDual::from_values(
+            vec![vec![0], vec![1], vec![2]],
+            vec![
+                Complex::new(3., 0.),
+                Complex::new(0., 1.),
+                Complex::new(0., 0.),
+            ],
+        )
+        .norm();
+        assert!((actual.values[2].re - 1. / 6.).abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_norm_preserves_extreme_primal_scales() {
+        use crate::domains::float::Complex;
+        for x in [1e200, -1e200, 1e-200, -1e-200] {
+            let result = HyperDual::from_values(
+                vec![vec![0], vec![1]],
+                vec![Complex::new(x, 0.), Complex::new(1., 0.)],
+            )
+            .norm();
+            assert_eq!(result.values[0], Complex::new(x.abs(), 0.));
+            assert!((result.values[1].re - x.signum()).abs() < 1e-12);
+        }
+    }
 
     #[test]
     fn real_functions() {
@@ -2458,6 +2912,25 @@ mod test {
 
         assert_eq!(runtime_x.values, [2., 0., 1.]);
         assert_eq!(runtime_y.values, [3., 1., 0.]);
+    }
+
+    #[test]
+    fn generic_component_views_preserve_static_and_dynamic_shapes() {
+        use super::{DualNumber, DualNumberStructure};
+
+        fn update(dual: &mut impl DualNumber<f64>) {
+            assert_eq!(dual.values(), &[2., 0., 1.]);
+            assert_eq!(dual.get_shape(), &[&[0, 0][..], &[0, 1], &[1, 0]]);
+            dual.values_mut()[1] = 7.;
+            assert_eq!(dual.values(), &[2., 7., 1.]);
+        }
+        let mut static_dual = ReorderedDual::<f64>::new_variable(0, 2.);
+        let mut dynamic_dual =
+            HyperDual::from_values(vec![vec![0, 0], vec![0, 1], vec![1, 0]], vec![2., 0., 1.]);
+        update(&mut static_dual);
+        update(&mut dynamic_dual);
+        assert_eq!(static_dual.values(), dynamic_dual.values());
+        assert_eq!(static_dual.get_shape(), dynamic_dual.get_shape());
     }
 
     #[test]

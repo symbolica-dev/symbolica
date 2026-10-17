@@ -598,8 +598,32 @@ fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
     param_count: usize,
-    config: Config,
+    mut config: Config,
 ) -> Result<Translator, String> {
+    // Retained bodies are compiled through this same boundary. Reserve the
+    // actual call arity of each program, including hoisted constant arguments;
+    // the number of inputs of the caller does not determine its call storage.
+    let call_arity = instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::Fun(_, function, _) => Some(function.2.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if call_arity > config.num_args() as usize {
+        config
+            .set_option("num_args", &call_arity.to_string())
+            .map_err(|error| error.to_string())?;
+        // SymJIT clamps reservations to its supported capacity.
+        if call_arity > config.num_args() as usize {
+            return Err(format!(
+                "Evaluator requires {call_arity} call arguments including hoisted constants, \
+                 but SymJIT supports only {}",
+                config.num_args()
+            ));
+        }
+    }
     let mut translator = Translator::new(config);
     translator.set_num_params(param_count);
 
@@ -630,7 +654,18 @@ fn translate_to_symjit(
                 .unwrap(),
             Instruction::Pow(lhs, arg, p, is_real) => translator
                 .append_pow(&slot(lhs), &slot(arg), p, is_real)
-                .unwrap(),
+                .map_err(|error| error.to_string())?,
+            Instruction::Div(lhs, numerator, denominator, numerator_real, denominator_real) => {
+                translator
+                    .append_div(
+                        &slot(lhs),
+                        &slot(numerator),
+                        &slot(denominator),
+                        numerator_real,
+                        denominator_real,
+                    )
+                    .map_err(|error| error.to_string())?
+            }
             Instruction::Powf(lhs, arg, p, is_real) => translator
                 .append_powf(&slot(lhs), &slot(arg), &slot(p), is_real)
                 .unwrap(),
@@ -650,7 +685,8 @@ fn translate_to_symjit(
                     .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
                     .map_err(|e| e.to_string())?;
             }
-            Instruction::Join(lhs, cond, true_val, false_val) => translator
+            Instruction::Join(lhs, cond, true_val, false_val)
+            | Instruction::Select(lhs, cond, true_val, false_val) => translator
                 .append_join(&slot(lhs), &slot(cond), &slot(true_val), &slot(false_val))
                 .unwrap(),
             Instruction::Label(id) => translator.append_label(id).unwrap(),
@@ -861,7 +897,27 @@ pub struct JITCompiledEvaluator<T> {
     batch_output_buffer: Vec<T>,
 }
 
+impl<T> std::fmt::Debug for JITCompiledEvaluator<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JITCompiledEvaluator")
+            .field("inputs", &self.get_input_len())
+            .field("outputs", &self.get_output_len())
+            .field("settings", &self.settings)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> JITCompiledEvaluator<T> {
+    /// Number of logical numerical inputs, independent of complex/SIMD storage.
+    pub fn get_input_len(&self) -> usize {
+        self.code.count_params / if self.code.config.is_complex() { 2 } else { 1 }
+    }
+
+    /// Number of logical numerical outputs, independent of complex/SIMD storage.
+    pub fn get_output_len(&self) -> usize {
+        self.code.count_obs / if self.code.config.is_complex() { 2 } else { 1 }
+    }
+
     /// Return the serialized SymJIT application used by this evaluator.
     pub fn as_bytes(&self) -> &[u8] {
         &self.compressed_ir
@@ -950,6 +1006,45 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
     /// Use [`BatchEvaluator::evaluate_batch`] to pack scalar buffers automatically.
     pub fn batch_evaluate(&mut self, args: &[T], out: &mut [T], rows: usize) {
         T::batch_evaluate(self, args, out, rows);
+    }
+}
+
+impl<T: JITCompiledNumber + Default + Clone> JITCompiledEvaluator<T> {
+    /// Evaluate with mapped application storage, reusing the native batch buffers.
+    /// Lengths are validated before calling setters or compiled code.
+    pub fn try_evaluate_mapped<I, O>(
+        &mut self,
+        input: &[I],
+        output: &mut [O],
+        mut set_input: impl FnMut(&mut T, &I),
+        mut set_output: impl FnMut(&mut O, &T),
+    ) -> Result<(), EvaluationError> {
+        if input.len() != self.get_input_len() {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.get_input_len(),
+                actual: input.len(),
+            });
+        }
+        if output.len() != self.get_output_len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.get_output_len(),
+                actual: output.len(),
+            });
+        }
+        let mut native_input = std::mem::take(&mut self.batch_input_buffer);
+        let mut native_output = std::mem::take(&mut self.batch_output_buffer);
+        native_input.resize_with(input.len(), T::default);
+        native_output.resize_with(output.len(), T::default);
+        for (destination, source) in native_input.iter_mut().zip(input) {
+            set_input(destination, source);
+        }
+        self.evaluate(&native_input, &mut native_output);
+        for (destination, source) in output.iter_mut().zip(&native_output) {
+            set_output(destination, source);
+        }
+        self.batch_input_buffer = native_input;
+        self.batch_output_buffer = native_output;
+        Ok(())
     }
 }
 
@@ -2045,6 +2140,50 @@ impl CompiledComplexEvaluator {
                 out.as_mut_ptr(),
             )
         }
+    }
+
+    /// Evaluate with application-owned complex storage, without layout casts.
+    /// The native scratch allocation also holds reusable mapped input/output tails.
+    pub fn try_evaluate_mapped<I, O>(
+        &mut self,
+        input: &[I],
+        output: &mut [O],
+        mut set_input: impl FnMut(&mut Complex<f64>, &I),
+        mut set_output: impl FnMut(&mut O, &Complex<f64>),
+    ) -> Result<(), EvaluationError> {
+        if input.len() != self.get_input_len() {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.get_input_len(),
+                actual: input.len(),
+            });
+        }
+        if output.len() != self.get_output_len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.get_output_len(),
+                actual: output.len(),
+            });
+        }
+        let scratch_len = unsafe { (self.library.borrow_dependent().get_buffer_len)() as usize };
+        self.buffer_complex
+            .resize(scratch_len + input.len() + output.len(), Complex::default());
+        let (scratch, mapped) = self.buffer_complex.split_at_mut(scratch_len);
+        let (native_input, native_output) = mapped.split_at_mut(input.len());
+        for (destination, source) in native_input.iter_mut().zip(input) {
+            set_input(destination, source);
+        }
+        // The three slices are disjoint parts of the existing owner allocation.
+        // The compiled function still receives its unchanged native ABI.
+        unsafe {
+            (self.library.borrow_dependent().eval)(
+                native_input.as_ptr(),
+                scratch.as_mut_ptr(),
+                native_output.as_mut_ptr(),
+            );
+        }
+        for (destination, source) in output.iter_mut().zip(native_output) {
+            set_output(destination, source);
+        }
+        Ok(())
     }
 }
 

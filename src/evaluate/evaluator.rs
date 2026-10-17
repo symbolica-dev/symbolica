@@ -36,6 +36,21 @@ pub(super) struct ProgramView<'a, T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// Return the number of parameter values required for one evaluation.
+    pub fn get_input_len(&self) -> usize {
+        self.param_count
+    }
+
+    /// Return the number of results produced by one evaluation.
+    pub fn get_output_len(&self) -> usize {
+        self.result_indices.len()
+    }
+
+    /// Borrow the numerical constants stored by the evaluator.
+    pub fn get_constants(&self) -> &[T] {
+        &self.stack[self.param_count..self.reserved_indices]
+    }
+
     pub(super) fn program(&self) -> ProgramView<'_, T> {
         ProgramView {
             instructions: &self.instructions,
@@ -58,6 +73,191 @@ impl FunctionBody {
             stack_size: self.stack_size,
             constants: &[],
         }
+    }
+}
+
+impl<T: Default + Clone> ExpressionEvaluator<T> {
+    /// Build a native view of a retained body. Its constants are explicit
+    /// captured arguments; root-level constant slots do not belong to this scope.
+    pub(super) fn from_retained_body(
+        body: &FunctionBody,
+        functions: &[ExternalFunctionContainer<T>],
+        settings: &OptimizationSettings,
+    ) -> Self {
+        let mut external_fns = functions.to_vec();
+        for function in &mut external_fns {
+            function.constant_index = None;
+        }
+        Self {
+            stack: vec![T::default(); body.stack_size],
+            param_count: body.param_count,
+            reserved_indices: body.param_count,
+            instructions: body.instructions.clone(),
+            result_indices: vec![body.result_index],
+            external_fns,
+            settings: settings.clone(),
+        }
+    }
+
+    /// Keep one output and all live lazy branches, making used constants
+    /// explicit function inputs and dropping unused original arguments.
+    pub(super) fn retain_output_component(&mut self, component: usize) -> Vec<usize> {
+        self.result_indices = vec![self.result_indices[component]];
+        self.prune_output_dependencies(true)
+    }
+
+    /// Remove data and control instructions not needed by the current outputs.
+    /// A guarded value keeps its controlling predicate; a live phi keeps its
+    /// branch even when both selected values are original inputs or constants.
+    /// Staged programs retain their input ABI, while outlined functions compact it.
+    pub(super) fn prune_output_dependencies(&mut self, compact_inputs: bool) -> Vec<usize> {
+        self.undo_stack_optimization();
+        for result in &mut self.result_indices {
+            while *result >= self.reserved_indices {
+                match &self.instructions[*result - self.reserved_indices].0 {
+                    Instr::Add(_, inputs) | Instr::Mul(_, inputs) if inputs.len() == 1 => {
+                        *result = inputs[0];
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        // Native branches close at a label and may be followed by several phi
+        // outputs. Keep ownership separate from the number of Join instructions.
+        let mut regions = Vec::<(usize, Option<usize>)>::new();
+        let mut open = Vec::<(usize, Option<Label>)>::new();
+        let mut last_exit = None;
+        let mut scopes = vec![None; self.instructions.len()];
+        let mut control = vec![None; self.instructions.len()];
+        let mut phis = vec![None; self.instructions.len()];
+        for (index, (instruction, _)) in self.instructions.iter().enumerate() {
+            if !matches!(instruction, Instr::Join(..)) {
+                last_exit = None;
+            }
+            scopes[index] = open.last().map(|(region, _)| *region);
+            match instruction {
+                Instr::IfElse(condition, _) => {
+                    let region = regions.len();
+                    regions.push((*condition, scopes[index]));
+                    control[index] = Some(region);
+                    open.push((region, None));
+                }
+                Instr::Goto(label) => {
+                    if let Some((region, exit)) = open.last_mut() {
+                        *exit = Some(*label);
+                        control[index] = Some(*region);
+                    }
+                }
+                Instr::Label(label) => {
+                    control[index] = scopes[index];
+                    if open.last().is_some_and(|(_, exit)| *exit == Some(*label)) {
+                        let (region, _) = open.pop().unwrap();
+                        last_exit = Some(region);
+                    }
+                }
+                Instr::Join(..) => {
+                    // Native phi outputs form one consecutive section after
+                    // this conditional's exit label, even with a reused predicate.
+                    phis[index] = last_exit;
+                }
+                _ => {}
+            }
+        }
+        let mut used = HashSet::default();
+        let mut live_regions = HashSet::default();
+        let mut pending = self.result_indices.clone();
+        while let Some(slot) = pending.pop() {
+            if !used.insert(slot) || slot < self.reserved_indices {
+                continue;
+            }
+            let index = slot - self.reserved_indices;
+            pending.extend(self.instructions[index].0.input_indices());
+            for mut scope in [scopes[index], phis[index]] {
+                while let Some(region) = scope {
+                    if !live_regions.insert(region) {
+                        break;
+                    }
+                    pending.push(regions[region].0);
+                    scope = regions[region].1;
+                }
+            }
+        }
+        let args = (0..self.reserved_indices)
+            .filter(|input| !compact_inputs || used.contains(input))
+            .collect::<Vec<_>>();
+        let reserved = if compact_inputs {
+            args.len()
+        } else {
+            self.reserved_indices
+        };
+        let mut slots = vec![0; self.stack.len()];
+        for (new, old) in args.iter().enumerate() {
+            slots[*old] = new;
+        }
+        let mut instructions = Vec::new();
+        for (index, (mut instruction, phase)) in self.instructions.drain(..).enumerate() {
+            let keep = match &instruction {
+                Instr::IfElse(..) | Instr::Goto(..) | Instr::Label(..) => {
+                    control[index].is_none_or(|region| live_regions.contains(&region))
+                }
+                _ => used.contains(&(index + self.reserved_indices)),
+            };
+            if !keep {
+                continue;
+            }
+            let output = match &mut instruction {
+                Instr::Add(output, inputs)
+                | Instr::Mul(output, inputs)
+                | Instr::ExternalFun(output, _, inputs) => {
+                    for input in inputs {
+                        *input = slots[*input];
+                    }
+                    Some(output)
+                }
+                Instr::Pow(output, input, _) | Instr::BuiltinFun(output, _, input) => {
+                    *input = slots[*input];
+                    Some(output)
+                }
+                Instr::Powf(output, left, right) | Instr::Div(output, left, right) => {
+                    *left = slots[*left];
+                    *right = slots[*right];
+                    Some(output)
+                }
+                Instr::Join(output, condition, left, right)
+                | Instr::Select(output, condition, left, right) => {
+                    *condition = slots[*condition];
+                    *left = slots[*left];
+                    *right = slots[*right];
+                    Some(output)
+                }
+                Instr::IfElse(condition, _) => {
+                    *condition = slots[*condition];
+                    None
+                }
+                Instr::Goto(..) | Instr::Label(..) => None,
+            };
+            if let Some(output) = output {
+                slots[*output] = reserved + instructions.len();
+                *output = slots[*output];
+            }
+            instructions.push((instruction, phase));
+        }
+        for output in &mut self.result_indices {
+            *output = slots[*output];
+        }
+        if compact_inputs {
+            self.param_count = args.len();
+            self.reserved_indices = args.len();
+            self.stack = vec![T::default(); args.len() + instructions.len()];
+        } else {
+            self.stack
+                .resize(self.reserved_indices + instructions.len(), T::default());
+        }
+        self.instructions = instructions;
+        self.optimize_stack();
+        self.fix_labels();
+        args
     }
 }
 
@@ -248,6 +448,22 @@ impl<T: Real> ExpressionEvaluator<T> {
     /// Evaluate the expression evaluator and write the results in `out`.
     #[inline]
     pub fn try_evaluate(&mut self, params: &[T], out: &mut [T]) -> Result<(), EvaluationError> {
+        self.try_evaluate_mapped(params, out, T::set_from, T::set_from)
+    }
+
+    /// Evaluate using different input and output storage types.
+    ///
+    /// Setters copy directly into the evaluator's existing input stack and from
+    /// its result slots. They may preserve allocation and precision in either
+    /// representation. Lengths are checked before either setter is called.
+    #[inline]
+    pub fn try_evaluate_mapped<I, O>(
+        &mut self,
+        params: &[I],
+        out: &mut [O],
+        mut set_input: impl FnMut(&mut T, &I),
+        mut set_output: impl FnMut(&mut O, &T),
+    ) -> Result<(), EvaluationError> {
         if params.len() != self.param_count {
             return Err(EvaluationError::InvalidParameterCount {
                 expected: self.param_count,
@@ -261,11 +477,11 @@ impl<T: Real> ExpressionEvaluator<T> {
             });
         }
         for (t, p) in self.stack.iter_mut().zip(params) {
-            t.set_from(p);
+            set_input(t, p);
         }
         Self::evaluate_program(&self.instructions, &mut self.stack, &mut self.external_fns);
         for (o, i) in out.iter_mut().zip(&self.result_indices) {
-            o.set_from(&self.stack[*i]);
+            set_output(o, &self.stack[*i]);
         }
         Ok(())
     }
@@ -278,6 +494,10 @@ impl<T: Real> ExpressionEvaluator<T> {
         external_fns: &mut [ExternalFunctionContainer<T>],
     ) {
         let mut tmp = T::new_zero();
+        // Keep the common Add/Mul/Pow dispatch small and its scratch local. Passing
+        // that scratch to the cold path forces spills in the hot arithmetic loop.
+        // Division gets reusable storage only when an instruction actually needs it.
+        let mut div_tmp = None;
         let mut i = 0;
         while i < instructions.len() {
             let (instr, _) = unsafe { &instructions.get_unchecked(i) };
@@ -330,11 +550,13 @@ impl<T: Real> ExpressionEvaluator<T> {
                     } else if *e >= 0 {
                         stack[*r] = stack[*b].pow(*e as u64);
                     } else {
-                        stack[*r] = stack[*b].pow(e.unsigned_abs()).inv();
+                        stack[*r] = stack[*b].inv().pow(e.unsigned_abs());
                     }
                 }
                 _ => {
-                    if let Some(idx) = Self::evaluate_impl_no_ops(stack, instr, external_fns) {
+                    if let Some(idx) =
+                        Self::evaluate_impl_no_ops(stack, instr, external_fns, &mut div_tmp)
+                    {
                         i = idx;
                         continue;
                     }
@@ -368,8 +590,15 @@ impl<T: Real> ExpressionEvaluator<T> {
         stack: &mut [T],
         instr: &Instr,
         external_fns: &mut [ExternalFunctionContainer<T>],
+        div_tmp: &mut Option<T>,
     ) -> Option<usize> {
         match instr {
+            Instr::Div(r, numerator, denominator) => {
+                let tmp = div_tmp.get_or_insert_with(T::new_zero);
+                tmp.set_from(&stack[*numerator]);
+                *tmp /= &stack[*denominator];
+                std::mem::swap(&mut stack[*r], tmp);
+            }
             Instr::Powf(r, b, e) => {
                 stack[*r] = stack[*b].powf(&stack[*e]);
             }
@@ -432,9 +661,10 @@ impl<T: Real> ExpressionEvaluator<T> {
                     stack[*r] = stack[*b].clone();
                 }
             }
-            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
-                unreachable!()
+            Instr::Select(r, c, a, b) => {
+                stack[*r] = stack[*c].select_nonzero(&stack[*a], &stack[*b]);
             }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => unreachable!(),
         }
 
         None
@@ -503,6 +733,18 @@ impl<T: Clone> ExpressionEvaluator<T> {
 
                     *stack.get_unchecked_mut(*r) = tmp;
                 },
+                Instr::Div(r, numerator, denominator) => {
+                    let inverse = ring.try_inv(&stack[*denominator]).ok_or_else(|| {
+                        EvaluationError::EvaluationFailed {
+                            expression: Atom::num(0),
+                            reason: format!(
+                                "Could not invert {}",
+                                ring.printer(&stack[*denominator])
+                            ),
+                        }
+                    })?;
+                    stack[*r] = ring.mul(&stack[*numerator], &inverse);
+                }
                 Instr::Pow(r, b, e) => {
                     if *e == -1 {
                         stack[*r] = ring.try_inv(&stack[*b]).ok_or_else(|| {
@@ -599,14 +841,14 @@ impl<T: Clone> ExpressionEvaluator<T> {
                 return Ok(Some(label.0));
             }
             Instr::Label(_) => {}
-            Instr::Join(r, c, a, b) => {
+            Instr::Join(r, c, a, b) | Instr::Select(r, c, a, b) => {
                 if !ring.is_zero(&stack[*c]) {
                     stack[*r] = stack[*a].clone();
                 } else {
                     stack[*r] = stack[*b].clone();
                 }
             }
-            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) | Instr::Div(..) => {
                 unreachable!()
             }
         }
@@ -726,21 +968,6 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
     }
 
-    /// Return the number of parameter values required for one evaluation.
-    pub fn get_input_len(&self) -> usize {
-        self.param_count
-    }
-
-    /// Return the number of results produced by one evaluation.
-    pub fn get_output_len(&self) -> usize {
-        self.result_indices.len()
-    }
-
-    /// Borrow the numerical constants stored by the evaluator.
-    pub fn get_constants(&self) -> &[T] {
-        &self.stack[self.param_count..self.reserved_indices]
-    }
-
     /// Return the total number of operations.
     pub fn count_operations(&self) -> OperationCount {
         let mut count = OperationCount::default();
@@ -750,6 +977,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                 Instr::Add(_, s) => count.additions += s.len() - 1,
                 Instr::Mul(_, s) => count.multiplications += s.len() - 1,
                 Instr::Pow(_, _, e) => count.add_integer_power(*e),
+                Instr::Div(..) => count.add_integer_power(-1),
                 Instr::Powf(..) | Instr::BuiltinFun(..) | Instr::ExternalFun(..) => {
                     count.add_function_call()
                 }
@@ -768,6 +996,8 @@ impl<T: Default> ExpressionEvaluator<T> {
             Mul(&'a [usize]),
             Pow(usize, i64),
             Powf(usize, usize),
+            Div(usize, usize),
+            Select(usize, usize, usize),
             BuiltinFun(u32, usize),
             ExternalFun(u32, &'a [usize]),
         }
@@ -780,6 +1010,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
+        let mut branch_exits = HashMap::default();
 
         for (instr, phase) in &mut self.instructions {
             let new_pos = new_instr.len() + self.reserved_indices;
@@ -809,7 +1040,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     *b = rename_map[*b];
                     *p = new_pos;
                 }
-                Instr::Powf(p, a, b) => {
+                Instr::Powf(p, a, b) | Instr::Div(p, a, b) => {
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                     *p = new_pos;
@@ -820,8 +1051,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         *x = rename_map[*x];
                     }
                 }
-                Instr::Join(p, a, b, c) => {
-                    current_node = dag_nodes[current_node];
+                Instr::Join(p, a, b, c) | Instr::Select(p, a, b, c) => {
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                     *c = rename_map[*c];
@@ -832,12 +1062,17 @@ impl<T: Default> ExpressionEvaluator<T> {
                     current_node = dag_nodes.len() - 1;
                     *c = rename_map[*c];
                 }
-                Instr::Goto(_) => {
+                Instr::Goto(label) => {
                     let parent = dag_nodes[current_node];
+                    branch_exits.insert(*label, parent);
                     dag_nodes.push(parent); // enter else block (included goto and labels)
                     current_node = dag_nodes.len() - 1;
                 }
-                _ => {}
+                Instr::Label(label) => {
+                    if let Some(parent) = branch_exits.get(label) {
+                        current_node = *parent;
+                    }
+                }
             }
 
             let key = match &*instr {
@@ -845,6 +1080,8 @@ impl<T: Default> ExpressionEvaluator<T> {
                 Instr::Mul(_, a) => Some(CSE::Mul(a)),
                 Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
                 Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
+                Instr::Div(_, a, b) => Some(CSE::Div(*a, *b)),
+                Instr::Select(_, c, a, b) => Some(CSE::Select(*c, *a, *b)),
                 Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
                 Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
                 _ => None,
@@ -920,6 +1157,7 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut branch_id = vec![0; self.instructions.len()];
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
+        let mut branch_exits = HashMap::default();
 
         const PROMOTED_PAIR: u32 = 1 << 31;
 
@@ -997,13 +1235,19 @@ impl<T: Default> ExpressionEvaluator<T> {
                     current_node = dag_nodes.len() - 1;
                     continue;
                 }
-                Instr::Goto(_) => {
+                Instr::Goto(label) => {
                     let parent = dag_nodes[current_node];
+                    branch_exits.insert(*label, parent);
                     dag_nodes.push(parent); // enter else block (included goto and labels)
                     current_node = dag_nodes.len() - 1;
                 }
-                Instr::Join(..) => {
-                    current_node = dag_nodes[current_node];
+                Instr::Label(label) => {
+                    // One conditional can produce several Join instructions
+                    // (for example, one per vector component). Its control-flow
+                    // scope ends once, at the forward jump's target label.
+                    if let Some(parent) = branch_exits.get(label) {
+                        current_node = *parent;
+                    }
                 }
                 _ => {}
             }
@@ -1290,7 +1534,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         *b = rename!(*b);
                         *p = new_pos;
                     }
-                    Instr::Powf(p, a, b) => {
+                    Instr::Powf(p, a, b) | Instr::Div(p, a, b) => {
                         *a = rename!(*a);
                         *b = rename!(*b);
                         *p = new_pos;
@@ -1301,7 +1545,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                             *x = rename!(*x);
                         }
                     }
-                    Instr::Join(p, a, b, c) => {
+                    Instr::Join(p, a, b, c) | Instr::Select(p, a, b, c) => {
                         *a = rename!(*a);
                         *b = rename!(*b);
                         *c = rename!(*c);
@@ -1709,6 +1953,7 @@ mod tests {
 #[cfg(test)]
 mod cse_tests {
     use super::*;
+    use crate::domains::dual::HyperDual;
 
     fn evaluator(
         params: usize,
@@ -1726,6 +1971,192 @@ mod cse_tests {
             result_indices: results,
             external_fns: vec![],
             settings: OptimizationSettings::default(),
+        }
+    }
+
+    #[test]
+    fn direct_division_preserves_finite_ratios_and_operand_order() {
+        let source = evaluator(2, vec![Instr::Div(2, 0, 1)], vec![2]);
+        assert_eq!(source.count_operations().inversions, 1);
+        assert!(matches!(
+            source.export_instructions().instructions[0],
+            Instruction::Div(..)
+        ));
+        let mut eager = source.clone();
+        for (numerator, denominator, expected) in [
+            (1e-320, 1e-320, 1.),
+            (1e308, 1e308, 1.),
+            (6., 3., 2.),
+            (3., 6., 0.5),
+        ] {
+            assert_eq!(eager.evaluate_single(&[numerator, denominator]), expected);
+        }
+        assert!(eager.evaluate_single(&[0., 0.]).is_nan());
+        assert!(eager.evaluate_single(&[1., 1e-320]).is_infinite());
+
+        // Interleave scratch users, including division onto either operand's slot.
+        let alternating = evaluator(
+            3,
+            vec![
+                Instr::Div(3, 0, 1),
+                Instr::Add(4, vec![3, 2]),
+                Instr::Mul(3, vec![4, 1]),
+                Instr::Div(3, 3, 1),
+                Instr::Div(4, 0, 1),
+                Instr::Add(3, vec![3, 4]),
+                Instr::Div(1, 3, 1),
+                Instr::Mul(1, vec![1, 0]),
+            ],
+            vec![3, 1],
+        );
+        let mut interleaved = alternating.clone();
+        for (input, expected) in [
+            ([6., 3., 4.], [8., 16.]),
+            ([2., 4., 1.], [2., 1.]),
+            ([7., 2., -2.], [5., 17.5]),
+            ([6., 3., 4.], [8., 16.]),
+        ] {
+            let mut output = [0.; 2];
+            interleaved.evaluate(&input, &mut output);
+            assert_eq!(output, expected);
+        }
+        #[cfg(feature = "float-mpfr")]
+        {
+            use crate::domains::float::Float;
+            let mut interleaved = alternating.map_coeff(&|value| Float::with_val(192, *value));
+            let mut output = [Float::with_val(32, 0), Float::with_val(32, 0)];
+            for precision in [64, 320, 128, 192] {
+                let input = [6, 3, 4].map(|value| Float::with_val(precision, value));
+                interleaved.evaluate(&input, &mut output);
+                assert_eq!(
+                    output,
+                    [
+                        Float::with_val(precision, 8),
+                        Float::with_val(precision, 16)
+                    ]
+                );
+                assert!(
+                    output
+                        .iter()
+                        .all(|value| value.get_precision() >= precision - 8)
+                );
+            }
+        }
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&eager, bincode::config::standard()).unwrap();
+            let (mut restored, consumed): (ExpressionEvaluator<f64>, _) =
+                bincode::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+            assert_eq!(consumed, bytes.len());
+            assert_eq!(restored.evaluate_single(&[1e-320, 1e-320]), 1.);
+        }
+        let mut batch = source.clone().into_batch_evaluator();
+        let mut output = [0.; 2];
+        batch
+            .evaluate_batch(&[1e-320, 1e-320, 1e308, 1e308], &mut output, 2)
+            .unwrap();
+        assert_eq!(output, [1., 1.]);
+
+        #[cfg(feature = "native_code_generation")]
+        for direct in [false, true] {
+            let mut compiled = source
+                .clone()
+                .jit_compile(
+                    JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            compiled.evaluate(&[1e-320, 1e-320], &mut output[..1]);
+            assert_eq!(output[0], 1., "direct={direct}");
+            let complex = source.clone().map_coeff(&|value| Complex::new(*value, 0.));
+            let mut compiled = complex
+                .jit_compile(
+                    JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            let mut output = [Complex::new(0., 0.)];
+            compiled.evaluate(
+                &[Complex::new(1e-320, 0.), Complex::new(1e-320, 0.)],
+                &mut output,
+            );
+            assert_eq!(output, [Complex::new(1., 0.)], "complex, direct={direct}");
+        }
+    }
+
+    #[test]
+    fn direct_division_vectorizes_without_reciprocal_intermediates() {
+        let source = evaluator(2, vec![Instr::Div(2, 0, 1)], vec![2])
+            .map_coeff(&|_| Complex::<Rational>::default());
+        let mut vectorized = source
+            .vectorize(&Dualizer::new(
+                HyperDual::<f64>::new(vec![vec![0], vec![1], vec![2]]),
+                vec![],
+            ))
+            .unwrap()
+            .map_coeff(&|value| value.re.to_f64());
+        let mut output = [0.; 3];
+        vectorized.evaluate(&[2., 1., 0., 3., 1., 0.], &mut output);
+        for (actual, expected) in output.into_iter().zip([2. / 3., 1. / 9., -1. / 27.]) {
+            assert!((actual - expected).abs() < 1e-15);
+        }
+        vectorized.evaluate(&[1e-320, 0., 0., 1e-320, 0., 0.], &mut output);
+        assert_eq!(output, [1., 0., 0.]);
+    }
+
+    #[test]
+    fn nested_multi_result_branches_keep_common_operations_in_scope() {
+        let mut original = evaluator(
+            3,
+            vec![
+                Instr::IfElse(0, Label(0)),
+                Instr::IfElse(1, Label(1)),
+                Instr::Add(5, vec![2, 2]),
+                Instr::Goto(Label(2)),
+                Instr::Label(Label(1)),
+                Instr::Mul(8, vec![2, 2]),
+                Instr::Label(Label(2)),
+                Instr::Join(10, 1, 5, 8),
+                Instr::Join(11, 1, 5, 8),
+                Instr::Mul(12, vec![2, 2]),
+                Instr::Add(13, vec![10, 11, 12]),
+                Instr::Goto(Label(3)),
+                Instr::Label(Label(0)),
+                Instr::Mul(16, vec![2, 2]),
+                Instr::Label(Label(3)),
+                Instr::Join(18, 0, 13, 16),
+            ],
+            vec![18],
+        );
+        original.fix_labels();
+        for pairs in [false, true] {
+            let mut optimized = original.clone();
+            if pairs {
+                assert!(optimized.remove_common_pairs() > 0);
+            } else {
+                optimized.remove_common_instructions();
+            }
+            optimized.optimize_stack();
+            optimized.fix_labels();
+            for (c, d) in [(0., 0.), (0., 1.), (1., 0.), (1., 1.), (0., 0.)] {
+                let input = [c, d, 3.];
+                let expected = if c == 0. {
+                    9.
+                } else if d == 0. {
+                    27.
+                } else {
+                    21.
+                };
+                assert_eq!(original.evaluate_single(&input), expected);
+                assert_eq!(
+                    optimized.evaluate_single(&input),
+                    expected,
+                    "common pairs={pairs}, c={c}, d={d}"
+                );
+            }
         }
     }
 
@@ -1758,6 +2189,74 @@ mod cse_tests {
             optimized.evaluate(&[point], &mut after);
             assert_eq!(after, before);
             assert!(after.iter().all(|value| (value - expected).abs() < 1e-14));
+        }
+    }
+
+    #[test]
+    fn output_pruning_tracks_scope_exits_when_predicates_are_reused() {
+        let mut original = evaluator(
+            3,
+            vec![
+                Instr::IfElse(0, Label(0)),
+                Instr::IfElse(0, Label(1)),
+                Instr::Add(5, vec![2, 2]),
+                Instr::Goto(Label(2)),
+                Instr::Label(Label(1)),
+                Instr::Mul(8, vec![2, 2]),
+                Instr::Label(Label(2)),
+                Instr::Join(10, 0, 5, 8),
+                Instr::Join(11, 0, 5, 8),
+                Instr::Mul(12, vec![2, 2]),
+                Instr::Add(13, vec![10, 11, 12]),
+                Instr::Goto(Label(3)),
+                Instr::Label(Label(0)),
+                Instr::Mul(16, vec![2, 2]),
+                Instr::Label(Label(3)),
+                Instr::Join(18, 0, 13, 16),
+                Instr::IfElse(0, Label(4)),
+                Instr::Add(20, vec![2, 2]),
+                Instr::Goto(Label(5)),
+                Instr::Label(Label(4)),
+                Instr::Pow(23, 2, -1),
+                Instr::Label(Label(5)),
+                Instr::Join(25, 0, 20, 23),
+                // A dead sibling uses the same predicate and contains a pole. Its
+                // scope must not retain or steal ownership from either live sibling.
+                Instr::IfElse(0, Label(6)),
+                Instr::Pow(27, 2, -1),
+                Instr::Goto(Label(7)),
+                Instr::Label(Label(6)),
+                Instr::Add(30, vec![2, 2]),
+                Instr::Label(Label(7)),
+                Instr::Join(32, 0, 27, 30),
+            ],
+            vec![18, 25],
+        );
+        original.fix_labels();
+        for compact in [false, true] {
+            let mut pruned = original.clone();
+            let arguments = pruned.prune_output_dependencies(compact);
+            assert_eq!(arguments, if compact { vec![0, 2] } else { vec![0, 1, 2] });
+            assert_eq!(
+                pruned
+                    .instructions
+                    .iter()
+                    .filter(|(instruction, _)| matches!(instruction, Instr::IfElse(..)))
+                    .count(),
+                3
+            );
+            for (condition, x) in [(0., 2.), (1., 2.), (0., -2.), (1., 0.), (1., -2.)] {
+                let input = [condition, 7., x];
+                let mut expected = [0.; 2];
+                let mut actual = [0.; 2];
+                original.evaluate(&input, &mut expected);
+                let inputs = arguments
+                    .iter()
+                    .map(|index| input[*index])
+                    .collect::<Vec<_>>();
+                pruned.evaluate(&inputs, &mut actual);
+                assert_eq!(actual, expected);
+            }
         }
     }
 }

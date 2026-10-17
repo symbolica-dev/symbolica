@@ -571,6 +571,15 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
 
     #[inline]
     fn div(self, rhs: &Self) -> Self::Output {
+        // Axis denominators need no squared norm. This also preserves finite
+        // subnormal ratios in SIMD domains without scalar range classification.
+        if rhs.im.is_fully_zero() {
+            return Self::new(self.re / &rhs.re, self.im / &rhs.re);
+        }
+        if rhs.re.is_fully_zero() {
+            return Self::new(self.im / &rhs.im, -self.re / &rhs.im);
+        }
+
         let n = rhs.norm_squared();
         let re = self.re.clone() * &rhs.re + self.im.clone() * &rhs.im;
         let im = self.im.clone() * &rhs.re - self.re.clone() * &rhs.im;
@@ -579,13 +588,6 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
             && (!im.needs_rescaling() || im.is_fully_zero())
         {
             return Complex::new(re / &n, im / &n);
-        }
-
-        if rhs.im.is_fully_zero() {
-            return Self::new(self.re / &rhs.re, self.im / &rhs.re);
-        }
-        if rhs.re.is_fully_zero() {
-            return Self::new(self.im / &rhs.im, -self.re / &rhs.im);
         }
 
         // Keep the usual two-division path for ordinary inputs. Only rescale
@@ -801,6 +803,16 @@ impl<T: FloatLike> FloatLike for Complex<T> {
     fn set_from(&mut self, other: &Self) {
         self.re.set_from(&other.re);
         self.im.set_from(&other.im);
+    }
+
+    #[inline]
+    fn select_nonzero(&self, nonzero: &Self, zero: &Self) -> Self {
+        Self::new(
+            self.re
+                .select_nonzero(&nonzero.re, &self.im.select_nonzero(&nonzero.re, &zero.re)),
+            self.re
+                .select_nonzero(&nonzero.im, &self.im.select_nonzero(&nonzero.im, &zero.im)),
+        )
     }
 
     #[inline]

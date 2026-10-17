@@ -10,6 +10,8 @@ use crate::{
 
 use super::{Atom, AtomCore, AtomType, AtomView};
 
+mod prepare;
+
 /// An atom that contains opaque aliases, together with a map from the aliases to their original atoms.
 /// An aliased atom may have a lower memory footprint than the original atom if it contains many repeated subexpressions.
 ///
@@ -413,16 +415,18 @@ impl AliasedAtom {
         }
 
         let mut dependency_graph: HashMap<&Atom, _> = HashMap::default();
+        let max_bytes = rhs
+            .aliases
+            .keys()
+            .map(|key| key.as_view().get_byte_size())
+            .max()
+            .unwrap_or(0);
         for (alias, body) in &rhs.aliases {
-            let mut dependencies = HashSet::default();
-            body.visitor(&mut |a| {
-                if rhs.aliases.contains_key::<[u8]>(&a.get_data()) {
-                    dependencies.insert(a);
-                    false
-                } else {
-                    true
-                }
-            });
+            let dependencies = rhs
+                .direct_alias_dependencies(body, max_bytes)
+                .into_iter()
+                .map(Atom::as_view)
+                .collect();
 
             dependency_graph.insert(
                 alias,

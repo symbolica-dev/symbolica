@@ -9,6 +9,198 @@ fn generic_cpp_compile_options() -> CompileOptions {
         .arg("-std=c++17")
 }
 
+#[test]
+fn mapped_jit_storage_preserves_dimensions_and_repeated_values() {
+    let source = parse!("z^2")
+        .evaluator(&[parse!("z")])
+        .build()
+        .unwrap()
+        .map_coeff(&|value| Complex::new(value.re.to_f64(), value.im.to_f64()));
+    for direct in [false, true] {
+        let mut program = source
+            .jit_compile(
+                JITCompilationSettings::new()
+                    .optimization_level(2)
+                    .direct_translation(direct),
+            )
+            .unwrap();
+        assert_eq!((program.get_input_len(), program.get_output_len()), (1, 1));
+        assert!(format!("{program:?}").contains("JITCompiledEvaluator"));
+        let mut output = [(0., 0., 9_u8)];
+        assert!(
+            program
+                .try_evaluate_mapped::<u8, _>(
+                    &[],
+                    &mut output,
+                    |_, _| panic!("invalid input reached mapper"),
+                    |_, _| panic!("invalid input reached mapper")
+                )
+                .is_err()
+        );
+        assert!(
+            program
+                .try_evaluate_mapped(
+                    &[(7_u8, 2., 3.)],
+                    &mut [] as &mut [u8],
+                    |_, _| panic!("invalid output reached mapper"),
+                    |_, _| panic!("invalid output reached mapper")
+                )
+                .is_err()
+        );
+        for (re, im) in [(2., 3.), (-4., 1.), (0., 0.), (1., -2.)] {
+            program
+                .try_evaluate_mapped(
+                    &[(7_u8, re, im)],
+                    &mut output,
+                    |destination, source| {
+                        destination.re = source.1;
+                        destination.im = source.2;
+                    },
+                    |destination, source| {
+                        destination.0 = source.re;
+                        destination.1 = source.im;
+                    },
+                )
+                .unwrap();
+            assert_eq!(output, [(re * re - im * im, 2. * re * im, 9)]);
+        }
+    }
+    let mut real = parse!("x+1")
+        .evaluator(&[parse!("x")])
+        .build()
+        .unwrap()
+        .map_coeff(&|value| value.re.to_f64())
+        .jit_compile(JITCompilationSettings::default())
+        .unwrap();
+    assert_eq!((real.get_input_len(), real.get_output_len()), (1, 1));
+    let mut output = [(0.,)];
+    real.try_evaluate_mapped(
+        &[(2.,)],
+        &mut output,
+        |destination, source| *destination = source.0,
+        |destination, source| destination.0 = *source,
+    )
+    .unwrap();
+    assert_eq!(output, [(3.,)]);
+}
+
+#[test]
+fn mapped_cpp_storage_reuses_disjoint_native_buffers() {
+    let base =
+        std::env::temp_dir().join(format!("symbolica_mapped_complex_{}", std::process::id()));
+    let cpp = base.with_extension("cpp");
+    let library = base.with_extension("so");
+    let source = parse!("z^2")
+        .evaluator(&[parse!("z")])
+        .build()
+        .unwrap()
+        .map_coeff(&|value| Complex::new(value.re.to_f64(), value.im.to_f64()));
+    source
+        .export_cpp::<Complex<f64>>(
+            &cpp,
+            "mapped_complex",
+            ExportSettings::new().inline_asm(InlineASM::None),
+        )
+        .unwrap()
+        .compile(&library, generic_cpp_compile_options())
+        .unwrap();
+    let mut program = CompiledComplexEvaluator::load(&library, "mapped_complex").unwrap();
+    let mut output = [(0., 0., 9_u8)];
+    assert!(
+        program
+            .try_evaluate_mapped::<u8, _>(
+                &[],
+                &mut output,
+                |_, _| panic!("invalid input reached mapper"),
+                |_, _| panic!("invalid input reached output mapper")
+            )
+            .is_err()
+    );
+    for (re, im) in [(2., 3.), (-4., 1.), (0., 0.), (1., -2.)] {
+        program
+            .try_evaluate_mapped(
+                &[(7_u8, re, im)],
+                &mut output,
+                |destination, source| {
+                    destination.re = source.1;
+                    destination.im = source.2;
+                },
+                |destination, source| {
+                    destination.0 = source.re;
+                    destination.1 = source.im;
+                },
+            )
+            .unwrap();
+        assert_eq!(output, [(re * re - im * im, 2. * re * im, 9)]);
+        // Ordinary calls still use the original native scratch prefix.
+        let mut ordinary = [Complex::default()];
+        program.evaluate(&[Complex::new(re, im)], &mut ordinary);
+        assert_eq!((ordinary[0].re, ordinary[0].im), (output[0].0, output[0].1));
+    }
+    std::fs::remove_file(cpp).unwrap();
+    std::fs::remove_file(library).unwrap();
+}
+
+#[test]
+fn mapped_jit_uses_packed_simd_dimensions_and_independent_lanes() {
+    use wide::f64x4;
+    let source = parse!("x^2").evaluator(&[parse!("x")]).build().unwrap();
+    for direct in [false, true] {
+        let settings = JITCompilationSettings::new()
+            .optimization_level(2)
+            .direct_translation(direct);
+        let mut real = source
+            .clone()
+            .map_coeff(&|value| f64x4::splat(value.re.to_f64()))
+            .jit_compile(settings.clone())
+            .unwrap();
+        assert_eq!((real.get_input_len(), real.get_output_len()), (1, 1));
+        let mut output = [[0.; 4]];
+        real.try_evaluate_mapped(
+            &[[1., -2., 3., 0.]],
+            &mut output,
+            |destination, source| *destination = f64x4::new(*source),
+            |destination, source| *destination = source.to_array(),
+        )
+        .unwrap();
+        assert_eq!(output, [[1., 4., 9., 0.]]);
+        // Complex SIMD is a native JIT number but does not opt into scalar
+        // coefficient-domain conversion. Use its existing compilation entrypoint.
+        let exported = source.export_instructions();
+        assert!(exported.sub_evaluators.is_empty());
+        let mut complex = <Complex<f64x4> as JITCompiledNumber>::jit_compile(
+            exported.instructions,
+            exported
+                .constants
+                .into_iter()
+                .map(|value| symjit::Complex::new(value.re.to_f64(), value.im.to_f64()))
+                .collect(),
+            source.get_input_len(),
+            &[],
+            settings,
+        )
+        .unwrap();
+        assert_eq!((complex.get_input_len(), complex.get_output_len()), (1, 1));
+        let input = [([1., -2., 3., 0.], [2., 1., 0., -4.])];
+        let mut output = [([0.; 4], [0.; 4])];
+        complex
+            .try_evaluate_mapped(
+                &input,
+                &mut output,
+                |destination, source| {
+                    destination.re = f64x4::new(source.0);
+                    destination.im = f64x4::new(source.1);
+                },
+                |destination, source| {
+                    destination.0 = source.re.to_array();
+                    destination.1 = source.im.to_array();
+                },
+            )
+            .unwrap();
+        assert_eq!(output, [([-3., 3., 9., -16.], [4., -4., 0., 0.])]);
+    }
+}
+
 fn check_restrict_macro_scope<F: CompiledNumber>(source: &mut String, function_name: &str) {
     // Concatenating generated functions must not leave helper macros visible to
     // later exports or to the caller's source, even with include_header(false).
@@ -16,6 +208,68 @@ fn check_restrict_macro_scope<F: CompiledNumber>(source: &mut String, function_n
     *source += &format!(
         "\n#ifdef {macro_name}\n#error Exported restrict macro escaped its scope\n#endif\n"
     );
+}
+
+#[test]
+fn norm_value_selections_preserve_physical_branch_scopes_in_cpp() {
+    let source = parse!("if(c,x^2,abs(x))")
+        .evaluator(&[parse!("c"), parse!("x")])
+        .build()
+        .unwrap()
+        .vectorize(&Dualizer::new(
+            crate::domains::dual::HyperDual::<f64>::new(vec![vec![0], vec![1], vec![2]]),
+            vec![(0, 1), (0, 2)],
+        ))
+        .unwrap()
+        .map_coeff(&|value| value.re.to_f64());
+    let cases = [
+        (1., 0., [0., 0., 4.]), // The inactive modulus is at its cusp.
+        (0., 3., [3., 2., 1.]),
+        (1., 3., [9., 12., 10.]),
+        (0., -3., [3., -2., -1.]),
+        (1., -3., [9., -12., -2.]),
+        (1., 0., [0., 0., 4.]),
+    ];
+    for direct in [false, true] {
+        let mut compiled = source
+            .clone()
+            .jit_compile(
+                JITCompilationSettings::new()
+                    .direct_translation(direct)
+                    .optimization_level(2),
+            )
+            .unwrap();
+        for (condition, x, expected) in cases {
+            let mut output = [0.; 3];
+            compiled.evaluate(&[condition, 0., 0., x, 2., 1.], &mut output);
+            assert_eq!(output, expected, "direct={direct}, c={condition}, x={x}");
+        }
+    }
+    let base =
+        std::env::temp_dir().join(format!("symbolica_norm_selection_{}", std::process::id()));
+    let assembly = if cfg!(target_arch = "aarch64") {
+        InlineASM::AArch64
+    } else {
+        InlineASM::X64
+    };
+    for (index, mode) in [InlineASM::None, assembly].into_iter().enumerate() {
+        let cpp = base.with_extension(format!("{index}.cpp"));
+        let library = base.with_extension(format!("{index}.so"));
+        let name = format!("norm_selection_{index}");
+        let code = source
+            .export_cpp::<f64>(&cpp, &name, ExportSettings::new().inline_asm(mode))
+            .unwrap();
+        code.compile(&library, generic_cpp_compile_options())
+            .unwrap();
+        let mut compiled = CompiledRealEvaluator::load(&library, &name).unwrap();
+        for (condition, x, expected) in cases {
+            let mut output = [0.; 3];
+            compiled.evaluate(&[condition, 0., 0., x, 2., 1.], &mut output);
+            assert_eq!(output, expected, "mode={mode:?}, c={condition}, x={x}");
+        }
+        std::fs::remove_file(cpp).unwrap();
+        std::fs::remove_file(library).unwrap();
+    }
 }
 
 #[test]

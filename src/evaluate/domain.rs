@@ -28,6 +28,46 @@ pub trait EvaluationDomain: Sized + 'static {
     }
 }
 
+/// Opt a scalar wrapper into the evaluator's native complex domain.
+///
+/// This is deliberately opt-in: existing exact, interval and SIMD domains keep
+/// their own conversion and callback policies. Both components use the scalar
+/// owner's conversion, without a binary64 intermediate. A registered callback
+/// for `Complex<Self>` wins; otherwise a `Complex<Float>` callback is converted
+/// at the wrapper's precision.
+pub trait ComplexEvaluationDomain: EvaluationDomain + Clone + Into<Float> {}
+
+impl<T: ComplexEvaluationDomain> EvaluationDomain for Complex<T> {
+    const FIXED_PRECISION: Option<u32> = T::FIXED_PRECISION;
+
+    fn try_from_complex_float(value: Complex<Float>) -> Result<Self, String> {
+        let re_zero = value.re.zero();
+        let im_zero = value.im.zero();
+        Ok(Self::new(
+            T::try_from_complex_float(Complex::new(value.re, re_zero))?,
+            T::try_from_complex_float(Complex::new(value.im, im_zero))?,
+        ))
+    }
+
+    fn resolve_function(
+        tags: &[AtomView],
+        info: &EvaluationInfo,
+    ) -> Option<Box<dyn ExternalFunction<Self>>> {
+        if let Some(callback) = info.get_evaluator::<Self>(tags) {
+            return Some(callback);
+        }
+        let callback = info.get_evaluator::<Complex<Float>>(tags)?;
+        Some(Box::new(move |arguments: &[Self]| {
+            let arguments = arguments
+                .iter()
+                .map(|value| Complex::new(value.re.clone().into(), value.im.clone().into()))
+                .collect::<smallvec::SmallVec<[Complex<Float>; 4]>>();
+            Self::try_from_complex_float(callback(&arguments))
+                .expect("External function result cannot be represented in the evaluation domain")
+        }))
+    }
+}
+
 impl EvaluationDomain for Complex<Rational> {
     const FIXED_PRECISION: Option<u32> = None;
 

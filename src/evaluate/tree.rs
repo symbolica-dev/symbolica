@@ -259,10 +259,98 @@ fn register_constant_external_container<T>(
 }
 
 // Shared by the root and every function compiled in this build.
+struct FunctionBindings {
+    arguments: Vec<usize>,
+    globals: Vec<Slot>,
+}
+
+#[cfg(test)]
+mod compact_function_arguments_tests {
+    use super::*;
+    use crate::{domains::dual::HyperDual, function, symbol};
+
+    #[test]
+    fn opt_in_compacts_nested_body_arguments_and_preserves_captures() {
+        let inner = symbol!("compact_function_arguments::inner");
+        let outer = symbol!("compact_function_arguments::outer");
+        let x = symbol!("compact_function_arguments::x");
+        let y = symbol!("compact_function_arguments::y");
+        let global = symbol!("compact_function_arguments::global");
+        let formal = symbol!("compact_function_arguments::formal");
+        let unused = symbol!("compact_function_arguments::unused");
+        for prune in [false, true] {
+            let options = FunctionRegistrationOptions::new()
+                .inlining(InliningPolicy::Never)
+                .prune_unused_arguments(prune);
+            let mut functions = FunctionMap::new();
+            functions
+                .add_function_with_options(
+                    inner,
+                    vec![formal, unused],
+                    Atom::var(formal).pow(2) + Atom::var(global),
+                    options.clone(),
+                )
+                .unwrap();
+            functions
+                .add_function_with_options(
+                    outer,
+                    vec![global, unused],
+                    function!(inner, Atom::var(global), Atom::var(unused)),
+                    options,
+                )
+                .unwrap();
+            let expression = function!(outer, Atom::var(x), Atom::var(y));
+            let inputs = [Atom::var(x), Atom::var(y), Atom::var(global)];
+            let evaluator = expression
+                .evaluator(&inputs)
+                .function_map(functions.clone())
+                .build()
+                .unwrap();
+            assert_eq!(evaluator.external_fns.len(), 2);
+            for function in &evaluator.external_fns {
+                assert_eq!(
+                    function.body.as_ref().unwrap().param_count,
+                    if prune { 2 } else { 3 }
+                );
+            }
+            assert_eq!(
+                evaluator
+                    .clone()
+                    .map_coeff(&|c| c.re.to_f64())
+                    .evaluate_single(&[3., 99., 7.]),
+                16.
+            );
+            let vector = evaluator
+                .vectorize(&Dualizer::new(
+                    HyperDual::<Complex<Rational>>::new(vec![vec![0], vec![1]]),
+                    vec![(1, 1), (2, 1)],
+                ))
+                .unwrap();
+            let mut output = [0.; 2];
+            vector
+                .map_coeff(&|c| c.re.to_f64())
+                .evaluate(&[3., 1., 99., 0., 7., 0.], &mut output);
+            assert_eq!(output, [16., 6.]);
+            let invalid = function!(outer, Atom::var(x))
+                .evaluator(&inputs)
+                .function_map(functions)
+                .build();
+            assert!(matches!(
+                invalid,
+                Err(EvaluationError::WrongNumberOfArguments {
+                    expected: 2,
+                    actual: 1,
+                    ..
+                })
+            ));
+        }
+    }
+}
+
 struct LinearizationContext<'a> {
     external_functions: Vec<ExternalFunctionContainer<Complex<Rational>>>,
     // Hidden global slots for each body; a pending entry detects recursive definitions.
-    functions: HashMap<usize, Option<Vec<Slot>>>,
+    functions: HashMap<usize, Option<FunctionBindings>>,
     // None denotes a registered constant whose value is resolved in the numerical domain.
     constants: Vec<Option<Complex<Rational>>>,
     constant_indices: HashMap<Complex<Rational>, usize>,
@@ -795,6 +883,27 @@ impl<'a> AtomView<'a> {
                         ComplexPhase::default(),
                     ));
                 }
+                Instruction::Select(o, condition, yes, no) => {
+                    instructions.push((
+                        Instr::Select(
+                            slot_map!(o),
+                            slot_map!(condition),
+                            slot_map!(yes),
+                            slot_map!(no),
+                        ),
+                        ComplexPhase::Any,
+                    ));
+                }
+                Instruction::Div(o, numerator, denominator, numerator_real, denominator_real) => {
+                    instructions.push((
+                        Instr::Div(slot_map!(o), slot_map!(numerator), slot_map!(denominator)),
+                        if numerator_real && denominator_real {
+                            ComplexPhase::Real
+                        } else {
+                            ComplexPhase::Any
+                        },
+                    ));
+                }
             }
         }
 
@@ -845,14 +954,58 @@ impl<'a> AtomView<'a> {
             )?;
             // Root inputs and constants stay symbolic during construction. Compact only
             // the surviving references, including globals forwarded to callees, once the
-            // body is complete. Declared arguments retain their original positions.
+            // body is complete. Explicit argument compaction is opt-in and does
+            // not change the registered function's public arity.
             let mut globals = Vec::new();
             let root_param_count = context.inputs.len();
-            let mut param_count = function.args.len();
+            let mut used_arguments =
+                vec![!function.options.should_prune_unused_arguments(); function.args.len()];
+            let mut record = |slot: &Slot| {
+                if let Slot::Param(index) = slot
+                    && *index >= root_param_count
+                {
+                    used_arguments[index - root_param_count] = true;
+                }
+            };
+            for instruction in &instr {
+                match instruction {
+                    Instruction::Add(_, args, _) | Instruction::Mul(_, args, _) => {
+                        args.iter().for_each(&mut record)
+                    }
+                    Instruction::Pow(_, input, _, _)
+                    | Instruction::Assign(_, input)
+                    | Instruction::IfElse(input, _) => record(input),
+                    Instruction::Powf(_, left, right, _)
+                    | Instruction::Div(_, left, right, _, _) => {
+                        record(left);
+                        record(right);
+                    }
+                    Instruction::Fun(_, function, _) => function.2.iter().for_each(&mut record),
+                    Instruction::Join(_, condition, left, right)
+                    | Instruction::Select(_, condition, left, right) => {
+                        record(condition);
+                        record(left);
+                        record(right);
+                    }
+                    Instruction::Goto(_) | Instruction::Label(_) => {}
+                }
+            }
+            result_indices.iter().for_each(record);
+            let arguments = used_arguments
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, used)| used.then_some(index))
+                .collect::<Vec<_>>();
+            let argument_positions = arguments
+                .iter()
+                .enumerate()
+                .map(|(new, old)| (*old, new))
+                .collect::<HashMap<_, _>>();
+            let mut param_count = arguments.len();
             let mut indices = HashMap::default();
             let mut lower_global = |slot: &mut Slot| match *slot {
                 Slot::Param(index) if index >= root_param_count => {
-                    *slot = Slot::Param(index - root_param_count);
+                    *slot = Slot::Param(argument_positions[&(index - root_param_count)]);
                 }
                 Slot::Param(_) | Slot::Const(_) => {
                     let index = *indices.entry(*slot).or_insert_with(|| {
@@ -872,7 +1025,7 @@ impl<'a> AtomView<'a> {
                     Instruction::Pow(_, base, _, _) | Instruction::Assign(_, base) => {
                         lower_global(base);
                     }
-                    Instruction::Powf(_, base, exp, _) => {
+                    Instruction::Powf(_, base, exp, _) | Instruction::Div(_, base, exp, _, _) => {
                         lower_global(base);
                         lower_global(exp);
                     }
@@ -880,7 +1033,8 @@ impl<'a> AtomView<'a> {
                         function.2.iter_mut().for_each(&mut lower_global);
                     }
                     Instruction::IfElse(cond, _) => lower_global(cond),
-                    Instruction::Join(_, cond, then_value, else_value) => {
+                    Instruction::Join(_, cond, then_value, else_value)
+                    | Instruction::Select(_, cond, then_value, else_value) => {
                         lower_global(cond);
                         lower_global(then_value);
                         lower_global(else_value);
@@ -912,16 +1066,22 @@ impl<'a> AtomView<'a> {
                     tags.clone(),
                     Arc::new(body),
                 ));
-            context.functions.insert(function.id, Some(globals));
+            context
+                .functions
+                .insert(function.id, Some(FunctionBindings { arguments, globals }));
         }
-        let globals = context.functions[&function.id]
+        let bindings = context.functions[&function.id]
             .as_ref()
             .ok_or_else(recursive_call)?;
 
         // Global slots bypass local name bindings, including shadowing arguments.
         // The caller's final lowering pass will compact them in its own signature.
-        let mut call_args = arg_slots;
-        call_args.extend_from_slice(globals);
+        let mut call_args = bindings
+            .arguments
+            .iter()
+            .map(|index| arg_slots[*index])
+            .collect::<Vec<_>>();
+        call_args.extend_from_slice(&bindings.globals);
 
         let result = Slot::Temp(instr.len());
         instr.push(Instruction::Fun(
@@ -1197,6 +1357,12 @@ impl<'a> AtomView<'a> {
                             }
                             Instruction::Pow(_, base, exp, _) => {
                                 if let Some(base_val) = resolve(*base, instr, constants) {
+                                    if *exp < 0 && base_val.is_zero() {
+                                        // An invalid exact inverse is not a
+                                        // proof of a branch condition. Preserve
+                                        // the native operation and its domain.
+                                        return None;
+                                    }
                                     if *exp == -1 {
                                         Some(base_val.inv())
                                     } else if *exp < 0 {
@@ -1416,24 +1582,28 @@ impl<'a> AtomView<'a> {
                     && den == 1
                     && num_i == 0
                 {
-                    let new_base = if num.unsigned_abs() > 1 {
+                    // A positive power can overflow while the requested
+                    // negative power is a representable subnormal. Invert the
+                    // original base first, before expanding repeated factors.
+                    let base = if num < 0 {
                         let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Mul(
-                            temp,
-                            vec![b_eval; num.unsigned_abs() as usize],
-                            0,
-                        ));
+                        instr.push(Instruction::Pow(temp, b_eval, -1, false));
                         temp
                     } else {
                         b_eval
                     };
-
-                    let res = if num > 0 {
-                        new_base
-                    } else {
+                    let res = if num == 0 {
+                        context.constant_slot(Complex::new(Rational::one(), Rational::zero()))
+                    } else if num.unsigned_abs() > 1 {
                         let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Pow(temp, new_base, -1, false));
+                        instr.push(Instruction::Mul(
+                            temp,
+                            vec![base; num.unsigned_abs() as usize],
+                            0,
+                        ));
                         temp
+                    } else {
+                        base
                     };
 
                     subexpressions.insert(*self, res);
@@ -2344,10 +2514,13 @@ impl EvalTree<Complex<Rational>> {
                 if p.1 > 1 {
                     instr.push((Instr::Mul(res, vec![b; p.1 as usize]), ComplexPhase::Any));
                 } else if p.1 < -1 {
-                    instr.push((Instr::Mul(res, vec![b; -p.1 as usize]), ComplexPhase::Any));
+                    instr.push((Instr::Pow(res, b, -1), ComplexPhase::Any));
                     stack.push(Complex::default());
                     res += 1;
-                    instr.push((Instr::Pow(res, res - 1, -1), ComplexPhase::Any));
+                    instr.push((
+                        Instr::Mul(res, vec![res - 1; p.1.unsigned_abs() as usize]),
+                        ComplexPhase::Any,
+                    ));
                 } else {
                     instr.push((Instr::Pow(res, b, p.1), ComplexPhase::Any));
                 }
@@ -3691,7 +3864,7 @@ impl<T: Real> EvalTree<T> {
                 } else if *e >= 0 {
                     b_eval.pow(*e as u64)
                 } else {
-                    b_eval.pow(e.unsigned_abs()).inv()
+                    b_eval.inv().pow(e.unsigned_abs())
                 }
             }
             Expression::Powf(_, p) => {
@@ -4400,7 +4573,7 @@ impl<'a> AtomView<'a> {
                         } else if num >= 0 {
                             return Ok(b_eval.pow(num as u64));
                         } else {
-                            return Ok(b_eval.pow(num.unsigned_abs()).inv());
+                            return Ok(b_eval.inv().pow(num.unsigned_abs()));
                         }
                     } else if den == 2 {
                         if num == -1 {
@@ -4408,7 +4581,7 @@ impl<'a> AtomView<'a> {
                         } else if num >= 0 {
                             return Ok(b_eval.sqrt().pow(num as u64));
                         } else {
-                            return Ok(b_eval.sqrt().pow(num.unsigned_abs()).inv());
+                            return Ok(b_eval.sqrt().inv().pow(num.unsigned_abs()));
                         }
                     }
                 }

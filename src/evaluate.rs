@@ -24,8 +24,11 @@ use std::{
 #[cfg(feature = "native_code_generation")]
 use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
+mod aliases;
 #[cfg(feature = "native_code_generation")]
 mod backend;
+mod batch;
+mod boolean;
 mod domain;
 mod dual;
 mod evaluator;
@@ -34,11 +37,18 @@ mod export;
 mod external;
 mod function_map;
 mod instruction;
+#[cfg(test)]
+mod mapped_tests;
 mod optimize;
+mod parameter_rows;
+#[cfg(test)]
+mod power_tests;
+mod specialize;
 mod tree;
 
 #[cfg(feature = "native_code_generation")]
 pub use backend::*;
+pub use batch::*;
 pub use domain::*;
 pub use dual::*;
 pub use evaluator::*;
@@ -51,6 +61,8 @@ pub use instruction::{
     Instruction, InstructionList, Label, Slot, VectorInstruction,
 };
 pub use optimize::*;
+pub use parameter_rows::*;
+pub use specialize::ParameterRows;
 pub use tree::*;
 
 use function_map::Expr;
@@ -70,8 +82,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
-    error, get_symbol,
-    info,
+    error, get_symbol, info,
     license::LicenseManager,
     numerical_integration::MonteCarloRng,
     utils::AbortCheck,
@@ -84,7 +95,7 @@ pub struct OperationCount {
     pub additions: usize,
     /// The number of multiplications.
     pub multiplications: usize,
-    /// The number of inversions.
+    /// The number of inversions and direct divisions.
     pub inversions: usize,
     /// The number of function calls.
     pub function_calls: usize,
@@ -372,6 +383,10 @@ mod test {
                         let result = value(*base).powi((*exponent).try_into().unwrap());
                         write(*out, result, &mut temporaries, &mut outputs);
                     }
+                    Instruction::Div(out, numerator, denominator, _, _) => {
+                        let result = value(*numerator) / value(*denominator);
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
                     Instruction::Powf(out, base, exponent, _) => {
                         let result = value(*base).powf(value(*exponent));
                         write(*out, result, &mut temporaries, &mut outputs);
@@ -392,6 +407,10 @@ mod test {
                         );
                         assert_eq!(result.len(), 1);
                         write(*out, result[0], &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Select(out, condition, yes, no) => {
+                        let result = value(if value(*condition) != 0. { *yes } else { *no });
+                        write(*out, result, &mut temporaries, &mut outputs);
                     }
                     Instruction::Assign(out, input) => {
                         let result = value(*input);
