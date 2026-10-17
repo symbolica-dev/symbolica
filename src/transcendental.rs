@@ -3107,7 +3107,8 @@ fn dilog_bernoulli_series_f64(u: f64) -> f64 {
     let v = u * u;
     let mut sum = DILOG_BERNOULLI[9];
     for coefficient in DILOG_BERNOULLI[..9].iter().rev() {
-        sum = sum.mul_add(v, *coefficient);
+        // Not mul_add: without a target FMA feature it becomes a libm call.
+        sum = sum * v + coefficient;
     }
     u - v / 4.0 + u * v * sum
 }
