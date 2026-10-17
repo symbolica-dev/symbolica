@@ -3105,24 +3105,34 @@ const DILOG_BERNOULLI: [f64; 10] = [
 #[inline]
 fn dilog_bernoulli_series_f64(u: f64) -> f64 {
     let v = u * u;
-    let mut sum = DILOG_BERNOULLI[9];
-    for coefficient in DILOG_BERNOULLI[..9].iter().rev() {
-        // Not mul_add: without a target FMA feature it becomes a libm call.
-        sum = sum * v + coefficient;
-    }
+    // Estrin's scheme, as in the complex series. No mul_add: without a target
+    // FMA feature it becomes a libm call.
+    let b = &DILOG_BERNOULLI;
+    let (v2, linear) = (v * v, |c0: f64, c1: f64| c0 + c1 * v);
+    let v4 = v2 * v2;
+    let low = linear(b[0], b[1]) + v2 * linear(b[2], b[3]);
+    let high = linear(b[4], b[5]) + v2 * linear(b[6], b[7]);
+    let sum = low + v4 * high + v4 * v4 * linear(b[8], b[9]);
     u - v / 4.0 + u * v * sum
 }
 
 #[inline]
 fn dilog_bernoulli_series_complex_f64(u: Complex<f64>) -> Complex<f64> {
-    let v = Complex::new(u.re * u.re - u.im * u.im, 2.0 * u.re * u.im);
-    let mut sum = Complex::new(DILOG_BERNOULLI[9], 0.0);
-    for coefficient in DILOG_BERNOULLI[..9].iter().rev() {
-        sum = Complex::new(
-            sum.re * v.re - sum.im * v.im + coefficient,
-            sum.re * v.im + sum.im * v.re,
-        );
-    }
+    let v = mul_complex_f64(u, u);
+    // Estrin's scheme in v: short dependency chains instead of nine
+    // dependent complex multiply-adds.
+    let b = &DILOG_BERNOULLI;
+    let linear = |c0: f64, c1: f64| Complex::new(c0 + c1 * v.re, c1 * v.im);
+    let add = |a: Complex<f64>, b: Complex<f64>| Complex::new(a.re + b.re, a.im + b.im);
+    let v2 = mul_complex_f64(v, v);
+    let v4 = mul_complex_f64(v2, v2);
+    let v8 = mul_complex_f64(v4, v4);
+    let low = add(linear(b[0], b[1]), mul_complex_f64(v2, linear(b[2], b[3])));
+    let high = add(linear(b[4], b[5]), mul_complex_f64(v2, linear(b[6], b[7])));
+    let sum = add(
+        add(low, mul_complex_f64(v4, high)),
+        mul_complex_f64(v8, linear(b[8], b[9])),
+    );
     let uv = Complex::new(u.re * v.re - u.im * v.im, u.re * v.im + u.im * v.re);
     Complex::new(
         u.re - v.re / 4.0 + (uv.re * sum.re - uv.im * sum.im),
