@@ -198,15 +198,24 @@ impl FloatLike for DoubleFloat {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
-        debug_assert!(e <= i32::MAX as u64);
-
         // `Df64::powi` is implemented as `exp(e * log(self))` and does not handle base <= 0
         if e == 0 {
             return 1f64.into();
         }
 
-        if !self.0.hi().is_finite() {
-            return self.0.hi().powi(e as i32).into();
+        if self.is_nan() {
+            return f64::NAN.into();
+        }
+        // Preserve the full exponent's parity and signed-zero conventions;
+        // narrowing to i32 changes large positive exponents into negative ones.
+        if self.0.hi().is_infinite() || self.is_fully_zero() {
+            let magnitude = self.0.hi().abs();
+            return if self.0.hi().is_sign_negative() && e & 1 != 0 {
+                -magnitude
+            } else {
+                magnitude
+            }
+            .into();
         }
 
         Self::binary_exp(self.0, e).into()
@@ -762,5 +771,73 @@ impl Hash for DoubleFloat {
         } else {
             self.0.lo().to_bits()
         });
+    }
+}
+
+#[cfg(test)]
+mod pow_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_powers_preserve_full_width_parity_and_special_values() {
+        for base in [
+            0.0f64,
+            -0.0,
+            1.,
+            -1.,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for exponent in [
+                0,
+                1,
+                2,
+                i32::MAX as u64 + 1,
+                u32::MAX as u64 + 1,
+                1u64 << 63,
+                u64::MAX,
+            ] {
+                let result = DoubleFloat::from(base).pow(exponent);
+                let expected = if exponent == 0 {
+                    1.
+                } else if base.is_nan() {
+                    f64::NAN
+                } else if base.is_sign_negative() && exponent & 1 != 0 {
+                    -base.abs()
+                } else {
+                    base.abs()
+                };
+                if expected.is_nan() {
+                    assert!(result.is_nan());
+                } else {
+                    assert_eq!(
+                        result.into_inner().hi().to_bits(),
+                        expected.to_bits(),
+                        "{base}^{exponent}"
+                    );
+                    assert_eq!(result.into_inner().lo(), 0.);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_powers_keep_finite_negative_bases_and_compensated_parts() {
+        for exponent in 0..=16 {
+            assert_eq!(
+                DoubleFloat::from(-2.).pow(exponent),
+                DoubleFloat::from((-2.0f64).powi(exponent as i32))
+            );
+        }
+        let delta = DoubleFloat::from(2.0f64.powi(-40));
+        let x = DoubleFloat::from_compensated_sum(-1., 2.0f64.powi(-40));
+        let square = x.pow(2);
+        assert_eq!(square, x * x);
+        assert_ne!(square, 1.0.into());
+        assert_eq!(
+            (square - DoubleFloat::from(1.)) / delta,
+            DoubleFloat::from(-2.) + delta
+        );
     }
 }
