@@ -3242,8 +3242,10 @@ pub fn dilog_f64(x: f64) -> f64 {
 /// lower lip `Li2(x - i0)`, `Im Li2(x) = -pi log(x)`, independent of the sign of
 /// the zero imaginary part; for `x <= 1` the imaginary part is zero, with the
 /// same sign as before (`-0` only at `x = -1`). A nonzero
-/// imaginary part, however small, selects its own side of the cut. The relative
-/// error is a few ulps of `|Li2(z)|`. Non-finite input gives `NaN` components.
+/// imaginary part, however small, selects its own side of the cut. The normwise
+/// relative error is below `1.2e-15` (about 10 units of `2^-53`, reached next to
+/// `Re z = 1/2`, where the reflection formula cancels; a few units elsewhere).
+/// Non-finite input gives `NaN` components.
 pub fn dilog_complex_f64(z: Complex<f64>) -> Complex<f64> {
     if !z.re.is_finite() || !z.im.is_finite() {
         return Complex::new(f64::NAN, f64::NAN);
@@ -6195,6 +6197,18 @@ mod tests {
                 points.push(Complex::new(x, y));
             }
         }
+        // Both sides of Re z = 1/2, where the reflection formula cancels most.
+        for j in -200..=200 {
+            let y = f64::from(j) * 0.005;
+            for x in [
+                0.5 - f64::EPSILON / 4.0,
+                0.5 + f64::EPSILON / 2.0,
+                0.499_999_999_9,
+                0.500_000_000_1,
+            ] {
+                points.push(Complex::new(x, y));
+            }
+        }
         // Deterministic pseudo-random arguments with scattered magnitudes.
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
         let mut next = || {
@@ -6234,13 +6248,15 @@ mod tests {
                 worst = (error, z);
             }
         }
-        // About four ulps; the old route rounded the same reference once.
+        // About 10 units of 2^-53 next to Re z = 1/2 (1.1e-15 at
+        // 0.5000000000000001 +- 0.005i), a few units elsewhere; the old route
+        // rounded the same reference once.
         eprintln!(
             "binary64 Li2: worst relative error {:e} at {:?}",
             worst.0, worst.1
         );
         assert!(
-            worst.0 < 1e-15,
+            worst.0 < 1.2e-15,
             "worst relative error {:e} at {:?}",
             worst.0,
             worst.1
