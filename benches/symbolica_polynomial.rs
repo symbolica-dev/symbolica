@@ -207,3 +207,49 @@ mod polybench_factorization {
         symbolica_bench::benchmark_polybench_factorization(bencher, case);
     }
 }
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod polynomial_fixtures {
+    use super::*;
+    use support::polynomial_fixtures::{
+        self, Case, FACTOR_CASES, GCD_CASES, RESULTANT_CASES, SegmentedCase,
+    };
+    use symbolica::poly::factor::Factorize;
+
+    #[divan::bench(args = FACTOR_CASES)]
+    fn factor(bencher: divan::Bencher, case: Case) {
+        symbolica_bench::configure_factorization_auto();
+        symbolica_bench::configure_gcd(symbolica_bench::GcdAlgorithm::Auto);
+        let input = polynomial_fixtures::load(case);
+        polynomial_fixtures::validate_factorization(&input.rational, &input.rational.factor());
+        bencher.bench_local(|| input.rational.factor());
+    }
+
+    #[divan::bench(args = GCD_CASES)]
+    fn gcd(bencher: divan::Bencher, case: Case) {
+        symbolica_bench::configure_factorization_auto();
+        symbolica_bench::configure_gcd(symbolica_bench::GcdAlgorithm::Auto);
+        let input = polynomial_fixtures::load(case);
+        let derivative = input.rational.derivative(case.gcd_variable.unwrap());
+        let gcd = input.rational.gcd(&derivative);
+        assert!(input.rational.try_div(&gcd).is_some());
+        assert!(derivative.try_div(&gcd).is_some());
+        bencher.bench_local(|| input.rational.gcd(&derivative));
+    }
+
+    #[divan::bench(args = RESULTANT_CASES)]
+    fn resultant(bencher: divan::Bencher, case: SegmentedCase) {
+        symbolica_bench::configure_factorization_auto();
+        symbolica_bench::configure_gcd(symbolica_bench::GcdAlgorithm::Auto);
+        let input = polynomial_fixtures::load_resultant(case);
+        bencher.bench_local(|| input[0].resultant(&input[1]));
+    }
+
+    #[divan::bench(args = polynomial_fixtures::ELIMINATION_CASES)]
+    fn elimination(bencher: divan::Bencher, case: polynomial_fixtures::EliminationCase) {
+        symbolica_bench::configure_factorization_auto();
+        symbolica_bench::configure_gcd(symbolica_bench::GcdAlgorithm::Auto);
+        let input = polynomial_fixtures::load_elimination(case);
+        bencher.bench_local(|| input.resultant_or_discriminant());
+    }
+}

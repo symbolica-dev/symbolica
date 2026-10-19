@@ -14,6 +14,70 @@ use std::sync::Once;
 
 static INITIALIZE_FLINT: Once = Once::new();
 
+/// Owned scalar output, so decimal conversion stays outside resultant timing.
+pub struct FmpzScalar(ffi::fmpz);
+
+impl FmpzScalar {
+    pub fn to_decimal(&self) -> String {
+        // SAFETY: self is initialized; FLINT allocates a null-terminated string.
+        unsafe {
+            let text = ffi::fmpz_get_str(std::ptr::null_mut(), 10, &self.0);
+            assert!(!text.is_null());
+            let result = CStr::from_ptr(text).to_str().unwrap().to_owned();
+            ffi::flint_free(text.cast());
+            result
+        }
+    }
+}
+
+impl Drop for FmpzScalar {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper uniquely owns the initialized scalar.
+        unsafe { ffi::fmpz_clear(&mut self.0) };
+    }
+}
+
+/// Dense integer inputs for the reported FLINT Euclidean resultant kernel.
+pub struct FmpzPoly(Box<ffi::fmpz_poly_struct>);
+
+impl FmpzPoly {
+    pub fn from_coefficients(coefficients: impl IntoIterator<Item = String>) -> Self {
+        initialize_single_thread();
+        // SAFETY: init accepts uninitialized storage; all subsequent operations
+        // use initialized values, released by their owning wrappers.
+        unsafe {
+            let mut raw = Box::<ffi::fmpz_poly_struct>::new_uninit();
+            ffi::fmpz_poly_init(raw.as_mut_ptr());
+            let mut result = Self(raw.assume_init());
+            let mut coefficient = FmpzScalar(0);
+            for (degree, value) in coefficients.into_iter().enumerate() {
+                let value = CString::new(value).unwrap();
+                assert_eq!(ffi::fmpz_set_str(&mut coefficient.0, value.as_ptr(), 10), 0);
+                ffi::fmpz_poly_set_coeff_fmpz(
+                    &mut *result.0,
+                    degree.try_into().unwrap(),
+                    &coefficient.0,
+                );
+            }
+            result
+        }
+    }
+
+    pub fn resultant_euclidean(&self, right: &Self) -> FmpzScalar {
+        let mut result = FmpzScalar(0);
+        // SAFETY: the inputs and output are initialized and do not alias.
+        unsafe { ffi::fmpz_poly_resultant_euclidean(&mut result.0, &*self.0, &*right.0) };
+        result
+    }
+}
+
+impl Drop for FmpzPoly {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper uniquely owns the initialized polynomial.
+        unsafe { ffi::fmpz_poly_clear(&mut *self.0) };
+    }
+}
+
 unsafe extern "C" {
     #[link_name = "flint_version"]
     static FLINT_VERSION_STRING: c_char;
@@ -339,6 +403,31 @@ impl<'context> FmpzMPoly<'context> {
         Ok(result)
     }
 
+    pub fn discriminant(&self, variable: usize) -> Result<Self, FlintError> {
+        if variable >= self.context.variable_count() {
+            return Err(FlintError::new(
+                "discriminant variable index is out of range",
+            ));
+        }
+        let mut result = Self::zero(self.context);
+        // SAFETY: the initialized, distinct values share the same context;
+        // the variable index has been checked against that context.
+        let success = unsafe {
+            ffi::fmpz_mpoly_discriminant(
+                result.raw.as_mut(),
+                self.raw.as_ref(),
+                variable as ffi::slong,
+                self.context.raw.as_ref(),
+            )
+        };
+        if success == 0 {
+            return Err(FlintError::new(
+                "FLINT integer polynomial discriminant failed",
+            ));
+        }
+        Ok(result)
+    }
+
     /// Computes a GCD with the selected FLINT implementation.
     pub fn gcd(&self, right: &Self, algorithm: GcdAlgorithm) -> Result<Self, FlintError> {
         self.assert_same_context(right);
@@ -481,6 +570,34 @@ pub struct FmpzMPolyFactor<'context> {
 }
 
 impl<'context> FmpzMPolyFactor<'context> {
+    /// Copies irreducible factors and their multiplicities for exact validation.
+    pub fn factors(&mut self) -> Vec<(FmpzMPoly<'context>, usize)> {
+        (0..self.len())
+            .map(|i| {
+                let mut factor = FmpzMPoly::zero(self.context);
+                // SAFETY: All FLINT objects are initialized in the same live context;
+                // i is within the factorization's length and factor is a distinct output.
+                let multiplicity = unsafe {
+                    ffi::fmpz_mpoly_factor_get_base(
+                        factor.raw.as_mut(),
+                        self.raw.as_ref(),
+                        i as ffi::slong,
+                        self.context.as_ptr(),
+                    );
+                    ffi::fmpz_mpoly_factor_get_exp_si(
+                        self.raw.as_mut(),
+                        i as ffi::slong,
+                        self.context.as_ptr(),
+                    )
+                };
+                (
+                    factor,
+                    usize::try_from(multiplicity).expect("positive factor multiplicity"),
+                )
+            })
+            .collect()
+    }
+
     fn new(context: &'context FmpzMPolyContext) -> Self {
         let mut raw = Box::<ffi::fmpz_mpoly_factor_struct>::new_uninit();
 

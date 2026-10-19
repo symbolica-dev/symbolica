@@ -411,11 +411,13 @@ impl Exponent for u16 {
         num.swap_bytes()
     }
 
-    fn unpack(mut n: u64, out: &mut [Self]) {
-        n = n.swap_bytes();
-        let s = unsafe { std::slice::from_raw_parts(&n as *const u64 as *const u8, out.len()) };
-        for (o, ss) in out.iter_mut().zip(s) {
-            *o = *ss as u16;
+    #[inline]
+    fn unpack(n: u64, out: &mut [Self]) {
+        assert!(out.len() <= 8);
+        let bytes = n.swap_bytes().to_ne_bytes();
+        // Indexed loads avoid iterator setup in the packed multiplication hot loop.
+        for i in 0..out.len() {
+            out[i] = bytes[i] as u16;
         }
     }
 
@@ -427,11 +429,12 @@ impl Exponent for u16 {
         num.swap_bytes()
     }
 
-    fn unpack_u16(mut n: u64, out: &mut [Self]) {
-        n = n.swap_bytes();
-        let s = unsafe { std::slice::from_raw_parts(&n as *const u64 as *const u16, out.len()) };
-        for (o, ss) in out.iter_mut().zip(s) {
-            *o = ss.swap_bytes();
+    #[inline]
+    fn unpack_u16(n: u64, out: &mut [Self]) {
+        assert!(out.len() <= 4);
+        let bytes = n.swap_bytes().to_ne_bytes();
+        for i in 0..out.len() {
+            out[i] = u16::from_ne_bytes([bytes[2 * i], bytes[2 * i + 1]]).swap_bytes();
         }
     }
 }

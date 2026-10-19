@@ -68,6 +68,12 @@ impl<F: Ring> UnivariatePolynomial<F> {
         }
 
         if other.degree() == 1 {
+            if self.degree() == 1 {
+                return Some(self.ring.sub(
+                    &self.ring.mul(&self.coefficients[1], &other.coefficients[0]),
+                    &self.ring.mul(&self.coefficients[0], &other.coefficients[1]),
+                ));
+            }
             return Some(self.resultant_with_linear_second(other));
         }
 
@@ -115,12 +121,14 @@ impl<F: Ring> UnivariatePolynomial<F> {
         let mut b1_power = b1.clone();
         let mut result = self.lcoeff();
 
-        for coefficient in self.coefficients[..self.degree()].iter().rev() {
+        for (degree, coefficient) in self.coefficients[..self.degree()].iter().enumerate().rev() {
             result = self.ring.add(
                 &self.ring.mul(&result, &neg_b0),
                 &self.ring.mul(coefficient, &b1_power),
             );
-            self.ring.mul_assign(&mut b1_power, b1);
+            if degree != 0 {
+                self.ring.mul_assign(&mut b1_power, b1);
+            }
         }
 
         // Homogeneous evaluation gives b1^m * self(-b0/b1), which is
@@ -143,21 +151,36 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         self.resultant_brown_with_linear_subresultant(other).0
     }
 
-    /// Compute the resultant using the Lazard-Ducos subresultant algorithm.
+    /// Compute the resultant using an exact subresultant algorithm.
     ///
-    /// This is the default resultant implementation for Euclidean coefficient
-    /// domains.
+    /// Defaults to Lazard-Ducos. A coefficient domain can select Brown's
+    /// sequence when its arithmetic makes that cheaper, as for low-degree
+    /// integer polynomials with very large coefficients.
+    pub fn resultant(&self, other: &Self) -> F::Element {
+        if let Some(resultant) = self.resultant_small(other) {
+            return resultant;
+        }
+        if self.ring.kernels().polynomial().is_some_and(|kernels| {
+            kernels.prefer_brown_resultant(&self.coefficients, &other.coefficients)
+        }) {
+            self.resultant_brown(other)
+        } else {
+            self.resultant_ducos(other)
+        }
+    }
+
+    /// Compute the resultant explicitly using the Lazard-Ducos subresultant algorithm.
     ///
     /// Compared with a classical subresultant PRS, the Ducos recurrence avoids
     /// pseudo-division after the initial remainder. This is particularly useful
     /// when the coefficients are multivariate polynomials.
-    pub fn resultant(&self, other: &Self) -> F::Element {
+    pub fn resultant_ducos(&self, other: &Self) -> F::Element {
         if let Some(resultant) = self.resultant_small(other) {
             return resultant;
         }
 
         if self.degree() < other.degree() {
-            let mut resultant = other.resultant(self);
+            let mut resultant = other.resultant_ducos(self);
             if self.degree() % 2 == 1 && other.degree() % 2 == 1 {
                 resultant = self.ring.neg(&resultant);
             }
@@ -1007,6 +1030,21 @@ mod test {
     use super::PolynomialResultant;
 
     #[test]
+    fn large_integer_resultant_selection_preserves_sign_and_common_factors() {
+        let a = parse!("(2^8192+1)*x^5+3*x^3-x+7")
+            .to_polynomial::<_, u16>(&Z, None)
+            .to_univariate_from_univariate(0);
+        let b = parse!("(2^8201+3)*x^3+2*x^2+x-5")
+            .to_polynomial::<_, u16>(&Z, None)
+            .to_univariate_from_univariate(0);
+        let expected = a.resultant_brown(&b);
+        assert_eq!(a.resultant_ducos(&b), expected);
+        assert_eq!(a.resultant(&b), expected);
+        assert_eq!(b.resultant(&a), -expected);
+        assert!((&a * &b).resultant(&b).is_zero());
+    }
+
+    #[test]
     fn resultant() {
         let a = parse!("9v1^6-27v1^4-27v1^3+72v1^2+18v1-451")
             .to_polynomial::<_, u8>(&Q, None)
@@ -1107,6 +1145,34 @@ mod test {
         assert_eq!(quadratic_a.resultant_brown(&quadratic_b), expected);
         assert_eq!(quadratic_a.resultant(&quadratic_b), expected);
         assert_eq!(quadratic_a.resultant_primitive(&quadratic_b), expected);
+    }
+
+    #[test]
+    fn linear_resultant_sign_matches_evaluation_at_root() {
+        use crate::domains::integer::Integer;
+        let variable = Arc::new(crate::poly::PolyVariable::Symbol(symbol!("x")));
+        let linear = crate::poly::univariate::UnivariatePolynomial::from_coefficients(
+            &Z,
+            vec![(-2).into(), 1.into()],
+            variable.clone(),
+        );
+        for degree in [1, 2, 3, 7] {
+            let mut coefficients = vec![Integer::zero(); degree + 1];
+            coefficients[0] = (-3).into();
+            coefficients[degree] = 1.into();
+            let p = crate::poly::univariate::UnivariatePolynomial::from_coefficients(
+                &Z,
+                coefficients,
+                variable.clone(),
+            );
+            // Res(x-2, p) = p(2), independently of a subresultant implementation.
+            let expected = Integer::from(2).pow(degree as u64) - Integer::from(3);
+            assert_eq!(linear.resultant(&p), expected);
+            let reversed = if degree % 2 == 1 { -expected } else { expected };
+            assert_eq!(p.resultant(&linear), reversed);
+            assert_eq!(p.resultant_brown(&linear), reversed);
+            assert_eq!(p.resultant_primitive(&linear), reversed);
+        }
     }
 
     #[test]
