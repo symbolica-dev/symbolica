@@ -5969,11 +5969,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                             range.0 = range.0.max(new_min);
                             range.1 = range.1.min(new_max);
+                        }
 
-                            if range.0 > range.1 {
-                                forward_pass = false;
-                                continue 'next_match;
-                            }
+                        if range.0 > range.1 {
+                            forward_pass = false;
+                            continue 'next_match;
                         }
 
                         let greedy = !match_stack.settings.non_greedy_wildcards.contains(name);
@@ -7435,6 +7435,40 @@ mod test {
                 "bindings(1/(x*(a+b*x)),a/(a+b*x),1,c,0,1,x,1,a,b,-1,1,2)"
             ))
         );
+    }
+
+    #[test]
+    fn optional_wildcards_preserve_required_minimum_in_either_order() {
+        use super::Pattern;
+
+        let required = symbol!("x_");
+        let optional = symbol!("o_");
+        let target = parse!("x");
+        let rhs = parse!("f(x_,o_)").to_pattern();
+
+        for sum in [true, false] {
+            for optional_first in [false, true] {
+                for partial in [false, true] {
+                    let mut arguments = vec![
+                        Pattern::Wildcard(required, false),
+                        Pattern::Wildcard(optional, true),
+                    ];
+                    if optional_first {
+                        arguments.reverse();
+                    }
+                    let (pattern, expected) = if sum {
+                        (Pattern::Add(arguments), parse!("f(x,0)"))
+                    } else {
+                        (Pattern::Mul(arguments), parse!("f(x,1)"))
+                    };
+                    assert_eq!(
+                        target.replace(&pattern).partial(partial).with(&rhs),
+                        expected,
+                        "sum={sum}, optional_first={optional_first}, partial={partial}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
