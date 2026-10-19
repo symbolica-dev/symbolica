@@ -120,13 +120,26 @@ pub trait GaloisField: Field + UniformlySampleableRing {
         larger_field: &AlgebraicExtension<Self::Base>,
     ) -> <AlgebraicExtension<Self::Base> as Set>::Element;
 
+    /// Try to project `e` back into this field.
+    ///
+    /// Returns `None` if its polynomial representation is not in the image of
+    /// [`Self::upgrade_element`].
+    fn try_downgrade_element(
+        &self,
+        e: &<AlgebraicExtension<Self::Base> as Set>::Element,
+    ) -> Option<Self::Element>;
+
     /// Project `e` back into this field.
     ///
-    /// The caller must ensure that `e` belongs to the image of this field.
+    /// # Panics
+    ///
+    /// Panics if [`Self::try_downgrade_element`] returns `None`.
     fn downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element;
+    ) -> Self::Element {
+        self.try_downgrade_element(e).unwrap()
+    }
 }
 
 impl<UField: FiniteFieldWorkspace> GaloisField for FiniteField<UField>
@@ -163,11 +176,11 @@ where
         larger_field.constant(e.clone())
     }
 
-    fn downgrade_element(
+    fn try_downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element {
-        e.poly.get_constant()
+    ) -> Option<Self::Element> {
+        (e.poly.ring() == self && e.poly.is_constant()).then(|| e.poly.get_constant())
     }
 }
 
@@ -451,11 +464,18 @@ where
         larger_field.element_from_polynomial(e.poly.clone())
     }
 
-    fn downgrade_element(
+    fn try_downgrade_element(
         &self,
         e: &<AlgebraicExtension<Self::Base> as Set>::Element,
-    ) -> Self::Element {
-        self.element_from_polynomial(e.poly.clone())
+    ) -> Option<Self::Element> {
+        if e.poly.ring() != self.poly.ring() {
+            return None;
+        }
+        if e.poly.is_constant() {
+            return Some(self.constant(e.poly.get_constant()));
+        }
+        let projected = self.try_element_from_polynomial(e.poly.clone()).ok()?;
+        (projected.poly == e.poly).then_some(projected)
     }
 }
 

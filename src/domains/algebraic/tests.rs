@@ -3,6 +3,33 @@
 use super::*;
 
 #[test]
+fn galois_prime_downgrade_checks_membership() {
+    let base = Zp::new(5);
+    let extension = base.upgrade(2);
+    for value in [base.zero(), base.nth(2.into())] {
+        let upgraded = base.upgrade_element(&value, &extension);
+        assert_eq!(base.try_downgrade_element(&upgraded), Some(value));
+        assert_eq!(base.downgrade_element(&upgraded), value);
+    }
+    assert!(base.try_downgrade_element(&extension.generator()).is_none());
+    assert!(Zp::new(7).try_downgrade_element(&extension.one()).is_none());
+}
+
+#[test]
+fn galois_extension_downgrade_preserves_representation() {
+    let field = AlgebraicExtension::galois_field(Zp::new(5), 2, PolyVariable::Temporary(0));
+    for value in [field.zero(), field.add(&field.generator(), &field.one())] {
+        assert_eq!(field.try_downgrade_element(&value), Some(value));
+    }
+    let larger = field.upgrade(3);
+    assert!(
+        field
+            .try_downgrade_element(&larger.pow(&larger.generator(), 2))
+            .is_none()
+    );
+}
+
+#[test]
 fn contextual_conversion_of_new_rational_coefficients_with_zero_generator() {
     let x = symbol!("rational_context_zero_generator::x");
     let mut context = AlgebraicContext::new(AlgebraicExtension::trivial(Q));
