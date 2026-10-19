@@ -238,6 +238,20 @@ impl Ring for AtomField {
         Atom::num(1)
     }
 
+    fn product<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        let mut elements = elements.into_iter();
+        let Some(first) = elements.next() else {
+            return self.one();
+        };
+        let Some(second) = elements.next() else {
+            return first;
+        };
+        self.normalize(Atom::mul_many([first, second].into_iter().chain(elements)))
+    }
+
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
         self.normalize(b.pow(e))
     }
@@ -381,5 +395,64 @@ impl Derivable for AtomField {
             PolyVariable::Symbol(s) => e.derivative(*s),
             _ => panic!("Cannot take derivative of non-symbol"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn ring_sum_and_product_batch_symbolic_arithmetic() {
+        let field = AtomField::new();
+        assert_eq!(field.sum([]), Atom::Zero);
+        assert_eq!(field.product([]), Atom::num(1));
+        let value = parse!("(ring_reduce_a+1)^2");
+        assert_eq!(field.sum([value.clone()]), value);
+        assert_eq!(field.product([value.clone()]), value);
+        assert_eq!(
+            field
+                .sum([value, parse!("-ring_reduce_a^2-2*ring_reduce_a")])
+                .expand(),
+            Atom::num(1)
+        );
+        assert_eq!(
+            field
+                .product([
+                    parse!("ring_reduce_a+1"),
+                    parse!("ring_reduce_a-1"),
+                    parse!("ring_reduce_a+1"),
+                ])
+                .expand(),
+            parse!("ring_reduce_a^3+ring_reduce_a^2-ring_reduce_a-1")
+        );
+    }
+
+    #[test]
+    fn ring_product_applies_custom_normalization_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let field = AtomField {
+            custom_normalization: Some(Box::new(move |a, out| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                *out = a.expand();
+                true
+            })),
+            ..AtomField::new()
+        };
+        assert_eq!(field.product([]), Atom::num(1));
+        let singleton = parse!("(ring_product_a+1)^2");
+        assert_eq!(field.product([singleton.clone()]), singleton);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            field.product([parse!("ring_product_a+1"), parse!("ring_product_a-1")]),
+            parse!("ring_product_a^2-1")
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

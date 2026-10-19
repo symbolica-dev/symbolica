@@ -623,13 +623,11 @@ impl AtomView<'_> {
                 Ok(series)
             }
             AtomView::Add(args) => {
-                let mut iter = args.iter();
-                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
-                for arg in iter {
-                    series = &series + &arg.series_impl(x, expansion_point, info)?;
-                }
-
-                Ok(series)
+                let series = args
+                    .iter()
+                    .map(|arg| arg.series_impl(x, expansion_point, info))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Series::sum(series))
             }
         }
     }
