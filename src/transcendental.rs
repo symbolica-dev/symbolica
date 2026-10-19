@@ -15,7 +15,7 @@ pub use harmonic_polylog::{
 pub use projections::{imaginary_part, real_part};
 
 use crate::{
-    atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
+    atom::{Atom, AtomCore, AtomOrView, AtomView, EvalFn, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
         algebraic::{AlgebraicExtension, AlgebraicNumber, Root},
@@ -639,19 +639,35 @@ impl SpecialSymbols {
                             .unwrap_or_else(|| Float::with_val(53, f64::NAN))
                         })
                     })
-                    .register_tagged(|tags| {
+                    .register_tagged(|tags| -> EvalFn<f64> {
                         let order = complex_float_tag("polylog", tags, 53).ok();
-                        let dilogarithm = order.as_ref().is_some_and(is_dilogarithm_order);
-                        Box::new(move |args: &[f64]| {
-                            polylog_eval_f64(order.as_ref(), dilogarithm, args)
-                        })
+                        if order.as_ref().is_some_and(|order| {
+                            order.im.is_zero() && order.re == Float::with_val(order.re.prec(), 2)
+                        }) {
+                            Box::new(move |args: &[f64]| match args {
+                                [arg] if arg.is_finite() => dilog_f64(*arg),
+                                _ => polylog_eval_f64(order.as_ref(), args),
+                            })
+                        } else {
+                            Box::new(move |args: &[f64]| polylog_eval_f64(order.as_ref(), args))
+                        }
                     })
-                    .register_tagged(|tags| {
+                    .register_tagged(|tags| -> EvalFn<Complex<f64>> {
                         let order = complex_float_tag("polylog", tags, 53).ok();
-                        let dilogarithm = order.as_ref().is_some_and(is_dilogarithm_order);
-                        Box::new(move |args: &[Complex<f64>]| {
-                            polylog_eval_complex_f64(order.as_ref(), dilogarithm, args)
-                        })
+                        if order.as_ref().is_some_and(|order| {
+                            order.im.is_zero() && order.re == Float::with_val(order.re.prec(), 2)
+                        }) {
+                            Box::new(move |args: &[Complex<f64>]| match args {
+                                [arg] if arg.re.is_finite() && arg.im.is_finite() => {
+                                    dilog_complex_f64(*arg)
+                                }
+                                _ => polylog_eval_complex_f64(order.as_ref(), args),
+                            })
+                        } else {
+                            Box::new(move |args: &[Complex<f64>]| {
+                                polylog_eval_complex_f64(order.as_ref(), args)
+                            })
+                        }
                     }),
                 )
             },
@@ -3048,44 +3064,29 @@ fn polygamma_eval_complex_f64(order: Option<u32>, args: &[Complex<f64>]) -> Comp
     polygamma_numeric_eval(order, &complex_f64_to_float(arg, 53), 53).to_f64()
 }
 
-fn polylog_eval_f64(order: Option<&Complex<Float>>, dilogarithm: bool, args: &[f64]) -> f64 {
+fn polylog_eval_f64(order: Option<&Complex<Float>>, args: &[f64]) -> f64 {
     let Some(order) = order else {
         return f64::NAN;
     };
     let [arg] = args else {
         return f64::NAN;
     };
-    if dilogarithm && arg.is_finite() {
-        return dilog_f64(*arg);
-    }
     let arg = Complex::new(Float::with_val(53, *arg), Float::new(53));
     polylog_numeric_eval(order, &arg, 53)
         .map(|x| x.re.to_f64())
         .unwrap_or(f64::NAN)
 }
 
-fn polylog_eval_complex_f64(
-    order: Option<&Complex<Float>>,
-    dilogarithm: bool,
-    args: &[Complex<f64>],
-) -> Complex<f64> {
+fn polylog_eval_complex_f64(order: Option<&Complex<Float>>, args: &[Complex<f64>]) -> Complex<f64> {
     let Some(order) = order else {
         return Complex::new(f64::NAN, f64::NAN);
     };
     let [arg] = args else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    if dilogarithm && arg.re.is_finite() && arg.im.is_finite() {
-        return dilog_complex_f64(*arg);
-    }
     polylog_numeric_eval(order, &complex_f64_to_float(arg, 53), 53)
         .map(|x| x.to_f64())
         .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
-}
-
-/// Whether a numeric polylogarithm order tag is exactly two.
-fn is_dilogarithm_order(order: &Complex<Float>) -> bool {
-    order.im.is_zero() && order.re == Float::with_val(order.re.prec(), 2)
 }
 
 /// `pi^2/6` and `pi^2/3`, correctly rounded to binary64.
