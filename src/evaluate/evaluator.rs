@@ -1707,6 +1707,42 @@ mod tests {
 }
 
 #[cfg(test)]
+mod merge_operand_remapping_tests {
+    use super::*;
+
+    #[test]
+    fn merge_normalizes_remapped_operands_before_cpe() {
+        let exact = |x| Complex::new(Rational::from(x), Rational::from(0));
+        let mut evaluator = ExpressionEvaluator {
+            stack: [1i64, 2, 0].map(exact).to_vec(),
+            param_count: 0,
+            reserved_indices: 2,
+            instructions: vec![(Instr::Pow(2, 1, 2), ComplexPhase::Any)],
+            result_indices: vec![2],
+            external_fns: vec![],
+            // An existing abort skips the first CSE pass while leaving CPE enabled.
+            settings: OptimizationSettings::new().abort_level(1),
+        };
+        let other = ExpressionEvaluator {
+            stack: [2i64, 1, 2, 0].map(exact).to_vec(),
+            param_count: 0,
+            reserved_indices: 3,
+            instructions: vec![(Instr::Add(3, vec![0, 0, 1, 2, 2, 2]), ComplexPhase::Any)],
+            result_indices: vec![3],
+            external_fns: vec![],
+            settings: OptimizationSettings::new(),
+        };
+        // Remapping the incoming constants produces [1, 1, 0, 1, 1, 1].
+        // CPE must see sorted operands to compact repeated arguments correctly.
+        evaluator.merge(other, None).unwrap();
+        let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+        let mut output = [0.; 2];
+        evaluator.evaluate(&[], &mut output);
+        assert_eq!(output, [4., 11.]);
+    }
+}
+
+#[cfg(test)]
 mod cse_tests {
     use super::*;
 

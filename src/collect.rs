@@ -274,7 +274,10 @@ impl<'a> AtomView<'a> {
             let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None);
-            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+            if matches!(
+                &poly,
+                Err(PolynomialConversionError::ZeroDenominator { .. })
+            ) {
                 out.set_from_view(self);
                 return;
             }
@@ -323,7 +326,10 @@ impl<'a> AtomView<'a> {
             }
         } else {
             let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None);
-            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+            if matches!(
+                &poly,
+                Err(PolynomialConversionError::ZeroDenominator { .. })
+            ) {
                 out.set_from_view(self);
                 return;
             }
@@ -1435,16 +1441,17 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Construct a Horner scheme for the given variables. If no variables are provided,
-    /// a heuristically determined near-optimal ordering is used.
-    pub(crate) fn horner_scheme<'b>(
+    /// Construct a Horner scheme within this algebraic region. Function atoms
+    /// and powers are terminal values; their arguments are handled separately.
+    /// Positive integer powers can still be factored as powers of an indeterminate.
+    /// If no variables are provided, their occurrence counts determine the order.
+    pub(crate) fn horner_scheme_local<T: AtomCore>(
         &self,
-        xs: Option<&[Indeterminate]>,
-        enter_functions: bool,
+        xs: Option<&[T]>,
         collect_by_coefficient: bool,
     ) -> Atom {
         let r = if let Some(xs) = xs {
-            self.horner_scheme_impl(xs, enter_functions)
+            self.horner_scheme_impl(xs)
         } else {
             // sort variables by their occurrence count
             let mut v = HashMap::default();
@@ -1457,29 +1464,175 @@ impl<'a> AtomView<'a> {
                 .map(|(x, _)| Indeterminate::try_from(x.to_owned()).unwrap())
                 .collect::<Vec<_>>();
 
-            self.horner_scheme_impl(&res, enter_functions)
+            self.horner_scheme_impl(&res)
         };
 
         if collect_by_coefficient {
-            r.as_view().collect_by_coefficient()
+            Workspace::get_local().with(|ws| {
+                let grouped = r.as_view().cleanup_horner_region(ws, false);
+                grouped
+                    .as_view()
+                    .cleanup_horner_region(ws, true)
+                    .into_owned()
+            })
         } else {
             r
         }
     }
 
-    pub(crate) fn horner_scheme_impl<'b>(
-        &self,
-        xs: &[Indeterminate],
-        enter_functions: bool,
-    ) -> Atom {
+    /// Clean coefficients bottom-up within an Add/Mul region, retaining unchanged
+    /// children by reference. Function and power children must remain untouched.
+    /// Keep grouping and content extraction as separate passes so parent grouping
+    /// sees the same coefficients as the general coefficient collector.
+    fn cleanup_horner_region(&self, ws: &Workspace, canonicalize_content: bool) -> AtomOrView<'a> {
+        let (is_sum, children) = match self {
+            AtomView::Add(sum) => (true, sum.iter()),
+            AtomView::Mul(product) => (false, product.iter()),
+            _ => return self.into(),
+        };
+        let mut rebuilt: Option<Atom> = None;
+        for (i, child) in children.enumerate() {
+            let cleaned = child.cleanup_horner_region(ws, canonicalize_content);
+            if rebuilt.is_none() && matches!(cleaned, AtomOrView::Atom(_)) {
+                let mut result = Atom::new();
+                if is_sum {
+                    let sum = result.to_add();
+                    for previous in children.take(i) {
+                        sum.extend(previous);
+                    }
+                } else {
+                    let product = result.to_mul();
+                    for previous in children.take(i) {
+                        product.extend(previous);
+                    }
+                }
+                rebuilt = Some(result);
+            }
+            if let Some(result) = &mut rebuilt {
+                match result {
+                    Atom::Add(sum) => sum.extend(cleaned.as_view()),
+                    Atom::Mul(product) => product.extend(cleaned.as_view()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let current: AtomOrView<'a> = if let Some(rebuilt) = rebuilt {
+            let mut normalized = Atom::new();
+            rebuilt.as_view().normalize(ws, &mut normalized);
+            normalized.into()
+        } else {
+            self.into()
+        };
+        let mut result = Atom::new();
+        let mut out = Settable::from(&mut result);
+        if canonicalize_content {
+            current
+                .as_view()
+                .canonicalize_horner_content_into(ws, &mut out);
+        } else {
+            current
+                .as_view()
+                .collect_num_exact_no_norm_impl(ws, &mut out);
+        }
+        if out.is_set() {
+            if !canonicalize_content {
+                let mut normalized = Atom::new();
+                result.as_view().normalize(ws, &mut normalized);
+                return normalized.into();
+            }
+            result.into()
+        } else {
+            current
+        }
+    }
+
+    /// Expose proportional sums to CSE, including sums with implicit unit
+    /// coefficients. Restrict this to exact real rationals: extracting content
+    /// from floating point, finite-field or symbolic coefficients needs a
+    /// different cost and normalization policy.
+    fn canonicalize_horner_content(&self, ws: &Workspace) -> Atom {
+        let mut result = Atom::new();
+        let mut out = Settable::from(&mut result);
+        self.canonicalize_horner_content_into(ws, &mut out);
+        if !out.is_set() {
+            out.set_from_view(self);
+        }
+        result
+    }
+
+    /// Leave `out` unset when an already-normalized expression has no content
+    /// to extract. Bottom-up maps can then retain its parents without copying
+    /// and normalizing their entire subtrees again.
+    fn canonicalize_horner_content_into(&self, ws: &Workspace, out: &mut Settable<'_, Atom>) {
+        let normalized = if self.needs_normalization() {
+            self.normalize(ws, out);
+            out.as_view()
+        } else {
+            *self
+        };
+        let AtomView::Add(sum) = normalized else {
+            return;
+        };
+        let mut content: Option<Rational> = None;
+        let mut negative = false;
+        for term in sum {
+            let coefficient = match term {
+                AtomView::Num(_) => Some(term),
+                AtomView::Mul(product) => product.get_coefficient(),
+                _ => None,
+            };
+            let value = if let Some(AtomView::Num(number)) = coefficient {
+                let Coefficient::Complex(value) = number.get_coeff_view().to_owned() else {
+                    return;
+                };
+                if !value.is_real() {
+                    return;
+                }
+                value.re
+            } else {
+                Rational::one()
+            };
+            if let Some(current) = &mut content {
+                *current = current.gcd(&value);
+            } else {
+                negative = value.is_negative();
+                content = Some(value.gcd(&value));
+            }
+        }
+        let mut content = content.unwrap();
+        if negative {
+            content = -content;
+        }
+        if content.is_one() {
+            return;
+        }
+
+        let coefficient = ws.new_num(content);
+        let mut primitive = ws.new_atom();
+        let addition = primitive.to_add();
+        let mut quotient = ws.new_atom();
+        for term in sum {
+            term.div_with_ws_into(ws, coefficient.as_view(), &mut quotient);
+            addition.extend(quotient.as_view());
+        }
+        let mut result = Atom::new();
+        primitive
+            .as_view()
+            .mul_no_norm(ws, coefficient.as_view())
+            .as_view()
+            .normalize(ws, &mut result);
+        **out = result;
+    }
+
+    pub(crate) fn horner_scheme_impl<T: AtomCore>(&self, xs: &[T]) -> Atom {
         // map every indeterminate to its position in the ordering, the first position wins
         let mut index = HashMap::default();
         for (i, x) in xs.iter().enumerate() {
-            index.entry(x.as_view()).or_insert(i);
+            index.entry(x.as_atom_view()).or_insert(i);
         }
 
         Workspace::get_local().with(|ws| {
-            let r = self.horner_scheme_impl_no_norm(ws, xs, &index, 0, enter_functions);
+            let r = self.horner_scheme_impl_no_norm(ws, xs, &index, 0);
 
             let mut out = Atom::new();
             r.as_view().normalize(ws, &mut out);
@@ -1513,14 +1666,19 @@ impl<'a> AtomView<'a> {
         index: &HashMap<AtomView<'b>, usize>,
         start: usize,
     ) -> Option<(usize, i64)> {
+        // Evaluator candidates can be whole non-polynomial expressions, such
+        // as exp(x), stored as a non-integer power. Factor only exact matches:
+        // decomposing their exponents would require additional algebraic laws.
+        if let Some(&i) = index.get(&atom)
+            && i >= start
+        {
+            return Some((i, 1));
+        }
+
         match atom {
-            AtomView::Var(_) | AtomView::Fun(_) => {
-                index.get(&atom).filter(|&&i| i >= start).map(|&i| (i, 1))
-            }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                if matches!(b, AtomView::Var(_) | AtomView::Fun(_))
-                    && let AtomView::Num(n) = e
+                if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
                     && n > 0
                     && let Some(&i) = index.get(&b)
@@ -1559,49 +1717,20 @@ impl<'a> AtomView<'a> {
 
     /// Apply the Horner scheme for the indeterminates `xs[start..]`, where `index` maps every
     /// indeterminate to its position in `xs`. The result is not normalized.
-    fn horner_scheme_impl_no_norm<'b>(
+    fn horner_scheme_impl_no_norm<'b, T: AtomCore>(
         &self,
         ws: &Workspace,
-        xs: &'b [Indeterminate],
+        xs: &'b [T],
         index: &HashMap<AtomView<'b>, usize>,
         start: usize,
-        enter_functions: bool,
     ) -> AtomOrView<'a> {
         if start >= xs.len() {
             return self.into();
         }
 
         match self {
-            AtomView::Num(_) | AtomView::Var(_) => self.into(),
-            AtomView::Fun(f) => {
-                if enter_functions {
-                    let mut tmp = ws.new_atom();
-                    let fun = tmp.to_fun(f.get_symbol());
-
-                    for arg in f {
-                        let r =
-                            arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
-                        fun.add_arg(r.as_view());
-                    }
-
-                    tmp.into_inner().into()
-                } else {
-                    self.into()
-                }
-            }
-            AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
-
-                let bb = b.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
-                let ee = e.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
-
-                if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
-                    let mut pow = Atom::new();
-                    pow.to_pow(bb.as_view(), ee.as_view());
-                    pow.into()
-                } else {
-                    self.into()
-                }
+            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) | AtomView::Pow(_) => {
+                self.into()
             }
             AtomView::Mul(m) => {
                 let mut tmp = ws.new_atom();
@@ -1609,7 +1738,7 @@ impl<'a> AtomView<'a> {
 
                 let mut changed = false;
                 for arg in m {
-                    let r = arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs, index, start);
                     changed |= matches!(r, AtomOrView::Atom(_));
                     mul.extend(r.as_view());
                 }
@@ -1653,7 +1782,7 @@ impl<'a> AtomView<'a> {
                 let mut pow = ws.new_atom();
                 for group in grouped.chunk_by(|a, b| a.0 == b.0) {
                     let i = group[0].0;
-                    let x = xs[i].as_view();
+                    let x = xs[i].as_atom_view();
                     let min_power = group.iter().map(|(_, p, _)| *p).min().unwrap();
 
                     let mut coeff = ws.new_atom();
@@ -1689,7 +1818,7 @@ impl<'a> AtomView<'a> {
                 drop(grouped);
 
                 for (i, min_power, coeff) in coeffs {
-                    let x = xs[i].as_view();
+                    let x = xs[i].as_atom_view();
 
                     // higher powers of x may remain in the coefficient, so start from x again
                     let new_key = (if let AtomView::Add(c) = coeff.as_view()
@@ -1699,13 +1828,7 @@ impl<'a> AtomView<'a> {
                     } else {
                         coeff.as_view()
                     })
-                    .horner_scheme_impl_no_norm(
-                        ws,
-                        xs,
-                        index,
-                        i,
-                        enter_functions,
-                    );
+                    .horner_scheme_impl_no_norm(ws, xs, index, i);
 
                     let v = if min_power == 1 {
                         new_key.as_view().mul_no_norm(ws, x)
@@ -1722,7 +1845,9 @@ impl<'a> AtomView<'a> {
                     return new_arg.into_inner().into();
                 }
 
-                res.into_inner().into()
+                // Preserve numerical content at this remainder boundary, before
+                // a parent addition can flatten it and hide proportional sums.
+                res.as_view().canonicalize_horner_content(ws).into()
             }
         }
     }
@@ -1732,7 +1857,10 @@ impl<'a> AtomView<'a> {
 mod test {
     use crate::{
         atom::{Atom, AtomCore, representation::InlineVar},
-        function, parse, symbol,
+        function, parse,
+        state::Workspace,
+        symbol,
+        utils::Settable,
     };
 
     #[test]
@@ -1752,10 +1880,234 @@ mod test {
     }
 
     #[test]
+    fn horner_content_exposes_proportional_remainders() {
+        let input = parse!("2*a*x+4*a*y+3*b*x+6*b*y-5*c*x-10*c*y");
+        let collected = input.collect_horner(Some(&[
+            symbol!("a"),
+            symbol!("b"),
+            symbol!("c"),
+            symbol!("x"),
+            symbol!("y"),
+        ]));
+        assert_eq!(collected.expand(), input);
+        assert_eq!(collected, parse!("2*a*(x+2*y)+3*b*(x+2*y)-5*c*(x+2*y)"));
+    }
+
+    #[test]
+    fn horner_content_handles_unit_fractional_and_negative_coefficients() {
+        Workspace::get_local().with(|ws| {
+            for (source, expected) in [
+                ("2*x+y", "2*x+y"),
+                ("-2*x-4*y", "-2*(x+2*y)"),
+                ("2/3*x+4/3*y", "2/3*(x+2*y)"),
+                ("-x-y", "-(x+y)"),
+            ] {
+                let source = parse!(source);
+                let result = source.as_view().canonicalize_horner_content(ws);
+                assert_eq!(result.expand(), source);
+                assert_eq!(result, parse!(expected));
+            }
+        });
+    }
+
+    #[test]
+    fn horner_content_leaves_normalized_primitive_sums_unset() {
+        Workspace::get_local().with(|ws| {
+            for source in ["2*x+y", "1+2*x+4*y", "x*(a+b)+y*(c+d)"] {
+                let source = parse!(source);
+                let mut result = Atom::new();
+                let mut out = Settable::from(&mut result);
+                source
+                    .as_view()
+                    .canonicalize_horner_content_into(ws, &mut out);
+                assert!(!out.is_set(), "Unchanged content in {source}");
+            }
+
+            let source = parse!("x*(a+b)+y*(c+d)");
+            let mut changed_children = 0;
+            let result = source.as_view().replace_map_bottom_up(
+                |term, context, out| {
+                    changed_children += usize::from(context.child_changed);
+                    if matches!(term, crate::atom::AtomView::Add(_)) {
+                        term.canonicalize_horner_content_into(ws, out);
+                    }
+                },
+                true,
+            );
+            assert_eq!(result, source);
+            assert_eq!(changed_children, 0);
+        });
+    }
+
+    #[test]
+    fn horner_content_normalizes_before_extracting_and_is_idempotent() {
+        Workspace::get_local().with(|ws| {
+            let mut source = Atom::new();
+            let sum = source.to_add();
+            for term in ["2*x", "4*y", "2*x", "4"] {
+                sum.extend(parse!(term).as_view());
+            }
+            assert!(source.as_view().needs_normalization());
+            let result = source.as_view().canonicalize_horner_content(ws);
+            assert_eq!(result, parse!("4*(1+x+y)"));
+            assert_eq!(result.expand(), parse!("4+4*x+4*y"));
+
+            for source in [result, parse!("-2*x-4*y"), parse!("2/3*x+4/3*y")] {
+                let canonical = source.as_view().canonicalize_horner_content(ws);
+                assert_eq!(canonical.expand(), source.expand());
+                let mut second = Atom::new();
+                let mut out = Settable::from(&mut second);
+                canonical
+                    .as_view()
+                    .canonicalize_horner_content_into(ws, &mut out);
+                assert!(!out.is_set(), "Canonical content in {canonical}");
+            }
+
+            let mut source = Atom::new();
+            let sum = source.to_add();
+            sum.extend(parse!("x").as_view());
+            sum.extend(parse!("-x").as_view());
+            assert_eq!(
+                source.as_view().canonicalize_horner_content(ws),
+                Atom::new()
+            );
+        });
+    }
+
+    #[test]
     fn collect_horner() {
         let expr = parse!("1 + v1*v2 + 2 v1*v2*v3 + v1^2 + v1^3*y + v1^4*z + v1^10");
         let collected = expr.collect_horner(Some(&[symbol!("v1"), symbol!("v2")]));
         assert_eq!(collected.expand(), expr);
+    }
+
+    #[test]
+    fn local_horner_preserves_function_and_power_children() {
+        let variables = [
+            parse!("a"),
+            parse!("b"),
+            parse!("x"),
+            parse!("y"),
+            parse!("z"),
+        ];
+        for terminal in [
+            "f(2*x+2*x*y)",
+            "(2*x+2*x*y)^(z+z*x)",
+            "exp(2*x+2*x*y)",
+            "(2*x+2*x*y)^3",
+        ] {
+            let terminal = parse!(terminal);
+            let source = parse!("a+a*b") * &terminal;
+            for cleanup in [false, true] {
+                let result = source
+                    .as_view()
+                    .horner_scheme_local(Some(&variables), cleanup);
+                assert_eq!(result, parse!("a*(1+b)") * &terminal);
+                assert_eq!(result.expand(), source.expand());
+                assert_eq!(
+                    terminal
+                        .as_view()
+                        .horner_scheme_local(Some(&variables), cleanup),
+                    terminal
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_horner_retains_positive_integer_power_factoring() {
+        let x = parse!("x");
+        let source = parse!("x+x^2+x^3");
+        let result = source.as_view().horner_scheme_local(Some(&[x]), true);
+        assert_eq!(result, parse!("x*(1+x*(1+x))"));
+        assert_eq!(result.expand(), source);
+
+        let base = parse!("a+a*b");
+        let source = parse!("(a+a*b)^2+(a+a*b)^3");
+        let result = source.as_view().horner_scheme_local(Some(&[base]), true);
+        assert_eq!(result, parse!("(a+a*b)^2*(1+a+a*b)"));
+        assert_eq!(result.expand(), source.expand());
+    }
+
+    #[test]
+    fn local_horner_coefficient_cleanup_remains_bottom_up() {
+        for (source, expected) in [
+            ("z*(2*a+2*b)*(3*c+3*d)", "6*z*(a+b)*(c+d)"),
+            ("u*(2*a+2*b)+v*(2*a+2*b)", "2*(u*(a+b)+v*(a+b))"),
+        ] {
+            let source = parse!(source);
+            let result = source
+                .as_view()
+                .horner_scheme_local(Some(&[] as &[Atom]), true);
+            assert_eq!(result, parse!(expected));
+            assert_eq!(result.expand(), source.expand());
+            assert_eq!(
+                result
+                    .as_view()
+                    .horner_scheme_local(Some(&[] as &[Atom]), true),
+                result
+            );
+        }
+
+        Workspace::get_local().with(|ws| {
+            let source = parse!("x*(a+b)+y*f(2*a+2*b)+(2*a+2*b)^(c+c*d)");
+            for canonicalize_content in [false, true] {
+                assert!(matches!(
+                    source
+                        .as_view()
+                        .cleanup_horner_region(ws, canonicalize_content),
+                    crate::atom::AtomOrView::View(_)
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn evaluator_horner_candidates_can_include_whole_exponentials() {
+        let exponential = parse!("exp(x+y)");
+        assert!(matches!(
+            exponential.as_view(),
+            crate::atom::AtomView::Pow(_)
+        ));
+        // The evaluator's internal candidate set is broader than the public
+        // polynomial indeterminate API, whose restrictions remain unchanged.
+        assert!(crate::atom::Indeterminate::try_from(exponential.clone()).is_err());
+
+        let source = parse!("a*exp(x+y)+b*exp(x+y)+c");
+        let collected = source
+            .as_view()
+            .horner_scheme_local(Some(&[exponential]), true);
+        assert_eq!(collected, parse!("(a+b)*exp(x+y)+c"));
+        assert_eq!(collected.expand(), source);
+    }
+
+    #[test]
+    fn evaluator_horner_candidates_do_not_infer_power_relations() {
+        for (source, candidate, expected) in [
+            (
+                "a*x^(1/3)+b*x^(1/3)+c*x^(2/3)",
+                "x^(1/3)",
+                "(a+b)*x^(1/3)+c*x^(2/3)",
+            ),
+            ("a*x^y+b*x^y+c*x^(2*y)", "x^y", "(a+b)*x^y+c*x^(2*y)"),
+            (
+                "a*exp(x)+b*exp(x)+c*exp(2*x)",
+                "exp(x)",
+                "(a+b)*exp(x)+c*exp(2*x)",
+            ),
+            (
+                "a*(1+x)^(1/2)+b*(1+x)^(1/2)+c*(1+x)^(-1/2)",
+                "(1+x)^(1/2)",
+                "(a+b)*(1+x)^(1/2)+c*(1+x)^(-1/2)",
+            ),
+        ] {
+            let source = parse!(source);
+            let collected = source
+                .as_view()
+                .horner_scheme_local(Some(&[parse!(candidate)]), true);
+            assert_eq!(collected, parse!(expected));
+            assert_eq!(collected.expand(), source);
+        }
     }
 
     #[test]

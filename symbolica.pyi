@@ -5384,6 +5384,7 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
+        horner_use_cpe: bool = False,
     ) -> Evaluator:
         """
         Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
@@ -5425,7 +5426,7 @@ class Expression:
         iterations: int, optional
             The number of Horner schemes to try.
         cpe_iterations: int | None, optional
-            The number of CPE iterations to perform. The number if unbounded if `None`.
+            The maximum number of common-pair elimination iterations. If `None`, continue until no more pairs are eliminated.
         n_cores: int, optional
             The number of CPU cores used for the optimization.
         verbose: bool, optional
@@ -5447,6 +5448,10 @@ class Expression:
             The maximum number of entries in the common pair cache.
         max_common_pair_distance: int, optional
             The maximum distance between common pairs. Used when clearing cache entries.
+        horner_use_cpe: bool, optional
+            If `False` (the default), rank Horner candidates using common-subexpression elimination only.
+            If `True`, also run common-pair elimination for each candidate; this can improve the selected scheme but is more expensive.
+            The selected scheme receives final common-pair elimination in either mode, controlled by `cpe_iterations`.
         """
 
     @classmethod
@@ -5467,6 +5472,7 @@ class Expression:
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
+        horner_use_cpe: bool = False,
     ) -> Evaluator:
         """
         Create an evaluator that can jointly evaluate (nested) expressions in an optimized fashion.
@@ -5491,9 +5497,9 @@ class Expression:
         functions: Sequence[FunctionDefinition]
             Function definitions available to the evaluator.
         iterations: int, optional
-            The number of optimization passes to run.
+            The number of Horner schemes to try.
         cpe_iterations: int | None, optional
-            The number of common subexpression elimination iterations to perform.
+            The maximum number of common-pair elimination iterations. If `None`, continue until no more pairs are eliminated.
         n_cores: int, optional
             The number of CPU cores used for parallel optimization.
         verbose: bool, optional
@@ -5514,6 +5520,10 @@ class Expression:
             The maximum number of common-subexpression pairs to cache.
         max_common_pair_distance: int, optional
             The maximum distance between factors when searching for common pairs.
+        horner_use_cpe: bool, optional
+            If `False` (the default), rank Horner candidates using common-subexpression elimination only.
+            If `True`, also run common-pair elimination for each candidate; this can improve the selected scheme but is more expensive.
+            The selected scheme receives final common-pair elimination in either mode, controlled by `cpe_iterations`.
         """
 
     def canonize_tensors(

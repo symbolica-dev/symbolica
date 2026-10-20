@@ -13,7 +13,7 @@ use std::{
     panic,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 #[cfg(feature = "native_code_generation")]

@@ -1,8 +1,354 @@
 use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
 
-use crate::{atom::InlineVar, coefficient::ConvertToRing};
+use crate::{
+    atom::{AtomOrView, InlineVar},
+    coefficient::ConvertToRing,
+    state::Workspace,
+};
 
 use super::*;
+
+/// Keep multiplication count as the primary objective, then minimize additions.
+fn horner_cost(ops: OperationCount) -> (usize, usize) {
+    (ops.multiplications, ops.additions)
+}
+
+/// Once search cancellation is requested, also stop optimization of the final
+/// candidate even when the caller's callback only returns true once.
+fn latched_horner_settings(
+    settings: &OptimizationSettings,
+) -> (OptimizationSettings, Arc<AtomicBool>) {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut search_settings = settings.clone();
+    let requested_abort = settings.abort_check.clone();
+    let abort_latch = cancelled.clone();
+    search_settings.abort_check = Some(Box::new(move || {
+        if abort_latch.load(Ordering::Relaxed) {
+            return true;
+        }
+        if requested_abort.as_ref().is_some_and(|check| check()) {
+            abort_latch.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }));
+    (search_settings, cancelled)
+}
+
+/// Mix changes of different sizes: moving a variable through a block can expose
+/// a factorization that no improving single transposition reaches.
+fn mutate_horner_order<T>(order: &mut [T], rng: &mut impl Rng, mutation: usize) {
+    let size = order.len();
+    if mutation % 4 == 0 {
+        let first = rng.random_range(0..size - 1);
+        order.swap(first, first + 1);
+        return;
+    }
+    let first = rng.random_range(0..size);
+    let mut second = rng.random_range(0..size - 1);
+    if second >= first {
+        second += 1;
+    }
+    match mutation % 4 {
+        1 => order.swap(first, second),
+        2 if first < second => order[first..=second].rotate_left(1),
+        2 => order[second..=first].rotate_right(1),
+        _ => order[first.min(second)..=first.max(second)].reverse(),
+    }
+}
+
+/// Score the instructions that will be executed, including binary powering.
+/// Keep this local to the search: the public operation-count convention is
+/// unchanged.
+fn evaluator_horner_cost<T>(evaluator: &ExpressionEvaluator<T>) -> OperationCount {
+    let mut count = OperationCount::default();
+    for (instruction, _) in &evaluator.instructions {
+        match instruction {
+            Instr::Add(_, args) => count.additions += args.len() - 1,
+            Instr::Mul(_, args) => count.multiplications += args.len() - 1,
+            Instr::Pow(_, _, exponent) => {
+                count.inversions += usize::from(*exponent < 0);
+                let power = exponent.unsigned_abs();
+                if power > 1 {
+                    count.multiplications += (power.ilog2() + power.count_ones() - 1) as usize;
+                }
+            }
+            Instr::Powf(..) | Instr::BuiltinFun(..) | Instr::ExternalFun(..) => {
+                count.add_function_call();
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn search_horner_order<T: Clone + Ord + Send + Sync>(
+    vars: &[T],
+    settings: &OptimizationSettings,
+    score: impl Fn(&[T]) -> OperationCount + Sync,
+) -> Vec<T> {
+    search_horner_order_with_seed(vars, None, settings, score)
+}
+
+fn search_horner_order_with_seed<T: Clone + Ord + Send + Sync>(
+    vars: &[T],
+    alternative: Option<&[T]>,
+    settings: &OptimizationSettings,
+    score: impl Fn(&[T]) -> OperationCount + Sync,
+) -> Vec<T> {
+    let alternatives = alternative.into_iter().collect::<Vec<_>>();
+    search_horner_order_with_seeds(vars, &alternatives, settings, score)
+}
+
+fn search_horner_order_with_seeds<T: Clone + Ord + Send + Sync>(
+    vars: &[T],
+    alternatives: &[&[T]],
+    settings: &OptimizationSettings,
+    score: impl Fn(&[T]) -> OperationCount + Sync,
+) -> Vec<T> {
+    if settings.horner_iterations == 0 {
+        return vars.to_vec();
+    }
+    if vars.len() < 2 || settings.horner_iterations == 1 {
+        return vars.to_vec();
+    }
+
+    // Exhaustive searches may use fewer candidates than the requested
+    // iteration budget.
+    let mut scored_orders = vec![vars.to_vec()];
+    for &alternative in alternatives {
+        if scored_orders.len() >= settings.horner_iterations {
+            break;
+        }
+        if scored_orders.iter().any(|order| order == alternative) {
+            continue;
+        }
+        scored_orders.push(alternative.to_vec());
+    }
+    let permutations =
+        if vars.len() < 10 && Integer::factorial(vars.len() as u32) <= settings.horner_iterations {
+            let indices: Vec<_> = (0..vars.len()).collect();
+            // Seed orders were already scored. Visit every other permutation once.
+            Some(
+                unique_permutations(&indices)
+                    .1
+                    .into_iter()
+                    .filter(|p| {
+                        !scored_orders
+                            .iter()
+                            .any(|order| p.iter().zip(order).all(|(&i, value)| &vars[i] == value))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+    let candidates = permutations
+        .as_ref()
+        .map_or(settings.horner_iterations - scored_orders.len(), Vec::len);
+    let mut initial = score(vars);
+
+    let mut initial_order = vars.to_vec();
+    for alternative in scored_orders.iter().skip(1) {
+        let alternative_cost = score(alternative);
+
+        if horner_cost(alternative_cost) < horner_cost(initial)
+            || horner_cost(alternative_cost) == horner_cost(initial) && alternative < &initial_order
+        {
+            initial = alternative_cost;
+            initial_order = alternative.clone();
+        }
+    }
+    let best = Mutex::new((initial, initial_order.clone()));
+    if candidates == 0 {
+        return initial_order;
+    }
+    let workers = LicenseManager::max_threads(settings.n_cores)
+        .max(1)
+        .min(candidates);
+    let abort = AtomicBool::new(false);
+    let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
+
+    std::thread::scope(|scope| {
+        for worker in 0..workers {
+            let best = &best;
+            let abort = &abort;
+            let permutations = &permutations;
+            let score = &score;
+            let initial_order = &initial_order;
+            let run = move || {
+                let _unlock = inherited_unlock.activate();
+                let mut rng = MonteCarloRng::new(0, worker);
+                let mut order = initial_order.clone();
+                let mut last = initial;
+                let worker_candidates = (candidates - 1 - worker) / workers + 1;
+                // Keep short searches in one basin. Longer searches also try
+                // reversed, shuffled, and perturbed-best starts, all charged to
+                // the same candidate budget.
+                let chain_length = if worker_candidates >= 128 {
+                    worker_candidates.div_ceil(4)
+                } else {
+                    worker_candidates
+                };
+                let mut mutation = 0;
+                // Striding includes the remainder when the budget is not divisible
+                // by the number of workers.
+                for (step, candidate) in (worker..candidates).step_by(workers).enumerate() {
+                    if abort.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if worker + 1 == workers
+                        && let Some(check) = &settings.abort_check
+                        && check()
+                    {
+                        abort.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let previous = order.clone();
+                    let restart = permutations.is_none() && step > 0 && step % chain_length == 0;
+                    if let Some(permutations) = &permutations {
+                        order = permutations[candidate]
+                            .iter()
+                            .map(|&i| vars[i].clone())
+                            .collect();
+                    } else if restart {
+                        match step / chain_length {
+                            1 => order = vars.iter().rev().cloned().collect(),
+                            2 => {
+                                order = vars.to_vec();
+                                for i in (1..order.len()).rev() {
+                                    order.swap(i, rng.random_range(0..=i));
+                                }
+                            }
+                            _ => {
+                                order = best.lock().unwrap().1.clone();
+                                for _ in 0..3 {
+                                    mutate_horner_order(&mut order, &mut rng, mutation);
+                                    mutation += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        mutate_horner_order(&mut order, &mut rng, mutation);
+                        mutation += 1;
+                    }
+                    let current = score(&order);
+
+                    if permutations.is_some()
+                        || restart
+                        || horner_cost(current) <= horner_cost(last)
+                    {
+                        last = current;
+                        // Keep the score and order under one lock: independent
+                        // atomics can expose a score assembled from different winners.
+                        let mut winner = best.lock().unwrap();
+                        if horner_cost(current) < horner_cost(winner.0)
+                            || horner_cost(current) == horner_cost(winner.0) && order < winner.1
+                        {
+                            *winner = (current, order.clone());
+                        }
+                    } else {
+                        order = previous;
+                    }
+                }
+            };
+            if worker + 1 == workers {
+                run();
+            } else {
+                scope.spawn(run);
+            }
+        }
+    });
+    let (ops, order) = best.into_inner().unwrap();
+    if settings.verbose {
+        info!("Final Horner scheme ops: {}", ops);
+    }
+
+    order
+}
+
+#[cfg(test)]
+mod horner_search_tests {
+    use super::*;
+
+    #[test]
+    fn complete_permutations_with_worker_remainder_and_deterministic_ties() {
+        let visited = Mutex::new(Vec::new());
+        let settings = OptimizationSettings {
+            horner_iterations: 24,
+            n_cores: 3,
+            ..Default::default()
+        };
+        let result = search_horner_order(&[3, 2, 1, 0], &settings, |order| {
+            visited.lock().unwrap().push(order.to_vec());
+            OperationCount::default()
+        });
+        let mut visited = visited.into_inner().unwrap();
+        assert_eq!(visited.len(), 24);
+        visited.sort();
+        visited.dedup();
+        assert_eq!(visited.len(), 24);
+        assert_eq!(result, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn multiplication_priority_then_addition_and_initial_score() {
+        let settings = OptimizationSettings {
+            horner_iterations: 6,
+            n_cores: 1,
+            ..Default::default()
+        };
+        let result = search_horner_order(&[0, 1, 2], &settings, |order| {
+            if order == [1, 0, 2] {
+                OperationCount::new(50, 1, 0, 0)
+            } else if order == [2, 1, 0] {
+                OperationCount::new(20, 1, 0, 0)
+            } else {
+                OperationCount::new(0, 2, 0, 0)
+            }
+        });
+        assert_eq!(result, [2, 1, 0]);
+
+        let result = search_horner_order(
+            &[0, 1, 2],
+            &OptimizationSettings {
+                horner_iterations: 2,
+                ..settings
+            },
+            |order| OperationCount::new(0, usize::from(order != [0, 1, 2]), 0, 0),
+        );
+        assert_eq!(result, [0, 1, 2]);
+    }
+
+    #[test]
+    fn random_search_spends_entire_budget_without_no_op_swaps() {
+        let visited = Mutex::new(Vec::new());
+        search_horner_order(
+            &[0, 1, 2, 3],
+            &OptimizationSettings {
+                horner_iterations: 11,
+                n_cores: 1,
+                ..Default::default()
+            },
+            |order| {
+                visited.lock().unwrap().push(order.to_vec());
+                OperationCount::default()
+            },
+        );
+        let visited = visited.into_inner().unwrap();
+        assert_eq!(visited.len(), 11);
+        assert!(visited.windows(2).all(|orders| orders[0] != orders[1]));
+    }
+
+    #[test]
+    fn one_variable_needs_no_search() {
+        assert_eq!(
+            search_horner_order(&[0], &OptimizationSettings::default(), |_| panic!()),
+            [0]
+        );
+    }
+}
 
 /// Errors that can occur while building or performing numerical expression evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -272,6 +618,292 @@ struct LinearizationContext<'a> {
     expanding_functions: HashSet<usize>,
 }
 
+/// Optimize nested algebra regions once, bottom-up, while keeping function calls
+/// and power contents terminal to each Horner search. The cache belongs to one
+/// binding scope; exact evaluator inputs are never traversed or renamed.
+struct HornerRegions<'a, 's> {
+    tags: &'s HashMap<Symbol, usize>,
+    settings: &'s OptimizationSettings,
+    cancelled: Arc<AtomicBool>,
+    parameters: HashSet<AtomView<'a>>,
+    repeated: HashSet<AtomView<'a>>,
+    optimized: HashMap<AtomView<'a>, AtomOrView<'a>>,
+}
+
+impl<'a, 's> HornerRegions<'a, 's> {
+    fn new(
+        tags: &'s HashMap<Symbol, usize>,
+        settings: &'s OptimizationSettings,
+        cancelled: Arc<AtomicBool>,
+        parameters: impl IntoIterator<Item = AtomView<'a>>,
+        roots: &[AtomView<'a>],
+    ) -> Self {
+        let mut regions = Self {
+            tags,
+            settings,
+            cancelled,
+            parameters: parameters.into_iter().collect(),
+            repeated: HashSet::default(),
+            optimized: HashMap::default(),
+        };
+        let mut counts = HashMap::default();
+        for &root in roots {
+            regions.count_children(root, &mut counts);
+        }
+        regions.repeated = counts
+            .into_iter()
+            .filter_map(|(region, count)| (count > 1).then_some(region))
+            .collect();
+        regions
+    }
+
+    fn tag_count(&self, symbol: Symbol) -> usize {
+        self.tags.get(&symbol).copied().unwrap_or_else(|| {
+            symbol
+                .get_evaluation_info()
+                .map_or(0, |info| info.get_tag_count())
+        })
+    }
+
+    /// Count calls and power boundaries reached while preparing an algebra
+    /// region. Ordinary Add/Mul subtrees are not separate cached regions.
+    fn count_children(&self, expression: AtomView<'a>, counts: &mut HashMap<AtomView<'a>, usize>) {
+        if self.parameters.contains(&expression) {
+            return;
+        }
+        match expression {
+            AtomView::Fun(_) | AtomView::Pow(_) => self.count_region(expression, counts),
+            AtomView::Add(sum) => {
+                for term in sum {
+                    self.count_children(term, counts);
+                }
+            }
+            AtomView::Mul(product) => {
+                for factor in product {
+                    self.count_children(factor, counts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A repeated whole region will reuse its first result, so its descendants
+    /// are only prepared once. Borrow all keys from the original scope roots.
+    fn count_region(&self, expression: AtomView<'a>, counts: &mut HashMap<AtomView<'a>, usize>) {
+        if matches!(expression, AtomView::Num(_) | AtomView::Var(_))
+            || self.parameters.contains(&expression)
+        {
+            return;
+        }
+        let count = counts.entry(expression).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            return;
+        }
+        match expression {
+            AtomView::Fun(function) => {
+                for argument in function.iter().skip(self.tag_count(function.get_symbol())) {
+                    self.count_region(argument, counts);
+                }
+            }
+            AtomView::Pow(power) => {
+                let (base, exponent) = power.get_base_exp();
+                self.count_region(base, counts);
+                self.count_region(exponent, counts);
+            }
+            _ => self.count_children(expression, counts),
+        }
+    }
+
+    fn cache_result(&mut self, original: AtomView<'a>, result: &AtomOrView<'a>) {
+        if self.repeated.contains(&original) {
+            self.optimized.insert(original, result.clone());
+        }
+    }
+
+    /// Borrow unchanged regions. Rebuild an Add/Mul only after its first
+    /// changed child, so large unaffected siblings are copied just once.
+    fn children(&mut self, expression: AtomView<'a>) -> AtomOrView<'a> {
+        if self.cancelled.load(Ordering::Relaxed) || self.parameters.contains(&expression) {
+            return expression.into();
+        }
+        let (is_sum, children) = match expression {
+            AtomView::Num(_) | AtomView::Var(_) => return expression.into(),
+            AtomView::Fun(function) => {
+                if let Some(cached) = self.optimized.get(&expression) {
+                    return cached.clone();
+                }
+                let tag_count = self.tag_count(function.get_symbol());
+                let arguments = function
+                    .iter()
+                    .enumerate()
+                    .map(|(i, argument)| {
+                        if i < tag_count {
+                            argument.into()
+                        } else {
+                            self.region(argument)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let result = if function
+                    .iter()
+                    .zip(&arguments)
+                    .all(|(before, after)| before == after.as_view())
+                {
+                    expression.into()
+                } else {
+                    let views = arguments
+                        .iter()
+                        .map(AtomOrView::as_view)
+                        .collect::<Vec<_>>();
+                    function.get_symbol().call(&views).into()
+                };
+                self.cache_result(expression, &result);
+                return result;
+            }
+            AtomView::Pow(power) => {
+                if let Some(cached) = self.optimized.get(&expression) {
+                    return cached.clone();
+                }
+                let (base, exponent) = power.get_base_exp();
+                let new_base = self.region(base);
+                let new_exponent = self.region(exponent);
+                let result = if base == new_base.as_view() && exponent == new_exponent.as_view() {
+                    expression.into()
+                } else {
+                    new_base.as_view().pow(new_exponent.as_view()).into()
+                };
+                self.cache_result(expression, &result);
+                return result;
+            }
+            AtomView::Add(sum) => (true, sum.iter()),
+            AtomView::Mul(product) => (false, product.iter()),
+        };
+        let mut rebuilt: Option<Atom> = None;
+        for (i, child) in children.enumerate() {
+            let prepared = self.children(child);
+            if rebuilt.is_none() && prepared.as_view() != child {
+                let mut result = Atom::new();
+                if is_sum {
+                    let sum = result.to_add();
+                    for previous in children.take(i) {
+                        sum.extend(previous);
+                    }
+                } else {
+                    let product = result.to_mul();
+                    for previous in children.take(i) {
+                        product.extend(previous);
+                    }
+                }
+                rebuilt = Some(result);
+            }
+            if let Some(result) = &mut rebuilt {
+                match result {
+                    Atom::Add(sum) => sum.extend(prepared.as_view()),
+                    Atom::Mul(product) => product.extend(prepared.as_view()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        if let Some(rebuilt) = rebuilt {
+            Workspace::get_local().with(|ws| {
+                let mut normalized = Atom::new();
+                rebuilt.as_view().normalize(ws, &mut normalized);
+                normalized.into()
+            })
+        } else {
+            expression.into()
+        }
+    }
+
+    fn region(&mut self, expression: AtomView<'a>) -> AtomOrView<'a> {
+        if matches!(expression, AtomView::Num(_) | AtomView::Var(_))
+            || self.parameters.contains(&expression)
+            || self.cancelled.load(Ordering::Relaxed)
+        {
+            return expression.into();
+        }
+        if let Some(result) = self.optimized.get::<[u8]>(expression.get_data()) {
+            return result.clone();
+        }
+        let prepared = self.children(expression);
+        if self.cancelled.load(Ordering::Relaxed) {
+            return prepared;
+        }
+        let result = if matches!(prepared.as_view(), AtomView::Add(_) | AtomView::Mul(_)) {
+            let orders =
+                AtomView::horner_orders(&[prepared.as_view()], &self.parameters, self.settings);
+            let mut score_params = HashSet::default();
+            if self.settings.horner_use_cpe {
+                // Functions are already optimized, fixed values for this region.
+                // Use them directly as numerical inputs when scoring its CSE/CPE.
+                prepared.as_view().visitor(&mut |part| match part {
+                    AtomView::Fun(_) => {
+                        score_params.insert(part);
+                        false
+                    }
+                    AtomView::Var(variable) => {
+                        if self.parameters.contains(&part)
+                            || !matches!(
+                                variable.get_symbol().get_id(),
+                                Symbol::E_ID | Symbol::PI_ID
+                            )
+                        {
+                            score_params.insert(part);
+                        }
+                        false
+                    }
+                    _ => true,
+                });
+            }
+            let mut score_params: Vec<_> = score_params.into_iter().collect();
+            score_params.sort();
+            let order = search_horner_order_with_seeds(
+                &orders[0],
+                &[&orders[1], &orders[2]],
+                self.settings,
+                |order| {
+                    let candidate = prepared.as_view().horner_scheme_local(Some(order), true);
+                    if self.settings.horner_use_cpe {
+                        if let Ok(evaluator) = AtomView::linearize_multiple(
+                            &[candidate.as_view()],
+                            &FunctionMap::new(),
+                            &score_params,
+                            self.settings.clone(),
+                        ) {
+                            return evaluator_horner_cost(
+                                &AtomView::optimize_evaluator_instructions(evaluator),
+                            );
+                        }
+                    }
+                    // Construction errors belong to the final evaluator build,
+                    // including errors in branches which may be eliminated.
+                    candidate
+                        .as_view()
+                        .count_operations_with_subexpressions(&mut HashSet::default())
+                },
+            );
+            if order.is_empty() && !orders[0].is_empty() || self.cancelled.load(Ordering::Relaxed) {
+                prepared
+            } else {
+                prepared
+                    .as_view()
+                    .horner_scheme_local(Some(&order), true)
+                    .into()
+            }
+        } else {
+            prepared
+        };
+        let result = if result.as_view() == expression {
+            expression.into()
+        } else {
+            result
+        };
+        self.cache_result(expression, &result);
+        result
+    }
+}
+
 impl LinearizationContext<'_> {
     fn constant_slot(&mut self, constant: Complex<Rational>) -> Slot {
         let index = *self
@@ -305,9 +937,81 @@ impl LinearizationContext<'_> {
 }
 
 impl<'a> AtomView<'a> {
+    /// Candidate orders for one algebra region, without looking inside calls
+    /// or the children of powers. Each nested region gets its own search.
+    fn horner_orders<'e>(
+        expressions: &[AtomView<'e>],
+        parameters: &HashSet<AtomView<'_>>,
+        settings: &OptimizationSettings,
+    ) -> [Vec<AtomView<'e>>; 3] {
+        let mut counts = HashMap::default();
+        for expression in expressions {
+            expression.count_horner_candidates(parameters, &mut counts);
+        }
+        let mut counts: Vec<_> = counts.into_iter().filter(|(_, count)| *count > 1).collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts.truncate(settings.max_horner_scheme_variables);
+        let occurrence: Vec<_> = counts.into_iter().map(|(atom, _)| atom).collect();
+        let mut computed_first = occurrence.clone();
+        computed_first.sort_by_key(|atom| matches!(atom, AtomView::Var(_)));
+        let mut lexical = occurrence.clone();
+        lexical.sort_by_cached_key(|atom| atom.to_canonical_string());
+        [computed_first, occurrence, lexical]
+    }
+
+    /// Evaluation treats a non-integer power as an atomic computed value, just
+    /// like a function call. In particular exp(x) is stored as E^x, so looking
+    /// only for variables and function atoms misses a useful common factor.
+    fn count_horner_candidates(
+        self,
+        parameters: &HashSet<AtomView<'_>>,
+        counts: &mut HashMap<AtomView<'a>, usize>,
+    ) {
+        if parameters.contains(&self) {
+            *counts.entry(self).or_insert(0) += 1;
+            return;
+        }
+        match self {
+            AtomView::Num(_) => {}
+            AtomView::Var(variable) => {
+                if !matches!(variable.get_symbol().get_id(), Symbol::E_ID | Symbol::PI_ID) {
+                    *counts.entry(self).or_insert(0) += 1;
+                }
+            }
+            AtomView::Fun(_) => {
+                *counts.entry(self).or_insert(0) += 1;
+            }
+            AtomView::Pow(power) => {
+                let (base, exponent) = power.get_base_exp();
+                // The base is one indeterminate at this level. Retain positive
+                // integer degree without descending into the base's algebra.
+                if i64::try_from(exponent).is_ok_and(|power| power > 0) {
+                    if parameters.contains(&base)
+                        || base != InlineVar::new(Symbol::E).as_view()
+                            && base != InlineVar::new(Symbol::PI).as_view()
+                    {
+                        *counts.entry(base).or_insert(0) += 1;
+                    }
+                } else {
+                    *counts.entry(self).or_insert(0) += 1;
+                }
+            }
+            AtomView::Mul(product) => {
+                for factor in product {
+                    factor.count_horner_candidates(parameters, counts);
+                }
+            }
+            AtomView::Add(sum) => {
+                for term in sum {
+                    term.count_horner_candidates(parameters, counts);
+                }
+            }
+        }
+    }
+
     pub(crate) fn to_evaluator(
         expressions: &[Self],
-        fn_map: &FunctionMap,
+        mut fn_map: FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
@@ -321,40 +1025,220 @@ impl<'a> AtomView<'a> {
         }
 
         if settings.horner_iterations == 0 {
-            return Self::linearize_multiple(expressions, fn_map, params, settings);
+            return Self::linearize_multiple(expressions, &fn_map, params, settings);
         }
 
-        let v = match &settings.hot_start {
-            Some(_) => {
-                return Err(EvaluationError::UnsupportedHotStart);
-            }
-            None => {
-                // start with an occurence order Horner scheme
-                let mut v = HashMap::default();
+        if settings.hot_start.is_some() {
+            return Err(EvaluationError::UnsupportedHotStart);
+        }
 
-                for t in expressions {
-                    t.count_indeterminates(true, &mut v);
+        // All argument, function-body, and root searches share a one-shot abort
+        // latch, so cancellation of an inner region also stops later searches.
+        let (search_settings, cancelled) = latched_horner_settings(&settings);
+
+        // Function bodies have independent bindings and independent orders.
+        // Alias bodies inherit their callers, so retain every possible formal
+        // input identity when preparing their shared definition.
+        // Split each owned definition into its immutable bindings and mutable
+        // body. Alias bindings can then borrow arguments from all definitions
+        // while the bodies are updated in place.
+        let mut definitions: Vec<_> = fn_map
+            .tagged_fn_map
+            .values_mut()
+            .map(|function| {
+                (
+                    function.args.as_slice(),
+                    &mut function.body,
+                    function.is_alias,
+                )
+            })
+            .collect();
+        let alias_parameters: Vec<_> = params
+            .iter()
+            .map(Atom::as_view)
+            .chain(
+                definitions
+                    .iter()
+                    .flat_map(|(args, _, _)| (*args).iter().map(Indeterminate::as_view)),
+            )
+            .collect();
+        for (args, body, is_alias) in &mut definitions {
+            let parameters = if *is_alias {
+                alias_parameters.clone()
+            } else {
+                params
+                    .iter()
+                    .map(Atom::as_view)
+                    .chain(args.iter().map(Indeterminate::as_view))
+                    .collect()
+            };
+            let mut regions = HornerRegions::new(
+                &fn_map.tag,
+                &search_settings,
+                cancelled.clone(),
+                parameters,
+                &[body.as_view()],
+            );
+            let prepared = regions.region(body.as_view());
+            drop(regions);
+            if let AtomOrView::Atom(prepared) = prepared {
+                **body = prepared;
+            }
+        }
+        drop(definitions);
+        let fn_map = &fn_map;
+        let mut regions = HornerRegions::new(
+            &fn_map.tag,
+            &search_settings,
+            cancelled.clone(),
+            params.iter().map(Atom::as_view),
+            expressions,
+        );
+        let prepared = expressions
+            .iter()
+            .map(|expression| regions.children(*expression))
+            .collect::<Vec<_>>();
+        drop(regions);
+        let expression_views = prepared.iter().map(AtomOrView::as_view).collect::<Vec<_>>();
+        let expressions = expression_views.as_slice();
+        if cancelled.load(Ordering::Relaxed) {
+            let mut evaluator =
+                Self::linearize_multiple(expressions, fn_map, params, search_settings)?;
+            evaluator.fix_labels();
+            evaluator.optimize_stack();
+            evaluator.settings = settings;
+            evaluator.settings.abort_level = 0;
+            return Ok(evaluator);
+        }
+        let parameters = params.iter().map(Atom::as_view).collect();
+        let [computed_first, v, lexical] = Self::horner_orders(expressions, &parameters, &settings);
+        if settings.horner_iterations == 1 || computed_first.len() < 2 {
+            let result = Self::build_horner_evaluator(
+                expressions,
+                fn_map,
+                params,
+                &computed_first,
+                search_settings,
+            );
+
+            let mut evaluator = result?;
+            evaluator.optimize_stack();
+            evaluator.settings = settings;
+            evaluator.settings.abort_level = 0;
+            return Ok(evaluator);
+        }
+
+        if !settings.horner_use_cpe {
+            let scheme = search_horner_order_with_seeds(
+                &computed_first,
+                &[&v, &lexical],
+                &search_settings,
+                |order| Self::horner_scheme_cost(expressions, order),
+            );
+            // The inexpensive search still receives the complete CSE/CPE
+            // pipeline once, after selecting its winning Horner scheme.
+            let mut evaluator = if scheme.is_empty() {
+                Self::build_unhornered_evaluator(expressions, fn_map, params, search_settings)?
+            } else {
+                Self::build_horner_evaluator(expressions, fn_map, params, &scheme, search_settings)?
+            };
+            evaluator.settings = settings;
+            evaluator.settings.abort_level = 0;
+            evaluator.optimize_stack();
+
+            return Ok(evaluator);
+        }
+
+        // Build and score the final CSE/CPE program for every candidate. A cheap
+        // tree score can reject a scheme whose new common pairs make the final
+        // evaluator smaller. Retain only the winning program, avoiding a final
+        // rebuild and keeping memory bounded by one candidate per worker.
+        let best_evaluator = Mutex::new(
+            None::<(
+                OperationCount,
+                Vec<AtomView<'_>>,
+                ExpressionEvaluator<Complex<Rational>>,
+            )>,
+        );
+        let first_error = Mutex::new(None);
+        let mut candidate_settings = search_settings.clone();
+        candidate_settings.verbose = false;
+        search_horner_order_with_seeds(
+            &computed_first,
+            &[&v, &lexical],
+            &search_settings,
+            |order| {
+                let unavailable = OperationCount::new(0, usize::MAX, 0, 0);
+                // The first candidate is built even if cancellation was requested,
+                // so an interrupted optimization still returns a usable evaluator.
+                if first_error.lock().unwrap().is_some()
+                    || cancelled.load(Ordering::Relaxed) && best_evaluator.lock().unwrap().is_some()
+                {
+                    return unavailable;
                 }
-
-                let mut v: Vec<_> = v.into_iter().collect();
-                v.retain(|(_, vv)| *vv > 1);
-                v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                v.truncate(settings.max_horner_scheme_variables);
-                v.into_iter()
-                    .map(|(k, _)| Indeterminate::try_from(k.to_owned()).unwrap())
-                    .collect::<Vec<_>>()
-            }
+                let evaluator = match Self::build_horner_evaluator(
+                    expressions,
+                    fn_map,
+                    params,
+                    order,
+                    candidate_settings.clone(),
+                ) {
+                    Ok(evaluator) => evaluator,
+                    Err(error) => {
+                        first_error.lock().unwrap().get_or_insert(error);
+                        cancelled.store(true, Ordering::Relaxed);
+                        return unavailable;
+                    }
+                };
+                let cost = evaluator_horner_cost(&evaluator);
+                let mut winner = best_evaluator.lock().unwrap();
+                if winner.as_ref().is_none_or(|(best_cost, best_order, _)| {
+                    horner_cost(cost) < horner_cost(*best_cost)
+                        || horner_cost(cost) == horner_cost(*best_cost)
+                            && order < best_order.as_slice()
+                }) {
+                    *winner = Some((cost, order.to_vec(), evaluator));
+                }
+                cost
+            },
+        );
+        if let Some(error) = first_error.into_inner().unwrap() {
+            return Err(error);
+        }
+        let mut evaluator = match best_evaluator.into_inner().unwrap() {
+            Some((_, _, evaluator)) => evaluator,
+            None => Self::build_unhornered_evaluator(expressions, fn_map, params, search_settings)?,
         };
+        evaluator.settings = settings;
+        evaluator.settings.abort_level = 0;
+        evaluator.optimize_stack();
 
-        let scheme = if settings.horner_iterations > 1 {
-            Self::optimize_horner_scheme_multiple(expressions, &v, &settings)
-        } else {
-            v
-        };
+        Ok(evaluator)
+    }
 
+    /// Skipping the Horner stage still permits later optimization stages.
+    fn build_unhornered_evaluator(
+        expressions: &[AtomView<'_>],
+        fn_map: &FunctionMap,
+        params: &[Atom],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
+        let evaluator = Self::linearize_multiple(expressions, fn_map, params, settings)?;
+        Ok(Self::optimize_evaluator_instructions(evaluator))
+    }
+
+    /// Construct one candidate without changing its variable order. Stack
+    /// allocation is delayed until the winning candidate is selected.
+    fn build_horner_evaluator<T: AtomCore>(
+        expressions: &[AtomView<'_>],
+        fn_map: &FunctionMap,
+        params: &[Atom],
+        scheme: &[T],
+        settings: OptimizationSettings,
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         let hornered_expressions = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(&scheme), true, true))
+            .map(|x| x.horner_scheme_local(Some(scheme), true))
             .collect::<Vec<_>>();
 
         if settings.horner_iterations == 1 && settings.verbose {
@@ -366,16 +1250,16 @@ impl<'a> AtomView<'a> {
             info!("Horner scheme ops: {}", count);
         }
 
-        let mut f = fn_map.clone();
-        for Expr { body, .. } in f.tagged_fn_map.values_mut() {
-            *body = body.as_view().horner_scheme(Some(&scheme), true, true);
-        }
+        let e = Self::linearize_multiple(&hornered_expressions, fn_map, params, settings)?;
 
-        let mut e = Self::linearize_multiple(&hornered_expressions, &f, params, settings)?;
-
-        drop(f);
         drop(hornered_expressions);
 
+        Ok(Self::optimize_evaluator_instructions(e))
+    }
+
+    fn optimize_evaluator_instructions(
+        mut e: ExpressionEvaluator<Complex<Rational>>,
+    ) -> ExpressionEvaluator<Complex<Rational>> {
         loop {
             let r = e.remove_common_instructions();
 
@@ -397,14 +1281,17 @@ impl<'a> AtomView<'a> {
                 break;
             }
 
+            // Pair extraction can make previously different instruction DAGs
+            // identical, including functions and powers that CPE cannot merge.
+            e.remove_common_instructions();
+
             if e.settings.verbose {
                 let count = e.count_operations();
                 info!("Removed {} common pairs: {}", r, count);
             }
         }
 
-        e.optimize_stack();
-        Ok(e)
+        e
     }
 
     /// Search for a Horner variable order that reduces the combined operation
@@ -415,198 +1302,40 @@ impl<'a> AtomView<'a> {
         vars: &[Indeterminate],
         settings: &OptimizationSettings,
     ) -> Vec<Indeterminate> {
-        if vars.is_empty() {
-            return vars.to_vec();
-        }
-
-        let horner: Vec<_> = expressions
-            .iter()
-            .map(|x| x.horner_scheme(Some(vars), true, true))
-            .collect();
-        let mut subexpr = HashSet::default();
-        let mut best_ops = OperationCount::default();
-        for h in &horner {
-            let ops = h
-                .as_view()
-                .count_operations_with_subexpressions(&mut subexpr);
-            best_ops += ops;
-        }
-
-        if settings.verbose {
-            info!("Initial Horner scheme ops: {}", best_ops);
-        }
-
-        let best_mul = Arc::new(AtomicUsize::new(best_ops.multiplications));
-        let best_add = Arc::new(AtomicUsize::new(best_ops.additions));
-        let best_scheme = Arc::new(Mutex::new(vars.to_vec()));
-
-        let n_iterations = settings.horner_iterations.max(1) - 1;
-
-        let permutations = if vars.len() < 10
-            && Integer::factorial(vars.len() as u32) <= settings.horner_iterations.max(1)
-        {
-            let v: Vec<_> = (0..vars.len()).collect();
-            Some(unique_permutations(&v).1)
-        } else {
-            None
-        };
-        let p_ref = &permutations;
-
-        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
-        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
-
-        std::thread::scope(|s| {
-            let abort = Arc::new(AtomicBool::new(false));
-
-            for i in 0..n_cores {
-                let mut rng = MonteCarloRng::new(0, i);
-
-                let mut cvars = vars.to_vec();
-                let best_scheme = best_scheme.clone();
-                let best_mul = best_mul.clone();
-                let best_add = best_add.clone();
-                let mut last_mul = usize::MAX;
-                let mut last_add = usize::MAX;
-                let abort = abort.clone();
-
-                let mut op = move || {
-                    let _unlock = inherited_unlock.activate();
-                    for j in 0..n_iterations / n_cores {
-                        if abort.load(Ordering::Relaxed) {
-                            return;
-                        }
-
-                        if i == n_cores - 1
-                            && let Some(a) = &settings.abort_check
-                            && a()
-                        {
-                            abort.store(true, Ordering::Relaxed);
-
-                            if settings.verbose {
-                                info!(
-                                    "Aborting Horner optimization at step {}/{}.",
-                                    j,
-                                    settings.horner_iterations / n_cores
-                                );
-                            }
-
-                            return;
-                        }
-
-                        // try a random swap
-                        let mut t1 = 0;
-                        let mut t2 = 0;
-
-                        if let Some(p) = p_ref {
-                            if j >= p.len() / n_cores {
-                                break;
-                            }
-
-                            let perm = &p[i * (p.len() / n_cores) + j];
-                            cvars = perm.iter().map(|x| vars[*x].clone()).collect();
-                        } else {
-                            t1 = rng.random_range(0..cvars.len());
-                            t2 = rng.random_range(0..cvars.len() - 1);
-
-                            cvars.swap(t1, t2);
-                        }
-
-                        let horner: Vec<_> = expressions
-                            .iter()
-                            .map(|x| x.horner_scheme(Some(&cvars), true, true))
-                            .collect();
-                        let mut subexpr = HashSet::default();
-                        let mut cur_ops = OperationCount::default();
-
-                        for h in &horner {
-                            let ops = h
-                                .as_view()
-                                .count_operations_with_subexpressions(&mut subexpr);
-                            cur_ops += ops;
-                        }
-
-                        // prefer fewer multiplications
-                        if cur_ops.multiplications <= last_mul
-                            || cur_ops.multiplications == last_mul && cur_ops.additions <= last_add
-                        {
-                            if settings.verbose {
-                                info!(
-                                    "Accept move at step {}/{}: {}",
-                                    j,
-                                    settings.horner_iterations / n_cores,
-                                    cur_ops
-                                );
-                            }
-
-                            last_add = cur_ops.additions;
-                            last_mul = cur_ops.multiplications;
-
-                            if cur_ops.multiplications <= best_mul.load(Ordering::Relaxed)
-                                || cur_ops.multiplications == best_mul.load(Ordering::Relaxed)
-                                    && cur_ops.additions <= best_add.load(Ordering::Relaxed)
-                            {
-                                let mut best_scheme = best_scheme.lock().unwrap();
-
-                                // check again if it is the best now that we have locked
-                                let best_mul_l = best_mul.load(Ordering::Relaxed);
-                                let best_add_l = best_add.load(Ordering::Relaxed);
-                                if cur_ops.multiplications <= best_mul_l
-                                    || cur_ops.multiplications == best_mul_l
-                                        && cur_ops.additions <= best_add_l
-                                {
-                                    if cur_ops.additions == best_add_l
-                                        && cur_ops.multiplications == best_mul_l
-                                    {
-                                        if *best_scheme < cvars {
-                                            // on a draw, accept the lexicographical minimum
-                                            // to get a deterministic scheme
-                                            *best_scheme = cvars.clone();
-                                        }
-                                    } else {
-                                        best_mul.store(cur_ops.multiplications, Ordering::Relaxed);
-                                        best_add.store(cur_ops.additions, Ordering::Relaxed);
-                                        *best_scheme = cvars.clone();
-                                    }
-                                }
-                            }
-                        } else {
-                            cvars.swap(t1, t2);
-                        }
-                    }
-                };
-
-                if i + 1 < n_cores {
-                    s.spawn(op);
-                } else {
-                    // execute in the main thread and do the abort check on the main thread
-                    // this helps with catching ctrl-c
-                    op()
-                }
-            }
-        });
-
-        if settings.verbose {
-            info!(
-                "Final scheme: {} + and {} ×",
-                best_add.load(Ordering::Relaxed),
-                best_mul.load(Ordering::Relaxed)
-            );
-        }
-
-        Arc::try_unwrap(best_scheme).unwrap().into_inner().unwrap()
+        search_horner_order(vars, settings, |order| {
+            Self::horner_scheme_cost(expressions, order)
+        })
     }
 
-    pub(crate) fn linearize_multiple<T: AtomCore>(
+    fn horner_scheme_cost<T: AtomCore>(
+        expressions: &[AtomView<'_>],
+        order: &[T],
+    ) -> OperationCount {
+        let hornered: Vec<_> = expressions
+            .iter()
+            .map(|expression| expression.horner_scheme_local(Some(order), true))
+            .collect();
+        let mut subexpr = HashSet::default();
+        let mut operations = OperationCount::default();
+        for expression in &hornered {
+            operations += expression
+                .as_view()
+                .count_operations_with_subexpressions(&mut subexpr);
+        }
+        operations
+    }
+
+    pub(crate) fn linearize_multiple<T: AtomCore, P: AtomCore>(
         expressions: &[T],
         fn_map: &FunctionMap,
-        params: &[Atom],
+        params: &[P],
         settings: OptimizationSettings,
     ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         let expressions = expressions
             .iter()
             .map(|e| e.as_atom_view())
             .collect::<Vec<_>>();
-        let params = params.iter().map(|p| p.as_view()).collect::<Vec<_>>();
+        let params = params.iter().map(|p| p.as_atom_view()).collect::<Vec<_>>();
         let mut context = LinearizationContext {
             external_functions: Vec::new(),
             functions: HashMap::default(),
@@ -2136,6 +2865,16 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
+        let mut evaluator = self.linearize_without_stack_optimization(&settings);
+        evaluator.optimize_stack();
+
+        evaluator
+    }
+
+    fn linearize_without_stack_optimization(
+        &mut self,
+        settings: &OptimizationSettings,
+    ) -> ExpressionEvaluator<Complex<Rational>> {
         // strip every constant and move them into the stack after the params
         let mut constants = vec![];
         self.strip_constants(&mut constants, self.param_count);
@@ -2173,35 +2912,10 @@ impl EvalTree<Complex<Rational>> {
             settings: settings.clone(),
         };
 
-        loop {
-            let r = e.remove_common_instructions();
-
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            if settings.verbose {
-                let count = e.count_operations();
-                info!("Removed {} common instructions: {}", r, count);
-            }
-        }
-
-        for _ in 0..settings.cpe_iterations.unwrap_or(usize::MAX) {
-            let r = e.remove_common_pairs();
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            if settings.verbose {
-                let count = e.count_operations();
-                info!("Removed {} common pairs: {}", r, count);
-            }
-        }
-
-        e.optimize_stack();
-        e
+        // Resolving branch destinations is required lowering, even when all
+        // optional CSE/CPE stages are interrupted by cancellation.
+        e.fix_labels();
+        AtomView::optimize_evaluator_instructions(e)
     }
 
     fn strip_constants(&mut self, constants: &mut Vec<Complex<Rational>>, param_count: usize) {
@@ -2627,12 +3341,26 @@ impl EvalTree<Complex<Rational>> {
             info!("Initial ops: {}", count);
         }
 
+        if settings.horner_use_cpe && settings.horner_iterations > 1 {
+            let (_, mut evaluator) = self.optimize_horner_scheme_with_cpe(settings);
+            evaluator.settings = settings.clone();
+            evaluator.settings.abort_level = 0;
+            evaluator.optimize_stack();
+
+            return evaluator;
+        }
+
+        let (search_settings, _) = latched_horner_settings(settings);
         if settings.horner_iterations > 0 {
-            let _ = self.optimize_horner_scheme(settings);
+            let _ = self.optimize_horner_scheme(&search_settings);
         }
 
         self.common_subexpression_elimination();
-        self.linearize(settings)
+        let mut evaluator = self.linearize(&search_settings);
+        evaluator.settings = settings.clone();
+        evaluator.settings.abort_level = 0;
+
+        evaluator
     }
 
     /// Write the expressions in a Horner scheme where the variables
@@ -2664,6 +3392,10 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> Vec<Expression<Complex<Rational>>> {
+        if settings.horner_use_cpe && settings.horner_iterations > 1 {
+            return self.optimize_horner_scheme_with_cpe(settings).0;
+        }
+
         let v = match &settings.hot_start {
             Some(a) => a.clone(),
             None => {
@@ -2732,6 +3464,120 @@ impl EvalTree<Complex<Rational>> {
         }
 
         scheme
+    }
+
+    /// Preserve the legacy path's independent root/function searches, but score
+    /// each candidate in the complete program where its function calls occur.
+    fn optimize_horner_scheme_with_cpe(
+        &mut self,
+        settings: &OptimizationSettings,
+    ) -> (
+        Vec<Expression<Complex<Rational>>>,
+        ExpressionEvaluator<Complex<Rational>>,
+    ) {
+        let (search_settings, cancelled) = latched_horner_settings(settings);
+        let mut candidate_settings = search_settings.clone();
+        candidate_settings.verbose = false;
+        let mut root_scheme = Vec::new();
+        let mut final_evaluator = None;
+
+        for scope in 0..=self.functions.len() {
+            if cancelled.load(Ordering::Relaxed) && final_evaluator.is_some() {
+                break;
+            }
+            let expressions = if scope == 0 {
+                &self.expressions
+            } else {
+                &self.functions[scope - 1].2
+            };
+            let vars = if scope == 0 && settings.hot_start.is_some() {
+                settings.hot_start.clone().unwrap()
+            } else {
+                let mut counts = HashMap::default();
+                for expression in expressions.tree.iter().chain(&expressions.subexpressions) {
+                    expression.find_all_variables(&mut counts);
+                }
+                let mut counts: Vec<_> = counts.into_iter().collect();
+                counts.retain(|(_, count)| *count > 1);
+                counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                counts.truncate(settings.max_horner_scheme_variables);
+                counts
+                    .into_iter()
+                    .map(|(variable, _)| variable)
+                    .collect::<Vec<_>>()
+            };
+            // An empty scheme leaves this scope unchanged, so a previously
+            // compiled winner is still valid.
+            if vars.is_empty() && final_evaluator.is_some() {
+                continue;
+            }
+            let best = Mutex::new(
+                None::<(
+                    OperationCount,
+                    Vec<Expression<Complex<Rational>>>,
+                    ExpressionEvaluator<Complex<Rational>>,
+                )>,
+            );
+            let score = |order: &[Expression<Complex<Rational>>]| {
+                if cancelled.load(Ordering::Relaxed) && best.lock().unwrap().is_some() {
+                    return OperationCount::new(0, usize::MAX, 0, 0);
+                }
+                let mut candidate = self.clone();
+                candidate.apply_horner_scheme_to_scope(scope, order);
+                candidate.common_subexpression_elimination();
+                let evaluator = candidate.linearize_without_stack_optimization(&candidate_settings);
+                let cost = evaluator_horner_cost(&evaluator);
+                let mut winner = best.lock().unwrap();
+                if winner.as_ref().is_none_or(|(best_cost, best_order, _)| {
+                    horner_cost(cost) < horner_cost(*best_cost)
+                        || horner_cost(cost) == horner_cost(*best_cost)
+                            && order < best_order.as_slice()
+                }) {
+                    *winner = Some((cost, order.to_vec(), evaluator));
+                }
+                cost
+            };
+            let scheme = if vars.len() < 2 {
+                score(&vars);
+                vars
+            } else {
+                search_horner_order(&vars, &search_settings, score)
+            };
+            if let Some((_, _, evaluator)) = best.into_inner().unwrap() {
+                self.apply_horner_scheme_to_scope(scope, &scheme);
+                if scope == 0 {
+                    root_scheme = scheme;
+                }
+                final_evaluator = Some(evaluator);
+            }
+        }
+        (
+            root_scheme,
+            final_evaluator.unwrap_or_else(|| {
+                let mut candidate = self.clone();
+                candidate.common_subexpression_elimination();
+                candidate.linearize_without_stack_optimization(&search_settings)
+            }),
+        )
+    }
+
+    fn apply_horner_scheme_to_scope(
+        &mut self,
+        scope: usize,
+        scheme: &[Expression<Complex<Rational>>],
+    ) {
+        let expressions = if scope == 0 {
+            &mut self.expressions
+        } else {
+            &mut self.functions[scope - 1].2
+        };
+        for expression in expressions
+            .tree
+            .iter_mut()
+            .chain(&mut expressions.subexpressions)
+        {
+            expression.apply_horner_scheme(scheme);
+        }
     }
 }
 
@@ -3128,190 +3974,23 @@ impl Expression<Complex<Rational>> {
         vars: &[Self],
         settings: &OptimizationSettings,
     ) -> Vec<Self> {
-        if vars.is_empty() {
-            return vars.to_vec();
-        }
-
-        let horner: Vec<_> = expressions
-            .iter()
-            .map(|x| {
-                let mut h = x.clone();
-                h.apply_horner_scheme(vars);
-                h.rehashed(true)
-            })
-            .collect();
-        let mut subexpr = HashMap::default();
-        let mut best_ops = OperationCount::default();
-        for h in &horner {
-            let ops = h.count_operations_with_subexpression(&mut subexpr);
-            best_ops += ops;
-        }
-
-        if settings.verbose {
-            info!("Initial Horner scheme ops: {}", best_ops);
-        }
-
-        let best_mul = Arc::new(AtomicUsize::new(best_ops.multiplications));
-        let best_add = Arc::new(AtomicUsize::new(best_ops.additions));
-        let best_scheme = Arc::new(Mutex::new(vars.to_vec()));
-
-        let n_iterations = settings.horner_iterations.max(1) - 1;
-
-        let permutations = if vars.len() < 10
-            && Integer::factorial(vars.len() as u32) <= settings.horner_iterations.max(1)
-        {
-            let v: Vec<_> = (0..vars.len()).collect();
-            Some(unique_permutations(&v).1)
-        } else {
-            None
-        };
-        let p_ref = &permutations;
-
-        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
-        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
-
-        std::thread::scope(|s| {
-            let abort = Arc::new(AtomicBool::new(false));
-
-            for i in 0..n_cores {
-                let mut rng = MonteCarloRng::new(0, i);
-
-                let mut cvars = vars.to_vec();
-                let best_scheme = best_scheme.clone();
-                let best_mul = best_mul.clone();
-                let best_add = best_add.clone();
-                let mut last_mul = usize::MAX;
-                let mut last_add = usize::MAX;
-                let abort = abort.clone();
-
-                let mut op = move || {
-                    let _unlock = inherited_unlock.activate();
-                    for j in 0..n_iterations / n_cores {
-                        if abort.load(Ordering::Relaxed) {
-                            return;
-                        }
-
-                        if i == n_cores - 1
-                            && let Some(a) = &settings.abort_check
-                            && a()
-                        {
-                            abort.store(true, Ordering::Relaxed);
-
-                            if settings.verbose {
-                                info!(
-                                    "Aborting Horner optimization at step {}/{}.",
-                                    j,
-                                    settings.horner_iterations / n_cores
-                                );
-                            }
-
-                            return;
-                        }
-
-                        // try a random swap
-                        let mut t1 = 0;
-                        let mut t2 = 0;
-
-                        if let Some(p) = p_ref {
-                            if j >= p.len() / n_cores {
-                                break;
-                            }
-
-                            let perm = &p[i * (p.len() / n_cores) + j];
-                            cvars = perm.iter().map(|x| vars[*x].clone()).collect();
-                        } else {
-                            t1 = rng.random_range(0..cvars.len());
-                            t2 = rng.random_range(0..cvars.len() - 1);
-
-                            cvars.swap(t1, t2);
-                        }
-
-                        let horner: Vec<_> = expressions
-                            .iter()
-                            .map(|x| {
-                                let mut h = x.clone();
-                                h.apply_horner_scheme(&cvars);
-                                h.rehash(true);
-                                h
-                            })
-                            .collect();
-                        let mut subexpr = HashMap::default();
-                        let mut cur_ops = OperationCount::default();
-
-                        for h in &horner {
-                            let ops = h.count_operations_with_subexpression(&mut subexpr);
-                            cur_ops += ops;
-                        }
-
-                        // prefer fewer multiplications
-                        if cur_ops.multiplications <= last_mul
-                            || cur_ops.multiplications == last_mul && cur_ops.additions <= last_add
-                        {
-                            if settings.verbose {
-                                info!(
-                                    "Accept move at step {}/{}: {}",
-                                    j,
-                                    settings.horner_iterations / n_cores,
-                                    cur_ops
-                                );
-                            }
-
-                            last_add = cur_ops.additions;
-                            last_mul = cur_ops.multiplications;
-
-                            if cur_ops.multiplications <= best_mul.load(Ordering::Relaxed)
-                                || cur_ops.multiplications == best_mul.load(Ordering::Relaxed)
-                                    && cur_ops.additions <= best_add.load(Ordering::Relaxed)
-                            {
-                                let mut best_scheme = best_scheme.lock().unwrap();
-
-                                // check again if it is the best now that we have locked
-                                let best_mul_l = best_mul.load(Ordering::Relaxed);
-                                let best_add_l = best_add.load(Ordering::Relaxed);
-                                if cur_ops.multiplications <= best_mul_l
-                                    || cur_ops.multiplications == best_mul_l
-                                        && cur_ops.additions <= best_add_l
-                                {
-                                    if cur_ops.additions == best_add_l
-                                        && cur_ops.multiplications == best_mul_l
-                                    {
-                                        if *best_scheme < cvars {
-                                            // on a draw, accept the lexicographical minimum
-                                            // to get a deterministic scheme
-                                            *best_scheme = cvars.clone();
-                                        }
-                                    } else {
-                                        best_mul.store(cur_ops.multiplications, Ordering::Relaxed);
-                                        best_add.store(cur_ops.additions, Ordering::Relaxed);
-                                        *best_scheme = cvars.clone();
-                                    }
-                                }
-                            }
-                        } else {
-                            cvars.swap(t1, t2);
-                        }
-                    }
-                };
-
-                if i + 1 < n_cores {
-                    s.spawn(op);
-                } else {
-                    // execute in the main thread and do the abort check on the main thread
-                    // this helps with catching ctrl-c
-                    op()
-                }
+        search_horner_order(vars, settings, |order| {
+            let hornered: Vec<_> = expressions
+                .iter()
+                .map(|expression| {
+                    let mut hornered = expression.clone();
+                    hornered.apply_horner_scheme(order);
+                    hornered.rehash(true);
+                    hornered
+                })
+                .collect();
+            let mut subexpr = HashMap::default();
+            let mut operations = OperationCount::default();
+            for expression in &hornered {
+                operations += expression.count_operations_with_subexpression(&mut subexpr);
             }
-        });
-
-        if settings.verbose {
-            info!(
-                "Final scheme: {} + and {} ×",
-                best_add.load(Ordering::Relaxed),
-                best_mul.load(Ordering::Relaxed)
-            );
-        }
-
-        Arc::try_unwrap(best_scheme).unwrap().into_inner().unwrap()
+            operations
+        })
     }
 
     fn find_all_variables(&self, vars: &mut HashMap<Expression<Complex<Rational>>, usize>) {
@@ -4581,6 +5260,110 @@ impl<'a> AtomView<'a> {
 }
 
 #[cfg(test)]
+mod post_cpe_cse_tests {
+    use super::*;
+
+    type Expr = Expression<Complex<Rational>>;
+
+    fn parameter(index: usize) -> Expr {
+        Expression::Parameter(0, index)
+    }
+
+    fn sum(terms: Vec<Expr>) -> Expr {
+        Expression::Add(0, terms)
+    }
+
+    fn sine(argument: Expr) -> Expr {
+        Expression::BuiltinFun(0, Symbol::SIN, Box::new(argument))
+    }
+
+    fn equivalent_sums() -> [Expr; 2] {
+        [
+            sum(vec![parameter(0), parameter(1), parameter(2)]),
+            sum(vec![sum(vec![parameter(0), parameter(1)]), parameter(2)]),
+        ]
+    }
+
+    fn build(
+        expressions: Vec<Expr>,
+        param_count: usize,
+        cpe_iterations: Option<usize>,
+    ) -> ExpressionEvaluator<Complex<Rational>> {
+        EvalTree {
+            functions: vec![],
+            external_functions: vec![],
+            expressions: SplitExpression {
+                tree: expressions,
+                subexpressions: vec![],
+            },
+            param_count,
+        }
+        .linearize(&OptimizationSettings {
+            cpe_iterations,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn pair_extraction_exposes_duplicate_functions_in_tree() {
+        // Different addition trees initially hide the identical sine calls.
+        // Extracting (a+b) makes both argument DAGs identical, even with one
+        // CPE round. CSE must then propagate that identity through the sine.
+        for rounds in [Some(1), None] {
+            let mut evaluator = build(equivalent_sums().map(sine).to_vec(), 3, rounds)
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
+            assert_eq!(evaluator.count_operations().function_calls, 1);
+            assert_eq!(evaluator.count_operations().additions, 2);
+            for point in [[0.2, 0.3, 0.4], [-0.7, 0.1, -0.2], [0., 0., 0.]] {
+                let mut outputs = [0.; 2];
+                evaluator.evaluate(&point, &mut outputs);
+                let expected = (point[0] + point[1] + point[2]).sin();
+                assert_eq!(outputs[0], outputs[1]);
+                assert!((outputs[0] - expected).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn pair_extraction_exposes_duplicate_functions_after_merge() {
+        let [flat, nested] = equivalent_sums();
+        let mut evaluator = build(vec![sine(flat)], 3, Some(0));
+        let other = build(vec![sine(nested)], 3, Some(0));
+        evaluator.merge(other, Some(1)).unwrap();
+        assert_eq!(evaluator.count_operations().function_calls, 1);
+        let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
+        let mut outputs = [0.; 2];
+        evaluator.evaluate(&[0.2, 0.3, 0.4], &mut outputs);
+        assert_eq!(outputs[0], outputs[1]);
+        assert!((outputs[0] - 0.9_f64.sin()).abs() < 1e-14);
+    }
+
+    #[test]
+    fn pair_extraction_merges_functions_only_in_dominating_branches() {
+        let branch = || sum(equivalent_sums().map(sine).to_vec());
+        let conditional = Expression::IfElse(
+            0,
+            Box::new((parameter(3), branch(), sum(vec![branch(), parameter(4)]))),
+        );
+        let mut evaluator =
+            build(vec![conditional], 5, None).map_coeff(&|coefficient| coefficient.re.to_f64());
+        // Each branch can share its two sine calls, but a sine evaluated only
+        // in the true branch cannot supply the false branch (or vice versa).
+        assert_eq!(evaluator.count_operations().function_calls, 2);
+        for point in [
+            [0.2, 0.3, 0.4, 0., 1.25],
+            [-0.7, 0.1, -0.2, 1., 1.25],
+            [0.6, -0.2, 0.1, 0., -0.5],
+            [0., 0., 0., 1., 7.],
+        ] {
+            let extra = if point[3] == 0. { point[4] } else { 0. };
+            let expected = 2. * (point[0] + point[1] + point[2]).sin() + extra;
+            assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-14);
+        }
+    }
+}
+
+#[cfg(test)]
 mod external_cache_tests {
     use crate::{
         atom::{Atom, AtomCore, EvaluationInfo, Symbol},
@@ -4645,5 +5428,664 @@ mod external_cache_tests {
         assert_eq!(output[1], Complex::new(4., 4.));
         assert_eq!(output[2], Complex::new(9., 12.));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod evaluator_horner_candidate_tests {
+    use super::*;
+
+    #[test]
+    fn horner_orders_borrow_the_input_storage() {
+        let source = crate::parse!("a*f(x^4+x^3+x^2+x+1)+b*f(x^4+x^3+x^2+x+1)+c*sin(x)+d*sin(x)");
+        let view = source.as_view();
+        let storage = view.get_data();
+        let start = storage.as_ptr() as usize;
+        let end = start + storage.len();
+        let orders = AtomView::horner_orders(
+            &[view],
+            &HashSet::default(),
+            &OptimizationSettings::default(),
+        );
+        assert_eq!(orders[0].len(), 2);
+        for order in orders {
+            for atom in order {
+                let data = atom.get_data();
+                let address = data.as_ptr() as usize;
+                assert!(address >= start && address + data.len() <= end);
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_regions_and_repeated_arguments_remain_borrowed() {
+        let source = crate::parse!("sin(x+1)+cos(x+1)+x^2*y+z^5");
+        let tags = HashMap::default();
+        let settings = OptimizationSettings::default();
+        let mut regions = HornerRegions::new(
+            &tags,
+            &settings,
+            Arc::new(AtomicBool::new(false)),
+            [],
+            &[source.as_view()],
+        );
+        assert!(matches!(
+            regions.children(source.as_view()),
+            AtomOrView::View(view) if view.get_data().as_ptr() == source.as_view().get_data().as_ptr()
+        ));
+        let argument = crate::parse!("x+1");
+        assert!(matches!(
+            regions.optimized.get(&argument.as_view()),
+            Some(AtomOrView::View(_))
+        ));
+    }
+
+    #[test]
+    fn two_candidate_budget_compares_seeds_with_multiplication_priority() {
+        let visited = Mutex::new(Vec::new());
+        let original = [0, 1, 2];
+        let alternative = [2, 1, 0];
+        let result = search_horner_order_with_seed(
+            &original,
+            Some(&alternative),
+            &OptimizationSettings {
+                horner_iterations: 2,
+                ..Default::default()
+            },
+            |order| {
+                visited.lock().unwrap().push(order.to_vec());
+                if order == alternative {
+                    OperationCount::new(100, 1, 0, 0)
+                } else {
+                    OperationCount::new(0, 2, 0, 0)
+                }
+            },
+        );
+        assert_eq!(result, alternative);
+        assert_eq!(
+            visited.into_inner().unwrap(),
+            [original.to_vec(), alternative.to_vec()]
+        );
+    }
+
+    #[test]
+    fn duplicate_seed_does_not_consume_an_extra_candidate() {
+        let visited = Mutex::new(Vec::new());
+        let original = [0, 1, 2];
+        search_horner_order_with_seed(
+            &original,
+            Some(&original),
+            &OptimizationSettings {
+                horner_iterations: 2,
+                n_cores: 1,
+                ..Default::default()
+            },
+            |order| {
+                visited.lock().unwrap().push(order.to_vec());
+                OperationCount::default()
+            },
+        );
+        let visited = visited.into_inner().unwrap();
+        assert_eq!(visited.len(), 2);
+        assert_eq!(visited[0], original);
+        assert_ne!(visited[1], original);
+    }
+
+    #[test]
+    fn exhaustive_search_with_two_seeds_visits_each_order_once() {
+        let visited = Mutex::new(Vec::new());
+        let original = [3, 2, 1, 0];
+        let alternative = [0, 2, 3, 1];
+        let result = search_horner_order_with_seed(
+            &original,
+            Some(&alternative),
+            &OptimizationSettings {
+                horner_iterations: 24,
+                n_cores: 3,
+                ..Default::default()
+            },
+            |order| {
+                visited.lock().unwrap().push(order.to_vec());
+                OperationCount::default()
+            },
+        );
+        let mut visited = visited.into_inner().unwrap();
+        assert_eq!(visited.len(), 24);
+        visited.sort();
+        visited.dedup();
+        assert_eq!(visited.len(), 24);
+        assert!(visited.contains(&original.to_vec()));
+        assert!(visited.contains(&alternative.to_vec()));
+        assert_eq!(result, [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn equal_cost_seeds_choose_same_lexicographic_winner() {
+        let first = [2, 1, 0];
+        let second = [0, 2, 1];
+        for (original, alternative) in [(&first, &second), (&second, &first)] {
+            let result = search_horner_order_with_seed(
+                original,
+                Some(alternative),
+                &OptimizationSettings {
+                    horner_iterations: 2,
+                    ..Default::default()
+                },
+                |_| OperationCount::new(3, 5, 0, 0),
+            );
+            assert_eq!(result, second);
+        }
+    }
+
+    #[test]
+    fn discovery_counts_computed_values_but_not_builtin_constants() {
+        let source = crate::parse!("a*exp(x+y)+b*exp(x+y)+c*sin(x)+d*sin(x)+x^4+pi");
+        let exponential = crate::parse!("exp(x+y)");
+        let sine = crate::parse!("sin(x)");
+        let integer_power = crate::parse!("x^4");
+        let x = crate::parse!("x");
+        let y = crate::parse!("y");
+        let e = Atom::var(Symbol::E);
+        let pi = Atom::var(Symbol::PI);
+        let mut candidates = HashMap::default();
+        source
+            .as_view()
+            .count_horner_candidates(&HashSet::default(), &mut candidates);
+        assert_eq!(candidates.get(&exponential.as_view()), Some(&2));
+        assert_eq!(candidates.get(&sine.as_view()), Some(&2));
+        assert_eq!(candidates.get(&x.as_view()), Some(&1));
+        assert!(!candidates.contains_key(&y.as_view()));
+        assert!(!candidates.contains_key(&integer_power.as_view()));
+        assert!(!candidates.contains_key(&e.as_view()));
+        assert!(!candidates.contains_key(&pi.as_view()));
+    }
+
+    #[test]
+    fn discovery_keeps_explicit_parameters_opaque_even_for_builtin_constants() {
+        let parameter = crate::parse!("f(x+x*y)");
+        let source = crate::parse!("a*f(x+x*y)+b*f(x+x*y)");
+        let parameters = [parameter.as_view()].into_iter().collect();
+        let mut candidates = HashMap::default();
+        source
+            .as_view()
+            .count_horner_candidates(&parameters, &mut candidates);
+        assert_eq!(candidates.get(&parameter.as_view()), Some(&2));
+        assert!(!candidates.contains_key(&crate::parse!("x").as_view()));
+        assert!(!candidates.contains_key(&crate::parse!("y").as_view()));
+
+        let e = Atom::var(Symbol::E);
+        let pi = Atom::var(Symbol::PI);
+        let source = &e + &pi;
+        let parameters = [e.as_view(), pi.as_view()].into_iter().collect();
+        let mut candidates = HashMap::default();
+        source
+            .as_view()
+            .count_horner_candidates(&parameters, &mut candidates);
+        assert_eq!(candidates.get(&e.as_view()), Some(&1));
+        assert_eq!(candidates.get(&pi.as_view()), Some(&1));
+    }
+
+    #[test]
+    fn direct_builder_preserves_single_occurrence_function_parameter() {
+        let parameter = crate::parse!("f(x+x*y)");
+        let source = crate::parse!("(x+x*y)*f(x+x*y)");
+        let parameters = [parameter, crate::parse!("x"), crate::parse!("y")];
+        for iterations in [1, 10] {
+            let mut evaluator = source
+                .evaluator(&parameters)
+                .optimization_settings(OptimizationSettings {
+                    direct_translation: true,
+                    horner_iterations: iterations,
+                    ..Default::default()
+                })
+                .build()
+                .unwrap()
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
+            for point in [[2., 0.5, -0.25], [3., -2., 0.25], [0., 7., 2.]] {
+                let expected = point[0] * (point[1] + point[1] * point[2]);
+                assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn direct_builder_factors_exponential_and_preserves_numerical_values() {
+        let source = crate::parse!("a*exp(x)+b*exp(x)+c");
+        let parameters = [
+            crate::parse!("x"),
+            crate::parse!("a"),
+            crate::parse!("b"),
+            crate::parse!("c"),
+        ];
+        let original = source
+            .evaluator(&parameters)
+            .optimization_settings(OptimizationSettings {
+                direct_translation: true,
+                horner_iterations: 0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        assert_eq!(original.count_operations().multiplications, 2);
+        for iterations in [1, 2, 10] {
+            let mut evaluator = source
+                .evaluator(&parameters)
+                .optimization_settings(OptimizationSettings {
+                    direct_translation: true,
+                    horner_iterations: iterations,
+                    ..Default::default()
+                })
+                .build()
+                .unwrap()
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
+            let operations = evaluator.count_operations();
+            assert_eq!(operations.multiplications, 1);
+            assert_eq!(operations.function_calls, 1);
+            for point in [
+                [-2., 2., -3., 0.7],
+                [0., -1., 4., 2.],
+                [0.5, 3., 5., -2.],
+                [2., 0.25, -0.5, -1.],
+            ] {
+                let expected = (point[1] + point[2]) * point[0].exp() + point[3];
+                assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-13);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod local_function_parameter_scope_tests {
+    use super::*;
+
+    fn check_local_function_parameter(inherited_alias: bool) {
+        let source = crate::parse!("g(u,x,y)");
+        let root_parameters = [crate::parse!("u"), crate::parse!("x"), crate::parse!("y")];
+        let declared_parameters: Vec<Indeterminate> = [
+            crate::parse!("h(2*x+2*y)"),
+            crate::parse!("x"),
+            crate::parse!("y"),
+        ]
+        .into_iter()
+        .map(|argument| argument.try_into().unwrap())
+        .collect();
+        let body = crate::parse!("(x+x*y)*h(2*x+2*y)");
+        let alias = crate::parse!("local_parameter_scope_alias");
+        for policy in [InliningPolicy::Always, InliningPolicy::Never] {
+            for iterations in [0, 1, 10] {
+                let function_body = if inherited_alias { &alias } else { &body };
+                let mut builder = source
+                    .evaluator(&root_parameters)
+                    .add_function_with_options(
+                        crate::symbol!("g"),
+                        declared_parameters.clone(),
+                        function_body.clone(),
+                        FunctionRegistrationOptions::new().inlining(policy),
+                    )
+                    .unwrap()
+                    .optimization_settings(OptimizationSettings {
+                        direct_translation: true,
+                        horner_iterations: iterations,
+                        ..Default::default()
+                    });
+                if inherited_alias {
+                    builder = builder
+                        .add_aliases([(alias.clone(), body.clone())])
+                        .unwrap();
+                }
+                let mut evaluator = builder
+                    .build()
+                    .unwrap()
+                    .map_coeff(&|coefficient| coefficient.re.to_f64());
+                for point in [[2., 3., 4.], [-3., 0.5, -0.25], [0., 7., 2.]] {
+                    let expected = point[0] * (point[1] + point[1] * point[2]);
+                    assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_and_deferred_function_arguments_keep_their_atom_identity() {
+        check_local_function_parameter(false);
+    }
+
+    #[test]
+    fn inherited_aliases_preserve_inline_and_deferred_function_arguments() {
+        check_local_function_parameter(true);
+    }
+}
+
+#[cfg(test)]
+mod optimized_horner_search_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn mixed_mutations_preserve_permutations_and_include_larger_moves() {
+        let original: Vec<_> = (0..12).collect();
+        let mut rng = MonteCarloRng::new(0, 0);
+        let mut large_insert = false;
+        let mut large_reversal = false;
+        for mutation in 0..128 {
+            let mut order = original.clone();
+            mutate_horner_order(&mut order, &mut rng, mutation);
+            assert_ne!(order, original);
+            let changed = order.iter().zip(&original).filter(|(a, b)| a != b).count();
+            large_insert |= mutation % 4 == 2 && changed > 2;
+            large_reversal |= mutation % 4 == 3 && changed > 2;
+            order.sort_unstable();
+            assert_eq!(order, original);
+        }
+        assert!(large_insert && large_reversal);
+    }
+
+    #[test]
+    fn multiple_seeds_are_unique_and_charged_against_the_budget() {
+        for budget in [2, 3] {
+            let visited = Mutex::new(Vec::new());
+            let initial = [0, 1, 2, 3];
+            let second = [1, 0, 2, 3];
+            let third = [3, 2, 1, 0];
+            let selected = search_horner_order_with_seeds(
+                &initial,
+                &[&initial, &second, &second, &third],
+                &OptimizationSettings {
+                    horner_iterations: budget,
+                    ..Default::default()
+                },
+                |order| {
+                    visited.lock().unwrap().push(order.to_vec());
+                    OperationCount::new(0, if order == third { 1 } else { 2 }, 0, 0)
+                },
+            );
+            let visited = visited.into_inner().unwrap();
+            assert_eq!(visited.len(), budget);
+            assert_eq!(visited[0], initial);
+            assert_eq!(visited[1], second);
+            if budget == 3 {
+                assert_eq!(visited[2], third);
+                assert_eq!(selected, third);
+            }
+        }
+    }
+
+    #[test]
+    fn long_search_restarts_without_exceeding_budget_or_losing_the_winner() {
+        let initial: Vec<_> = (0..10).collect();
+        let visited = Mutex::new(Vec::new());
+        let selected = search_horner_order(
+            &initial,
+            &OptimizationSettings {
+                horner_iterations: 130,
+                n_cores: 1,
+                ..Default::default()
+            },
+            |order| {
+                visited.lock().unwrap().push(order.to_vec());
+                OperationCount::new(0, usize::from(order != initial), 0, 0)
+            },
+        );
+        let visited = visited.into_inner().unwrap();
+        assert_eq!(visited.len(), 130);
+        assert_eq!(
+            visited[34],
+            initial.iter().rev().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(selected, initial);
+    }
+
+    #[test]
+    fn finished_program_score_counts_binary_powering() {
+        // A lowered instruction fixture keeps powers explicit: the Atom
+        // linearizer expands positive integer powers into multiplication lists.
+        let mut evaluator = ExpressionEvaluator {
+            stack: vec![0_f64; 5],
+            param_count: 2,
+            reserved_indices: 2,
+            instructions: vec![
+                (Instr::Pow(2, 0, 7), ComplexPhase::default()),
+                (Instr::Pow(3, 1, -4), ComplexPhase::default()),
+                (Instr::Add(4, vec![2, 3]), ComplexPhase::default()),
+            ],
+            result_indices: vec![4],
+            external_fns: vec![],
+            settings: OptimizationSettings::default(),
+        };
+        let cost = evaluator_horner_cost(&evaluator);
+        assert_eq!(cost.multiplications, 6);
+        assert_eq!(cost.additions, 1);
+        assert_eq!(cost.inversions, 1);
+        assert_eq!(evaluator.evaluate_single(&[2., 2.]), 128.0625);
+    }
+
+    #[test]
+    fn search_selects_fewer_multiplications_after_pair_elimination() {
+        let parameters = [
+            crate::parse!("horner_cost_a"),
+            crate::parse!("horner_cost_b"),
+            crate::parse!("horner_cost_c"),
+        ];
+        let permutations = unique_permutations(&[0_usize, 1, 2]).1;
+        let settings = OptimizationSettings {
+            horner_iterations: 6,
+            horner_use_cpe: true,
+            ..Default::default()
+        };
+        let mut strict_misranking = false;
+        // Coefficient sign normalization depends on the canonical variable
+        // order. Check every relabeling of the same small polynomial instead
+        // of relying on symbols registered by another parallel test.
+        for relabeling in &permutations {
+            let [a, b, c] =
+                std::array::from_fn::<_, 3, _>(|i| parameters[relabeling[i]].to_canonical_string());
+            let source = crate::parse!(&format!(
+                "{b}*{c}^3-3*{b}^2-{a}*{c}^2+2*{a}^2*{c}-2*{a}^2*{b}^2-3*{a}^3*{c}+2*{a}^3*{c}^2+3*{a}^3*{b}^2*{c}-2*{a}^3*{b}^2*{c}^2"
+            ));
+            let expressions = [source.as_view()];
+            let mut outcomes = Vec::new();
+            for permutation in &permutations {
+                let order = permutation
+                    .iter()
+                    .map(|&i| parameters[i].clone())
+                    .collect::<Vec<_>>();
+                let before = horner_cost(AtomView::horner_scheme_cost(&expressions, &order));
+                let evaluator = AtomView::build_horner_evaluator(
+                    &expressions,
+                    &FunctionMap::new(),
+                    &parameters,
+                    &order,
+                    settings.clone(),
+                )
+                .unwrap();
+                outcomes.push((
+                    before,
+                    horner_cost(evaluator_horner_cost(&evaluator)),
+                    order,
+                ));
+            }
+            let cheap_winner = outcomes
+                .iter()
+                .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.2.cmp(&right.2)))
+                .unwrap();
+            let finished_minimum = outcomes.iter().map(|outcome| outcome.1).min().unwrap();
+            strict_misranking |= cheap_winner.1.0 > finished_minimum.0;
+            for horner_use_cpe in [false, true] {
+                let evaluator = source
+                    .evaluator(&parameters)
+                    .optimization_settings(settings.clone().horner_use_cpe(horner_use_cpe))
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    horner_cost(evaluator_horner_cost(&evaluator)),
+                    if horner_use_cpe {
+                        finished_minimum
+                    } else {
+                        cheap_winner.1
+                    }
+                );
+                let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
+                for point in [[1.2_f64, -0.3, 0.7], [-2., 1.5, -0.2], [0., 3., 2.]] {
+                    let [a, b, c] = std::array::from_fn::<_, 3, _>(|i| point[relabeling[i]]);
+                    let expected = b * c.powi(3) - 3. * b.powi(2) - a * c.powi(2)
+                        + 2. * a.powi(2) * c
+                        - 2. * a.powi(2) * b.powi(2)
+                        - 3. * a.powi(3) * c
+                        + 2. * a.powi(3) * c.powi(2)
+                        + 3. * a.powi(3) * b.powi(2) * c
+                        - 2. * a.powi(3) * b.powi(2) * c.powi(2);
+                    assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-12);
+                }
+            }
+        }
+        assert!(
+            strict_misranking,
+            "the fixture must expose a strictly worse pre-CPE winner"
+        );
+    }
+
+    #[test]
+    fn legacy_function_search_scores_all_calls_and_reuses_the_winner() {
+        let parameters = [
+            crate::parse!("legacy_score_x"),
+            crate::parse!("legacy_score_y"),
+            crate::parse!("legacy_score_z"),
+        ];
+        let body = crate::parse!(
+            "legacy_score_b*legacy_score_c^3-3*legacy_score_b^2\
+            -legacy_score_a*legacy_score_c^2+2*legacy_score_a^2*legacy_score_c\
+            -2*legacy_score_a^2*legacy_score_b^2-3*legacy_score_a^3*legacy_score_c\
+            +2*legacy_score_a^3*legacy_score_c^2\
+            +3*legacy_score_a^3*legacy_score_b^2*legacy_score_c\
+            -2*legacy_score_a^3*legacy_score_b^2*legacy_score_c^2"
+        );
+        let source = crate::parse!(
+            "legacy_score_f(legacy_score_x,legacy_score_y,legacy_score_z)\
+            +legacy_score_f(legacy_score_y,legacy_score_x,legacy_score_z)"
+        );
+        let mut functions = FunctionMap::new();
+        functions
+            .add_function(
+                crate::symbol!("legacy_score_f"),
+                vec![
+                    crate::symbol!("legacy_score_a"),
+                    crate::symbol!("legacy_score_b"),
+                    crate::symbol!("legacy_score_c"),
+                ],
+                body,
+            )
+            .unwrap();
+        let tree = source
+            .as_view()
+            .to_evaluation_tree(&functions, &parameters)
+            .unwrap();
+        assert_eq!(tree.functions.len(), 1);
+        let mut variables = HashMap::default();
+        for expression in &tree.functions[0].2.tree {
+            expression.find_all_variables(&mut variables);
+        }
+        let mut variables = variables
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(variable, _)| variable)
+            .collect::<Vec<_>>();
+        variables.sort();
+        assert_eq!(variables.len(), 3);
+        let settings = OptimizationSettings {
+            direct_translation: false,
+            horner_use_cpe: true,
+            horner_iterations: 6,
+            ..Default::default()
+        };
+        let minimum = unique_permutations(&variables)
+            .1
+            .into_iter()
+            .map(|order| {
+                let mut candidate = tree.clone();
+                candidate.apply_horner_scheme_to_scope(1, &order);
+                candidate.common_subexpression_elimination();
+                horner_cost(evaluator_horner_cost(&candidate.linearize(&settings)))
+            })
+            .min()
+            .unwrap();
+        let mut selected_tree = tree.clone();
+        let (_, cached) = selected_tree.optimize_horner_scheme_with_cpe(&settings);
+        assert_eq!(horner_cost(evaluator_horner_cost(&cached)), minimum);
+        // The tree returned by the public scheme API must agree with the cached
+        // full program even though only the latter has undergone CSE and CPE.
+        selected_tree.common_subexpression_elimination();
+        assert_eq!(
+            horner_cost(evaluator_horner_cost(&selected_tree.linearize(&settings))),
+            minimum
+        );
+        let evaluator = tree.optimize(&settings);
+        assert_eq!(horner_cost(evaluator_horner_cost(&evaluator)), minimum);
+        let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
+        let expected_body = |a: f64, b: f64, c: f64| {
+            b * c.powi(3) - 3. * b.powi(2) - a * c.powi(2) + 2. * a.powi(2) * c
+                - 2. * a.powi(2) * b.powi(2)
+                - 3. * a.powi(3) * c
+                + 2. * a.powi(3) * c.powi(2)
+                + 3. * a.powi(3) * b.powi(2) * c
+                - 2. * a.powi(3) * b.powi(2) * c.powi(2)
+        };
+        for point in [[1.2, -0.3, 0.7], [-2., 1.5, -0.2], [0., 3., 2.]] {
+            let [a, b, c] = point;
+            let expected = expected_body(a, b, c) + expected_body(b, a, c);
+            assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-11);
+        }
+    }
+
+    #[test]
+    fn candidate_build_errors_are_returned() {
+        let source = crate::parse!("unregistered_horner_function(x+y)+x*y");
+        for direct_translation in [false, true] {
+            for horner_use_cpe in [false, true] {
+                let result = source
+                    .evaluator(&[crate::parse!("x"), crate::parse!("y")])
+                    .optimization_settings(OptimizationSettings {
+                        horner_iterations: 1000,
+                        horner_use_cpe,
+                        direct_translation,
+                        n_cores: 3,
+                        ..Default::default()
+                    })
+                    .build();
+                assert!(matches!(
+                    result,
+                    Err(EvaluationError::UndefinedFunction { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_is_latched_and_returns_a_working_candidate() {
+        let source = crate::parse!("x*y+x*z+y*z+x*y*z");
+        for direct_translation in [false, true] {
+            for horner_use_cpe in [false, true] {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let callback_polls = polls.clone();
+                let mut evaluator = source
+                    .evaluator(&[crate::parse!("x"), crate::parse!("y"), crate::parse!("z")])
+                    .optimization_settings(OptimizationSettings {
+                        horner_iterations: 1000,
+                        horner_use_cpe,
+                        direct_translation,
+                        n_cores: 3,
+                        // A one-shot callback tests the latch rather than relying on
+                        // a caller that keeps returning true after cancellation.
+                        abort_check: Some(Box::new(move || {
+                            callback_polls.fetch_add(1, Ordering::Relaxed) == 0
+                        })),
+                        ..Default::default()
+                    })
+                    .build()
+                    .unwrap()
+                    .map_coeff(&|coefficient| coefficient.re.to_f64());
+                assert_eq!(polls.load(Ordering::Relaxed), 1);
+                assert_eq!(evaluator.evaluate_single(&[2., 3., 4.]), 50.);
+            }
+        }
     }
 }

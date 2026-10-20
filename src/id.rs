@@ -7100,7 +7100,7 @@ mod test {
     fn nested() {
         let res = parse!("f(x+x*y+f(x+x^2),x,f(x+x^2))").replace_map_bottom_up(|a, c, o| {
             if c.parent_type == Some(AtomType::Fun) {
-                let r = a.horner_scheme(None, false, false);
+                let r = a.horner_scheme_local::<crate::atom::Indeterminate>(None, false);
                 if r.as_view() != a {
                     **o = r;
                 }

@@ -399,6 +399,18 @@ impl<'a> EvaluatorBuilder<'a> {
         self
     }
 
+    /// Run common-pair elimination when scoring each Horner scheme.
+    ///
+    /// Disabled by default: schemes are ranked after common-subexpression
+    /// elimination, and common-pair elimination runs only on the selected
+    /// scheme. Enabling this can improve the chosen scheme but substantially
+    /// increases optimization time. The `cpe_iterations` setting controls
+    /// common-pair elimination in either mode.
+    pub fn horner_use_cpe(mut self, horner_use_cpe: bool) -> Self {
+        self.optimization_settings.horner_use_cpe = horner_use_cpe;
+        self
+    }
+
     /// Set the number of CPU cores to use during optimization.
     pub fn cores(mut self, n_cores: usize) -> Self {
         self.optimization_settings.n_cores = n_cores;
@@ -467,7 +479,7 @@ impl<'a> EvaluatorBuilder<'a> {
         {
             AtomView::to_evaluator(
                 &self.exprs,
-                &self.fn_map,
+                self.fn_map,
                 &self.params,
                 self.optimization_settings,
             )
@@ -500,6 +512,8 @@ pub(super) struct Expr {
 #[derive(Clone)]
 pub struct OptimizationSettings {
     pub(crate) horner_iterations: usize,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) horner_use_cpe: bool,
     pub(crate) n_cores: usize,
     pub(crate) cpe_iterations: Option<usize>,
     pub(crate) hot_start: Option<Vec<Expression<Complex<Rational>>>>,
@@ -530,7 +544,10 @@ impl bincode::Encode for OptimizationSettings {
         bincode::Encode::encode(&self.max_common_pair_cache_entries, encoder)?;
         bincode::Encode::encode(&self.max_common_pair_distance, encoder)?;
         bincode::Encode::encode(&self.verbose, encoder)?;
-        bincode::Encode::encode(&self.direct_translation, encoder)?;
+        // Preserve the legacy trailing bool byte when Horner CPE is disabled.
+        // Values 2 and 3 were invalid booleans and now encode the extra flag.
+        let flags = u8::from(self.direct_translation) | (u8::from(self.horner_use_cpe) << 1);
+        bincode::Encode::encode(&flags, encoder)?;
         Ok(())
     }
 }
@@ -540,8 +557,9 @@ impl<Context> bincode::Decode<Context> for OptimizationSettings {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
-        Ok(Self {
+        let mut settings = Self {
             horner_iterations: bincode::Decode::decode(decoder)?,
+            horner_use_cpe: false,
             n_cores: bincode::Decode::decode(decoder)?,
             cpe_iterations: bincode::Decode::decode(decoder)?,
             hot_start: bincode::Decode::decode(decoder)?,
@@ -551,8 +569,17 @@ impl<Context> bincode::Decode<Context> for OptimizationSettings {
             max_common_pair_cache_entries: bincode::Decode::decode(decoder)?,
             max_common_pair_distance: bincode::Decode::decode(decoder)?,
             verbose: bincode::Decode::decode(decoder)?,
-            direct_translation: bincode::Decode::decode(decoder)?,
-        })
+            direct_translation: false,
+        };
+        let flags: u8 = bincode::Decode::decode(decoder)?;
+        if flags & !3 != 0 {
+            return Err(bincode::error::DecodeError::Other(
+                "Invalid evaluator optimization flags",
+            ));
+        }
+        settings.direct_translation = flags & 1 != 0;
+        settings.horner_use_cpe = flags & 2 != 0;
+        Ok(settings)
     }
 }
 
@@ -560,6 +587,7 @@ impl std::fmt::Debug for OptimizationSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("OptimizationSettings")
             .field("horner_iterations", &self.horner_iterations)
+            .field("horner_use_cpe", &self.horner_use_cpe)
             .field("n_cores", &self.n_cores)
             .field("cpe_iterations", &self.cpe_iterations)
             .field("hot_start", &self.hot_start)
@@ -574,6 +602,7 @@ impl Default for OptimizationSettings {
     fn default() -> Self {
         OptimizationSettings {
             horner_iterations: 10,
+            horner_use_cpe: false,
             n_cores: 1,
             cpe_iterations: None,
             hot_start: None,
@@ -597,6 +626,18 @@ impl OptimizationSettings {
     /// Set the number of Horner scheme optimization iterations.
     pub fn horner_iterations(mut self, horner_iterations: usize) -> Self {
         self.horner_iterations = horner_iterations;
+        self
+    }
+
+    /// Run common-pair elimination when scoring each Horner scheme.
+    ///
+    /// Disabled by default: schemes are ranked after common-subexpression
+    /// elimination, and common-pair elimination runs only on the selected
+    /// scheme. Enabling this can improve the chosen scheme but substantially
+    /// increases optimization time. The `cpe_iterations` setting controls
+    /// common-pair elimination in either mode.
+    pub fn horner_use_cpe(mut self, horner_use_cpe: bool) -> Self {
+        self.horner_use_cpe = horner_use_cpe;
         self
     }
 
@@ -658,5 +699,74 @@ impl OptimizationSettings {
     pub fn direct_translation(mut self, direct_translation: bool) -> Self {
         self.direct_translation = direct_translation;
         self
+    }
+}
+
+#[cfg(all(test, feature = "bincode"))]
+mod optimization_settings_serialization_tests {
+    use super::*;
+
+    fn check_encoding<C: bincode::config::Config>(config: C) {
+        for direct_translation in [false, true] {
+            let settings = OptimizationSettings::new()
+                .horner_iterations(321)
+                .cores(3)
+                .cpe_iterations(Some(7))
+                .direct_translation(direct_translation);
+            // The old schema ended with two bools and had no Horner CPE flag.
+            let legacy = (
+                settings.horner_iterations,
+                settings.n_cores,
+                settings.cpe_iterations,
+                &settings.hot_start,
+                settings.max_horner_scheme_variables,
+                settings.max_common_pair_cache_entries,
+                settings.max_common_pair_distance,
+                settings.verbose,
+                settings.direct_translation,
+            );
+            let bytes = bincode::encode_to_vec((legacy, 0x12345678_u32), config).unwrap();
+            let ((decoded, following), consumed): ((OptimizationSettings, u32), _) =
+                bincode::decode_from_slice(&bytes, config).unwrap();
+            assert_eq!(consumed, bytes.len());
+            assert_eq!(following, 0x12345678);
+            assert_eq!(decoded.horner_iterations, 321);
+            assert_eq!(decoded.n_cores, 3);
+            assert_eq!(decoded.cpe_iterations, Some(7));
+            assert_eq!(decoded.direct_translation, direct_translation);
+            assert!(!decoded.horner_use_cpe);
+            assert_eq!(
+                bincode::encode_to_vec((&settings, 0x12345678_u32), config).unwrap(),
+                bytes
+            );
+
+            for horner_use_cpe in [false, true] {
+                let settings = settings.clone().horner_use_cpe(horner_use_cpe);
+                let bytes = bincode::encode_to_vec((&settings, 0x12345678_u32), config).unwrap();
+                let ((decoded, following), consumed): ((OptimizationSettings, u32), _) =
+                    bincode::decode_from_slice(&bytes, config).unwrap();
+                assert_eq!(consumed, bytes.len());
+                assert_eq!(following, 0x12345678);
+                assert_eq!(decoded.direct_translation, direct_translation);
+                assert_eq!(decoded.horner_use_cpe, horner_use_cpe);
+                assert_eq!(decoded.horner_iterations, settings.horner_iterations);
+            }
+
+            let mut invalid = bincode::encode_to_vec(&settings, config).unwrap();
+            *invalid.last_mut().unwrap() = 4;
+            assert!(
+                bincode::decode_from_slice::<OptimizationSettings, _>(&invalid, config).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn horner_cpe_flag_preserves_legacy_settings_and_nested_streams() {
+        check_encoding(bincode::config::standard());
+        check_encoding(
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_big_endian(),
+        );
     }
 }
