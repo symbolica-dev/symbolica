@@ -1,5 +1,10 @@
 //! Rational polynomial field with factorized denominator.
 
+mod apart;
+
+#[cfg(test)]
+mod constructor_tests;
+
 use std::{
     borrow::Cow,
     cmp::Ordering,
