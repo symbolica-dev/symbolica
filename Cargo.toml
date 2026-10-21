@@ -57,7 +57,7 @@ integer-gmp = ["dep:rug", "numerica/integer-gmp"]
 # Use Malachite for integer arithmetic.
 integer-malachite = ["numerica/integer-malachite"]
 # Use MPFR for floating-point arithmetic.
-float-mpfr = ["numerica/float-mpfr"]
+float-mpfr = ["numerica/float-mpfr", "dep:rug"]
 # Use Astro for floating-point arithmetic.
 float-astro = ["numerica/float-astro"]
 # Select features that compile on WebAssembly. Disable default features.

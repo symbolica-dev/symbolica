@@ -1729,6 +1729,15 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    pub(crate) fn is_exact_one(&self) -> bool {
+        if self.data.is_small_int() {
+            self.data.is_one_rat()
+        } else {
+            self.get_coeff_view().is_exact_one()
+        }
+    }
+
+    #[inline]
     /// Return whether the coefficient is stored as a rational polynomial.
     pub fn is_rational_polynomial(&self) -> bool {
         self.data.is_rational_polynomial()

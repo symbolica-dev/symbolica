@@ -2541,6 +2541,13 @@ impl PythonSymbol {
         Atom::from(crate::transcendental::polylog()).into()
     }
 
+    /// The harmonic-polylogarithm constant at a primitive sixth root of unity.
+    #[classattr]
+    #[pyo3(name = "HPL_AT_SIXTH_ROOT")]
+    pub fn hpl_at_sixth_root() -> PythonExpression {
+        Atom::from(crate::transcendental::hpl_at_sixth_root()).into()
+    }
+
     /// The built-in cylindrical Bessel function of the first kind.
     #[classattr]
     #[pyo3(name = "BESSEL_J")]
@@ -4273,6 +4280,29 @@ impl PythonExpression {
     #[pyo3(name = "POLYLOG")]
     pub fn polylog_attr() -> PythonExpression {
         Atom::from(crate::transcendental::polylog()).into()
+    }
+
+    /// The harmonic-polylogarithm constant at a primitive sixth root of unity.
+    #[classattr]
+    #[pyo3(name = "HPL_AT_SIXTH_ROOT")]
+    pub fn hpl_at_sixth_root_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::hpl_at_sixth_root()).into()
+    }
+
+    /// Construct H(indices; exp(sign*i*pi/3)) with exact endpoint tags.
+    ///
+    /// Indices are -1, 0 or 1, with weight at most six. The sign is +1 or -1.
+    /// Numerical evaluation uses the requested precision; no numerical table is used.
+    #[classmethod]
+    #[pyo3(signature = (indices, sign = 1))]
+    pub fn hpl_at_sixth_root(
+        _cls: &Bound<'_, PyType>,
+        indices: Vec<i8>,
+        sign: i8,
+    ) -> PyResult<PythonExpression> {
+        crate::transcendental::sixth_root_hpl(&indices, sign)
+            .map(Into::into)
+            .map_err(exceptions::PyValueError::new_err)
     }
 
     /// The built-in cylindrical Bessel function of the first kind.

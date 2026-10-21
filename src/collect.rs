@@ -274,7 +274,10 @@ impl<'a> AtomView<'a> {
             let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None);
-            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+            if matches!(
+                &poly,
+                Err(PolynomialConversionError::ZeroDenominator { .. })
+            ) {
                 out.set_from_view(self);
                 return;
             }
@@ -323,7 +326,10 @@ impl<'a> AtomView<'a> {
             }
         } else {
             let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None);
-            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+            if matches!(
+                &poly,
+                Err(PolynomialConversionError::ZeroDenominator { .. })
+            ) {
                 out.set_from_view(self);
                 return;
             }
