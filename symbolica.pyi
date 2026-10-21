@@ -3240,6 +3240,59 @@ class Expression:
             The symbol-data key to retrieve. Omit it to return all stored data.
         """
 
+    def check_zero(
+        self,
+        *,
+        finite_field_samples: int = 5,
+        numerical_samples: int = 5,
+        max_precision: int = 1024,
+        exact_fallback: bool = True,
+        treat_floats_as_exact: bool = False,
+    ) -> bool | None:
+        """
+        Test whether the expression is identically zero wherever it is defined.
+
+        Returns True when zero is established, False when the expression is found
+        to be nonzero, and None when the test cannot decide. Use `is True` when
+        proof of zero is required. This tests an identity: `S('x')` returns False
+        even though it vanishes at x = 0. Small values are never treated as zero
+        using a numerical tolerance.
+
+        Numerical nonzero results are heuristic; set numerical_samples=0 to
+        disable them. Calls to user-defined functions without evaluation info
+        are assumed independent unless identical, which can give false nonzero
+        results for identities involving those functions.
+
+        Parameters
+        ----------
+        finite_field_samples: int, optional
+            Maximum finite-field samples (default: 5). Zero disables this stage;
+            values above five have no additional effect.
+        numerical_samples: int, optional
+            Maximum numerical sample points (default: 5). Zero disables this stage.
+        max_precision: int, optional
+            Maximum numerical working precision in binary bits (default: 1024).
+            Values below 128 restrict numerical testing to machine precision.
+        exact_fallback: bool, optional
+            Allow more expensive symbolic checks (default: True). Disable this
+            to limit work, accepting more inconclusive results.
+        treat_floats_as_exact: bool, optional
+            Interpret finite floating coefficients as their exact stored values
+            (default: False), including in function arguments and exponents.
+            This ignores their rounding uncertainty and cannot recover lost accuracy.
+
+        Examples
+        --------
+        >>> E('(x+1)^2-x^2-2*x-1').check_zero()
+        True
+        >>> E('sin(x)^2+cos(x)^2-1').check_zero()
+        True
+        >>> E('x').check_zero()
+        False
+        >>> E('log(2)+log(3)-log(6)').check_zero() is None
+        True
+        """
+
     def is_scalar(self) -> bool | None:
         """
         Check if the expression is a scalar. Symbols must have the scalar attribute.

@@ -15,6 +15,7 @@ TARGETS = {
     ("Series", "get_coefficient"), ("Evaluator", "load"),
     ("Evaluator", "evaluate_complex_with_prec"), ("Evaluator", "evaluate_with_prec"),
     ("Expression", "nsolve"), ("Expression", "nsolve_system"),
+    ("Expression", "check_zero"),
     ("Float", "__new__"), ("Float", "from_ratio"), ("Float", "with_precision"),
     ("Float", "to_decimal"), ("Float", "as_integer_ratio"),
     ("ComplexFloat", "__new__"), ("ComplexFloat", "with_precision"),
