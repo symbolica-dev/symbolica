@@ -3689,12 +3689,19 @@ impl Atom {
     /// Replace this atom with a coefficient, reusing its allocation, and return
     /// mutable access to the new number.
     pub fn to_num<T: Into<Coefficient>>(&mut self, coeff: T) -> &mut Num {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Num(Num::new_into(coeff.into(), buffer));
-        if let Atom::Num(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Num(value) => {
+                value.set_from_coeff(coeff.into());
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Num(Num::new_into(coeff.into(), buffer));
+                let Atom::Num(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
@@ -3726,12 +3733,19 @@ impl Atom {
     #[inline]
     /// Replace this atom with the unnormalized power `base^exp`, reusing its allocation.
     pub fn to_pow(&mut self, base: AtomView, exp: AtomView) -> &mut Pow {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Pow(Pow::new_into(base, exp, buffer));
-        if let Atom::Pow(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Pow(value) => {
+                value.set_from_base_and_exp(base, exp);
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Pow(Pow::new_into(base, exp, buffer));
+                let Atom::Pow(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
@@ -3739,12 +3753,19 @@ impl Atom {
     /// Replace this atom with an empty, unnormalized product, reusing its allocation.
     /// Normalize after adding factors.
     pub fn to_mul(&mut self) -> &mut Mul {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Mul(Mul::new_into(buffer));
-        if let Atom::Mul(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Mul(value) => {
+                value.clear();
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Mul(Mul::new_into(buffer));
+                let Atom::Mul(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
@@ -3752,12 +3773,19 @@ impl Atom {
     /// Replace this atom with an empty, unnormalized sum, reusing its allocation.
     /// Normalize after adding terms.
     pub fn to_add(&mut self) -> &mut Add {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Add(Add::new_into(buffer));
-        if let Atom::Add(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Add(value) => {
+                value.clear();
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Add(Add::new_into(buffer));
+                let Atom::Add(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
@@ -4881,6 +4909,125 @@ mod test {
     };
 
     use super::FunctionBuilder;
+
+    #[test]
+    fn constructors_reuse_and_reset_atom_variants() {
+        let base = parse!("reuse_base(x)");
+        let exp = Atom::num(3);
+        let inputs = [
+            Atom::Zero,
+            Atom::num(42),
+            parse!("reuse_x"),
+            parse!("reuse_f(x,y)"),
+            parse!("reuse_x^2"),
+            parse!("reuse_x*reuse_y"),
+            parse!("reuse_x+reuse_y"),
+        ];
+        for initial in inputs {
+            for kind in 0..4 {
+                let mut out = initial.clone();
+                // First convert from each possible variant, then reset the
+                // matching variant after it contains a nonempty expression.
+                for _ in 0..2 {
+                    let mut fresh = Atom::new();
+                    for atom in [&mut out, &mut fresh] {
+                        match kind {
+                            0 => {
+                                atom.to_num((-7, 13));
+                            }
+                            1 => {
+                                atom.to_pow(base.as_view(), exp.as_view());
+                            }
+                            2 => {
+                                let mul = atom.to_mul();
+                                assert_eq!(mul.to_mul_view().get_nargs(), 0);
+                                mul.extend(base.as_view());
+                            }
+                            _ => {
+                                let add = atom.to_add();
+                                assert_eq!(add.to_add_view().get_nargs(), 0);
+                                add.extend(base.as_view());
+                            }
+                        }
+                    }
+                    assert_eq!(out.as_view().get_data(), fresh.as_view().get_data());
+                    assert_eq!(out.as_view().needs_normalization(), kind != 0);
+                    out.set_normalized(true);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constructors_reset_alias_ownership() {
+        use std::sync::Arc;
+
+        for opaque in [false, true] {
+            for kind in 0..3 {
+                let handle = crate::alias::register_alias_atom(parse!("reuse_alias_body(x)"));
+                let weak = Arc::downgrade(&handle);
+                let alias = if opaque {
+                    handle.to_opaque_atom()
+                } else {
+                    handle.to_atom()
+                };
+                let exp = Atom::num(2);
+                let mut out = Atom::new();
+                match kind {
+                    0 => {
+                        out.to_pow(alias.as_view(), exp.as_view());
+                    }
+                    1 => {
+                        out.to_mul().extend(alias.as_view());
+                    }
+                    _ => {
+                        out.to_add().extend(alias.as_view());
+                    }
+                }
+                drop(alias);
+                drop(handle);
+                assert!(out.as_view().has_alias());
+                match kind {
+                    0 => {
+                        out.to_pow(exp.as_view(), exp.as_view());
+                    }
+                    1 => {
+                        out.to_mul();
+                    }
+                    _ => {
+                        out.to_add();
+                    }
+                }
+                assert!(!out.as_view().has_alias());
+                assert!(weak.upgrade().is_none());
+            }
+
+            let old = crate::alias::register_alias_atom(parse!("reuse_alias_old(x)"));
+            let new = crate::alias::register_alias_atom(parse!("reuse_alias_new(x)"));
+            let old_weak = Arc::downgrade(&old);
+            let new_weak = Arc::downgrade(&new);
+            let exp = Atom::num(2);
+            let old_atom = old.to_atom();
+            let new_atom = if opaque {
+                new.to_opaque_atom()
+            } else {
+                new.to_atom()
+            };
+            let mut out = Atom::new();
+            out.to_pow(old_atom.as_view(), exp.as_view());
+            drop(old_atom);
+            drop(old);
+            out.to_pow(new_atom.as_view(), exp.as_view());
+            drop(new_atom);
+            drop(new);
+            assert!(old_weak.upgrade().is_none());
+            assert!(new_weak.upgrade().is_some());
+            assert!(out.as_view().has_alias());
+            assert_eq!(out.inline_aliases(true), parse!("reuse_alias_new(x)^2"));
+            drop(out);
+            assert!(new_weak.upgrade().is_none());
+        }
+    }
 
     #[test]
     fn parse_macro() {

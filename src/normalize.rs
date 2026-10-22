@@ -527,7 +527,7 @@ impl Atom {
                 // The base borrowed from `other` survives mutations of `self`.
                 // Copy only when preserving an alias held by `self` instead.
                 let mut semantic_base;
-                let base = if self.as_view().has_alias() {
+                let base = if self.has_alias() {
                     semantic_base = workspace.new_atom();
                     semantic_base.set_from_view(&self.as_view());
                     semantic_base.as_view()
@@ -850,7 +850,7 @@ impl AtomView<'_> {
         }
         if cleanup_alias_handles {
             out.refresh_alias_flags_from_tree();
-            if out.as_view().has_alias() {
+            if out.has_alias() {
                 out.refresh_alias_handles_from_tree();
             } else {
                 out.clear_alias_handles();
@@ -869,45 +869,56 @@ impl AtomView<'_> {
         let mut atom_test_buf: SmallVec<[_; 20]> = SmallVec::new();
 
         for a in t.iter() {
-            let mut handle = workspace.new_atom();
-            let resolved_a = resolve_alias(a);
-            let a = if matches!(a, AtomView::Alias(_)) && matches!(resolved_a, AtomView::Mul(_)) {
-                *cleanup_alias_handles = true;
-                resolved_a
+            let a = if matches!(a, AtomView::Alias(_)) {
+                let resolved = resolve_alias(a);
+                if matches!(resolved, AtomView::Mul(_)) {
+                    *cleanup_alias_handles = true;
+                    resolved
+                } else {
+                    a
+                }
             } else {
                 a
             };
-            if a.needs_normalization() {
-                let had_alias = a.has_alias();
-                a.normalize(workspace, &mut handle);
-                if had_alias && !handle.as_view().has_alias() {
-                    *cleanup_alias_handles = true;
-                }
+            // Borrow canonical products while flattening them. Their children
+            // need owned buffers for merging, but copying the parent is redundant.
+            let mut handle;
+            let mul = if let AtomView::Mul(mul) = a
+                && !a.needs_normalization()
+            {
+                mul
             } else {
-                handle.set_from_view(&a);
-            }
+                handle = workspace.new_atom();
+                if a.needs_normalization() {
+                    let had_alias = a.has_alias();
+                    a.normalize(workspace, &mut handle);
+                    if had_alias && !handle.has_alias() {
+                        *cleanup_alias_handles = true;
+                    }
+                } else {
+                    handle.set_from_view(&a);
+                }
 
-            if let Atom::Mul(mul) = handle.deref_mut() {
-                for c in mul.to_mul_view().iter() {
-                    // TODO: remove this copy
-                    let mut handle = workspace.new_atom();
-                    handle.set_from_view(&c);
-
-                    if let AtomView::Num(n) = c
+                let Atom::Mul(mul) = handle.deref_mut() else {
+                    if let AtomView::Num(n) = handle.as_view()
                         && n.is_one()
                     {
                         continue;
                     }
-
                     atom_test_buf.push(handle);
-                }
-            } else {
-                if let AtomView::Num(n) = handle.as_view()
+                    continue;
+                };
+                mul.to_mul_view()
+            };
+
+            for c in mul.iter() {
+                if let AtomView::Num(n) = c
                     && n.is_one()
                 {
                     continue;
                 }
-
+                let mut handle = workspace.new_atom();
+                handle.set_from_view(&c);
                 atom_test_buf.push(handle);
             }
         }
@@ -918,14 +929,15 @@ impl AtomView<'_> {
         if !atom_test_buf.is_empty() {
             let out_mul = out.to_mul();
 
-            atom_test_buf.reverse();
-            let mut last_buf = atom_test_buf.pop().unwrap();
+            // Drain in sorted order without reversing the owned buffers.
+            let mut factors = atom_test_buf.drain(..);
+            let mut last_buf = factors.next().unwrap();
 
             let mut tmp = workspace.new_atom();
             let mut cur_len = 0;
 
-            while let Some(mut cur_buf) = atom_test_buf.pop() {
-                let had_alias = last_buf.as_view().has_alias() || cur_buf.as_view().has_alias();
+            for mut cur_buf in factors {
+                let had_alias = last_buf.has_alias() || cur_buf.has_alias();
                 let merged = last_buf.merge_factors(&mut cur_buf, &mut tmp, workspace);
                 if merged && had_alias {
                     *cleanup_alias_handles = true;
@@ -973,12 +985,12 @@ impl AtomView<'_> {
             }
 
             if cur_len == 0 {
-                out.set_from_view(&last_buf.as_view());
+                std::mem::swap(out, &mut last_buf);
             } else {
                 if second_pass {
                     out_mul.extend(last_buf.as_view());
                     out.as_view().normalize(workspace, &mut tmp);
-                    out.set_from_view(&tmp.as_view());
+                    std::mem::swap(out, &mut tmp);
                     return;
                 }
 
@@ -1004,7 +1016,7 @@ impl AtomView<'_> {
                         if cur_len > 0 {
                             // number created during the merge of two factors, e.g. 2^(1/2)*2^(1/2) = 2
                             out.as_view().normalize(workspace, &mut tmp);
-                            out.set_from_view(&tmp.as_view());
+                            std::mem::swap(out, &mut tmp);
                             return;
                         }
 
@@ -1012,7 +1024,7 @@ impl AtomView<'_> {
                     } else if cur_len == 1 {
                         // downgrade
                         last_buf.set_from_view(&out_mul.to_mul_view().to_slice().get(0));
-                        out.set_from_view(&last_buf.as_view());
+                        std::mem::swap(out, &mut last_buf);
                     } else {
                         out_mul.set_normalized(true);
                     }
@@ -1446,7 +1458,7 @@ impl AtomView<'_> {
 
         if second_pass {
             out.as_view().normalize(workspace, &mut helper);
-            out.set_from_view(&helper.as_view());
+            std::mem::swap(out, &mut helper);
         } else {
             match out_add.get_nargs() {
                 0 => {
@@ -1454,7 +1466,7 @@ impl AtomView<'_> {
                 }
                 1 => {
                     helper.set_from_view(&out_add.to_add_view().to_slice().get(0));
-                    out.set_from_view(&helper.as_view());
+                    std::mem::swap(out, &mut helper);
                 }
                 _ => out_add.set_normalized(true),
             }
@@ -1489,7 +1501,7 @@ impl AtomView<'_> {
                 // TODO: if a is a nested addition, prevent a sort
                 let had_alias = a.has_alias();
                 a.normalize(workspace, &mut norm_arg);
-                if had_alias && !norm_arg.as_view().has_alias() {
+                if had_alias && !norm_arg.has_alias() {
                     *cleanup_alias_handles = true;
                 }
                 norm_arg.as_view()
@@ -1553,7 +1565,7 @@ impl AtomView<'_> {
         let mut cur_len = 0;
 
         for (cur, _) in atom_sort_buf.iter().skip(1) {
-            let last_had_alias = last_buf.as_view().has_alias();
+            let last_had_alias = last_buf.has_alias();
             let cur_had_alias = cur.has_alias();
             let merged = last_buf.merge_terms(*cur, &mut helper);
             if merged && (last_had_alias || cur_had_alias) {
@@ -1588,7 +1600,7 @@ impl AtomView<'_> {
         }
 
         if cur_len == 0 {
-            out.set_from_view(&last_buf.as_view());
+            std::mem::swap(out, &mut last_buf);
         } else {
             let v = last_buf.as_view();
             if let AtomView::Num(n) = v {
@@ -1607,7 +1619,7 @@ impl AtomView<'_> {
                 } else if cur_len == 1 {
                     // downgrade
                     last_buf.set_from_view(&out_add.to_add_view().to_slice().get(0));
-                    out.set_from_view(&last_buf.as_view());
+                    std::mem::swap(out, &mut last_buf);
                 } else {
                     out_add.set_normalized(true);
                 }
@@ -2252,10 +2264,10 @@ impl AtomView<'_> {
             } else if a.get_nargs() == 1 {
                 let mut b = ws.new_atom();
                 b.set_from_view(&a.to_add_view().iter().next().unwrap());
-                out.set_from_view(&b.as_view());
+                std::mem::swap(out, &mut b);
             } else if second_pass {
                 out.as_view().normalize(ws, &mut helper);
-                out.set_from_view(&helper.as_view());
+                std::mem::swap(out, &mut helper);
             } else {
                 a.set_normalized(true);
             }
@@ -2364,10 +2376,10 @@ impl AtomView<'_> {
             if a.get_nargs() == 1 {
                 let mut b = ws.new_atom();
                 b.set_from_view(&a.to_add_view().iter().next().unwrap());
-                out.set_from_view(&b.as_view());
+                std::mem::swap(out, &mut b);
             } else if second_pass {
                 out.as_view().normalize(ws, &mut helper);
-                out.set_from_view(&helper.as_view());
+                std::mem::swap(out, &mut helper);
             } else {
                 a.set_normalized(true);
             }
@@ -2544,12 +2556,12 @@ impl AtomView<'_> {
         }
 
         if cur_len == 0 {
-            out.set_from_view(&last_buf.as_view());
+            std::mem::swap(out, &mut last_buf);
         } else {
             if second_pass {
                 out_add.extend(last_buf.as_view());
                 out.as_view().normalize(ws, &mut helper);
-                out.set_from_view(&helper.as_view());
+                std::mem::swap(out, &mut helper);
                 return;
             }
 
@@ -2569,7 +2581,7 @@ impl AtomView<'_> {
                     out_add.set_normalized(true);
                 } else if cur_len == 1 {
                     last_buf.set_from_view(&out_add.to_add_view().to_slice().get(0));
-                    out.set_from_view(&last_buf.as_view());
+                    std::mem::swap(out, &mut last_buf);
                 } else {
                     out_add.set_normalized(true);
                 }
@@ -2862,6 +2874,136 @@ mod test {
             assert_eq!(out, parse!("2*2^(1/2)"));
             assert!(!out.as_view().needs_normalization());
         });
+    }
+
+    #[test]
+    fn product_normalization_borrows_nested_canonical_products() {
+        let x = parse!("borrow_product_x");
+        let y = parse!("borrow_product_y");
+        let product = &x * &y;
+        // Mul::extend normally flattens products before normalization. Lists
+        // use the same header layout, so retain this nested product in a raw
+        // dirty Mul to exercise normalization's canonical-parent borrowing.
+        let mut list = crate::atom::Add::new();
+        list.extend(product.as_view());
+        list.extend(x.pow(-1).as_view());
+        let mut data = list.into_raw();
+        data[0] = (data[0] & !0b111) | 4; // Replace Add's kind with Mul's kind.
+        let dirty = unsafe { Atom::from_raw(data) };
+        let AtomView::Mul(outer) = dirty.as_view() else {
+            unreachable!()
+        };
+        assert!(matches!(outer.iter().next(), Some(AtomView::Mul(_))));
+        Workspace::get_local().with(|ws| {
+            let mut out = Atom::num(42);
+            dirty.as_view().normalize(ws, &mut out);
+            assert_eq!(out, y);
+            assert!(!out.as_view().needs_normalization());
+        });
+    }
+
+    #[test]
+    fn product_normalization_moves_finished_buffers() {
+        let x = parse!("move_product_x");
+        let y = parse!("move_product_y");
+        let root_two = parse!("2^(1/2)");
+        let root_product = parse!("(move_product_x*move_product_y)^(1/2)");
+        let mut dirty_product = Atom::new();
+        let mul = dirty_product.to_mul();
+        mul.extend(x.as_view());
+        mul.extend(y.as_view());
+        let cases = [
+            (Vec::new(), Atom::num(1)),
+            (vec![x.clone()], x.clone()),
+            (vec![x.clone(), Atom::num(1)], x.clone()),
+            (vec![x.clone(), x.pow(-1)], Atom::num(1)),
+            (vec![x.clone(), y.clone(), y.pow(-1)], x.clone()),
+            (vec![Atom::num(0), x.clone()], Atom::num(0)),
+            (vec![root_two.clone(), root_two.clone()], Atom::num(2)),
+            (vec![x.clone(), root_two.clone(), root_two], &x * 2),
+            (vec![root_product.clone(), root_product], &x * &y),
+            (vec![&x * &y, x.pow(-1)], y.clone()),
+            (vec![dirty_product, x.pow(-1)], y.clone()),
+            (vec![x.clone(); 24], x.pow(24)),
+        ];
+        Workspace::get_local().with(|ws| {
+            let mut out = parse!("move_old_output(a,b,c)");
+            for (factors, expected) in cases {
+                // Exercise both inline and heap factor storage, including
+                // second passes and downgrades to a single surviving factor.
+                for shift in 0..factors.len().max(1) {
+                    let mut dirty = Atom::new();
+                    let mul = dirty.to_mul();
+                    for factor in factors[shift..].iter().chain(&factors[..shift]) {
+                        mul.extend(factor.as_view());
+                    }
+                    dirty.as_view().normalize(ws, &mut out);
+                    assert_eq!(out, expected);
+                    assert!(!out.as_view().needs_normalization());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn product_normalization_moves_alias_ownership() {
+        use std::sync::Arc;
+
+        for opaque in [false, true] {
+            let handle = crate::alias::register_alias_atom(parse!("move_alias_body(x)"));
+            let weak = Arc::downgrade(&handle);
+            let alias = if opaque {
+                handle.to_opaque_atom()
+            } else {
+                handle.to_atom()
+            };
+            let y = parse!("move_alias_y");
+            let mut canonical = Atom::new();
+            let mul = canonical.to_mul();
+            mul.extend(y.as_view());
+            mul.extend(alias.as_view());
+            canonical.set_normalized(true);
+            // The transparent parent alias prevents Mul::extend from flattening
+            // the product before normalize_mul can borrow its canonical body.
+            let parent_handle = crate::alias::register_alias_atom(canonical);
+            let parent_weak = Arc::downgrade(&parent_handle);
+            let parent = parent_handle.to_atom();
+            let mut dirty = Atom::new();
+            let mul = dirty.to_mul();
+            mul.extend(parent.as_view());
+            mul.extend(y.pow(-1).as_view());
+            drop(parent);
+            drop(parent_handle);
+            drop(alias);
+            drop(handle);
+
+            Workspace::get_local().with(|ws| {
+                let old = crate::alias::register_alias_atom(parse!("move_alias_old(x)"));
+                let old_weak = Arc::downgrade(&old);
+                let mut out = crate::function!(crate::symbol!("move_alias_parent"), old.to_atom());
+                drop(old);
+                dirty.as_view().normalize(ws, &mut out);
+                drop(dirty);
+                assert!(parent_weak.upgrade().is_none());
+                assert!(old_weak.upgrade().is_none());
+                assert!(weak.upgrade().is_some());
+                assert!(out.as_view().has_alias());
+                assert!(!out.as_view().needs_normalization());
+                let AtomView::Alias(result) = out.as_view() else {
+                    panic!("the surviving child alias should remain an alias");
+                };
+                assert_eq!(result.is_opaque(), opaque);
+                assert_eq!(result.get_body(), parse!("move_alias_body(x)").as_view());
+                eprintln!("opaque={opaque}, before drop: {}", weak.strong_count());
+                drop(out);
+                eprintln!("after drop: {}", weak.strong_count());
+                let pooled: Vec<_> = (0..30).map(|_| ws.new_atom().into_inner()).collect();
+                eprintln!("pooled aliases: {:?}", pooled.iter().filter(|a| a.has_alias()).collect::<Vec<_>>());
+                drop(pooled);
+                eprintln!("after pool: {}", weak.strong_count());
+                assert!(weak.upgrade().is_none());
+            });
+        }
     }
 
     #[test]

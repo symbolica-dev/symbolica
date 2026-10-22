@@ -1285,6 +1285,20 @@ impl Atom {
         }
     }
 
+    /// Check subtree alias flags without constructing a borrowed view.
+    #[inline(always)]
+    pub(crate) fn has_alias(&self) -> bool {
+        let data = match self {
+            Atom::Num(_) | Atom::Var(_) | Atom::Zero => return false,
+            Atom::Alias(_) => return true,
+            Atom::Fun(f) => &f.data,
+            Atom::Mul(m) => &m.data,
+            Atom::Add(a) => &a.data,
+            Atom::Pow(p) => &p.data,
+        };
+        data[0] & HAS_ALIAS_FLAG != 0
+    }
+
     #[inline]
     pub(crate) fn clear_alias_handles(&mut self) {
         let data = match self {
@@ -1989,12 +2003,18 @@ impl Mul {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Mul {
-        buffer.clear();
-        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
-        buffer.extend_from_slice(&[MUL_ID | NOT_NORMALIZED, 0x11, 0, 0]);
+    pub(crate) fn new_into(buffer: RawAtom) -> Mul {
+        let mut value = Mul { data: buffer };
+        value.clear();
+        value
+    }
 
-        Mul { data: buffer }
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        self.data
+            .extend_from_slice(&[MUL_ID | NOT_NORMALIZED, 0x11, 0, 0]);
     }
 
     #[inline]
@@ -2188,11 +2208,18 @@ impl Add {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Add {
-        buffer.clear();
+    pub(crate) fn new_into(buffer: RawAtom) -> Add {
+        let mut value = Add { data: buffer };
+        value.clear();
+        value
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
         // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
-        buffer.extend_from_slice(&[ADD_ID | NOT_NORMALIZED, 0x11, 0, 0]);
-        Add { data: buffer }
+        self.data
+            .extend_from_slice(&[ADD_ID | NOT_NORMALIZED, 0x11, 0, 0]);
     }
 
     #[inline]
@@ -3885,6 +3912,7 @@ mod tests {
             parse!("x^2"),
         ] {
             assert!(!atom.as_view().has_alias(), "{atom}");
+            assert_eq!(atom.has_alias(), atom.as_view().has_alias(), "{atom}");
             let mut copied = atom.clone();
             copied.clear_alias_handles();
             assert_eq!(copied, atom);
@@ -3892,6 +3920,20 @@ mod tests {
         for opaque in [false, true] {
             let mut alias = x.alias(opaque);
             assert!(alias.as_view().has_alias());
+            assert_eq!(alias.has_alias(), alias.as_view().has_alias());
+            for kind in 0..4 {
+                let mut parent = Atom::new();
+                match kind {
+                    0 => parent.to_fun(linear).add_arg(alias.as_view()),
+                    1 => {
+                        parent.to_pow(alias.as_view(), InlineNum::new(2, 1).as_view());
+                    }
+                    2 => parent.to_mul().extend(alias.as_view()),
+                    _ => parent.to_add().extend(alias.as_view()),
+                }
+                assert!(parent.has_alias(), "kind {kind}, opaque {opaque}");
+                assert_eq!(parent.has_alias(), parent.as_view().has_alias());
+            }
             alias.clear_alias_handles();
             assert_eq!(alias.inline_aliases(true), x);
         }
