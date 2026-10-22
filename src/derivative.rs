@@ -13,7 +13,7 @@ use crate::{
     id::Pattern,
     poly::{
         PolyVariable,
-        series::{Series, SeriesDepth, SeriesError},
+        series::{Series, SeriesContext, SeriesDepth, SeriesError, SeriesSettings},
     },
     state::Workspace,
 };
@@ -380,6 +380,17 @@ impl AtomView<'_> {
         expansion_point: AtomView,
         depth: SeriesDepth,
     ) -> Result<Series<AtomField>, SeriesError> {
+        self.series_with_settings(x, expansion_point, depth, &SeriesSettings::default())
+    }
+
+    pub(crate) fn series_with_settings(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        depth: SeriesDepth,
+        settings: &SeriesSettings,
+    ) -> Result<Series<AtomField>, SeriesError> {
+        let mut context = SeriesContext::new(settings);
         let order = depth.order();
         if !depth.is_absolute() && (order.is_negative() || order.is_zero()) {
             return Err(SeriesError::NonPositiveRelativeDepth { depth });
@@ -400,20 +411,24 @@ impl AtomView<'_> {
         };
 
         loop {
-            let info = Series::new(
+            let info = Series::try_new(
                 &field,
                 None,
                 Arc::new(x.clone().into()),
                 expansion_point.to_owned(),
                 &current_depth + &(1.into(), current_depth.denominator()).into(),
-            );
+                context.settings(),
+            )?;
 
-            let mut series = self.series_impl(x, expansion_point, &info)?;
+            let mut series = self.series_impl_checked(x, expansion_point, &info, &mut context)?;
             if !depth.is_absolute() && series.relative_order() >= *order {
-                series.truncate_relative_order(order.clone());
+                series.try_truncate_relative_order(order.clone(), context.settings())?;
                 break Ok(series);
             } else if depth.is_absolute() && series.absolute_order() > *order {
-                series.truncate_absolute_order(order + &(1.into(), order.denominator()).into());
+                series.try_truncate_absolute_order(
+                    order + &(1.into(), order.denominator()).into(),
+                    context.settings(),
+                )?;
                 break Ok(series);
             } else {
                 // An empty truncation alone does not prove the input zero.
@@ -433,37 +448,41 @@ impl AtomView<'_> {
                 }
                 // increase the expansion depth
                 // TODO: find better heuristic
+                context.retry()?;
                 current_depth = &current_depth * &2.into();
             }
         }
     }
 
     /// Series expand in `x` around `expansion_point` to depth `depth`.
-    pub(crate) fn series_impl(
+    pub(crate) fn series_impl_checked(
         &self,
         x: &Indeterminate,
         expansion_point: AtomView,
         info: &Series<AtomField>,
+        context: &mut SeriesContext<'_>,
     ) -> Result<Series<AtomField>, SeriesError> {
         if !self.contains_indeterminate(x) {
-            return Ok(info.constant(self.to_owned()));
+            return info.try_constant(self.to_owned(), context.settings());
         }
 
         if *x == *self {
-            return Ok(info.shifted_variable(expansion_point.to_owned()));
+            return info.try_shifted_variable(expansion_point.to_owned(), context.settings());
         }
 
         // TODO: optimize, appending a monomial using addition is slow
         match self {
-            AtomView::Num(_) | AtomView::Var(_) => Ok(info.constant(self.to_owned())),
+            AtomView::Num(_) | AtomView::Var(_) => {
+                info.try_constant(self.to_owned(), context.settings())
+            }
             AtomView::Fun(f) => {
                 let mut args_series = Vec::with_capacity(f.get_nargs());
                 for arg in f {
-                    args_series.push(arg.series_impl(x, expansion_point, info)?);
+                    args_series.push(arg.series_impl_checked(x, expansion_point, info, context)?);
                 }
 
                 if args_series.is_empty() {
-                    return Ok(info.constant(f.to_owned().into()));
+                    return info.try_constant(f.to_owned().into(), context.settings());
                 }
 
                 let symbol = f.get_symbol();
@@ -489,26 +508,35 @@ impl AtomView<'_> {
                     let a = f_eval.finish();
 
                     if !matches!(a, Atom::Fun(_)) {
-                        return a.as_view().series_impl(x, expansion_point, info);
+                        return a
+                            .as_view()
+                            .series_impl_checked(x, expansion_point, info, context);
                     }
                 }
 
                 match f.get_symbol_id() {
-                    Symbol::COS_ID => args_series[0].cos(),
-                    Symbol::SIN_ID => args_series[0].sin(),
-                    Symbol::LOG_ID => args_series[0].log(),
+                    Symbol::COS_ID => args_series[0].cos_with_settings(context.settings()),
+                    Symbol::SIN_ID => args_series[0].sin_with_settings(context.settings()),
+                    Symbol::LOG_ID => args_series[0].log_with_settings(context.settings()),
                     _ => {
                         if let Some(custom_series) = &f.get_symbol().get_series_function()
                             && let Some((singular, regularized)) = custom_series(&args_series)
                         {
-                            let singular_series =
-                                singular.as_view().series_impl(x, expansion_point, info)?;
+                            let singular_series = singular.as_view().series_impl_checked(
+                                x,
+                                expansion_point,
+                                info,
+                                context,
+                            )?;
                             // TODO: expand deeper?
-                            let regularized_series =
-                                regularized
-                                    .as_view()
-                                    .series_impl(x, expansion_point, info)?;
-                            return Ok(&singular_series * &regularized_series);
+                            let regularized_series = regularized.as_view().series_impl_checked(
+                                x,
+                                expansion_point,
+                                info,
+                                context,
+                            )?;
+                            return singular_series
+                                .try_mul(&regularized_series, context.settings());
                         }
 
                         // TODO: also check for log(x)
@@ -533,10 +561,14 @@ impl AtomView<'_> {
 
                         // TODO: depth is an overestimate
                         let order = info.absolute_order();
-                        let depth = order.numerator().to_i64().unwrap() as u32
-                            * order.denominator().to_i64().unwrap() as u32;
+                        let depth = (order.numerator() * order.denominator())
+                            .to_i64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or(SeriesError::IndexOverflow {
+                                operation: "generic-function Taylor derivative count",
+                            })?;
 
-                        let mut result = info.constant(constant.clone());
+                        let mut result = info.try_constant(constant.clone(), context.settings())?;
 
                         // TODO: do not allow series expansion in IF if it is not a constant!
 
@@ -553,11 +585,11 @@ impl AtomView<'_> {
                                 .replace(Pattern::Literal(Atom::from(x.clone())))
                                 .with(Pattern::Literal(expansion_point.to_owned()));
 
-                            result = &result
-                                + &info
-                                    .monomial(info.get_field().one(), i.into())
-                                    .mul_coeff(&rep)
-                                    .div_coeff(&Atom::num(Integer::factorial(i)));
+                            let term = info
+                                .try_monomial(info.get_field().one(), i.into(), context.settings())?
+                                .mul_coeff(&rep)
+                                .div_coeff(&Atom::num(Integer::factorial(i)));
+                            result = result.try_add(&term, context.settings())?;
                         }
 
                         Ok(result)
@@ -567,7 +599,8 @@ impl AtomView<'_> {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
-                let mut base_series = base.series_impl(x, expansion_point, info)?;
+                let mut base_series =
+                    base.series_impl_checked(x, expansion_point, info, context)?;
 
                 if let AtomView::Num(n) = exp {
                     if let CoefficientView::Natural(n, d, ni, _) = n.get_coeff_view() {
@@ -587,46 +620,64 @@ impl AtomView<'_> {
                             // Unresolved function coefficients must survive.
                             base_series.normalize_trailing_coefficient();
                             while base_series.is_zero() && current_depth < 1000 {
+                                context.retry()?;
                                 current_depth = &current_depth * &2.into();
-                                let info = Series::new(
+                                let info = Series::try_new(
                                     info.get_field(),
                                     None,
                                     info.get_variable().clone(),
                                     info.get_expansion_point().clone(),
                                     &current_depth
                                         + &(1.into(), current_depth.denominator()).into(),
-                                );
+                                    context.settings(),
+                                )?;
 
-                                base_series = base.series_impl(x, expansion_point, &info)?;
+                                base_series =
+                                    base.series_impl_checked(x, expansion_point, &info, context)?;
                                 base_series.normalize_trailing_coefficient();
+                            }
+                            if base_series.is_zero() {
+                                return Err(SeriesError::UnresolvedInverseLeadingCoefficient {
+                                    expression: base.to_owned(),
+                                    relative_depth: current_depth,
+                                    heuristic_limit: 1000,
+                                });
                             }
                         }
 
-                        base_series.rpow((n, d).into())
+                        base_series.rpow_with_settings((n, d).into(), context.settings())
                     } else {
                         Err(SeriesError::UnsupportedLargeExponent {
                             expression: self.to_owned(),
                         })
                     }
                 } else {
-                    let e = exp.series_impl(x, expansion_point, info)?;
-                    base_series.pow(&e)
+                    let e = exp.series_impl_checked(x, expansion_point, info, context)?;
+                    base_series.pow_with_settings(&e, context.settings())
                 }
             }
             AtomView::Mul(args) => {
                 let mut iter = args.iter();
-                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
+                let mut series =
+                    iter.next()
+                        .unwrap()
+                        .series_impl_checked(x, expansion_point, info, context)?;
                 for arg in iter {
-                    series = &series * &arg.series_impl(x, expansion_point, info)?;
+                    let next = arg.series_impl_checked(x, expansion_point, info, context)?;
+                    series = series.try_mul(&next, context.settings())?;
                 }
 
                 Ok(series)
             }
             AtomView::Add(args) => {
                 let mut iter = args.iter();
-                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
+                let mut series =
+                    iter.next()
+                        .unwrap()
+                        .series_impl_checked(x, expansion_point, info, context)?;
                 for arg in iter {
-                    series = &series + &arg.series_impl(x, expansion_point, info)?;
+                    let next = arg.series_impl_checked(x, expansion_point, info, context)?;
+                    series = series.try_add(&next, context.settings())?;
                 }
 
                 Ok(series)
@@ -663,6 +714,8 @@ impl Mul<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn mul(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
+        let settings = SeriesSettings::default();
+        let mut context = SeriesContext::new(&settings);
         let x = match self.get_variable().as_ref() {
             PolyVariable::Symbol(x) => Indeterminate::from(*x),
             PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
@@ -685,22 +738,27 @@ impl Mul<&Atom> for &Series<AtomField> {
         }
 
         loop {
-            let info = Series::new(
+            let info = Series::try_new(
                 self.get_field(),
                 None,
                 self.get_variable().clone(),
                 expansion_point.to_owned(),
                 current_depth.clone(),
-            );
+                context.settings(),
+            )?;
 
-            let series = rhs
-                .as_view()
-                .series_impl(&x, expansion_point.as_view(), &info)?
-                * self;
+            let rhs = rhs.as_view().series_impl_checked(
+                &x,
+                expansion_point.as_view(),
+                &info,
+                &mut context,
+            )?;
+            let series = rhs.try_mul(self, context.settings())?;
             if series.relative_order() >= self.relative_order() {
                 return Ok(series);
             } else {
                 // increase the expansion depth
+                context.retry()?;
                 current_depth = &current_depth * &2.into();
             }
         }
@@ -735,6 +793,8 @@ impl Add<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn add(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
+        let settings = SeriesSettings::default();
+        let mut context = SeriesContext::new(&settings);
         let x = match self.get_variable().as_ref() {
             PolyVariable::Symbol(x) => Indeterminate::from(*x),
             PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
@@ -757,22 +817,27 @@ impl Add<&Atom> for &Series<AtomField> {
         }
 
         loop {
-            let info = Series::new(
+            let info = Series::try_new(
                 self.get_field(),
                 None,
                 self.get_variable().clone(),
                 expansion_point.to_owned(),
                 current_depth.clone(),
-            );
+                context.settings(),
+            )?;
 
-            let series = rhs
-                .as_view()
-                .series_impl(&x, expansion_point.as_view(), &info)?
-                + self.clone();
+            let rhs = rhs.as_view().series_impl_checked(
+                &x,
+                expansion_point.as_view(),
+                &info,
+                &mut context,
+            )?;
+            let series = rhs.try_add(self, context.settings())?;
             if series.absolute_order() >= self.absolute_order() {
                 return Ok(series);
             } else {
                 // increase the expansion depth
+                context.retry()?;
                 current_depth = &current_depth * &2.into();
             }
         }
@@ -807,6 +872,8 @@ impl Div<&Atom> for &Series<AtomField> {
     type Output = Result<Series<AtomField>, SeriesError>;
 
     fn div(self, rhs: &Atom) -> Result<Series<AtomField>, SeriesError> {
+        let settings = SeriesSettings::default();
+        let mut context = SeriesContext::new(&settings);
         let x = match self.get_variable().as_ref() {
             PolyVariable::Symbol(x) => Indeterminate::from(*x),
             PolyVariable::Function(_, x) => Indeterminate::try_from(x.clone()).map_err(|_| {
@@ -829,22 +896,27 @@ impl Div<&Atom> for &Series<AtomField> {
         }
 
         loop {
-            let info = Series::new(
+            let info = Series::try_new(
                 self.get_field(),
                 None,
                 self.get_variable().clone(),
                 expansion_point.to_owned(),
                 current_depth.clone(),
-            );
+                context.settings(),
+            )?;
 
-            let series = self
-                / &rhs
-                    .as_view()
-                    .series_impl(&x, expansion_point.as_view(), &info)?;
+            let rhs = rhs.as_view().series_impl_checked(
+                &x,
+                expansion_point.as_view(),
+                &info,
+                &mut context,
+            )?;
+            let series = self.try_div(&rhs, context.settings())?;
             if series.relative_order() >= self.relative_order() {
                 return Ok(series);
             } else {
                 // increase the expansion depth
+                context.retry()?;
                 current_depth = &current_depth * &2.into();
             }
         }

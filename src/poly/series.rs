@@ -11,7 +11,6 @@
 //! println!("{}", out);
 //! assert_eq!(out.to_atom(), parse!("1/2*x+1/24*x^3"));
 //! ```
-use core::panic;
 use std::{
     cmp::Ordering,
     ops::{Add, Div, Mul, Neg, Sub},
@@ -35,6 +34,27 @@ use super::PolyVariable;
 /// Errors that can occur during series expansion.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SeriesError {
+    /// Operands do not share a field, indeterminate, and expansion point.
+    IncompatibleSeries,
+    /// A finite series index, exponent grid, or loop count cannot be represented.
+    IndexOverflow { operation: &'static str },
+    /// An explicit caller limit would be exceeded before an allocation or retry.
+    LimitExceeded {
+        resource: &'static str,
+        limit: usize,
+        requested: usize,
+    },
+    /// Reserving a checked coefficient vector failed.
+    AllocationFailed { requested: usize },
+    /// A prototype cannot have a negative relative precision.
+    NegativeOrder { order: Rational },
+    /// The existing inverse refinement heuristic ended without establishing a
+    /// nonzero leading coefficient. This does not establish a zero divisor.
+    UnresolvedInverseLeadingCoefficient {
+        expression: Atom,
+        relative_depth: Rational,
+        heuristic_limit: usize,
+    },
     /// The requested relative truncation depth is not positive.
     NonPositiveRelativeDepth {
         /// The rejected truncation depth.
@@ -77,6 +97,9 @@ pub enum SeriesError {
     },
     /// The logarithm requires a known nonzero leading coefficient.
     MissingLogCoefficient,
+    /// A zero remainder does not establish the positive absolute precision
+    /// needed to expand a regular function around its zero argument.
+    MissingFunctionCoefficient { function: Symbol },
     /// A coefficient treated as constant still depends on the expansion variable.
     ConstantTermDependsOnExpansionVariable {
         /// The function being expanded.
@@ -102,6 +125,34 @@ impl std::error::Error for SeriesError {}
 impl std::fmt::Display for SeriesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::IncompatibleSeries => {
+                f.write_str("series operands have different fields, variables, or expansion points")
+            }
+            Self::IndexOverflow { operation } => {
+                write!(f, "series index overflow during {operation}")
+            }
+            Self::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            } => write!(
+                f,
+                "series {resource} limit {limit} exceeded by request {requested}"
+            ),
+            Self::AllocationFailed { requested } => {
+                write!(f, "cannot allocate {requested} series coefficient slots")
+            }
+            Self::NegativeOrder { order } => {
+                write!(f, "series prototype order must be nonnegative, got {order}")
+            }
+            Self::UnresolvedInverseLeadingCoefficient {
+                expression,
+                relative_depth,
+                heuristic_limit,
+            } => write!(
+                f,
+                "could not establish a nonzero leading coefficient of inverse base {expression} by relative depth {relative_depth} under the existing native precision heuristic (limit {heuristic_limit}); this does not prove that the base is zero"
+            ),
             SeriesError::NonPositiveRelativeDepth { depth } => {
                 write!(f, "relative series depth must be positive, got {depth:?}")
             }
@@ -141,6 +192,10 @@ impl std::fmt::Display for SeriesError {
             SeriesError::MissingLogCoefficient => {
                 f.write_str("log argument needs to have a coefficient")
             }
+            Self::MissingFunctionCoefficient { function } => write!(
+                f,
+                "cannot establish a constant coefficient for {function} from a zero remainder without positive absolute precision"
+            ),
             SeriesError::ConstantTermDependsOnExpansionVariable {
                 function,
                 constant,
@@ -159,6 +214,114 @@ impl std::fmt::Display for SeriesError {
                 f.write_str("cannot invert series with a zero constant term")
             }
         }
+    }
+}
+
+/// Optional limits on native series containers and precision retries.
+///
+/// The default imposes no optional resource cap. Machine-size arithmetic is
+/// checked independently. Slots bound the requested length of each individual
+/// coefficient vector, not total live slots or allocator capacity. Coefficient
+/// algebra and registered callback internals, including library-provided
+/// callbacks, are outside these controls and are not subject to a process
+/// memory/time limit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeriesSettings {
+    max_coefficient_slots: Option<usize>,
+    max_ramification: Option<usize>,
+    max_precision_retries: Option<usize>,
+}
+
+impl SeriesSettings {
+    /// Maximum slots requested by one native coefficient container, if capped.
+    pub fn coefficient_slots_limit(&self) -> Option<usize> {
+        self.max_coefficient_slots
+    }
+
+    /// Maximum intermediate exponent-grid denominator, if capped.
+    pub fn ramification_limit(&self) -> Option<usize> {
+        self.max_ramification
+    }
+
+    /// Maximum precision retries shared by one expansion, if capped.
+    pub fn precision_retries_limit(&self) -> Option<usize> {
+        self.max_precision_retries
+    }
+
+    pub fn max_coefficient_slots(mut self, limit: impl Into<Option<usize>>) -> Self {
+        self.max_coefficient_slots = limit.into();
+        self
+    }
+
+    pub fn max_ramification(mut self, limit: impl Into<Option<usize>>) -> Self {
+        self.max_ramification = limit.into();
+        self
+    }
+
+    pub fn max_precision_retries(mut self, limit: impl Into<Option<usize>>) -> Self {
+        self.max_precision_retries = limit.into();
+        self
+    }
+
+    fn check(
+        &self,
+        resource: &'static str,
+        requested: usize,
+        limit: Option<usize>,
+    ) -> Result<(), SeriesError> {
+        if let Some(limit) = limit
+            && requested > limit
+        {
+            return Err(SeriesError::LimitExceeded {
+                resource,
+                limit,
+                requested,
+            });
+        }
+        Ok(())
+    }
+
+    fn slots(&self, requested: usize) -> Result<(), SeriesError> {
+        self.check("coefficient slots", requested, self.max_coefficient_slots)
+    }
+
+    fn ramification(&self, requested: usize) -> Result<(), SeriesError> {
+        self.check("ramification", requested, self.max_ramification)
+    }
+}
+
+/// One shared retry counter for the complete native expansion call.
+pub(crate) struct SeriesContext<'a> {
+    settings: &'a SeriesSettings,
+    retries: usize,
+}
+
+impl<'a> SeriesContext<'a> {
+    pub(crate) fn new(settings: &'a SeriesSettings) -> Self {
+        Self {
+            settings,
+            retries: 0,
+        }
+    }
+
+    pub(crate) fn settings(&self) -> &'a SeriesSettings {
+        self.settings
+    }
+
+    pub(crate) fn retry(&mut self) -> Result<(), SeriesError> {
+        let requested = self
+            .retries
+            .checked_add(1)
+            .ok_or(SeriesError::IndexOverflow {
+                operation: "precision retries",
+            })?;
+        self.settings.check(
+            "precision retries",
+            requested,
+            self.settings.max_precision_retries,
+        )?;
+        self.retries = requested;
+        Ok(())
     }
 }
 
@@ -265,19 +428,147 @@ impl<F: Ring> Series<F> {
         expansion_point: F::Element,
         order: Rational,
     ) -> Self {
-        if order.is_negative() {
-            panic!("The order of the series must be positive.");
-        }
+        Self::try_new(
+            field,
+            cap,
+            variable,
+            expansion_point,
+            order,
+            &SeriesSettings::default(),
+        )
+        .expect("invalid series prototype")
+    }
 
-        Self {
-            coefficients: Vec::with_capacity(cap.unwrap_or(0)),
+    /// Fallible prototype construction with checked finite native geometry.
+    pub fn try_new(
+        field: &F,
+        cap: Option<usize>,
+        variable: Arc<PolyVariable>,
+        expansion_point: F::Element,
+        order: Rational,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        if order.is_negative() {
+            return Err(SeriesError::NegativeOrder { order });
+        }
+        let order_units = Self::unsigned(order.numerator_ref(), "prototype order")?;
+        if order_units == i64::MAX as usize {
+            return Err(SeriesError::IndexOverflow {
+                operation: "finite prototype order",
+            });
+        }
+        let ramification = Self::unsigned(order.denominator_ref(), "prototype ramification")?;
+        let mut result = Self {
+            coefficients: Vec::new(),
             expansion_point,
             field: field.clone(),
             variable,
             shift: 0,
-            order: order.numerator().to_i64().unwrap() as usize,
-            ramification: order.denominator().to_i64().unwrap() as usize,
+            order: order_units,
+            ramification,
+        };
+        result.check_geometry(settings)?;
+        Self::reserve(&mut result.coefficients, cap.unwrap_or(0), settings)?;
+        Ok(result)
+    }
+
+    fn unsigned(value: &Integer, operation: &'static str) -> Result<usize, SeriesError> {
+        value
+            .to_i64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(SeriesError::IndexOverflow { operation })
+    }
+
+    fn signed(value: &Integer, operation: &'static str) -> Result<isize, SeriesError> {
+        value
+            .to_i64()
+            .and_then(|value| isize::try_from(value).ok())
+            .ok_or(SeriesError::IndexOverflow { operation })
+    }
+
+    fn reserve(
+        values: &mut Vec<F::Element>,
+        length: usize,
+        settings: &SeriesSettings,
+    ) -> Result<(), SeriesError> {
+        settings.slots(length)?;
+        if length > isize::MAX as usize / std::mem::size_of::<F::Element>().max(1) {
+            return Err(SeriesError::IndexOverflow {
+                operation: "coefficient allocation",
+            });
         }
+        if length > values.len() {
+            values
+                .try_reserve_exact(length - values.len())
+                .map_err(|_| SeriesError::AllocationFailed { requested: length })?;
+        }
+        Ok(())
+    }
+
+    fn resize(
+        &self,
+        values: &mut Vec<F::Element>,
+        length: usize,
+        settings: &SeriesSettings,
+    ) -> Result<(), SeriesError> {
+        Self::reserve(values, length, settings)?;
+        values.resize(length, self.field.zero());
+        Ok(())
+    }
+
+    fn check_geometry(&self, settings: &SeriesSettings) -> Result<(), SeriesError> {
+        if self.ramification == 0
+            || self.ramification > i64::MAX as usize
+            || self.order > i64::MAX as usize
+        {
+            return Err(SeriesError::IndexOverflow {
+                operation: "series geometry",
+            });
+        }
+        settings.ramification(self.ramification)?;
+        settings.slots(self.coefficients.len())?;
+        // i64::MAX is the existing internal infinite-precision sentinel. Its
+        // order is combined with a finite operand before publication/access.
+        if self.order != i64::MAX as usize {
+            let order = isize::try_from(self.order).map_err(|_| SeriesError::IndexOverflow {
+                operation: "precision units",
+            })?;
+            self.shift
+                .checked_add(order)
+                .ok_or(SeriesError::IndexOverflow {
+                    operation: "absolute precision",
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Clone the coefficient container through its checked allocation boundary.
+    pub fn try_clone(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        let mut coefficients = Vec::new();
+        Self::reserve(&mut coefficients, self.coefficients.len(), settings)?;
+        coefficients.extend(self.coefficients.iter().cloned());
+        Ok(Self {
+            coefficients,
+            variable: self.variable.clone(),
+            expansion_point: self.expansion_point.clone(),
+            field: self.field.clone(),
+            shift: self.shift,
+            order: self.order,
+            ramification: self.ramification,
+        })
+    }
+
+    fn rescaled_order(order: usize, ratio: usize) -> Result<usize, SeriesError> {
+        if order == i64::MAX as usize {
+            return Ok(order);
+        }
+        order
+            .checked_mul(ratio)
+            .filter(|&value| value < i64::MAX as usize)
+            .ok_or(SeriesError::IndexOverflow {
+                operation: "rescaled precision",
+            })
     }
 
     /// Constructs a finite-precision zero series, inheriting the field and variable from `self`.
@@ -298,84 +589,103 @@ impl<F: Ring> Series<F> {
     /// inheriting the field and variable from `self`.
     #[inline]
     pub fn constant(&self, coeff: F::Element) -> Self {
-        if self.field.is_zero(&coeff) {
-            return self.zero();
-        }
+        self.try_constant(coeff, &SeriesSettings::default())
+            .expect("invalid constant series")
+    }
 
-        Self {
-            coefficients: vec![coeff],
+    pub fn try_constant(
+        &self,
+        coeff: F::Element,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if self.field.is_zero(&coeff) {
+            return Ok(self.zero());
+        }
+        let mut coefficients = Vec::new();
+        Self::reserve(&mut coefficients, 1, settings)?;
+        coefficients.push(coeff);
+        Ok(Self {
+            coefficients,
             field: self.field.clone(),
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
             shift: 0,
             order: self.order,
             ramification: self.ramification,
-        }
+        })
     }
 
     /// Constructs a finite-precision series that is one, inheriting the field and variable from `self`.
     #[inline]
     pub fn one(&self) -> Self {
-        Self {
-            coefficients: vec![self.field.one()],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: 0,
-            order: self.order,
-            ramification: self.ramification,
-        }
+        self.constant(self.field.one())
     }
 
     /// Constructs a series that is one with infinite digits.
     /// Must be added or multiplied with another finite series.
     #[inline]
-    fn one_inf_prec(&self) -> Self {
-        Self {
-            coefficients: vec![self.field.one()],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: 0,
-            order: i64::MAX as usize, // considered infinity
-            ramification: 1,
-        }
+    fn try_one_inf_prec(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        let mut result = self.try_constant(self.field.one(), settings)?;
+        result.order = i64::MAX as usize;
+        result.ramification = 1;
+        Ok(result)
     }
 
     /// Constructs a series with a single term.
     #[inline]
     pub fn monomial(&self, coeff: F::Element, exponent: Rational) -> Self {
+        self.try_monomial(coeff, exponent, &SeriesSettings::default())
+            .expect("invalid monomial series")
+    }
+
+    pub fn try_monomial(
+        &self,
+        coeff: F::Element,
+        exponent: Rational,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
         if self.field.is_zero(&coeff) {
-            return self.zero();
+            return Ok(self.zero());
         }
-
-        let n = exponent.numerator().to_i64().unwrap() as isize;
-        let d = exponent.denominator().to_i64().unwrap() as usize;
-
-        let ram = Integer::from(self.ramification as i64)
-            .lcm(exponent.denominator_ref())
-            .to_i64()
-            .unwrap() as usize;
-
-        Self {
-            coefficients: vec![coeff],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: n * (ram / d) as isize,
-            order: self.order * (ram / self.ramification),
-            ramification: ram,
-        }
+        let ram = Self::unsigned(
+            &Integer::from(self.ramification).lcm(exponent.denominator_ref()),
+            "monomial ramification",
+        )?;
+        settings.ramification(ram)?;
+        let shift = Self::signed(
+            &(exponent.numerator_ref() * (Integer::from(ram) / exponent.denominator_ref())),
+            "monomial shift",
+        )?;
+        let order = Self::rescaled_order(self.order, ram / self.ramification)?;
+        let mut result = self.try_constant(coeff, settings)?;
+        result.shift = shift;
+        result.order = order;
+        result.ramification = ram;
+        result.check_geometry(settings)?;
+        Ok(result)
     }
 
     /// Constructs a series that is `x+a`, where `a` is a constant.
     #[inline]
     pub fn shifted_variable(&self, coeff: F::Element) -> Self {
-        if self.field.is_zero(&coeff) {
-            return self.monomial(self.field.one(), (1, 1).into());
-        }
+        self.try_shifted_variable(coeff, &SeriesSettings::default())
+            .expect("invalid shifted series variable")
+    }
 
-        self.constant(coeff) + self.monomial(self.field.one(), (1, 1).into())
+    pub fn try_shifted_variable(
+        &self,
+        coeff: F::Element,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        if self.field.is_zero(&coeff) {
+            return self.try_monomial(self.field.one(), (1, 1).into(), settings);
+        }
+        self.try_constant(coeff, settings)?.try_add(
+            &self.try_monomial(self.field.one(), (1, 1).into(), settings)?,
+            settings,
+        )
     }
 
     /// Get the field of the series coefficients.
@@ -395,15 +705,17 @@ impl<F: Ring> Series<F> {
         (Rational::from(index as i64) + Rational::from(shift as i64)) / Rational::from(ram as i64)
     }
 
-    // Map a power to an index in the coefficient array.
-    #[inline]
-    fn get_index(&self, p: Rational) -> usize {
+    fn try_index(&self, p: Rational) -> Result<usize, SeriesError> {
         let r = p * &Rational::from(self.ramification as i64);
-        debug_assert!(r.is_integer());
-
-        let i = r.numerator().to_i64().unwrap() - self.shift as i64;
-        debug_assert!(i >= 0);
-        i as usize
+        if !r.is_integer() {
+            return Err(SeriesError::IndexOverflow {
+                operation: "coefficient grid alignment",
+            });
+        }
+        Self::unsigned(
+            &(r.numerator_ref() - Integer::from(self.shift)),
+            "coefficient index",
+        )
     }
 
     /// Get the relative order of the series expansion.
@@ -430,59 +742,104 @@ impl<F: Ring> Series<F> {
         self.expansion_point.clone()
     }
 
-    fn change_ramification(&mut self, ram: usize) {
-        let ram = Integer::from(self.ramification as i64)
-            .lcm(&Integer::from(ram as i64))
-            .to_i64()
-            .unwrap() as usize;
+    fn try_change_ramification(
+        &mut self,
+        ram: usize,
+        settings: &SeriesSettings,
+    ) -> Result<(), SeriesError> {
+        self.check_geometry(settings)?;
+        let ram = Self::unsigned(
+            &Integer::from(self.ramification).lcm(&Integer::from(ram)),
+            "combined ramification",
+        )?;
+        settings.ramification(ram)?;
 
         if ram == self.ramification {
-            return;
+            return Ok(());
         }
-
+        let ratio = ram / self.ramification;
+        let shift = self
+            .shift
+            .checked_mul(
+                isize::try_from(ratio).map_err(|_| SeriesError::IndexOverflow {
+                    operation: "ramification ratio",
+                })?,
+            )
+            .ok_or(SeriesError::IndexOverflow {
+                operation: "rescaled shift",
+            })?;
+        let order = Self::rescaled_order(self.order, ratio)?;
+        let length =
+            self.coefficients
+                .len()
+                .checked_mul(ratio)
+                .ok_or(SeriesError::IndexOverflow {
+                    operation: "rescaled coefficient length",
+                })?;
         let mut s = Self {
-            coefficients: vec![
-                self.field.zero();
-                self.coefficients.len() * ram / self.ramification
-            ],
+            coefficients: Vec::new(),
             field: self.field.clone(),
             variable: self.variable.clone(),
             expansion_point: self.expansion_point.clone(),
-            shift: self.shift * (ram / self.ramification) as isize,
-            order: self.order * (ram / self.ramification),
+            shift,
+            order,
             ramification: ram,
         };
+        s.check_geometry(settings)?;
+        self.resize(&mut s.coefficients, length, settings)?;
 
         for (i, c) in std::mem::take(&mut self.coefficients)
             .into_iter()
             .enumerate()
         {
-            let index = s.get_index(self.get_exponent(i));
+            let index = i.checked_mul(ratio).ok_or(SeriesError::IndexOverflow {
+                operation: "rescaled coefficient index",
+            })?;
             s.coefficients[index] = c;
         }
 
         *self = s;
+        Ok(())
     }
 
     /// Truncate the series to the desired relative order.
     /// If the new order is larger, nothing happens.
     #[inline]
     pub fn truncate_relative_order(&mut self, order: Rational) {
+        self.try_truncate_relative_order(order, &SeriesSettings::default())
+            .expect("invalid relative series truncation")
+    }
+
+    pub fn try_truncate_relative_order(
+        &mut self,
+        order: Rational,
+        settings: &SeriesSettings,
+    ) -> Result<(), SeriesError> {
+        self.check_geometry(settings)?;
         if self.relative_order() < order {
-            return;
+            return Ok(());
         }
 
         if order.is_negative() {
-            panic!("Cannot series expand to negative depth");
+            return Err(SeriesError::NegativeOrder { order });
         }
 
-        let ram = order.denominator().to_i64().unwrap() as usize;
-        self.change_ramification(ram);
-        let new_order = (order.numerator().to_i64().unwrap() as usize) * self.ramification / ram;
+        let ram = Self::unsigned(order.denominator_ref(), "truncation ramification")?;
+        self.try_change_ramification(ram, settings)?;
+        let new_order = Self::unsigned(
+            &(order.numerator_ref() * Integer::from(self.ramification / ram)),
+            "relative truncation precision",
+        )?;
+        if new_order >= i64::MAX as usize {
+            return Err(SeriesError::IndexOverflow {
+                operation: "relative truncation precision",
+            });
+        }
 
         self.coefficients.truncate(new_order);
         self.order = new_order;
         self.truncate();
+        self.check_geometry(settings)
     }
 
     /// Truncate the series to the desired absolute order.
@@ -490,11 +847,24 @@ impl<F: Ring> Series<F> {
     /// An empty series retains its known order since no terms need to be removed.
     #[inline]
     pub fn truncate_absolute_order(&mut self, order: Rational) {
+        self.try_truncate_absolute_order(order, &SeriesSettings::default())
+            .expect("invalid absolute series truncation")
+    }
+
+    pub fn try_truncate_absolute_order(
+        &mut self,
+        order: Rational,
+        settings: &SeriesSettings,
+    ) -> Result<(), SeriesError> {
+        self.check_geometry(settings)?;
         if self.coefficients.is_empty() || self.absolute_order() < order {
-            return;
+            return Ok(());
         }
 
-        self.change_ramification(order.denominator().to_i64().unwrap() as usize);
+        self.try_change_ramification(
+            Self::unsigned(order.denominator_ref(), "truncation ramification")?,
+            settings,
+        )?;
 
         for i in (0..self.coefficients.len()).rev() {
             if self.get_exponent(i) >= order {
@@ -507,16 +877,23 @@ impl<F: Ring> Series<F> {
         if self.coefficients.is_empty() {
             self.order = 0;
         } else {
-            self.order = self.get_index(order);
+            self.order = self.try_index(order)?;
         }
+        self.check_geometry(settings)
     }
 
     #[inline]
-    fn joint_ramification(&self, other: &Self) -> usize {
-        Integer::from(self.ramification as i64)
-            .lcm(&Integer::from(other.ramification as i64))
-            .to_i64()
-            .unwrap() as usize
+    fn try_joint_ramification(
+        &self,
+        other: &Self,
+        settings: &SeriesSettings,
+    ) -> Result<usize, SeriesError> {
+        let ram = Self::unsigned(
+            &Integer::from(self.ramification).lcm(&Integer::from(other.ramification)),
+            "joint ramification",
+        )?;
+        settings.ramification(ram)?;
+        Ok(ram)
     }
 
     #[inline]
@@ -593,30 +970,49 @@ impl<F: Ring> Series<F> {
     }
 
     /// Compute `self^pow`. `pow` must be a positive integer.
-    pub fn npow(&self, mut pow: usize) -> Self {
-        if pow == 0 {
-            panic!("Cannot create one with infinite precision");
-        }
+    pub fn npow(&self, pow: usize) -> Self {
+        self.try_npow(pow, &SeriesSettings::default())
+            .expect("invalid series power")
+    }
 
-        let mut x = self.clone();
-        let mut y = self.one_inf_prec();
+    pub fn try_npow(&self, mut pow: usize, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        if pow == 0 {
+            return Err(SeriesError::ZeroPowerRequiresInfinitePrecision);
+        }
+        let mut x = self.try_clone(settings)?;
+        let mut y = self.try_one_inf_prec(settings)?;
         while pow != 1 {
             if pow % 2 == 1 {
-                y = &y * &x;
+                y = y.try_mul(&x, settings)?;
                 pow -= 1;
             }
 
-            x = &x * &x;
+            x = x.try_mul(&x, settings)?;
             pow /= 2;
         }
 
-        x * &y
+        x.try_mul(&y, settings)
     }
 
     /// Multiply the exponents `exp` units of the ramification.
-    pub fn mul_exp_units(mut self, exp: isize) -> Self {
-        self.shift += exp;
-        self
+    pub fn mul_exp_units(self, exp: isize) -> Self {
+        self.try_mul_exp_units(exp, &SeriesSettings::default())
+            .expect("invalid series shift")
+    }
+
+    pub fn try_mul_exp_units(
+        mut self,
+        exp: isize,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.shift = self
+            .shift
+            .checked_add(exp)
+            .ok_or(SeriesError::IndexOverflow {
+                operation: "exponent shift",
+            })?;
+        self.check_geometry(settings)?;
+        Ok(self)
     }
 
     /// Multiply every stored coefficient by `coeff`, preserving the truncation
@@ -975,73 +1371,221 @@ impl<R: Ring> PartialOrd for Series<R> {
     }
 }
 
-impl<F: Ring> Add for Series<F> {
-    type Output = Self;
+impl<F: Ring> Series<F> {
+    fn add_same_grid(
+        mut self,
+        other: &Self,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.order = self.order.min(other.order);
+        self.coefficients.truncate(self.order);
+        for (position, coefficient) in other.coefficients.iter().enumerate() {
+            if position < self.coefficients.len() {
+                self.field
+                    .add_assign(&mut self.coefficients[position], coefficient);
+            }
+        }
+        self.truncate();
+        self.check_geometry(settings)?;
+        Ok(self)
+    }
 
-    fn add(mut self, mut other: Self) -> Self::Output {
-        assert_eq!(self.field, other.field);
-        assert_eq!(self.variable, other.variable);
-
+    fn try_add_owned(
+        mut self,
+        mut other: Self,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        other.check_geometry(settings)?;
+        if self.field != other.field
+            || self.variable != other.variable
+            || self.expansion_point != other.expansion_point
+        {
+            return Err(SeriesError::IncompatibleSeries);
+        }
         if self.shift == other.shift && self.ramification == other.ramification {
             if self.coefficients.len() < other.coefficients.len() {
                 std::mem::swap(&mut self, &mut other);
             }
-
-            self.order = self.order.min(other.order);
-            self.coefficients.truncate(self.order);
-
-            for (i, c) in other.coefficients.iter().enumerate() {
-                if i < self.coefficients.len() {
-                    self.field.add_assign(&mut self.coefficients[i], c);
-                }
-            }
-
-            self.truncate();
-            self
-        } else {
-            let r = self.joint_ramification(&other);
-            let r_d_s = r / self.ramification;
-            let r_d_o = r / other.ramification;
-
-            let shift = (self.shift * r_d_s as isize).min(other.shift * r_d_o as isize);
-            let order_s = (self.order * r_d_s) as isize + self.shift * r_d_s as isize;
-            let order_o = (other.order * r_d_o) as isize + other.shift * r_d_o as isize;
-
-            let mut s = Self {
-                coefficients: vec![],
-                variable: self.variable.clone(),
-                expansion_point: self.expansion_point.clone(),
-                field: self.field.clone(),
-                shift,
-                order: (order_s.min(order_o) - shift) as usize,
-                ramification: r,
-            };
-
-            s.coefficients =
-                vec![self.field.zero(); self.coefficients.len().max(other.coefficients.len())];
-            for (i, c) in self.coefficients.iter().enumerate() {
-                let index = s.get_index(self.get_exponent(i));
-                if index < s.order {
-                    if index >= s.coefficients.len() {
-                        s.coefficients.resize(index * 2, self.field.zero());
-                    }
-                    s.coefficients[index] = c.clone(); // TODO: prevent copy
-                }
-            }
-            for (i, c) in other.coefficients.iter().enumerate() {
-                let index = s.get_index(other.get_exponent(i));
-                if index < s.order {
-                    if index >= s.coefficients.len() {
-                        s.coefficients.resize(index * 2, self.field.zero());
-                    }
-
-                    s.field.add_assign(&mut s.coefficients[index], c);
-                }
-            }
-
-            s.truncate();
-            s
+            return self.add_same_grid(&other, settings);
         }
+        self.try_add(&other, settings)
+    }
+
+    /// Add using the native series kernel with checked geometry and allocation.
+    pub fn try_add(&self, other: &Self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        other.check_geometry(settings)?;
+        if self.field != other.field
+            || self.variable != other.variable
+            || self.expansion_point != other.expansion_point
+        {
+            return Err(SeriesError::IncompatibleSeries);
+        }
+        if self.shift == other.shift && self.ramification == other.ramification {
+            let (long, short) = if self.coefficients.len() >= other.coefficients.len() {
+                (self, other)
+            } else {
+                (other, self)
+            };
+            return long.try_clone(settings)?.add_same_grid(short, settings);
+        }
+        let ramification = self.try_joint_ramification(other, settings)?;
+        let left_ratio = ramification / self.ramification;
+        let right_ratio = ramification / other.ramification;
+        let left_shift = Self::signed(
+            &(Integer::from(self.shift) * Integer::from(left_ratio)),
+            "addition left shift",
+        )?;
+        let right_shift = Self::signed(
+            &(Integer::from(other.shift) * Integer::from(right_ratio)),
+            "addition right shift",
+        )?;
+        let shift = left_shift.min(right_shift);
+        let endpoint =
+            |source: &Self, ratio, scaled_shift| -> Result<Option<Integer>, SeriesError> {
+                if source.order == i64::MAX as usize {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        Integer::from(Self::rescaled_order(source.order, ratio)?)
+                            + Integer::from(scaled_shift),
+                    ))
+                }
+            };
+        let end = match (
+            endpoint(self, left_ratio, left_shift)?,
+            endpoint(other, right_ratio, right_shift)?,
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(end), None) | (None, Some(end)) => Some(end),
+            (None, None) => None,
+        };
+        let order = match end {
+            Some(end) => {
+                let order = Self::unsigned(&(end - Integer::from(shift)), "addition precision")?;
+                if order == i64::MAX as usize {
+                    return Err(SeriesError::IndexOverflow {
+                        operation: "finite addition precision",
+                    });
+                }
+                order
+            }
+            None => i64::MAX as usize,
+        };
+        let mut result = Self {
+            coefficients: Vec::new(),
+            field: self.field.clone(),
+            variable: self.variable.clone(),
+            expansion_point: self.expansion_point.clone(),
+            shift,
+            order,
+            ramification,
+        };
+        result.check_geometry(settings)?;
+        self.resize(
+            &mut result.coefficients,
+            self.coefficients.len().max(other.coefficients.len()),
+            settings,
+        )?;
+        for source in [self, other] {
+            for (position, coefficient) in source.coefficients.iter().enumerate() {
+                let index = result.try_index(source.get_exponent(position))?;
+                if index < result.order {
+                    if index >= result.coefficients.len() {
+                        let length = index
+                            .checked_mul(2)
+                            .and_then(|length| {
+                                index.checked_add(1).map(|minimum| length.max(minimum))
+                            })
+                            .ok_or(SeriesError::IndexOverflow {
+                                operation: "addition coefficient growth",
+                            })?;
+                        self.resize(&mut result.coefficients, length, settings)?;
+                    }
+                    self.field
+                        .add_assign(&mut result.coefficients[index], coefficient);
+                }
+            }
+        }
+        result.truncate();
+        result.check_geometry(settings)?;
+        Ok(result)
+    }
+
+    /// Multiply using the existing convolution with checked native indices.
+    pub fn try_mul(&self, rhs: &Self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        rhs.check_geometry(settings)?;
+        if self.field != rhs.field
+            || self.variable != rhs.variable
+            || self.expansion_point != rhs.expansion_point
+        {
+            return Err(SeriesError::IncompatibleSeries);
+        }
+        let ramification = self.try_joint_ramification(rhs, settings)?;
+        let left_ratio = ramification / self.ramification;
+        let right_ratio = ramification / rhs.ramification;
+        let shift = Self::signed(
+            &(Integer::from(self.shift) * Integer::from(left_ratio)
+                + Integer::from(rhs.shift) * Integer::from(right_ratio)),
+            "multiplication shift",
+        )?;
+        let order = Self::rescaled_order(self.order, left_ratio)?
+            .min(Self::rescaled_order(rhs.order, right_ratio)?);
+        let mut result = Self {
+            coefficients: Vec::new(),
+            field: self.field.clone(),
+            variable: self.variable.clone(),
+            expansion_point: self.expansion_point.clone(),
+            shift,
+            order,
+            ramification,
+        };
+        result.check_geometry(settings)?;
+        self.resize(
+            &mut result.coefficients,
+            self.coefficients.len().max(rhs.coefficients.len()),
+            settings,
+        )?;
+        for (left_position, left) in self.coefficients.iter().enumerate() {
+            if self.field.is_zero(left) {
+                continue;
+            }
+            let left_exponent = self.get_exponent(left_position);
+            for (right_position, right) in rhs.coefficients.iter().enumerate() {
+                if self.field.is_zero(right) {
+                    continue;
+                }
+                let index = result.try_index(&left_exponent + &rhs.get_exponent(right_position))?;
+                if index < result.order {
+                    if index >= result.coefficients.len() {
+                        let length = index
+                            .checked_mul(2)
+                            .and_then(|length| {
+                                index.checked_add(1).map(|minimum| length.max(minimum))
+                            })
+                            .ok_or(SeriesError::IndexOverflow {
+                                operation: "multiplication coefficient growth",
+                            })?;
+                        self.resize(&mut result.coefficients, length, settings)?;
+                    }
+                    self.field
+                        .add_mul_assign(&mut result.coefficients[index], left, right);
+                }
+            }
+        }
+        result.truncate();
+        result.check_geometry(settings)?;
+        Ok(result)
+    }
+}
+
+impl<F: Ring> Add for Series<F> {
+    type Output = Self;
+    fn add(self, other: Self) -> Self::Output {
+        self.try_add_owned(other, &SeriesSettings::default())
+            .expect("invalid series addition")
     }
 }
 
@@ -1082,58 +1626,9 @@ impl<F: Ring> Neg for Series<F> {
 
 impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
     type Output = Series<F>;
-
-    #[inline]
     fn mul(self, rhs: &'a Series<F>) -> Self::Output {
-        assert_eq!(self.field, rhs.field);
-        assert_eq!(self.variable, rhs.variable);
-
-        let r = self.joint_ramification(rhs);
-        let r_d_s = r / self.ramification;
-        let r_d_o = r / rhs.ramification;
-        let mut res = Series {
-            coefficients: vec![],
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            expansion_point: self.expansion_point.clone(),
-            shift: self.shift * r_d_s as isize + rhs.shift * r_d_o as isize,
-            // The infinite-precision identity can overflow when its grid is refined.
-            order: self
-                .order
-                .saturating_mul(r_d_s)
-                .min(rhs.order.saturating_mul(r_d_o)),
-            ramification: r,
-        };
-
-        res.coefficients =
-            vec![self.field.zero(); self.coefficients.len().max(rhs.coefficients.len())];
-
-        for (e1, c1) in self.coefficients.iter().enumerate() {
-            if self.field.is_zero(c1) {
-                continue;
-            }
-
-            let p1 = self.get_exponent(e1);
-
-            for (e2, c2) in rhs.coefficients.iter().enumerate() {
-                let p = &p1 + &rhs.get_exponent(e2);
-
-                if !self.field.is_zero(c2) {
-                    let index = res.get_index(p);
-                    if index < res.order {
-                        if index >= res.coefficients.len() {
-                            res.coefficients.resize(index * 2, self.field.zero());
-                        }
-
-                        self.field
-                            .add_mul_assign(&mut res.coefficients[index], c1, c2);
-                    }
-                }
-            }
-        }
-
-        res.truncate();
-        res
+        self.try_mul(rhs, &SeriesSettings::default())
+            .expect("invalid series multiplication")
     }
 }
 
@@ -1198,6 +1693,54 @@ impl<F: EuclideanDomain> Series<F> {
 }
 
 impl Series<AtomField> {
+    fn regular_zero_remainder(
+        &self,
+        function: Symbol,
+        settings: &SeriesSettings,
+    ) -> Result<Option<Self>, SeriesError> {
+        if !self.is_zero() {
+            return Ok(None);
+        }
+        if function == Symbol::LOG {
+            return Err(SeriesError::MissingLogCoefficient);
+        }
+        if self.order == i64::MAX as usize {
+            return Err(SeriesError::IndexOverflow {
+                operation: "finite zero-remainder precision",
+            });
+        }
+        let precision = self.absolute_order();
+        if precision <= 0 {
+            return Err(SeriesError::MissingFunctionCoefficient { function });
+        }
+        if function == Symbol::SIN {
+            return Self::try_new(
+                &self.field,
+                None,
+                self.variable.clone(),
+                self.expansion_point.clone(),
+                precision,
+                settings,
+            )
+            .map(Some);
+        }
+        let precision = if function == Symbol::COS {
+            &precision * &Rational::from(2)
+        } else {
+            precision
+        };
+        Self::try_new(
+            &self.field,
+            Some(1),
+            self.variable.clone(),
+            self.expansion_point.clone(),
+            precision,
+            settings,
+        )?
+        .try_constant(self.field.one(), settings)
+        .map(Some)
+    }
+
     /// Remove coefficients at the lowest powers that the zero test proves zero.
     pub(crate) fn normalize_trailing_coefficient(&mut self) {
         let zeros = self
@@ -1222,49 +1765,51 @@ impl Series<AtomField> {
 
     /// Extract powers of `x` from an expression that comes from simplifying an exponential with logs
     /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`.
-    fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, SeriesError> {
+    fn extract_exp_log(
+        &self,
+        e: AtomView,
+        s: AtomView,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
         if !e.contains(s) {
-            return Ok(self.constant(e.to_owned()));
+            return self.try_constant(e.to_owned(), settings);
         }
-
         match e {
-            AtomView::Pow(p) => {
-                let (b, exp) = p.get_base_exp();
-
-                if b == s {
-                    if let AtomView::Num(n) = exp {
-                        if let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view() {
-                            if ni == 0 {
-                                Ok(self.monomial(self.field.one(), (n, d).into()))
-                            } else {
-                                Err(SeriesError::UnsupportedComplexExponent {
-                                    expression: e.to_owned(),
-                                })
-                            }
+            AtomView::Pow(power) => {
+                let (base, exponent) = power.get_base_exp();
+                if base != s {
+                    return Err(SeriesError::UnexpectedExpLogSimplification {
+                        expression: e.to_owned(),
+                    });
+                }
+                if let AtomView::Num(number) = exponent {
+                    if let CoefficientView::Natural(n, d, imaginary, _) = number.get_coeff_view() {
+                        if imaginary == 0 {
+                            self.try_monomial(self.field.one(), (n, d).into(), settings)
                         } else {
-                            Err(SeriesError::UnsupportedLargeExponent {
+                            Err(SeriesError::UnsupportedComplexExponent {
                                 expression: e.to_owned(),
                             })
                         }
                     } else {
-                        Err(SeriesError::NonRationalPower {
+                        Err(SeriesError::UnsupportedLargeExponent {
                             expression: e.to_owned(),
                         })
                     }
                 } else {
-                    Err(SeriesError::UnexpectedExpLogSimplification {
+                    Err(SeriesError::NonRationalPower {
                         expression: e.to_owned(),
                     })
                 }
             }
-            AtomView::Var(_) => Ok(self.monomial(self.field.one(), (1, 1).into())),
-            AtomView::Mul(m) => {
-                let mut shift_series = self.one_inf_prec();
-                for a in m {
-                    shift_series = &shift_series * &self.extract_exp_log(a, s)?;
+            AtomView::Var(_) => self.try_monomial(self.field.one(), 1.into(), settings),
+            AtomView::Mul(product) => {
+                let mut result = self.try_one_inf_prec(settings)?;
+                for factor in product {
+                    result =
+                        result.try_mul(&self.extract_exp_log(factor, s, settings)?, settings)?;
                 }
-
-                Ok(shift_series)
+                Ok(result)
             }
             _ => Err(SeriesError::UnexpectedExpLogSimplification {
                 expression: e.to_owned(),
@@ -1272,116 +1817,131 @@ impl Series<AtomField> {
         }
     }
 
-    /// Expand the exponential of this series to the available order.
-    /// Returns an error for a pole that would produce an essential singularity
-    /// or an unsupported exponential-logarithmic constant term.
+    fn factorial_order(order: usize) -> Result<u32, SeriesError> {
+        u32::try_from(order).map_err(|_| SeriesError::IndexOverflow {
+            operation: "factorial Taylor order",
+        })
+    }
+
+    /// Expand the exponential to available precision using checked native indices.
     pub fn exp(&self) -> Result<Self, SeriesError> {
+        self.exp_with_settings(&SeriesSettings::default())
+    }
+
+    pub fn exp_with_settings(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if let Some(result) = self.regular_zero_remainder(Symbol::EXP, settings)? {
+            return Ok(result);
+        }
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
                 function: Symbol::EXP,
             });
         }
-
         if self.order == 0 {
-            return Ok(self.one_inf_prec()
-                + Series::new(
+            return self.try_one_inf_prec(settings)?.try_add(
+                &Self::try_new(
                     &self.field,
                     Some(1),
                     self.variable.clone(),
                     self.expansion_point.clone(),
                     (self.shift as i64, 1).into(),
-                ));
+                    settings,
+                )?,
+                settings,
+            );
         }
-
-        let c = if self.shift == 0 && self.order > 0 {
+        let c = if self.shift == 0 {
             self.coefficients[0].clone()
         } else {
             Atom::new()
         };
-
-        // construct the constant term, log(x) in the argument will be turned into x
         let e = FunctionBuilder::new(Symbol::EXP).add_arg(&c).finish();
-
-        // split the true constant part and the x-dependent part
-        let var = self.variable.to_atom() - &self.expansion_point;
-        let shift_series = self.extract_exp_log(e.as_view(), var.as_view())?; // FIXME: needs to be inf prec!
-
-        let p = self.clone().remove_constant();
-
-        let mut r = self.one_inf_prec();
-        let mut sp = p.clone();
-        for i in 1..=self.order {
-            let s = sp
-                .clone()
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            r = r + s;
+        let variable = self.variable.to_atom() - &self.expansion_point;
+        let shift_series = self.extract_exp_log(e.as_view(), variable.as_view(), settings)?;
+        let p = self.try_clone(settings)?.remove_constant();
+        let mut result = self.try_one_inf_prec(settings)?;
+        let mut power = p.try_clone(settings)?;
+        for i in 1..=Self::factorial_order(self.order)? {
+            let term = power
+                .try_clone(settings)?
+                .div_coeff(&Atom::num(Integer::factorial(i)));
+            power = power.try_mul(&p, settings)?;
+            result = result.try_add(&term, settings)?;
         }
-
-        Ok(r * &shift_series)
+        result.try_mul(&shift_series, settings)
     }
 
-    /// Expand the logarithm using the leading monomial and the remaining
-    /// positive-order terms. Returns an error if no leading coefficient is known.
+    /// Expand the logarithm through the available native precision.
     pub fn log(&self) -> Result<Self, SeriesError> {
+        self.log_with_settings(&SeriesSettings::default())
+    }
+
+    pub fn log_with_settings(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if let Some(result) = self.regular_zero_remainder(Symbol::LOG, settings)? {
+            return Ok(result);
+        }
         if self.order == 0 {
             return Err(SeriesError::MissingLogCoefficient);
         }
-
-        // construct the log argument, which may contain x
         let c = (self.variable.to_atom() - &self.expansion_point).pow(self.get_exponent(0))
             * &self.coefficients[0];
-        // normalize the series to 1 + ..
-        let p = self
-            .clone()
+        let opposite = self.shift.checked_neg().ok_or(SeriesError::IndexOverflow {
+            operation: "logarithm shift",
+        })?;
+        let normalized = self
+            .try_clone(settings)?
             .div_coeff(&self.coefficients[0])
-            .mul_exp_units(-self.shift)
-            - self.one();
-
-        let mut e = self.constant(FunctionBuilder::new(Symbol::LOG).add_arg(&c).finish());
-        let mut sp = p.clone();
+            .try_mul_exp_units(opposite, settings)?;
+        let one = self.try_constant(self.field.one(), settings)?;
+        let p = normalized.try_add(&(-one), settings)?;
+        let mut result = self.try_constant(
+            FunctionBuilder::new(Symbol::LOG).add_arg(&c).finish(),
+            settings,
+        )?;
+        let mut power = p.try_clone(settings)?;
         for i in 1..=self.order {
-            let s = sp.clone().div_coeff(&Atom::num(i as i64));
-
-            sp = sp * &p;
-
+            let mut term = power.try_clone(settings)?.div_coeff(&Atom::num(i as i64));
+            power = power.try_mul(&p, settings)?;
             if i % 2 == 0 {
-                e = e - s;
-            } else {
-                e = e + s;
+                term = -term;
             }
+            result = result.try_add(&term, settings)?;
         }
-
-        Ok(e)
+        Ok(result)
     }
 
-    /// Expand the sine of this series to the available order. Returns an error
-    /// for poles or a constant coefficient that still depends on the expansion variable.
+    /// Expand the sine using checked native coefficient containers.
     pub fn sin(&self) -> Result<Self, SeriesError> {
+        self.sin_with_settings(&SeriesSettings::default())
+    }
+
+    pub fn sin_with_settings(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if let Some(result) = self.regular_zero_remainder(Symbol::SIN, settings)? {
+            return Ok(result);
+        }
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
                 function: Symbol::SIN,
             });
         }
-
         if self.order == 0 {
-            return Ok(Series::new(
+            return Self::try_new(
                 &self.field,
                 Some(1),
                 self.variable.clone(),
                 self.expansion_point.clone(),
                 (self.shift as i64, 1).into(),
-            ));
+                settings,
+            );
         }
-
         let c = if self.shift == 0 {
             self.coefficients[0].clone()
         } else {
             Atom::new()
         };
-
         if c.contains(self.variable.to_atom()) {
             return Err(SeriesError::ConstantTermDependsOnExpansionVariable {
                 function: Symbol::SIN,
@@ -1389,61 +1949,64 @@ impl Series<AtomField> {
                 variable: self.variable.as_ref().clone(),
             });
         }
-
-        let p = self.clone().remove_constant();
-
-        let mut e = self.constant(FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish());
-        let mut sp = p.clone();
-        for i in 1..=self.order {
-            let mut b = if i % 2 == 1 {
-                FunctionBuilder::new(Symbol::COS).add_arg(&c).finish()
-            } else {
-                FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish()
-            };
-
+        let p = self.try_clone(settings)?.remove_constant();
+        let mut result = self.try_constant(
+            FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish(),
+            settings,
+        )?;
+        let mut power = p.try_clone(settings)?;
+        for i in 1..=Self::factorial_order(self.order)? {
+            let mut coefficient =
+                FunctionBuilder::new(if i % 2 == 1 { Symbol::COS } else { Symbol::SIN })
+                    .add_arg(&c)
+                    .finish();
             if i % 4 >= 2 {
-                b = b.neg();
+                coefficient = coefficient.neg();
             }
-
-            let s = sp
-                .clone()
-                .mul_coeff(&b)
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            e = e + s;
+            let term = power
+                .try_clone(settings)?
+                .mul_coeff(&coefficient)
+                .div_coeff(&Atom::num(Integer::factorial(i)));
+            power = power.try_mul(&p, settings)?;
+            result = result.try_add(&term, settings)?;
         }
-
-        Ok(e)
+        Ok(result)
     }
 
-    /// Expand the cosine of this series to the available order. Returns an error
-    /// for poles or a constant coefficient that still depends on the expansion variable.
+    /// Expand the cosine using checked native coefficient containers.
     pub fn cos(&self) -> Result<Self, SeriesError> {
+        self.cos_with_settings(&SeriesSettings::default())
+    }
+
+    pub fn cos_with_settings(&self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if let Some(result) = self.regular_zero_remainder(Symbol::COS, settings)? {
+            return Ok(result);
+        }
         if self.shift < 0 {
             return Err(SeriesError::EssentialSingularity {
                 function: Symbol::COS,
             });
         }
-
         if self.order == 0 {
-            return Ok(self.one_inf_prec()
-                + Series::new(
+            let precision = Integer::from(self.shift) * Integer::from(2);
+            return self.try_one_inf_prec(settings)?.try_add(
+                &Self::try_new(
                     &self.field,
                     Some(1),
                     self.variable.clone(),
                     self.expansion_point.clone(),
-                    (self.shift as i64 * 2, 1).into(),
-                ));
+                    precision.into(),
+                    settings,
+                )?,
+                settings,
+            );
         }
-
         let c = if self.shift == 0 {
             self.coefficients[0].clone()
         } else {
             Atom::new()
         };
-
         if c.contains(self.variable.to_atom()) {
             return Err(SeriesError::ConstantTermDependsOnExpansionVariable {
                 function: Symbol::COS,
@@ -1451,94 +2014,138 @@ impl Series<AtomField> {
                 variable: self.variable.as_ref().clone(),
             });
         }
-
-        let p = self.clone().remove_constant();
-
-        let mut e = self.constant(FunctionBuilder::new(Symbol::COS).add_arg(&c).finish());
-        let mut sp = p.clone();
-        for i in 1..=self.order {
-            let mut b = if i % 2 == 1 {
-                FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish()
-            } else {
-                -FunctionBuilder::new(Symbol::COS).add_arg(&c).finish()
-            };
-
-            if i % 4 < 2 {
-                b = b.neg();
+        let p = self.try_clone(settings)?.remove_constant();
+        let mut result = self.try_constant(
+            FunctionBuilder::new(Symbol::COS).add_arg(&c).finish(),
+            settings,
+        )?;
+        let mut power = p.try_clone(settings)?;
+        for i in 1..=Self::factorial_order(self.order)? {
+            let mut coefficient =
+                FunctionBuilder::new(if i % 2 == 1 { Symbol::SIN } else { Symbol::COS })
+                    .add_arg(&c)
+                    .finish();
+            if i % 2 == 0 {
+                coefficient = -coefficient;
             }
-
-            let s = sp
-                .clone()
-                .mul_coeff(&b)
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            e = e + s;
+            if i % 4 < 2 {
+                coefficient = coefficient.neg();
+            }
+            let term = power
+                .try_clone(settings)?
+                .mul_coeff(&coefficient)
+                .div_coeff(&Atom::num(Integer::factorial(i)));
+            power = power.try_mul(&p, settings)?;
+            result = result.try_add(&term, settings)?;
         }
-
-        Ok(e)
+        Ok(result)
     }
 
-    /// Take the series to the power of another series.
-    pub fn pow(&self, pow: &Self) -> Result<Self, SeriesError> {
-        (self.log()? * pow).exp()
+    /// Raise to a series power using the native logarithm/exponential route.
+    pub fn pow(&self, power: &Self) -> Result<Self, SeriesError> {
+        self.pow_with_settings(power, &SeriesSettings::default())
     }
 
-    /// Take the series to the power of a rational number.
-    pub fn rpow(&self, pow: Rational) -> Result<Self, SeriesError> {
-        if pow.is_zero() {
+    pub fn pow_with_settings(
+        &self,
+        power: &Self,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.log_with_settings(settings)?
+            .try_mul(power, settings)?
+            .exp_with_settings(settings)
+    }
+
+    /// Divide with checked native reciprocal and convolution operations.
+    pub fn try_div(&self, rhs: &Self, settings: &SeriesSettings) -> Result<Self, SeriesError> {
+        self.try_mul(&rhs.rpow_with_settings((-1, 1).into(), settings)?, settings)
+    }
+
+    /// Raise to an exact rational power using checked native indices.
+    pub fn rpow(&self, power: Rational) -> Result<Self, SeriesError> {
+        self.rpow_with_settings(power, &SeriesSettings::default())
+    }
+
+    pub fn rpow_with_settings(
+        &self,
+        power: Rational,
+        settings: &SeriesSettings,
+    ) -> Result<Self, SeriesError> {
+        self.check_geometry(settings)?;
+        if power.is_zero() {
             return Err(SeriesError::ZeroPowerRequiresInfinitePrecision);
         }
-
-        if pow.is_integer() && !pow.is_negative() {
-            return Ok(self.npow(pow.numerator().to_i64().unwrap() as usize));
+        if power.is_integer() && !power.is_negative() {
+            return self.try_npow(
+                Self::unsigned(power.numerator_ref(), "integer series power")?,
+                settings,
+            );
         }
-
-        let mut base = self.clone();
+        let mut base = self.try_clone(settings)?;
         base.normalize_trailing_coefficient();
         if base.is_zero() {
-            if pow.is_negative() {
+            if power.is_negative() {
                 return Err(SeriesError::DivisionByZero);
             }
-
-            base.shift *= pow.numerator().to_i64().unwrap() as isize;
-            base.order *= pow.numerator().to_i64().unwrap() as usize;
-            base.ramification *= pow.denominator().to_i64().unwrap() as usize;
+            base.shift = Self::signed(
+                &(Integer::from(base.shift) * power.numerator_ref()),
+                "zero power shift",
+            )?;
+            base.order = Self::unsigned(
+                &(Integer::from(base.order) * power.numerator_ref()),
+                "zero power precision",
+            )?;
+            base.ramification = Self::unsigned(
+                &(Integer::from(base.ramification) * power.denominator_ref()),
+                "zero power ramification",
+            )?;
+            if base.order == i64::MAX as usize {
+                return Err(SeriesError::IndexOverflow {
+                    operation: "zero power precision",
+                });
+            }
+            base.check_geometry(settings)?;
             return Ok(base);
         }
-
         let c = base.coefficients[0].clone();
         let order = base.order;
         let shift = base.shift;
-        let p = Rational::from((base.shift as i64, base.ramification as i64)) * &pow;
-        let mut r = base.one();
-        let mut x = base.one();
-
-        // normalize the series to 1 + ...
-        let cc = base.div_coeff(&c).mul_exp_units(-shift) - r.one();
-
-        let mut num = Rational::one();
-
-        for i in 1..=order {
-            num = &num * &(&pow - &(i as i64 - 1).into());
-
-            x = x * &cc;
-
-            let p = x
-                .clone()
-                .mul_coeff(&Atom::num(num.clone()))
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            r = r + p;
+        let leading =
+            Rational::from((Integer::from(shift), Integer::from(base.ramification))) * &power;
+        let target_ramification = Self::unsigned(
+            &Integer::from(base.ramification).lcm(leading.denominator_ref()),
+            "rational power ramification",
+        )?;
+        settings.ramification(target_ramification)?;
+        let target_shift = Self::signed(
+            &(leading.numerator_ref()
+                * (Integer::from(target_ramification) / leading.denominator_ref())),
+            "rational power shift",
+        )?;
+        let mut result = base.try_constant(self.field.one(), settings)?;
+        let mut term_power = result.try_clone(settings)?;
+        let opposite = shift.checked_neg().ok_or(SeriesError::IndexOverflow {
+            operation: "rational power normalization shift",
+        })?;
+        let normalized = base.div_coeff(&c).try_mul_exp_units(opposite, settings)?;
+        let delta = normalized.try_add(
+            &(-result.try_constant(self.field.one(), settings)?),
+            settings,
+        )?;
+        let mut numerator = Rational::one();
+        for i in 1..=Self::factorial_order(order)? {
+            numerator = &numerator * &(&power - &Rational::from(i - 1));
+            term_power = term_power.try_mul(&delta, settings)?;
+            let term = term_power
+                .try_clone(settings)?
+                .mul_coeff(&Atom::num(numerator.clone()))
+                .div_coeff(&Atom::num(Integer::factorial(i)));
+            result = result.try_add(&term, settings)?;
         }
-
-        r.change_ramification(p.denominator().to_i64().unwrap() as usize);
-
-        let shift = p.numerator().to_i64().unwrap() as isize
-            * (r.ramification / p.denominator().to_i64().unwrap() as usize) as isize;
-
-        Ok(r.mul_coeff(&c.pow(pow)).mul_exp_units(shift))
+        result.try_change_ramification(target_ramification, settings)?;
+        result
+            .mul_coeff(&c.pow(power))
+            .try_mul_exp_units(target_shift, settings)
     }
 
     /// Return the stored terms as an expression, discarding the unknown remainder.

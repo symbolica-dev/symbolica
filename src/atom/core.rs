@@ -37,7 +37,7 @@ use crate::{
         factor::Factorize,
         gcd::PolynomialGCD,
         polynomial::MultivariatePolynomial,
-        series::{Series, SeriesDepth},
+        series::{Series, SeriesDepth, SeriesSettings},
     },
     printer::{AtomPrinter, CanonicalOrderingSettings, PrintOptions, PrintState},
     solve::SolveError,
@@ -748,6 +748,62 @@ pub trait AtomCore: private::Sealed + Sized {
         let depth = depth.into();
         self.as_atom_view()
             .series(x, expansion_point.as_atom_view(), depth)
+    }
+
+    /// Series expand using explicit native container and precision-retry limits.
+    ///
+    /// Machine-size index arithmetic is checked independently of optional limits.
+    /// Exhausting a limit returns an error; it never returns an incomplete series
+    /// as a successful result. Limits govern the native series containers and
+    /// precision retries, not memory or execution time inside scalar coefficient
+    /// algebra or registered callback internals (including library-provided
+    /// callbacks). Returned callback expressions re-enter the checked engine;
+    /// execution inside a callback retains that callback's own controls and
+    /// error behavior.
+    ///
+    /// The existing inverse refinement heuristic can still stop without finding
+    /// a nonzero leading coefficient near relative depth 1000. That case returns
+    /// [`SeriesError::UnresolvedInverseLeadingCoefficient`], independently of
+    /// caller resource limits, and does not assert a zero divisor.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::{prelude::*, poly::series::{SeriesDepth, SeriesSettings}};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let settings = SeriesSettings::default()
+    ///     .max_coefficient_slots(128)
+    ///     .max_ramification(12)
+    ///     .max_precision_retries(8);
+    /// let x = symbol!("checked_example::x");
+    /// let out = parse!("(1+checked_example::x)^-1")
+    ///     .series_with_settings(x, 0, SeriesDepth::absolute(4), &settings)?;
+    /// assert_eq!(out.to_atom(), parse!(
+    ///     "1-checked_example::x+checked_example::x^2-checked_example::x^3+checked_example::x^4"
+    /// ));
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn series_with_settings<'a, 'b, T, V, D>(
+        &self,
+        x: V,
+        expansion_point: T,
+        depth: D,
+        settings: &SeriesSettings,
+    ) -> Result<Series<AtomField>, SeriesError>
+    where
+        T: Into<AtomOrView<'b>>,
+        V: Into<BorrowedOrOwned<'a, Indeterminate>>,
+        D: Into<SeriesDepth>,
+    {
+        let expansion_point = expansion_point.into();
+        let x = x.into();
+        self.as_atom_view().series_with_settings(
+            x.borrow(),
+            expansion_point.as_atom_view(),
+            depth.into(),
+            settings,
+        )
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
