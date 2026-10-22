@@ -3321,7 +3321,7 @@ impl Eq for Atom {}
 impl Hash for Atom {
     #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_view().hash(state)
+        self.as_view().get_data().hash(state)
     }
 }
 
@@ -3669,14 +3669,24 @@ impl Atom {
     #[inline(always)]
     /// Replace this atom with a copy of `view`, reusing its allocation.
     pub fn set_from_view(&mut self, view: &AtomView) {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        match view {
-            AtomView::Num(n) => *self = Atom::Num(Num::from_view_into(n, buffer)),
-            AtomView::Var(v) => *self = Atom::Var(Var::from_view_into(v, buffer)),
-            AtomView::Fun(f) => *self = Atom::Fun(Fun::from_view_into(f, buffer)),
-            AtomView::Pow(p) => *self = Atom::Pow(Pow::from_view_into(p, buffer)),
-            AtomView::Mul(m) => *self = Atom::Mul(Mul::from_view_into(m, buffer)),
-            AtomView::Add(a) => *self = Atom::Add(Add::from_view_into(a, buffer)),
+        match (self, view) {
+            (Atom::Num(out), AtomView::Num(input)) => out.set_from_view(input),
+            (Atom::Var(out), AtomView::Var(input)) => out.set_from_view(input),
+            (Atom::Fun(out), AtomView::Fun(input)) => out.set_from_view(input),
+            (Atom::Pow(out), AtomView::Pow(input)) => out.set_from_view(input),
+            (Atom::Mul(out), AtomView::Mul(input)) => out.set_from_view(input),
+            (Atom::Add(out), AtomView::Add(input)) => out.set_from_view(*input),
+            (atom, _) => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = match view {
+                    AtomView::Num(n) => Atom::Num(Num::from_view_into(n, buffer)),
+                    AtomView::Var(v) => Atom::Var(Var::from_view_into(v, buffer)),
+                    AtomView::Fun(f) => Atom::Fun(Fun::from_view_into(f, buffer)),
+                    AtomView::Pow(p) => Atom::Pow(Pow::from_view_into(p, buffer)),
+                    AtomView::Mul(m) => Atom::Mul(Mul::from_view_into(m, buffer)),
+                    AtomView::Add(a) => Atom::Add(Add::from_view_into(a, buffer)),
+                };
+            }
         }
     }
 
@@ -4756,6 +4766,42 @@ mod test {
     };
 
     use super::FunctionBuilder;
+
+    #[test]
+    fn copying_views_preserves_content_and_normalization() {
+        let mut values = vec![
+            Atom::Zero,
+            Atom::num((-7, 13)),
+            parse!("copy_view_x"),
+            parse!("copy_view_f(x,y)"),
+            parse!("copy_view_x^3"),
+            parse!("2*copy_view_x*copy_view_y"),
+            parse!("copy_view_x+copy_view_y+3"),
+        ];
+        let dirty: Vec<_> = values
+            .iter()
+            .cloned()
+            .filter_map(|mut atom| {
+                atom.set_normalized(false);
+                atom.as_view().needs_normalization().then_some(atom)
+            })
+            .collect();
+        values.extend(dirty);
+
+        for initial in &values {
+            for source in &values {
+                let mut out = initial.clone();
+                for expected in [source, initial, source] {
+                    out.set_from_view(&expected.as_view());
+                    assert_eq!(out.as_view().get_data(), expected.as_view().get_data());
+                    assert_eq!(
+                        out.as_view().needs_normalization(),
+                        expected.as_view().needs_normalization()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn constructors_reuse_and_reset_atom_variants() {

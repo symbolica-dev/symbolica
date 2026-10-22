@@ -44,12 +44,18 @@ impl AtomView<'_> {
     /// Compare two atoms in an ordering that sorts by type.
     ///
     /// This is not the ordering used for sorting terms or factors.
+    #[inline]
     pub fn cmp(&self, other: &AtomView<'_>) -> Ordering {
         if self == other {
             // equality comparison is a fast check
             return Ordering::Equal;
         }
 
+        self.cmp_structural(other)
+    }
+
+    /// Compare structure after the caller has checked representation equality.
+    pub(crate) fn cmp_structural(&self, other: &AtomView<'_>) -> Ordering {
         match (&self, other) {
             // comparisons on floating points may yield Equal even if the binary data is not the same
             // for example when the precision is different. To stay consistent with the PartialEq implementation,
