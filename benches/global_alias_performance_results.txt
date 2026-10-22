@@ -1,0 +1,76 @@
+Global alias performance results — 2026-10-22
+============================================
+
+Branch: codex/global-alias-performance
+Original global-alias branch: alias (3dab8484).
+Latest main: a2051681; merge baseline: 2d43058f; optimized code: 41668877.
+
+Outcome
+-------
+Across the nine no-alias workloads, the geometric mean of paired time ratios fell 11.9%.
+The same aggregate overhead relative to main fell from 42.7% to 25.0%.
+Eight workloads improved; pairwise addition was 3.9% slower. The regression
+against non-global main is reduced, not eliminated. This unweighted workload
+aggregate is descriptive, not an estimate of application-level speedup.
+
+No aliases: median time in ns/op; changes are paired within-round median ratios.
+Negative percentages mean less time. Ratios can differ slightly from ratios of
+all-sample medians because run-to-run drift is paired out before aggregation.
+
+Workload                      main      global   optimized   vs global    vs main
+construct                   1288.2      1685.5      1622.7       -5.7%     +25.4%
+add_pair                     168.8       213.8       224.0       +3.9%     +31.4%
+add_chain                  12064.8     15105.0     13132.0      -13.4%      +8.8%
+add_many                    3937.7      7453.7      4467.8      -39.4%     +16.2%
+normalize_product           1946.4      2847.4      2540.2       -9.1%     +34.0%
+expand_power              324521.4    480044.3    415359.3      -12.3%     +28.3%
+expand_product            264015.3    369914.8    346088.8       -5.1%     +31.8%
+differentiate               6870.3      9994.5      9092.7      -10.2%     +30.3%
+replace                    22548.0     30117.5     27270.1       -8.6%     +20.6%
+
+Live-alias workloads: time change versus the merged global-alias baseline.
+  construct_with_live_alias      -6.5%
+  copy_alias_power              -11.0%
+  add_alias_plain               -15.5%
+  multiply_alias_powers          -5.4%
+
+Changes
+-------
+- Store subtree alias presence on powers, avoiding recursive power decoding.
+- Skip ownership collection on ordinary copies and coefficient replacement.
+- Use canonical byte comparisons for normalized expressions without aliases.
+- Borrow surviving power bases instead of making unnecessary temporary copies.
+- Outline alias-handle work and alias-specific sum normalization.
+- Normalize raw transparent-alias bodies before merging into canonical parents;
+  retain factors in aliased-product merges and preserve opaque behavior.
+
+Validation
+----------
+cargo test --tests --features bincode -j 8 -- --test-threads=1
+  923 library tests and 69 integration tests passed; 2 ignored.
+cargo check --lib --features python_export,bincode -j 8
+  Passed.
+Both release benchmark examples built successfully; live-alias workloads
+assert semantic equivalence before timing. No-alias result byte counts match
+across all three variants (this is not itself a proof of equivalence).
+
+An earlier run hit an intermittent Galois factorization panic. It was reproduced
+in the unoptimized merge baseline (repeat 14), so is not caused by this change.
+A slow randomized GCD test passed 10 isolated repeats and the final full run.
+The final full test run passed without exclusions beyond the existing ignores.
+
+Method
+------
+Six paired rounds, seven approximately 100 ms samples per workload per round;
+42 samples per workload/variant. Sequential binaries pinned to logical CPU 6
+on an AMD Ryzen 9 5900X. No concurrent builds or tests during this final run;
+normal desktop background processes remained active. Alias-free build order
+rotated and live-alias order alternated. Setup/calibration is untimed; result
+destruction is timed. Rust 1.99.0, release LTO, one codegen unit, native CPU
+flags, identical dependency versions and default features across builds.
+
+Reproduce with examples/alias_performance.rs, examples/global_alias_performance.rs
+and benches/run_alias_performance.py; see benches/alias_performance.txt.
+Full measurements, per-round ranges, provenance, binary hashes, and validation
+logs are retained locally under benches/results/global-alias-2026-10-22/.
+That generated-results directory is ignored by Git, following repository policy.
