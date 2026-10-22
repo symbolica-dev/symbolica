@@ -652,7 +652,7 @@ impl Transformer {
                     let _ = Transformer::execute_chain(cur_input, cond, workspace, state, out)?;
                     std::mem::swap(out, &mut tmp);
 
-                    if tmp.as_view() != out.as_view() {
+                    if tmp.as_view().get_data() != out.as_view().get_data() {
                         if Transformer::execute_chain(tmp.as_view(), t1, workspace, state, out)?
                             .is_break()
                         {
@@ -1078,7 +1078,7 @@ impl Transformer {
                         break;
                     }
 
-                    if tmp.as_view() == out.as_view() {
+                    if tmp.as_view().get_data() == out.as_view().get_data() {
                         break;
                     }
 
@@ -1137,6 +1137,59 @@ mod test {
     };
 
     use super::Transformer;
+
+    #[test]
+    fn repeat_observes_transparent_alias_representation_changes() {
+        let plain = parse!("transform_repeat_alias_body(x)");
+        let first = plain.alias(false);
+        let second = first.alias(false);
+        let expected = second.clone();
+        let initial = plain.clone();
+        let transformer = Transformer::Repeat(vec![Transformer::Map(Box::new(
+            move |input, _state, out| {
+                if input.get_data() == plain.as_view().get_data() {
+                    out.set_from_view(&first.as_view());
+                } else if input.get_data() == first.as_view().get_data() {
+                    out.set_from_view(&second.as_view());
+                } else {
+                    out.set_from_view(&input);
+                }
+                Ok(())
+            },
+        ))]);
+        let result = transformer.execute(initial.as_view()).unwrap();
+        assert_eq!(result.as_view().get_data(), expected.as_view().get_data());
+        assert_eq!(result, initial);
+    }
+
+    #[test]
+    fn if_changed_observes_transparent_alias_representation_changes() {
+        let plain = parse!("transform_if_changed_alias_body(x)");
+        let alias = plain.alias(false);
+        for changed in [false, true] {
+            let replacement = if changed {
+                alias.clone()
+            } else {
+                plain.clone()
+            };
+            let transformer = Transformer::IfChanged(
+                vec![Transformer::Map(Box::new(move |_input, _state, out| {
+                    out.set_from_view(&replacement.as_view());
+                    Ok(())
+                }))],
+                vec![Transformer::Map(Box::new(|_input, _state, out| {
+                    out.to_num(1);
+                    Ok(())
+                }))],
+                vec![Transformer::Map(Box::new(|_input, _state, out| {
+                    out.to_num(0);
+                    Ok(())
+                }))],
+            );
+            let result = transformer.execute(plain.as_view()).unwrap();
+            assert_eq!(result, Atom::num(if changed { 1 } else { 0 }));
+        }
+    }
 
     #[test]
     fn expand_derivative() {

@@ -211,10 +211,12 @@ impl AliasStore {
 }
 
 pub(crate) fn collect_alias_handles_in(root: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
-    let mut handles = HashSet::default();
+    // Ownership follows encoded tokens, even when different alias bodies are
+    // semantically equal. Avoid hashing or comparing the bodies themselves.
+    let mut handles = HashMap::default();
     collect_alias_handles_in_impl(root, &mut handles);
 
-    let mut handles: Vec<_> = handles.into_iter().collect();
+    let mut handles: Vec<_> = handles.into_values().collect();
     handles.sort_by_key(|handle| handle.id());
     handles
 }
@@ -241,30 +243,48 @@ pub(crate) fn collect_alias_handles_with_dependencies(root: AtomView<'_>) -> Vec
     out
 }
 
-fn collect_alias_handles_in_impl(root: AtomView<'_>, handles: &mut HashSet<Arc<AliasHandle>>) {
+fn collect_alias_handles_in_impl(
+    root: AtomView<'_>,
+    handles: &mut HashMap<usize, Arc<AliasHandle>>,
+) {
+    // A mutating parent can still have its old alias flag (replace_first updates
+    // that flag after collecting ownership). Its children already carry valid
+    // flags, so skip ordinary subtrees here rather than rejecting the root.
     match root {
         AtomView::Num(_) | AtomView::Var(_) => {}
         AtomView::Alias(a) => {
-            handles.insert(a.get_handle());
+            handles
+                .entry(a.get_token())
+                .or_insert_with(|| a.get_handle());
         }
         AtomView::Fun(f) => {
             for arg in f {
-                collect_alias_handles_in_impl(arg, handles);
+                if arg.has_alias() {
+                    collect_alias_handles_in_impl(arg, handles);
+                }
             }
         }
         AtomView::Pow(p) => {
             let (base, exp) = p.get_base_exp();
-            collect_alias_handles_in_impl(base, handles);
-            collect_alias_handles_in_impl(exp, handles);
+            if base.has_alias() {
+                collect_alias_handles_in_impl(base, handles);
+            }
+            if exp.has_alias() {
+                collect_alias_handles_in_impl(exp, handles);
+            }
         }
         AtomView::Mul(m) => {
             for child in m {
-                collect_alias_handles_in_impl(child, handles);
+                if child.has_alias() {
+                    collect_alias_handles_in_impl(child, handles);
+                }
             }
         }
         AtomView::Add(a) => {
             for child in a {
-                collect_alias_handles_in_impl(child, handles);
+                if child.has_alias() {
+                    collect_alias_handles_in_impl(child, handles);
+                }
             }
         }
     }
@@ -515,6 +535,76 @@ fn alias_normalization_prunes_removed_alias_handles() {
 
     drop(z_alias);
     assert!(get_alias(z_token).is_none());
+}
+
+#[test]
+fn alias_ownership_distinguishes_tokens_with_equivalent_bodies() {
+    let expected = crate::parse!("ownership_identity_body(ownership_identity_x)");
+    let (collected, weak) = {
+        let inner = register_alias_atom(crate::parse!("ownership_identity_x"));
+        let nested_body =
+            crate::function!(crate::symbol!("ownership_identity_body"), inner.to_atom());
+        assert_eq!(nested_body.inline_aliases(true), expected);
+        let direct = register_alias_atom(expected.clone());
+        let nested = register_alias_atom(nested_body);
+        assert_ne!(direct.token(), nested.token());
+        let expression = crate::function!(
+            crate::symbol!("ownership_identity_parent"),
+            direct.to_atom(),
+            nested.to_atom(),
+            direct.to_opaque_atom(),
+            nested.to_opaque_atom(),
+            direct.to_atom()
+        );
+        let collected = collect_alias_handles_in(expression.as_view());
+        let tokens: HashSet<_> = collected.iter().map(|handle| handle.token()).collect();
+        assert_eq!(tokens, HashSet::from_iter([direct.token(), nested.token()]));
+        assert_eq!(collected.len(), 2);
+        let weak = [
+            Arc::downgrade(&direct),
+            Arc::downgrade(&nested),
+            Arc::downgrade(&inner),
+        ];
+        (collected, weak)
+    };
+    assert!(weak.iter().all(|handle| handle.upgrade().is_some()));
+    for handle in &collected {
+        assert_eq!(handle.atom().inline_aliases(true), expected);
+    }
+    drop(collected);
+    assert!(weak.iter().all(|handle| handle.upgrade().is_none()));
+}
+
+#[test]
+fn replacing_plain_factor_with_alias_recovers_ownership_before_flag_refresh() {
+    for opaque in [false, true] {
+        let body = crate::parse!("ownership_replaced_factor");
+        let handle = register_alias_atom(body.clone());
+        let weak = Arc::downgrade(&handle);
+        let alias = if opaque {
+            handle.to_opaque_atom()
+        } else {
+            handle.to_atom()
+        };
+        let mut product = Atom::new();
+        let mul = product.to_mul();
+        mul.extend(crate::parse!("ownership_old_factor").as_view());
+        mul.extend(crate::parse!("ownership_other_factor").as_view());
+        assert!(!mul.as_view().has_alias());
+        mul.replace_first(alias.as_view());
+        drop(alias);
+        drop(handle);
+
+        assert!(product.as_view().has_alias());
+        assert!(weak.upgrade().is_some());
+        assert_eq!(
+            product.inline_aliases(true),
+            body * crate::parse!("ownership_other_factor")
+        );
+        assert_eq!(product.inline_aliases(false).as_view().has_alias(), opaque);
+        drop(product);
+        assert!(weak.upgrade().is_none());
+    }
 }
 
 #[test]
@@ -799,15 +889,26 @@ fn alias_multiplication_merges_nested_alias_equivalent_factors() {
     let x_alias = register_alias_atom(crate::parse!("x"));
     let x_alias_atom = x_alias.to_atom();
 
+    let head = crate::symbol!("nested_alias_factor");
+    let body = crate::function!(head, crate::parse!("x"));
     let mut left = crate::atom::Atom::new();
-    left.to_fun(crate::atom::Symbol::EXP)
-        .add_arg(x_alias_atom.as_view());
+    left.to_fun(head).add_arg(x_alias_atom.as_view());
 
-    let exp_alias = register_alias_atom(crate::parse!("exp(x)"));
-    let product = left * exp_alias.to_atom();
+    let body_alias = register_alias_atom(body.clone());
+    let product = left * body_alias.to_atom();
 
     assert!(product.as_view().has_alias());
-    assert_eq!(to_atom(&product), crate::parse!("exp(x)^2"));
+    assert_eq!(product, body.pow(2));
+    assert_eq!(to_atom(&product), body.pow(2));
+
+    // Builtin exp lowers to a power and may eliminate compressed operands.
+    // Its normalized value must still agree with the unaliased expression.
+    let mut exponential = crate::atom::Atom::new();
+    exponential
+        .to_fun(crate::atom::Symbol::EXP)
+        .add_arg(x_alias_atom.as_view());
+    let exp_alias = register_alias_atom(crate::parse!("exp(x)"));
+    assert_eq!(exponential * exp_alias.to_atom(), crate::parse!("exp(x)^2"));
 }
 
 #[test]
@@ -1039,6 +1140,40 @@ fn get_aliases_lists_unique_alias_bodies() {
     let aliased = alias_literal(crate::parse!("exp(x+y)+log(x+y)"), body.clone(), false);
 
     assert_eq!(aliased.get_aliases(), vec![Arc::new(body)]);
+}
+
+#[test]
+fn alias_known_aliases_reaches_the_encoded_fixed_point() {
+    let x = crate::parse!("known_alias_fixed_point_x");
+    let x_alias = register_alias_atom(x.clone());
+    let head = crate::symbol!("known_alias_fixed_point_parent");
+    let parent = register_alias_atom(crate::function!(head, x_alias.to_atom()));
+    let plain = crate::function!(head, &x);
+    let result = plain.as_view().alias_known_aliases();
+    let AtomView::Alias(alias) = result.as_view() else {
+        panic!("Expected the parent alias after replacing its child first");
+    };
+    assert_eq!(alias.get_token(), parent.token());
+    assert_eq!(result, plain);
+}
+
+#[test]
+fn repeat_map_keeps_transparent_alias_representation_changes() {
+    let plain = crate::parse!("repeat_map_alias_body(x)");
+    let first = plain.alias(false);
+    let second = first.alias(false);
+    let mut result = plain.clone();
+    result.repeat_map(|view| {
+        if view.get_data() == plain.as_view().get_data() {
+            first.clone()
+        } else if view.get_data() == first.as_view().get_data() {
+            second.clone()
+        } else {
+            view.to_owned()
+        }
+    });
+    assert_eq!(result.as_view().get_data(), second.as_view().get_data());
+    assert_eq!(result, plain);
 }
 
 #[test]

@@ -78,8 +78,8 @@ pub use self::alias::{AliasedAtom, AliasedAtomPrinter};
 use self::coefficient::{PackedRationalNumberReader, PackedRationalNumberWriter};
 pub use self::core::AtomCore;
 pub use self::representation::{
-    Add, AddView, Alias, AliasView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice,
-    Mul, MulView, Num, NumView, Pow, PowView, Var, VarView,
+    Add, AddView, Alias, AliasView, BorrowedAtom, Fun, InlineNum, InlineVar, KeyLookup,
+    ListIterator, ListSlice, Mul, MulView, Num, NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom, SYM_EXTRA_LINEAR_FLAG};
 pub use self::zero_test::ZeroTestSettings;
@@ -876,10 +876,7 @@ impl std::fmt::Display for Symbol {
 
 impl<T: AtomCore> PartialEq<T> for Symbol {
     fn eq(&self, other: &T) -> bool {
-        match other.as_atom_view() {
-            AtomView::Var(v) => self.get_id() == v.get_symbol_id(),
-            _ => false,
-        }
+        InlineVar::new(*self).as_view() == other.as_atom_view()
     }
 }
 
@@ -2513,28 +2510,36 @@ impl Eq for AtomView<'_> {}
 impl<T: AtomCore> PartialEq<T> for AtomView<'_> {
     #[inline]
     fn eq(&self, other: &T) -> bool {
-        self.get_data() == other.as_atom_view().get_data()
+        let data = self.get_data();
+        let other_data = other.as_atom_view().get_data();
+        data == other_data
+            || ((representation::raw_has_alias(data) || representation::raw_has_alias(other_data))
+                && representation::aliased_view_eq_other(self, other))
     }
 }
 
 impl<T: AtomCore> PartialEq<T> for Atom {
     #[inline]
     fn eq(&self, other: &T) -> bool {
-        self.as_view() == other.as_atom_view()
+        let data = self.as_view().get_data();
+        let other_data = other.as_atom_view().get_data();
+        data == other_data
+            || ((representation::raw_has_alias(data) || representation::raw_has_alias(other_data))
+                && representation::aliased_atom_eq(self, other))
     }
 }
 
 impl<T: AtomCore> PartialOrd<T> for AtomView<'_> {
     #[inline]
     fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.cmp(&other.as_atom_view()))
+        Some(self.cmp_public(&other.as_atom_view()))
     }
 }
 
 impl<T: AtomCore> PartialOrd<T> for Atom {
     #[inline]
     fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.as_view().cmp(&other.as_atom_view()))
+        Some(self.as_view().cmp_public(&other.as_atom_view()))
     }
 }
 
@@ -2560,7 +2565,7 @@ macro_rules! impl_atom_eq_for_symbol {
             #[inline]
             fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
                 let other = InlineVar::new($symbol(other));
-                Some(self.cmp(&other.as_view()))
+                Some(self.cmp_public(&other.as_view()))
             }
         }
 
@@ -2568,7 +2573,7 @@ macro_rules! impl_atom_eq_for_symbol {
             #[inline]
             fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
                 let other = InlineVar::new($symbol(other));
-                Some(self.as_view().cmp(&other.as_view()))
+                Some(self.as_view().cmp_public(&other.as_view()))
             }
         }
     };
@@ -2589,7 +2594,7 @@ impl PartialOrd<Symbol> for &Atom {
     #[inline]
     fn partial_cmp(&self, other: &Symbol) -> Option<Ordering> {
         let other = InlineVar::new(*other);
-        Some(self.as_view().cmp(&other.as_view()))
+        Some(self.as_view().cmp_public(&other.as_view()))
     }
 }
 
@@ -2625,7 +2630,7 @@ fn eq_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> bool {
 #[inline]
 fn cmp_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> Ordering {
     let rhs = Atom::num(rhs);
-    lhs.cmp(&rhs.as_view())
+    lhs.cmp_public(&rhs.as_view())
 }
 
 macro_rules! impl_atom_eq_for_num {
@@ -2757,22 +2762,31 @@ impl_atom_eq_for_coefficient!(rug::Integer, rug::Rational);
 
 impl Ord for AtomView<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.get_data().cmp(other.get_data())
+        self.cmp_public(other)
+    }
+}
+
+impl AtomView<'_> {
+    /// The public total ordering distinguishes stored metadata that the
+    /// normalization comparator deliberately ignores, including dirty flags.
+    #[inline]
+    fn cmp_public(&self, other: &Self) -> Ordering {
+        let left = self.get_data();
+        let right = other.get_data();
+        if left == right {
+            Ordering::Equal
+        } else if representation::raw_has_alias(left) || representation::raw_has_alias(right) {
+            representation::aliased_view_cmp(self, other)
+        } else {
+            self.cmp_structural(other).then_with(|| left.cmp(right))
+        }
     }
 }
 
 impl Hash for AtomView<'_> {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self {
-            AtomView::Num(a) => a.hash(state),
-            AtomView::Var(a) => a.hash(state),
-            AtomView::Alias(a) => a.hash(state),
-            AtomView::Fun(a) => a.hash(state),
-            AtomView::Pow(a) => a.hash(state),
-            AtomView::Mul(a) => a.hash(state),
-            AtomView::Add(a) => a.hash(state),
-        }
+        representation::view_hash(self, state);
     }
 }
 
@@ -2850,9 +2864,9 @@ pub enum AtomOrView<'a> {
     View(AtomView<'a>),
 }
 
-impl Borrow<[u8]> for AtomOrView<'_> {
-    fn borrow(&self) -> &[u8] {
-        self.as_view().get_data()
+impl Borrow<BorrowedAtom> for AtomOrView<'_> {
+    fn borrow(&self) -> &BorrowedAtom {
+        BorrowedAtom::new(self.as_view())
     }
 }
 
@@ -2881,7 +2895,7 @@ impl PartialOrd for AtomOrView<'_> {
 
 impl Ord for AtomOrView<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.as_view().cmp(&other.as_view())
+        self.as_view().cmp_public(&other.as_view())
     }
 }
 
@@ -3209,7 +3223,8 @@ impl AtomView<'_> {
                 }
             });
 
-            if out2 == out {
+            // A transparent alias changes storage even when its value is equal.
+            if out2.as_view().get_data() == out.as_view().get_data() {
                 break;
             }
 
@@ -3449,13 +3464,18 @@ impl Eq for Atom {}
 impl Hash for Atom {
     #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_view().hash(state)
+        let data = self.as_view().get_data();
+        if representation::raw_has_alias(data) {
+            representation::aliased_atom_hash(self, state);
+        } else {
+            data.hash(state);
+        }
     }
 }
 
 impl Ord for Atom {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.as_view().cmp(&other.as_view())
+        self.as_view().cmp_public(&other.as_view())
     }
 }
 
@@ -3678,7 +3698,7 @@ impl Atom {
         let mut res;
         loop {
             res = op(self.as_view());
-            if res == *self {
+            if res.as_view().get_data() == self.as_view().get_data() {
                 break;
             }
             std::mem::swap(self, &mut res);
@@ -3808,15 +3828,26 @@ impl Atom {
     #[inline(always)]
     /// Replace this atom with a copy of `view`, reusing its allocation.
     pub fn set_from_view(&mut self, view: &AtomView) {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        match view {
-            AtomView::Num(n) => *self = Atom::Num(Num::from_view_into(n, buffer)),
-            AtomView::Var(v) => *self = Atom::Var(Var::from_view_into(v, buffer)),
-            AtomView::Alias(a) => *self = Atom::Alias(Alias::from_view_into(a, buffer)),
-            AtomView::Fun(f) => *self = Atom::Fun(Fun::from_view_into(f, buffer)),
-            AtomView::Pow(p) => *self = Atom::Pow(Pow::from_view_into(p, buffer)),
-            AtomView::Mul(m) => *self = Atom::Mul(Mul::from_view_into(m, buffer)),
-            AtomView::Add(a) => *self = Atom::Add(Add::from_view_into(a, buffer)),
+        match (self, view) {
+            (Atom::Num(out), AtomView::Num(input)) => out.set_from_view(input),
+            (Atom::Var(out), AtomView::Var(input)) => out.set_from_view(input),
+            (Atom::Alias(out), AtomView::Alias(input)) => out.set_from_view(input),
+            (Atom::Fun(out), AtomView::Fun(input)) => out.set_from_view(input),
+            (Atom::Pow(out), AtomView::Pow(input)) => out.set_from_view(input),
+            (Atom::Mul(out), AtomView::Mul(input)) => out.set_from_view(input),
+            (Atom::Add(out), AtomView::Add(input)) => out.set_from_view(*input),
+            (atom, _) => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = match view {
+                    AtomView::Num(n) => Atom::Num(Num::from_view_into(n, buffer)),
+                    AtomView::Var(v) => Atom::Var(Var::from_view_into(v, buffer)),
+                    AtomView::Alias(a) => Atom::Alias(Alias::from_view_into(a, buffer)),
+                    AtomView::Fun(f) => Atom::Fun(Fun::from_view_into(f, buffer)),
+                    AtomView::Pow(p) => Atom::Pow(Pow::from_view_into(p, buffer)),
+                    AtomView::Mul(m) => Atom::Mul(Mul::from_view_into(m, buffer)),
+                    AtomView::Add(a) => Atom::Add(Add::from_view_into(a, buffer)),
+                };
+            }
         }
     }
 
@@ -4909,6 +4940,107 @@ mod test {
     };
 
     use super::FunctionBuilder;
+
+    #[test]
+    fn copying_atom_views_replaces_alias_ownership() {
+        use std::sync::Arc;
+
+        fn parent(kind: usize, child: AtomView<'_>) -> Atom {
+            let mut atom = Atom::new();
+            match kind {
+                0 => atom.set_from_view(&child),
+                1 => atom
+                    .to_fun(symbol!("copy_atom_alias_parent"))
+                    .add_arg(child),
+                2 => {
+                    atom.to_pow(child, Atom::num(2).as_view());
+                }
+                3 => atom.to_mul().extend(child),
+                _ => atom.to_add().extend(child),
+            }
+            atom
+        }
+
+        for kind in 0..5 {
+            for opaque in [false, true] {
+                for has_alias in [false, true] {
+                    let old = crate::alias::register_alias_atom(parse!("copy_atom_old_body(x)"));
+                    let old_weak = Arc::downgrade(&old);
+                    let old_alias = if opaque {
+                        old.to_opaque_atom()
+                    } else {
+                        old.to_atom()
+                    };
+                    let mut target = parent(kind, old_alias.as_view());
+                    drop(old_alias);
+                    drop(old);
+
+                    let new = crate::alias::register_alias_atom(parse!("copy_atom_new_body(x)"));
+                    let new_weak = Arc::downgrade(&new);
+                    let new_child = if has_alias {
+                        if opaque {
+                            new.to_opaque_atom()
+                        } else {
+                            new.to_atom()
+                        }
+                    } else {
+                        parse!("copy_atom_plain_child")
+                    };
+                    let source = parent(kind, new_child.as_view());
+                    let expected_data = source.as_view().get_data().to_vec();
+                    let expected_dirty = source.as_view().needs_normalization();
+                    drop(new_child);
+                    drop(new);
+
+                    target.set_from_view(&source.as_view());
+                    drop(source);
+                    assert!(old_weak.upgrade().is_none());
+                    assert_eq!(new_weak.upgrade().is_some(), has_alias);
+                    assert_eq!(target.as_view().get_data(), expected_data);
+                    assert_eq!(target.as_view().needs_normalization(), expected_dirty);
+                    assert_eq!(target.as_view().has_alias(), has_alias);
+                    drop(target);
+                    assert!(new_weak.upgrade().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copying_views_preserves_content_and_normalization() {
+        let mut values = vec![
+            Atom::Zero,
+            Atom::num((-7, 13)),
+            parse!("copy_view_x"),
+            parse!("copy_view_f(x,y)"),
+            parse!("copy_view_x^3"),
+            parse!("2*copy_view_x*copy_view_y"),
+            parse!("copy_view_x+copy_view_y+3"),
+        ];
+        let dirty: Vec<_> = values
+            .iter()
+            .cloned()
+            .filter_map(|mut atom| {
+                atom.set_normalized(false);
+                atom.as_view().needs_normalization().then_some(atom)
+            })
+            .collect();
+        values.extend(dirty);
+
+        for initial in &values {
+            for source in &values {
+                let mut out = initial.clone();
+                for expected in [source, initial, source] {
+                    out.set_from_view(&expected.as_view());
+                    assert_eq!(out.as_view().get_data(), expected.as_view().get_data());
+                    assert_eq!(
+                        out.as_view().needs_normalization(),
+                        expected.as_view().needs_normalization()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn constructors_reuse_and_reset_atom_variants() {

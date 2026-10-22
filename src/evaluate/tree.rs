@@ -1,6 +1,9 @@
 use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
 
-use crate::{atom::InlineVar, coefficient::ConvertToRing};
+use crate::{
+    atom::{BorrowedAtom, InlineVar},
+    coefficient::ConvertToRing,
+};
 
 use super::*;
 
@@ -4251,7 +4254,7 @@ impl<'a> AtomView<'a> {
             AtomView::Var(v) => {
                 let s = v.get_symbol();
 
-                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                if let Some(val) = map.get(BorrowedAtom::new(*self)) {
                     return Ok(val.clone());
                 }
 
@@ -4344,7 +4347,7 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                if let Some(val) = map.get(BorrowedAtom::new(*self)) {
                     return Ok(val.clone());
                 }
 
@@ -4486,7 +4489,7 @@ impl<'a> AtomView<'a> {
             AtomView::Var(v) => {
                 let s = v.get_symbol();
 
-                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                if let Some(val) = map.get(BorrowedAtom::new(*self)) {
                     return Ok(val.clone());
                 }
 
@@ -4546,7 +4549,7 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                if let Some(val) = map.get(BorrowedAtom::new(*self)) {
                     return Ok(val.clone());
                 }
 
@@ -4675,5 +4678,44 @@ mod external_cache_tests {
         assert_eq!(output[1], Complex::new(4., 4.));
         assert_eq!(output[2], Complex::new(9., 12.));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod semantic_alias_lookup_tests {
+    use std::collections::HashMap;
+
+    use crate::{
+        atom::AtomCore,
+        domains::rational::{Q, Rational},
+        function, parse, symbol,
+    };
+
+    #[test]
+    fn evaluation_maps_accept_equivalent_alias_and_body_keys() {
+        let x = parse!("semantic_lookup_x");
+        let alias = x.alias(false);
+        let head = symbol!("semantic_lookup_f");
+        let call = function!(head, &x);
+        let aliased_call = function!(head, &alias);
+        for (plain, aliased) in [
+            (x.clone(), alias),
+            (call.clone(), call.alias(false)),
+            (call, aliased_call),
+        ] {
+            for key in [&plain, &aliased] {
+                let float_map = HashMap::from([(key.clone(), 7.0)]);
+                let view_map = HashMap::from([(key.as_view(), 7.0)]);
+                let ring_map = HashMap::from([(key.clone(), Rational::from(7))]);
+                for query in [&plain, &aliased] {
+                    assert_eq!(query.evaluate(&float_map).unwrap(), 7.0);
+                    assert_eq!(query.evaluate(&view_map).unwrap(), 7.0);
+                    assert_eq!(
+                        query.evaluate_in_ring(&ring_map, &Q).unwrap(),
+                        Rational::from(7)
+                    );
+                }
+            }
+        }
     }
 }

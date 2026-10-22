@@ -1,5 +1,13 @@
 //! Low-level representation of expressions.
 
+mod semantic;
+pub use semantic::BorrowedAtom;
+pub(crate) use semantic::{
+    aliased_atom_eq, aliased_atom_hash, aliased_view_cmp, aliased_view_eq_other,
+    compare_expanded_function_data, compare_expanded_sum_contents, compare_expanded_term_keys,
+    encoded_eq, encoded_hash, view_eq, view_hash,
+};
+
 use ahash::HashMap;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut};
@@ -67,7 +75,7 @@ const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
 
 #[inline(always)]
-fn raw_has_alias(data: &[u8]) -> bool {
+pub(crate) fn raw_has_alias(data: &[u8]) -> bool {
     let tag = data[0];
     tag & HAS_ALIAS_FLAG != 0 || tag & TYPE_MASK == ALIAS_ID
 }
@@ -83,12 +91,16 @@ fn merge_aliases_from_view(dst: &mut RawAtom, view: AtomView<'_>) {
 #[inline(never)]
 fn merge_aliases_from_aliased_view(dst: &mut RawAtom, view: AtomView<'_>) {
     let dst = dst.aliases_mut();
-    let old_len = dst.len();
-    collect_aliases_from_data(view.get_data(), view.aliases_ref(), dst);
-    if dst.len() != old_len {
-        dst.sort_by_key(|handle| handle.token());
-        dst.dedup_by_key(|handle| handle.token());
+    let owners = view.aliases_ref();
+    // A flagged subtree of a parent with one owner must use that owner. Views
+    // with several owners still require selective collection below.
+    if let [owner] = owners {
+        if let Err(index) = dst.binary_search_by_key(&owner.token(), |handle| handle.token()) {
+            dst.insert(index, owner.clone());
+        }
+        return;
     }
+    collect_aliases_from_data(view.get_data(), owners, dst);
 }
 
 fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
@@ -98,8 +110,6 @@ fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
 fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
     let mut handles = Vec::new();
     collect_aliases_from_data(data, &[], &mut handles);
-    handles.sort_by_key(|handle| handle.token());
-    handles.dedup_by_key(|handle| handle.token());
     handles
 }
 
@@ -124,13 +134,18 @@ fn collect_aliases_from_data(
         NUM_ID | VAR_ID => {}
         ALIAS_ID => {
             let token = read_alias_token(&data[1..]);
+            // Both ownership contexts and collected handles are token-sorted.
+            // Deduplicate before cloning, including repeated aliases in a tree.
+            let Err(index) = handles.binary_search_by_key(&token, |handle| handle.token()) else {
+                return;
+            };
             if let Some(handle) = aliases
-                .iter()
-                .find(|handle| handle.token() == token)
-                .cloned()
+                .binary_search_by_key(&token, |handle| handle.token())
+                .ok()
+                .map(|index| aliases[index].clone())
                 .or_else(|| get_alias_handle(token))
             {
-                handles.push(handle);
+                handles.insert(index, handle);
             }
         }
         FUN_ID => {
@@ -506,6 +521,8 @@ pub type BorrowedRawAtom = [u8];
 #[derive(Debug, Clone, Default, Eq)]
 pub struct RawAtom {
     data: Vec<u8>,
+    // Unique direct owners in generation-aware token order. All borrowed
+    // ownership contexts come from this field or the empty NO_ALIASES vector.
     aliases: Option<Box<Vec<Arc<AliasHandle>>>>,
 }
 
@@ -560,7 +577,12 @@ impl RawAtom {
         if aliases.is_empty() {
             self.aliases = None;
         } else {
-            self.aliases = Some(Box::new(aliases.to_vec()));
+            let mut owners = aliases.to_vec();
+            // Callers such as refresh_alias_handles_from_tree may provide slot
+            // order, which differs from token order after slot reuse.
+            owners.sort_unstable_by_key(|handle| handle.token());
+            owners.dedup_by_key(|handle| handle.token());
+            self.aliases = Some(Box::new(owners));
         }
     }
 
@@ -593,10 +615,14 @@ impl RawAtom {
         data: &[u8],
         aliases: &[Arc<AliasHandle>],
     ) -> Option<Box<Vec<Arc<AliasHandle>>>> {
+        // This function is only called for alias-bearing views. With exactly
+        // one source owner, every alias in the subtree uses that handle. Empty
+        // ownership (raw views) and multi-owner parents require selective lookup.
+        if aliases.len() == 1 {
+            return Some(Box::new(aliases.to_vec()));
+        }
         let mut new_aliases = Vec::new();
         collect_aliases_from_data(data, aliases, &mut new_aliases);
-        new_aliases.sort_by_key(|handle| handle.token());
-        new_aliases.dedup_by_key(|handle| handle.token());
         if new_aliases.is_empty() {
             None
         } else {
@@ -649,26 +675,26 @@ impl Borrow<BorrowedRawAtom> for RawAtom {
     }
 }
 
-impl Borrow<BorrowedRawAtom> for &Atom {
-    fn borrow(&self) -> &BorrowedRawAtom {
-        self.as_view().get_data()
+impl Borrow<BorrowedAtom> for &Atom {
+    fn borrow(&self) -> &BorrowedAtom {
+        BorrowedAtom::new(self.as_view())
     }
 }
 
-impl Borrow<BorrowedRawAtom> for Atom {
-    fn borrow(&self) -> &BorrowedRawAtom {
-        self.as_view().get_data()
+impl Borrow<BorrowedAtom> for Atom {
+    fn borrow(&self) -> &BorrowedAtom {
+        BorrowedAtom::new(self.as_view())
     }
 }
 
-impl Borrow<BorrowedRawAtom> for AtomView<'_> {
-    fn borrow(&self) -> &BorrowedRawAtom {
-        self.get_data()
+impl Borrow<BorrowedAtom> for AtomView<'_> {
+    fn borrow(&self) -> &BorrowedAtom {
+        BorrowedAtom::new(*self)
     }
 }
 
-/// Allows the atom to be used as a key and looked up through a mapping to `&[u8]`.
-pub trait KeyLookup: Borrow<BorrowedRawAtom> + Eq + Hash {}
+/// Allows expression keys to be queried using a borrowed expression view.
+pub trait KeyLookup: Borrow<BorrowedAtom> + Eq + Hash {}
 
 impl KeyLookup for Atom {}
 impl KeyLookup for AtomView<'_> {}
@@ -1580,7 +1606,7 @@ pub struct Alias {
 
 impl PartialEq for Alias {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        view_eq(&self.as_view(), &other.as_view())
     }
 }
 
@@ -1588,7 +1614,7 @@ impl Eq for Alias {}
 
 impl Hash for Alias {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        view_hash(&self.as_view(), state);
     }
 }
 
@@ -1666,7 +1692,7 @@ pub struct Fun {
 
 impl PartialEq for Fun {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        encoded_eq(&self.data, &other.data)
     }
 }
 
@@ -1674,7 +1700,7 @@ impl Eq for Fun {}
 
 impl Hash for Fun {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(&self.data, state);
     }
 }
 
@@ -1867,7 +1893,7 @@ pub struct Pow {
 
 impl PartialEq for Pow {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        encoded_eq(&self.data, &other.data)
     }
 }
 
@@ -1875,7 +1901,7 @@ impl Eq for Pow {}
 
 impl Hash for Pow {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(&self.data, state);
     }
 }
 
@@ -1978,7 +2004,7 @@ pub struct Mul {
 
 impl PartialEq for Mul {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        encoded_eq(&self.data, &other.data)
     }
 }
 
@@ -1986,7 +2012,7 @@ impl Eq for Mul {}
 
 impl Hash for Mul {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(&self.data, state);
     }
 }
 
@@ -2183,7 +2209,7 @@ pub struct Add {
 
 impl PartialEq for Add {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data
+        encoded_eq(&self.data, &other.data)
     }
 }
 
@@ -2191,7 +2217,7 @@ impl Eq for Add {}
 
 impl Hash for Add {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(&self.data, state);
     }
 }
 
@@ -2416,13 +2442,13 @@ pub struct AliasView<'a> {
 
 impl<'b> PartialEq<AliasView<'b>> for AliasView<'_> {
     fn eq(&self, other: &AliasView<'b>) -> bool {
-        self.data == other.data
+        view_eq(&self.as_view(), &other.as_view())
     }
 }
 
 impl Hash for AliasView<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        view_hash(&self.as_view(), state);
     }
 }
 
@@ -2452,24 +2478,31 @@ impl<'a> AliasView<'a> {
 
     #[inline(always)]
     pub fn get_handle(&self) -> Arc<AliasHandle> {
-        // TODO: query alias store instead
-        self.aliases
-            .iter()
-            .find(|h| h.token() == self.get_token())
+        let token = self.get_token();
+        self.find_owner(token)
             .cloned()
-            .or_else(|| get_alias_handle(self.get_token()))
+            .or_else(|| get_alias_handle(token))
             .expect("Alias handle was released before the alias atom")
     }
 
     #[inline(always)]
     pub fn get_body(&self) -> AtomView<'a> {
-        // TODO: query alias store instead
-        self.aliases
-            .iter()
-            .find(|h| h.token() == self.get_token())
+        self.find_owner(self.get_token())
             .expect("Alias handle was released before the alias atom")
             .atom()
             .as_view()
+    }
+
+    #[inline(always)]
+    fn find_owner(&self, token: usize) -> Option<&'a Arc<AliasHandle>> {
+        match self.aliases.as_slice() {
+            [] => None,
+            [owner] => (owner.token() == token).then_some(owner),
+            owners => owners
+                .binary_search_by_key(&token, |owner| owner.token())
+                .ok()
+                .map(|index| &owners[index]),
+        }
     }
 
     #[inline(always)]
@@ -2496,13 +2529,13 @@ pub struct FunView<'a> {
 
 impl<'b> PartialEq<FunView<'b>> for FunView<'_> {
     fn eq(&self, other: &FunView<'b>) -> bool {
-        self.data == other.data
+        encoded_eq(self.data, other.data)
     }
 }
 
 impl Hash for FunView<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(self.data, state);
     }
 }
 
@@ -2790,13 +2823,13 @@ impl<'a> IntoIterator for &PowView<'a> {
 impl<'b> PartialEq<PowView<'b>> for PowView<'_> {
     #[inline]
     fn eq(&self, other: &PowView<'b>) -> bool {
-        self.data == other.data
+        encoded_eq(self.data, other.data)
     }
 }
 
 impl Hash for PowView<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(self.data, state);
     }
 }
 
@@ -2897,13 +2930,13 @@ pub struct MulView<'a> {
 impl<'b> PartialEq<MulView<'b>> for MulView<'_> {
     #[inline]
     fn eq(&self, other: &MulView<'b>) -> bool {
-        self.data == other.data
+        encoded_eq(self.data, other.data)
     }
 }
 
 impl Hash for MulView<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(self.data, state);
     }
 }
 
@@ -3029,13 +3062,13 @@ pub struct AddView<'a> {
 impl<'b> PartialEq<AddView<'b>> for AddView<'_> {
     #[inline]
     fn eq(&self, other: &AddView<'b>) -> bool {
-        self.data == other.data
+        encoded_eq(self.data, other.data)
     }
 }
 
 impl Hash for AddView<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.data.hash(state);
+        encoded_hash(self.data, state);
     }
 }
 
@@ -3775,6 +3808,171 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    fn copying_alias_subviews_retains_only_referenced_owners() {
+        for opaque in [false, true] {
+            for multiple_owners in [false, true] {
+                let used = crate::alias::register_alias_atom(parse!("subview_used_body(x)"));
+                let unused = crate::alias::register_alias_atom(parse!("subview_unused_body(y)"));
+                let used_weak = Arc::downgrade(&used);
+                let unused_weak = Arc::downgrade(&unused);
+                let alias = if opaque {
+                    used.to_opaque_atom()
+                } else {
+                    used.to_atom()
+                };
+                let mut child = Atom::new();
+                let function = child.to_fun(symbol!("subview_child"));
+                for _ in 0..8 {
+                    function.add_arg(alias.as_view());
+                }
+                function.add_arg(parse!("subview_plain").as_view());
+                assert_eq!(child.as_view().aliases_ref().len(), 1);
+                let expected = child.inline_aliases(true);
+
+                let mut parent = Atom::new();
+                let function = parent.to_fun(symbol!("subview_parent"));
+                function.add_arg(child.as_view());
+                if multiple_owners {
+                    function.add_arg(unused.to_atom().as_view());
+                }
+                let AtomView::Fun(function) = parent.as_view() else {
+                    unreachable!()
+                };
+                let view = function.iter().next().unwrap();
+                assert_eq!(
+                    view.aliases_ref().len(),
+                    if multiple_owners { 2 } else { 1 }
+                );
+                let copied = view.to_owned();
+                // Ownerless byte views must continue recovering handles from
+                // the global store instead of assuming a source ownership set.
+                let raw_copied = AtomView::from(view.get_data()).to_owned();
+                assert_eq!(copied.as_view().aliases_ref().len(), 1);
+                assert_eq!(raw_copied.as_view().aliases_ref().len(), 1);
+                drop(parent);
+                drop(child);
+                drop(alias);
+                drop(used);
+                drop(unused);
+                assert!(unused_weak.upgrade().is_none());
+                for copy in [&copied, &raw_copied] {
+                    assert_eq!(copy.inline_aliases(true), expected);
+                    assert_eq!(copy.inline_aliases(false).as_view().has_alias(), opaque);
+                }
+                drop(copied);
+                assert!(used_weak.upgrade().is_some());
+                drop(raw_copied);
+                assert!(used_weak.upgrade().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn multi_owner_collection_preserves_reused_tokens_and_selective_ownership() {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let body = parse!(&format!("sorted_owner_body(x+{i})"));
+                let retired = crate::alias::register_alias_atom(body.clone());
+                let old_token = retired.token();
+                drop(retired);
+                let current = crate::alias::register_alias_atom(body);
+                assert_ne!(old_token, current.token());
+                current
+            })
+            .collect();
+        let weak: Vec<_> = handles.iter().map(Arc::downgrade).collect();
+        let selected = [11usize, 2, 7];
+        let mut child = Atom::new();
+        let function = child.to_fun(symbol!("sorted_owner_child"));
+        for _ in 0..32 {
+            for index in selected {
+                let alias = if index % 2 == 0 {
+                    handles[index].to_opaque_atom()
+                } else {
+                    handles[index].to_atom()
+                };
+                function.add_arg(alias.as_view());
+            }
+        }
+        let expected = child.inline_aliases(true);
+        let opaque_expected = child.inline_aliases(false);
+        let mut parent = Atom::new();
+        let function = parent.to_fun(symbol!("sorted_owner_parent"));
+        function.add_arg(child.as_view());
+        for handle in handles.iter().rev() {
+            function.add_arg(handle.to_atom().as_view());
+        }
+        parent.refresh_alias_handles_from_tree();
+
+        // Exercise the ownership synchronization boundary with unsorted,
+        // duplicated handles independently of the registry's current slot order.
+        let mut shuffled = handles.clone();
+        shuffled.sort_unstable_by_key(|handle| std::cmp::Reverse(handle.token()));
+        shuffled.extend(handles.iter().cloned());
+        let mut raw = parent.into_raw();
+        raw.sync_aliases_from(&shuffled);
+        drop(shuffled);
+        assert_eq!(raw.aliases_vec().len(), handles.len());
+        assert!(
+            raw.aliases_vec()
+                .windows(2)
+                .all(|pair| pair[0].token() < pair[1].token())
+        );
+        // Encoded bytes and all referenced owners are unchanged.
+        let parent = unsafe { Atom::from_raw(raw) };
+        let AtomView::Fun(function) = parent.as_view() else {
+            unreachable!()
+        };
+        for (view, handle) in function.iter().skip(1).zip(handles.iter().rev()) {
+            let AtomView::Alias(alias) = view else {
+                unreachable!()
+            };
+            assert_eq!(
+                alias.get_body().get_data(),
+                handle.atom().as_view().get_data()
+            );
+            assert!(Arc::ptr_eq(&alias.get_handle(), handle));
+            let AtomView::Alias(detached) = AtomView::from(view.get_data()) else {
+                unreachable!()
+            };
+            assert!(Arc::ptr_eq(&detached.get_handle(), handle));
+            let single = handle.to_atom();
+            let AtomView::Alias(single) = single.as_view() else {
+                unreachable!()
+            };
+            assert_eq!(single.get_body().get_data(), alias.get_body().get_data());
+            assert!(Arc::ptr_eq(&single.get_handle(), handle));
+        }
+        let view = function.iter().next().unwrap();
+        let copied = view.to_owned();
+        let raw_copied = AtomView::from(view.get_data()).to_owned();
+        let mut expected_tokens: Vec<_> = selected.iter().map(|&i| handles[i].token()).collect();
+        expected_tokens.sort_unstable();
+        for copy in [&copied, &raw_copied] {
+            assert_eq!(
+                copy.as_view()
+                    .aliases_ref()
+                    .iter()
+                    .map(|h| h.token())
+                    .collect::<Vec<_>>(),
+                expected_tokens
+            );
+            assert_eq!(copy.inline_aliases(true), expected);
+            assert_eq!(copy.inline_aliases(false), opaque_expected);
+        }
+        drop(opaque_expected);
+        drop(child);
+        drop(parent);
+        drop(handles);
+        for (index, handle) in weak.iter().enumerate() {
+            assert_eq!(handle.upgrade().is_some(), selected.contains(&index));
+        }
+        drop(copied);
+        drop(raw_copied);
+        assert!(weak.iter().all(|handle| handle.upgrade().is_none()));
+    }
 
     #[test]
     fn copying_compound_views_replaces_alias_ownership() {

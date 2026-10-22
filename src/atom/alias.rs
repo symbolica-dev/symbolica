@@ -8,7 +8,7 @@ use crate::{
     printer::{AtomPrinter, PrintOptions},
 };
 
-use super::{Atom, AtomCore, AtomType, AtomView};
+use super::{Atom, AtomCore, AtomType, AtomView, BorrowedAtom};
 
 /// An atom that contains opaque aliases, together with a map from the aliases to their original atoms.
 /// An aliased atom may have a lower memory footprint than the original atom if it contains many repeated subexpressions.
@@ -130,12 +130,14 @@ impl AliasedAtom {
         // TODO: this can be a one-pass if unfolded in reverse insertion order
         loop {
             let out = self.root.replace_map(|a, _, out| {
-                if let Some(replacement) = self.aliases.get::<[u8]>(a.get_data()) {
+                if let Some(replacement) = self.aliases.get(BorrowedAtom::new(a)) {
                     out.set_from_view(&replacement.as_view());
                 }
             });
 
-            if out != self.root {
+            // Alias expansion can change the representation without changing
+            // its value. Continue until the encoded expression stops changing.
+            if out.as_view().get_data() != self.root.as_view().get_data() {
                 self.root = out;
             } else {
                 break;
@@ -337,7 +339,7 @@ impl AliasedAtom {
     pub fn flatten_operators(&mut self) {
         self.root = self.root.replace_map(|a, ctx, out| {
             if (ctx.parent_type == Some(AtomType::Add) || ctx.parent_type == Some(AtomType::Mul))
-                && let Some(alias) = self.aliases.get::<[u8]>(a.get_data())
+                && let Some(alias) = self.aliases.get(BorrowedAtom::new(a))
                 && ctx.parent_type == Some(alias.get_atom_type())
             {
                 out.set_from_view(&alias.as_atom_view());
@@ -416,7 +418,7 @@ impl AliasedAtom {
         for (alias, body) in &rhs.aliases {
             let mut dependencies = HashSet::default();
             body.visitor(&mut |a| {
-                if rhs.aliases.contains_key::<[u8]>(&a.get_data()) {
+                if rhs.aliases.contains_key(BorrowedAtom::new(a)) {
                     dependencies.insert(a);
                     false
                 } else {
@@ -441,7 +443,9 @@ impl AliasedAtom {
             dependency_graph: &mut HashMap<&'a Atom, NodeInfo<'a>>,
             resolve: &impl Fn(AtomView) -> Atom,
         ) {
-            let node = dependency_graph.get_mut(current.get_data()).unwrap();
+            let node = dependency_graph
+                .get_mut(BorrowedAtom::new(current))
+                .unwrap();
 
             if node.resolved {
                 return;
@@ -454,13 +458,14 @@ impl AliasedAtom {
 
             let new_body = if dependencies
                 .iter()
-                .all(|d| dependency_graph[d.get_data()].rename.is_none())
+                .all(|d| dependency_graph[BorrowedAtom::new(*d)].rename.is_none())
             {
-                Cow::Borrowed(&rhs_aliases[current.get_data()]) // original body remains unchanged
+                Cow::Borrowed(&rhs_aliases[BorrowedAtom::new(current)]) // original body remains unchanged
             } else {
-                let body = rhs_aliases[current.get_data()].replace_map(|a, _, out| {
-                    if dependencies.contains(a.get_data())
-                        && let Some(new_alias) = &dependency_graph.get(a.get_data()).unwrap().rename
+                let body = rhs_aliases[BorrowedAtom::new(current)].replace_map(|a, _, out| {
+                    if dependencies.contains(BorrowedAtom::new(a))
+                        && let Some(new_alias) =
+                            &dependency_graph.get(BorrowedAtom::new(a)).unwrap().rename
                     {
                         {
                             out.set_from_view(&new_alias.as_view());
@@ -471,10 +476,12 @@ impl AliasedAtom {
                 Cow::Owned(body)
             };
 
-            let node = dependency_graph.get_mut(current.get_data()).unwrap();
+            let node = dependency_graph
+                .get_mut(BorrowedAtom::new(current))
+                .unwrap();
             node.resolved = true;
 
-            match aliases.get(current.get_data()) {
+            match aliases.get(BorrowedAtom::new(current)) {
                 Some(existing) if existing == &*new_body => {}
                 Some(_) => {
                     let mut new_alias = resolve(current);
@@ -503,7 +510,7 @@ impl AliasedAtom {
 
         rhs.root.replace_map(|a, _, out| {
             if let Some(new_alias) = dependency_graph
-                .get(a.get_data())
+                .get(BorrowedAtom::new(a))
                 .and_then(|node| node.rename.as_ref())
             {
                 out.set_from_view(&new_alias.as_atom_view());
@@ -696,6 +703,17 @@ fn named_alias_subexpressions(
 #[cfg(test)]
 mod test {
     use crate::{atom::AtomCore, function, id::AliasedAtom, parse, symbol};
+
+    #[test]
+    fn named_alias_expansion_observes_representation_changes() {
+        let body = parse!("named_semantic_body(x)");
+        let alias = body.alias(false);
+        let mut named = AliasedAtom::from(alias.clone());
+        named.register_alias(alias, body.clone());
+        let expanded = named.into_inner();
+        assert_eq!(expanded.as_view().get_data(), body.as_view().get_data());
+        assert!(!expanded.as_view().has_alias());
+    }
 
     #[test]
     fn create_alias() {

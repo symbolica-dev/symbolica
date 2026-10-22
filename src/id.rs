@@ -610,7 +610,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             self.replace_settings,
             &mut out,
         ) {
-            if !self.repeat || expr_ref == out.as_view() {
+            if !self.repeat || expr_ref.get_data() == out.as_view().get_data() {
                 break;
             }
 
@@ -669,7 +669,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
             out,
         ) {
             replaced = true;
-            if !self.repeat || expr_ref == out.as_view() {
+            if !self.repeat || expr_ref.get_data() == out.as_view().get_data() {
                 break;
             }
 
@@ -1422,6 +1422,15 @@ impl<'a> AtomView<'a> {
     }
 
     pub(crate) fn count_subexpressions(&self, subexpressions: &mut HashMap<AtomView<'a>, usize>) {
+        // A transparent wrapper is the same subexpression as its body. Resolve
+        // it before inserting the key so descendants are visited on first use.
+        if let AtomView::Alias(alias) = self
+            && !alias.is_opaque()
+        {
+            alias.get_body().count_subexpressions(subexpressions);
+            return;
+        }
+
         if subexpressions.contains_key(self) {
             *subexpressions.entry(*self).or_insert(0) += 1;
             return;
@@ -1429,11 +1438,8 @@ impl<'a> AtomView<'a> {
 
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {}
-            AtomView::Alias(a) => {
+            AtomView::Alias(_) => {
                 *subexpressions.entry(*self).or_insert(0) += 1;
-                if !a.is_opaque() {
-                    a.get_body().count_subexpressions(subexpressions);
-                }
             }
             AtomView::Fun(f) => {
                 *subexpressions.entry(*self).or_insert(0) += 1;
@@ -6819,6 +6825,27 @@ mod test {
                 "missing expected replacement {expected}; got {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn subexpression_counts_resolve_transparent_aliases_once() {
+        let body = parse!("semantic_count_outer(semantic_count_inner(x))");
+        let child = parse!("semantic_count_inner(x)");
+        let alias = body.alias(false);
+        assert_eq!(alias.count_subexpressions(), body.count_subexpressions());
+
+        let head = symbol!("semantic_count_container");
+        let expression = crate::function!(head, &body, &alias, &alias);
+        let counts = expression.count_subexpressions();
+        assert_eq!(counts.get(&body.as_view()), Some(&3));
+        assert_eq!(counts.get(&alias.as_view()), Some(&3));
+        assert_eq!(counts.get(&child.as_view()), Some(&1));
+
+        let opaque = body.alias(true);
+        let counts = opaque.count_subexpressions();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts.get(&opaque.as_view()), Some(&1));
+        assert!(!counts.contains_key(&body.as_view()));
     }
 
     #[test]

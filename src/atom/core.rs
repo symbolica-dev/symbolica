@@ -422,7 +422,8 @@ pub trait AtomCore: private::Sealed + Sized {
 
     /// Inline aliases in the expression.
     ///
-    /// This can be used before comparing or hashing expressions when alias transparency is desired,
+    /// Equality and hashing already treat transparent aliases as their bodies.
+    /// This explicitly replaces alias references and normalizes the resulting expression,
     /// while leaving opaque aliases as explicit atoms unless `expand_opaque` is true.
     fn inline_aliases(&self, expand_opaque: bool) -> Self::Output {
         self.as_atom_view()

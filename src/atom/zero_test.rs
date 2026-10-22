@@ -1,7 +1,7 @@
 //! Test whether expressions are identically zero.
 
 use crate::{
-    atom::{Atom, AtomCore, AtomOrView, AtomView, FunctionBuilder, Symbol},
+    atom::{Atom, AtomCore, AtomOrView, AtomView, BorrowedAtom, FunctionBuilder, Symbol},
     coefficient::{CoefficientView, ConvertToRing},
     domains::{
         Field, Ring, RingOps, UniformlySampleableRing,
@@ -1050,7 +1050,7 @@ impl AtomView<'_> {
                 if !var.get_symbol().is_formal_sample_variable() {
                     return Err(PolyError::UnsupportedConstant(var.get_symbol()));
                 }
-                if let Some(val) = samples.get::<[u8]>(self.get_data()) {
+                if let Some(val) = samples.get(BorrowedAtom::new(*self)) {
                     Ok(*val)
                 } else {
                     let new_sample = field.sample_uniform_nonzero(&mut rng);
@@ -1114,7 +1114,7 @@ impl AtomView<'_> {
                 let symbol = fun_view.get_symbol();
 
                 if symbol.is_opaque_sample_function() {
-                    if let Some(sample) = samples.get::<[u8]>(self.get_data()) {
+                    if let Some(sample) = samples.get(BorrowedAtom::new(*self)) {
                         return Ok(*sample);
                     }
                     let sample = field.sample_uniform_nonzero(&mut rng);
@@ -1336,7 +1336,7 @@ fn sample_imaginary_unit(
     }
     let key = Atom::i();
     let minus_one = field.neg(&field.one());
-    if let Some(sample) = samples.get::<[u8]>(key.as_view().get_data()) {
+    if let Some(sample) = samples.get(BorrowedAtom::new(key.as_view())) {
         return if field.mul(sample, sample) == minus_one {
             Ok(*sample)
         } else {
@@ -1426,7 +1426,7 @@ fn sample_exponential_generator(
     field: &Zp64,
     exponent_field: &Zp64,
 ) -> Result<FiniteFieldElement<u64>, PolyError> {
-    if let Some(sample) = samples.get::<[u8]>(key.as_view().get_data()) {
+    if let Some(sample) = samples.get(BorrowedAtom::new(key.as_view())) {
         if field.pow(sample, exponent_field.get_prime()) != field.one() {
             return Err(PolyError::InvalidExponentialSample {
                 subgroup_order: exponent_field.get_prime(),
@@ -2019,6 +2019,25 @@ mod tests {
     }
 
     #[test]
+    fn finite_field_samples_accept_equivalent_alias_keys() {
+        let plain = parse!("semantic_sample_x");
+        let alias = plain.alias(false);
+        let field = Zp64::new(SAMPLE_PRIMES[0].prime);
+        let value = field.to_element(7);
+        for key in [&plain, &alias] {
+            let mut samples = HashMap::default();
+            samples.insert(AtomOrView::from(key.clone()), value);
+            for query in [&plain, &alias] {
+                assert_eq!(
+                    query.as_view().sample_in_finite_field(&mut samples, &field),
+                    Ok(value)
+                );
+                assert_eq!(samples.len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn fixed_imaginary_units_are_cached_and_respect_existing_samples() {
         for sample in &SAMPLE_PRIMES {
             let field = Zp64::new(sample.prime);
@@ -2027,7 +2046,7 @@ mod tests {
             assert_eq!(sample_imaginary_unit(&mut samples, &field), Ok(i));
             assert_eq!(samples.len(), 1);
             assert_eq!(
-                samples.get::<[u8]>(Atom::i().as_view().get_data()),
+                samples.get(BorrowedAtom::new(Atom::i().as_view())),
                 Some(&i)
             );
             assert_eq!(sample_imaginary_unit(&mut samples, &field), Ok(i));
