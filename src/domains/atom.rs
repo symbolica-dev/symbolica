@@ -219,6 +219,21 @@ impl Ring for AtomField {
         Atom::num(0)
     }
 
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        let mut elements = elements.into_iter();
+        let Some(first) = elements.next() else {
+            return self.zero();
+        };
+        let Some(second) = elements.next() else {
+            return first;
+        };
+        // Apply custom normalization once to the complete n-ary sum.
+        self.normalize(Atom::add_many([first, second].into_iter().chain(elements)))
+    }
+
     fn one(&self) -> Self::Element {
         Atom::num(1)
     }

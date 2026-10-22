@@ -161,6 +161,22 @@ pub trait Ring:
     fn zero(&self) -> Self::Element;
     /// Return the multiplicative identity `1`.
     fn one(&self) -> Self::Element;
+
+    /// Add owned elements, returning zero for an empty iterator.
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        let mut elements = elements.into_iter();
+        let Some(mut sum) = elements.next() else {
+            return self.zero();
+        };
+        for element in elements {
+            self.add_assign(&mut sum, element);
+        }
+        sum
+    }
+
     /// Embed the integer `n` as `n * 1`.
     ///
     /// In a field extension, the result lies in its prime subfield.
@@ -742,8 +758,16 @@ mod tests {
     use crate::domains::{
         Field, Ring, SampleableRing,
         integer::{Integer, Z},
-        rational::Q,
+        rational::{Q, Rational},
     };
+
+    #[test]
+    fn ring_sum_uses_the_identity_and_owned_elements() {
+        assert_eq!(Z.sum([]), Integer::from(0));
+        assert_eq!(Z.sum([Integer::from(7)]), Integer::from(7));
+        let values = [(1, 2), (2, 3), (3, 4)].map(Rational::from);
+        assert_eq!(Q.sum(values), Rational::from((23, 12)));
+    }
 
     #[test]
     fn small_integer_sampling_is_available_for_every_ring() {

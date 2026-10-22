@@ -96,6 +96,8 @@ pub mod prelude {
 
     pub use crate::coefficient::{Coefficient, CoefficientView, ConvertToRing};
 
+    pub use crate::linear_combination::LinearCombination;
+
     pub use crate::domains::{
         EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, SampleableRing, Set,
         UniformlySampleableRing,

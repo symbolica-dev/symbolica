@@ -3271,6 +3271,10 @@ mod test {
             (&x * &infinity, &x * &negative_infinity),
             ((&x + &y) / 3, 2 * (&x + &y) / 3),
             (x.pow(3), &x * &y),
+            (
+                crate::function!(crate::symbol!("pairwise_add_f"), &x),
+                crate::function!(crate::symbol!("pairwise_add_f"), &y),
+            ),
             (crate::function!(crate::symbol!("pairwise_add_f"), &x), y),
         ];
         for number in [
