@@ -41,7 +41,7 @@ use crate::{
     },
     printer::{AtomPrinter, CanonicalOrderingSettings, PrintOptions, PrintState},
     solve::SolveError,
-    state::Workspace,
+    state::{StateMap, Workspace},
     tensors::{CanonicalTensor, matrix::Matrix},
     utils::{BorrowedOrOwned, Settable},
 };
@@ -2257,6 +2257,40 @@ pub trait AtomCore: private::Sealed + Sized {
     {
         self.as_atom_view()
             .replace_multiple_into(replacements, ReplaceSettings::default(), out)
+    }
+
+    /// Simultaneously rename variable and function symbols, then normalize.
+    ///
+    /// Replacements are applied once, so swaps and longer cycles are supported.
+    /// Function normalizers see the renamed head and all renamed arguments;
+    /// no intermediate expression is normalized with an old function head.
+    /// Target symbols retain their registered attributes, tags and user data.
+    /// Rational-polynomial coefficients are converted to ordinary expressions
+    /// when necessary so that their variables participate in the substitution.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use symbolica::prelude::*;
+    ///
+    /// let (f, g, x, y) = symbol!("f", "g", "x", "y");
+    /// let renamed = function!(f, x).rename_symbols(&HashMap::from([(f, g), (x, y)]));
+    /// assert_eq!(renamed, function!(g, y));
+    /// ```
+    fn rename_symbols<S: BuildHasher>(
+        &self,
+        symbols: &StdHashMap<Symbol, Symbol, S>,
+    ) -> Self::Output {
+        if symbols.is_empty() {
+            return self.as_atom_view().to_owned().wrap(self);
+        }
+        let mut state_map = StateMap::default();
+        state_map.rename_coefficient_symbols = true;
+        state_map.symbols.extend(
+            symbols
+                .iter()
+                .map(|(source, target)| (source.get_id(), *target)),
+        );
+        self.as_atom_view().rename(&state_map).wrap(self)
     }
 
     /// Replace part of an expression by calling the map `m` on each subexpression.

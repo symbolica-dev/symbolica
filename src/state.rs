@@ -56,6 +56,8 @@ pub struct StateMap {
     pub(crate) finite_fields: HashMap<FiniteFieldIndex, FiniteFieldIndex>,
     pub(crate) variables_lists: HashMap<u64, Arc<Vec<PolyVariable>>>,
     imported_variable_lists: HashMap<u64, Vec<ImportedPolyVariable>>,
+    /// An in-memory symbol substitution has no imported variable-list mapping.
+    pub(crate) rename_coefficient_symbols: bool,
 }
 
 enum ImportedPolyVariable {

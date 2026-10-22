@@ -4730,6 +4730,111 @@ mod test {
     use super::FunctionBuilder;
 
     #[test]
+    fn rename_symbols_changes_heads_arguments_and_preserves_target_metadata() {
+        use std::collections::HashMap;
+
+        let (f, g, x, y) = symbol!(
+            "rename_heads_f",
+            "rename_heads_g",
+            "rename_heads_x",
+            "rename_heads_y"
+        );
+        let input = function!(f, x, function!(g, y)) + Atom::var(x).pow(2);
+        let renaming = HashMap::from([(f, g), (g, f), (x, y), (y, x)]);
+        let expected = function!(g, y, function!(f, x)) + Atom::var(y).pow(2);
+        assert_eq!(input.rename_symbols(&renaming), expected);
+        assert_eq!(expected.rename_symbols(&renaming), input);
+        assert_eq!(input.rename_symbols(&HashMap::new()), input);
+
+        let target = super::SymbolBuilder::new(wrap_symbol!("rename_metadata_target"))
+            .with_tags(["test::rename_metadata_tag".to_owned()])
+            .with_user_data(UserData::String("target metadata".into()))
+            .build()
+            .unwrap();
+        let result = function!(f, x).rename_symbols(&HashMap::from([(f, target)]));
+        assert_eq!(result.as_fun_view().unwrap().get_symbol(), target);
+        assert!(target.has_tag("test::rename_metadata_tag"));
+        assert_eq!(
+            target.get_data(),
+            &UserData::String("target metadata".into())
+        );
+    }
+
+    #[test]
+    fn rename_symbols_normalizes_only_after_the_complete_substitution() {
+        use std::{
+            collections::HashMap,
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        let (x, y) = symbol!("rename_callback_x", "rename_callback_y");
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let observed = source_calls.clone();
+        let source = super::SymbolBuilder::new(wrap_symbol!("rename_callback_source"))
+            .with_normalization_function(move |node, out| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                if let AtomView::Fun(fun) = node
+                    && fun.iter().next() == Some(Atom::var(y).as_view())
+                {
+                    **out = Atom::num(1);
+                }
+            })
+            .build()
+            .unwrap();
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        let observed = target_calls.clone();
+        let target = super::SymbolBuilder::new(wrap_symbol!("rename_callback_target"))
+            .with_normalization_function(move |node, out| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                if let AtomView::Fun(fun) = node
+                    && fun.iter().next() == Some(Atom::var(y).as_view())
+                {
+                    **out = Atom::num(7);
+                }
+            })
+            .build()
+            .unwrap();
+        let input = function!(source, x);
+        source_calls.store(0, Ordering::Relaxed);
+        let result = input.rename_symbols(&HashMap::from([(source, target), (x, y)]));
+        assert_eq!(result, Atom::num(7));
+        assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(target_calls.load(Ordering::Relaxed), 1);
+
+        let packed = input.set_coefficient_ring([input.clone()]);
+        source_calls.store(0, Ordering::Relaxed);
+        target_calls.store(0, Ordering::Relaxed);
+        assert_eq!(
+            packed.rename_symbols(&HashMap::from([(source, target), (x, y)])),
+            Atom::num(7)
+        );
+        assert_eq!(source_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(target_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn rename_symbols_includes_rational_polynomial_coefficients() {
+        use std::collections::HashMap;
+
+        let (x, y, z, f) = symbol!(
+            "rename_coefficient_x",
+            "rename_coefficient_y",
+            "rename_coefficient_z",
+            "rename_coefficient_f"
+        );
+        let input = (Atom::var(x) + Atom::var(y) * 2).set_coefficient_ring([x, y].as_slice());
+        let renamed = input.rename_symbols(&HashMap::from([(x, y), (y, x)]));
+        assert_eq!(renamed, Atom::var(y) + Atom::var(x) * 2);
+        let merged = input.rename_symbols(&HashMap::from([(x, z), (y, z)]));
+        assert_eq!(merged, Atom::var(z) * 3);
+        let unrelated = input.rename_symbols(&HashMap::from([(f, z)]));
+        assert_eq!(unrelated, input);
+    }
+
+    #[test]
     fn parse_macro() {
         assert_eq!(parse_lit!(x ^ 2 + 5 + f(x)), parse!("x ^ 2 + 5 + f(x)"));
     }

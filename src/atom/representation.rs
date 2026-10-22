@@ -2172,6 +2172,16 @@ impl<'a> AtomView<'a> {
                     if let Some(nv) = state_map.get_variable_list(old_id) {
                         let rr = r.deserialize_with_variables(nv);
                         out.to_num(Coefficient::RationalPolynomial(rr));
+                    } else if state_map.rename_coefficient_symbols
+                        && self
+                            .get_all_symbols(true)
+                            .iter()
+                            .any(|symbol| state_map.symbols.contains_key(&symbol.get_id()))
+                    {
+                        // Reuse the coefficient-domain conversion and the same
+                        // delayed-normalization renamer for in-memory maps.
+                        let expression = self.set_coefficient_ring(&Default::default());
+                        expression.as_view().rename_no_norm(state_map, ws, out);
                     }
                 }
                 _ => {}
