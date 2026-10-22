@@ -109,6 +109,23 @@ class MatrixMathMLTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_small_complete_values_remain_visible_across_many_rows(self):
+        viewer = Matrix.from_linear(52, 11, list(range(572))).mathml_viewer()
+        try:
+            page = viewer.page()
+            self.assertEqual((page['start'], page['end'], page['total']), (0, 25, 52))
+            self.assertEqual([m[0] for m in page['markers']], [[]])
+            rendered = cells(page['html'])
+            self.assertEqual(len(rendered), 275)
+            for index, cell in enumerate(rendered):
+                self.assertEqual(mathml_expression(fragment(root(ET.tostring(cell, encoding='unicode')))), E(str(index)))
+            _, page = viewer.handle_message({'action': 'expand', 'value': [], 'size': 25})
+            self.assertEqual((page['start'], page['end']), (0, 50))
+            self.assertEqual([m[0] for m in page['markers']], [[]])
+            self.assertEqual(len(cells(page['html'])), 550)
+        finally:
+            viewer.close()
+
     def test_coordinates_only_label_truncated_dimensions(self):
         for rows, cols, expected_rows, expected_cols in [(32, 11, True, False), (1, 40, False, False), (2, 2, False, False)]:
             viewer = Matrix.from_linear(rows, cols, list(range(rows * cols))).mathml_viewer()

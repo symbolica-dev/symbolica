@@ -94,7 +94,12 @@ impl Source<'_> {
                     .entry(index)?
                     .page_expanded(&default_options(), &[], 0, size, &expansions)
                     .unwrap();
-                if bytes + page.html.len() > HTML_BUDGET || markers.len() + page.markers.len() > 900
+                // Small, complete values should not become omission buttons
+                // just because earlier rows used the detailed-expression budget.
+                // The shared provider still enforces the hard page-size limit.
+                let detailed = !page.markers.is_empty() || page.html.len() > 1024;
+                if (detailed && bytes + page.html.len() > HTML_BUDGET)
+                    || markers.len() + page.markers.len() > 900
                 {
                     let id = markers.len();
                     body.push_str(&format!("<math>{}</math>", MathMLMarker::marker(id)));
@@ -104,7 +109,9 @@ impl Source<'_> {
                         0,
                     ));
                 } else {
-                    bytes += page.html.len();
+                    if detailed {
+                        bytes += page.html.len();
+                    }
                     let offset = markers.len();
                     let mut html = page.html;
                     // Descending replacement avoids renumbering an ID twice.
