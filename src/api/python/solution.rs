@@ -493,6 +493,11 @@ impl PythonSolution {
 pub struct PythonSolutionSet {
     pub(super) set: SolutionSet,
 }
+impl From<SolutionSet> for PythonSolutionSet {
+    fn from(set: SolutionSet) -> Self {
+        Self { set }
+    }
+}
 impl PythonSolutionSet {
     fn text_with(&self, atom: &impl Fn(&Atom) -> String) -> String {
         let mut lines = Vec::new();
