@@ -25,6 +25,37 @@ fn algebraic_conversion_respects_alias_opacity() {
 }
 
 #[test]
+fn algebraic_explicit_generators_respect_alias_opacity() {
+    for generator in [
+        crate::parse!("sqrt(2)"),
+        crate::parse!("root(x^3-2,0)"),
+        Atom::i(),
+    ] {
+        let transparent = generator.alias(false).alias(false);
+        let mut context =
+            AlgebraicContext::from_generators(std::slice::from_ref(&transparent)).unwrap();
+        assert_eq!(
+            context.convert_atom(transparent.as_view()).unwrap(),
+            context.convert_atom(generator.as_view()).unwrap()
+        );
+
+        let opaque = generator.alias(true);
+        assert!(AlgebraicContext::from_generators(&[opaque.clone()]).is_err());
+        assert!(AlgebraicContext::from_generators(&[opaque.alias(false)]).is_err());
+    }
+
+    let expression = crate::parse!("x^2-2");
+    let generator = crate::parse!("sqrt(2)");
+    let factorization = expression
+        .factor_in_extension(&[generator.alias(false)])
+        .unwrap();
+    assert_eq!(
+        factorization.inline_aliases(false),
+        expression.factor_in_extension(&[generator]).unwrap()
+    );
+}
+
+#[test]
 fn algebraic_polynomial_conversion_descends_transparent_aliases() {
     let body = crate::parse!("x+sqrt(2)");
     let transparent = body.alias(false);

@@ -768,6 +768,9 @@ impl AlgebraicContext {
 
     fn is_explicit_generator(atom: AtomView<'_>) -> bool {
         match atom {
+            AtomView::Alias(alias) if !alias.is_opaque() => {
+                Self::is_explicit_generator(alias.get_body())
+            }
             AtomView::Fun(function) => function.get_symbol() == root(),
             AtomView::Pow(power) => {
                 let (_, exponent) = power.get_base_exp();
