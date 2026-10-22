@@ -172,6 +172,11 @@ name = "slow_fac_operations"
 harness = false
 required-features = ["symbolica_benchmarks"]
 
+[[bench]]
+name = "linear_combination"
+harness = false
+required-features = ["symbolica_benchmarks"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 directories = "6.0"
 
