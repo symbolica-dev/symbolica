@@ -50,8 +50,22 @@ impl AtomView<'_> {
             return Ordering::Equal;
         }
 
-        let a = resolve_alias(*self);
-        let b = resolve_alias(*other);
+        // Borrow ordinary views directly. Materializing both resolved views
+        // here copies their data and ownership pointers on every comparison.
+        let resolved_a;
+        let a = if matches!(self, AtomView::Alias(_)) {
+            resolved_a = resolve_alias_loop(*self);
+            &resolved_a
+        } else {
+            self
+        };
+        let resolved_b;
+        let b = if matches!(other, AtomView::Alias(_)) {
+            resolved_b = resolve_alias_loop(*other);
+            &resolved_b
+        } else {
+            other
+        };
 
         match (a, b) {
             // comparisons on floating points may yield Equal even if the binary data is not the same
@@ -158,8 +172,20 @@ impl AtomView<'_> {
 
     /// Compare factors semantically in a term. `x` and `x^2` are placed next to each other by sorting a power based on the base only.
     pub(crate) fn cmp_factors(&self, other: &AtomView<'_>) -> Ordering {
-        let a = resolve_alias(*self);
-        let b = resolve_alias(*other);
+        let resolved_a;
+        let a = if matches!(self, AtomView::Alias(_)) {
+            resolved_a = resolve_alias_loop(*self);
+            &resolved_a
+        } else {
+            self
+        };
+        let resolved_b;
+        let b = if matches!(other, AtomView::Alias(_)) {
+            resolved_b = resolve_alias_loop(*other);
+            &resolved_b
+        } else {
+            other
+        };
 
         match (a, b) {
             (AtomView::Num(_), AtomView::Num(_)) => Ordering::Equal,
@@ -2151,10 +2177,20 @@ impl AtomView<'_> {
             return;
         }
 
+        if !matches!(self, AtomView::Add(_)) {
+            if matches!(rhs, AtomView::Add(_)) {
+                rhs.add_normalized(*self, ws, out);
+            } else {
+                self.add_normalized_pair(rhs, ws, out);
+            }
+            return;
+        }
+
         let a = out.to_add();
         a.grow_capacity(self.get_byte_size() + rhs.get_byte_size());
 
-        let no_aliases = !self.has_alias() && !rhs.has_alias();
+        // The alias-bearing case returned before constructing the output.
+        let no_aliases = true;
 
         let mut helper = ws.new_atom();
         let mut b = ws.new_atom();
@@ -2335,15 +2371,38 @@ impl AtomView<'_> {
             } else {
                 a.set_normalized(true);
             }
-        } else if let AtomView::Add(_) = rhs {
-            rhs.add_normalized(*self, ws, out);
-        } else {
-            let mut e = ws.new_atom();
-            let a = e.to_add();
-            a.extend(*self);
-            a.extend(rhs);
-            e.as_view().normalize(ws, out);
         }
+    }
+
+    /// Add two terms after excluding sums and aliases.
+    fn add_normalized_pair(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
+        if !self.needs_normalization()
+            && !rhs.needs_normalization()
+            && !matches!(self, AtomView::Num(_))
+            && !matches!(rhs, AtomView::Num(_))
+        {
+            let order = self.get_term_cmp_slice().cmp(rhs.get_term_cmp_slice());
+            if order != Ordering::Equal {
+                // Canonical terms with distinct monomials need neither staging nor sorting.
+                let a = out.to_add();
+                a.grow_capacity(self.get_byte_size() + rhs.get_byte_size());
+                if order == Ordering::Less {
+                    a.extend(*self);
+                    a.extend(rhs);
+                } else {
+                    a.extend(rhs);
+                    a.extend(*self);
+                }
+                a.set_normalized(true);
+                return;
+            }
+        }
+
+        let mut sum = ws.new_atom();
+        let a = sum.to_add();
+        a.extend(*self);
+        a.extend(rhs);
+        sum.as_view().normalize(ws, out);
     }
 
     /// Add normalized atoms and normalize the result using an n-way merge over their terms.
@@ -3030,6 +3089,131 @@ mod test {
         let a = parse!("v1 + (v1 + v2) / 2");
         let b = parse!("v2 + (v1 + v2) / 2");
         assert_eq!(a + b, parse!("2*v1+2*v2"));
+    }
+
+    #[test]
+    fn pairwise_add_matches_general_normalization() {
+        use crate::{
+            coefficient::Coefficient,
+            domains::finite_field::{FiniteFieldCore, Zp64},
+        };
+
+        let x = parse!("pairwise_add_x");
+        let y = parse!("pairwise_add_y");
+        let field = Zp64::new(17);
+        let finite = |n| {
+            Atom::num(Coefficient::from_finite_field(
+                field.clone(),
+                field.to_element(n),
+            ))
+        };
+        let infinity = Atom::num(Coefficient::positive_infinity());
+        let negative_infinity = Atom::num(-Coefficient::positive_infinity());
+        let mut cases = vec![
+            (&x * &y, 2 * x.pow(2) * y.pow(2)),
+            (x.clone(), &x * 2),
+            (&x * 2, &x * -2),
+            (Atom::num(0), x.clone()),
+            (Atom::num(0), Atom::num(0)),
+            (Atom::num(2), Atom::num(3)),
+            (Atom::num((1, 2)), Atom::num((1, 3))),
+            (Atom::num(2).to_float(20), Atom::num(3).to_float(30)),
+            (Atom::num(2).to_float(20), Atom::num(-2).to_float(20)),
+            (Atom::num(0).to_float(20), Atom::num(3)),
+            (finite(2), finite(3)),
+            (finite(2), finite(15)),
+            (finite(0), Atom::num(3)),
+            (finite(3), Atom::num(0)),
+            (&x * finite(2), &x * finite(15)),
+            (infinity.clone(), negative_infinity.clone()),
+            (&x * &infinity, &x * &negative_infinity),
+            ((&x + &y) / 3, 2 * (&x + &y) / 3),
+            (x.pow(3), &x * &y),
+            (crate::function!(crate::symbol!("pairwise_add_f"), &x), y),
+        ];
+        for number in [
+            Atom::num(Coefficient::Indeterminate),
+            infinity,
+            negative_infinity,
+            Atom::num(Coefficient::complex_infinity()),
+        ] {
+            cases.push((number.clone(), x.clone()));
+            cases.push((number, Atom::num(3)));
+        }
+
+        Workspace::get_local().with(|ws| {
+            for (left, right) in cases {
+                for (left, right) in [(&left, &right), (&right, &left)] {
+                    let mut sum = Atom::new();
+                    let a = sum.to_add();
+                    a.extend(left.as_view());
+                    a.extend(right.as_view());
+                    let mut expected = Atom::new();
+                    sum.as_view().normalize(ws, &mut expected);
+                    let mut actual = Atom::new();
+                    left.as_view()
+                        .add_normalized(right.as_view(), ws, &mut actual);
+                    assert_eq!(actual, expected, "adding {left} and {right}");
+                    assert!(!actual.as_view().needs_normalization());
+                }
+            }
+        });
+
+        // Keep the preexisting identical-input rule, which retains a factored sum.
+        let sum = parse!("pairwise_add_x+pairwise_add_y");
+        assert_eq!(&sum + &sum, &sum * 2);
+    }
+
+    #[test]
+    fn pairwise_add_preserves_dirty_and_aliased_inputs() {
+        let x = parse!("pairwise_dirty_x");
+        let y = parse!("pairwise_dirty_y");
+        let two = Atom::num(2);
+        let mut raw_power = Atom::new();
+        raw_power.to_pow(x.as_view(), two.as_view());
+        let canonical_power = x.pow(2);
+        let mut raw_function = Atom::new();
+        raw_function
+            .to_fun(crate::symbol!("pairwise_dirty_f"))
+            .add_arg(raw_power.as_view());
+        let canonical_function =
+            crate::function!(crate::symbol!("pairwise_dirty_f"), &canonical_power);
+        let alias = raw_power.alias(false);
+        let opaque = raw_power.alias(true);
+        let unrelated_handle =
+            crate::alias::register_alias_atom(parse!("pairwise_unrelated_alias"));
+        let cases = [
+            (raw_power.clone(), y.clone()),
+            (raw_power, canonical_power.clone()),
+            (raw_function, canonical_function),
+            (alias, canonical_power.clone()),
+            (opaque, canonical_power),
+            (x, y),
+        ];
+        Workspace::get_local().with(|ws| {
+            for (left, right) in cases {
+                for (left, right) in [(&left, &right), (&right, &left)] {
+                    let mut sum = Atom::new();
+                    let a = sum.to_add();
+                    a.extend(left.as_view());
+                    a.extend(right.as_view());
+                    let mut expected = Atom::new();
+                    sum.as_view().normalize(ws, &mut expected);
+
+                    let handle =
+                        crate::alias::register_alias_atom(parse!("pairwise_reused_output"));
+                    let token = handle.token();
+                    let mut actual = handle.to_atom();
+                    drop(handle);
+                    left.as_view()
+                        .add_normalized(right.as_view(), ws, &mut actual);
+                    assert_eq!(actual, expected, "adding {left} and {right}");
+                    assert!(!actual.as_view().needs_normalization());
+                    assert!(crate::alias::get_alias(token).is_none());
+                }
+            }
+        });
+        assert!(crate::alias::get_alias(unrelated_handle.token()).is_some());
     }
 
     #[test]

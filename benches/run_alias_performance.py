@@ -12,8 +12,9 @@ Example:
 
 Build binaries before running this script. Defaults are three paired rounds of
 seven approximately 100 ms samples per workload. Each round runs all variants
-consecutively; alias-free order rotates, and actual-alias order alternates. The
-summary compares medians within matching rounds before taking the median ratio.
+consecutively, rotating the order in each suite. Optional --previous and
+--previous-alias binaries add a comparison against an earlier optimization.
+The summary compares medians within matching rounds before taking the median ratio.
 Negative percentage changes mean less time per operation.
 """
 
@@ -38,7 +39,7 @@ RAW_FIELDS = ("suite", "variant", "round", "position", *INPUT_FIELDS)
 SUMMARY_FIELDS = (
     "suite", "workload", "variant", "samples", "median_ns", "min_round_median_ns",
     "max_round_median_ns", "paired_change_vs_main_pct",
-    "paired_change_vs_global_baseline_pct",
+    "paired_change_vs_global_baseline_pct", "paired_change_vs_previous_pct",
 )
 
 
@@ -125,7 +126,7 @@ def summarize(rows):
         summary.append(dict(zip(SUMMARY_FIELDS, (
             *key, len(all_samples), statistics.median(all_samples),
             min(round_medians[key].values()), max(round_medians[key].values()),
-            change(key, "main"), change(key, "global-baseline"),
+            change(key, "main"), change(key, "global-baseline"), change(key, "previous"),
         ))))
     return summary
 
@@ -139,14 +140,15 @@ def markdown_summary(rows, rounds, samples, target_ms, cpu):
         f"{rounds} paired rounds × {samples} samples × target {target_ms} ms; "
         + (f"CPU {cpu}." if cpu is not None else "CPU affinity unchanged."),
         "", "Changes use paired round medians; negative values mean faster.", "",
-        "| Suite | Workload | Variant | Median ns/op | vs main | vs global baseline |",
-        "|---|---|---|---:|---:|---:|",
+        "| Suite | Workload | Variant | Median ns/op | vs main | vs global baseline | vs previous |",
+        "|---|---|---|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['suite']} | {row['workload']} | {row['variant']} | "
             f"{row['median_ns']:,.1f} | {format_percent(row['paired_change_vs_main_pct'])} | "
-            f"{format_percent(row['paired_change_vs_global_baseline_pct'])} |"
+            f"{format_percent(row['paired_change_vs_global_baseline_pct'])} | "
+            f"{format_percent(row['paired_change_vs_previous_pct'])} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -155,8 +157,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--baseline", type=binary_path, required=True, help="main alias_performance binary")
     parser.add_argument("--global-baseline", type=binary_path, required=True, help="merged unoptimized alias_performance binary")
+    parser.add_argument("--previous", type=binary_path, help="previous optimized alias_performance binary")
     parser.add_argument("--optimized", type=binary_path, required=True, help="optimized alias_performance binary")
     parser.add_argument("--global-baseline-alias", type=binary_path, help="merged unoptimized global_alias_performance binary")
+    parser.add_argument("--previous-alias", type=binary_path, help="previous optimized global_alias_performance binary (requires --previous and both other actual-alias binaries)")
     parser.add_argument("--optimized-alias", type=binary_path, help="optimized global_alias_performance binary")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--rounds", type=positive_int, default=3)
@@ -167,6 +171,8 @@ def main():
     args = parser.parse_args()
     if bool(args.global_baseline_alias) != bool(args.optimized_alias):
         parser.error("provide both actual-alias binaries, or neither")
+    if args.previous_alias and not (args.previous and args.global_baseline_alias):
+        parser.error("--previous-alias requires --previous and both other actual-alias binaries")
     try:
         prefix, cpu, allowed_cpus = affinity_command(args.cpu)
     except ValueError as error:
@@ -177,13 +183,17 @@ def main():
         if (output_dir / filename).exists():
             parser.error(f"output already exists: {output_dir / filename}; select a fresh directory")
 
-    suites = [("no-aliases", [
-        ("main", args.baseline), ("global-baseline", args.global_baseline), ("optimized", args.optimized)
-    ])]
+    ordinary_variants = [("main", args.baseline), ("global-baseline", args.global_baseline)]
+    if args.previous:
+        ordinary_variants.append(("previous", args.previous))
+    ordinary_variants.append(("optimized", args.optimized))
+    suites = [("no-aliases", ordinary_variants)]
     if args.global_baseline_alias:
-        suites.append(("live-aliases", [
-            ("global-baseline", args.global_baseline_alias), ("optimized", args.optimized_alias)
-        ]))
+        alias_variants = [("global-baseline", args.global_baseline_alias)]
+        if args.previous_alias:
+            alias_variants.append(("previous", args.previous_alias))
+        alias_variants.append(("optimized", args.optimized_alias))
+        suites.append(("live-aliases", alias_variants))
     metadata = {
         "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "rounds": args.rounds, "samples": args.samples, "target_ms": args.target_ms,

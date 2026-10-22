@@ -1264,3 +1264,36 @@ fn alias_power_legacy_raw_bytes_recover_alias_ownership() {
     assert!(imported.as_view().has_alias());
     assert_eq!(imported.inline_aliases(true), x.pow(Atom::num(2)));
 }
+
+#[test]
+fn alias_comparison_preserves_structural_order_for_borrowed_views() {
+    let expressions = [
+        crate::parse!("1"),
+        crate::parse!("comparison_alias_x"),
+        crate::parse!("comparison_alias_x^2"),
+        crate::parse!("comparison_alias_x*comparison_alias_y"),
+        crate::parse!("comparison_alias_x+comparison_alias_y"),
+        crate::parse!("comparison_alias_f(comparison_alias_x)"),
+        crate::parse!("comparison_alias_f(comparison_alias_y)"),
+        crate::parse!("comparison_alias_f(comparison_alias_x,comparison_alias_y)"),
+    ];
+    let aliases: Vec<_> = expressions.iter().map(|expr| expr.alias(false)).collect();
+    for (left, left_alias) in expressions.iter().zip(&aliases) {
+        for (right, right_alias) in expressions.iter().zip(&aliases) {
+            let expected = left.as_view().cmp(&right.as_view());
+            assert_eq!(left_alias.as_view().cmp(&right.as_view()), expected);
+            assert_eq!(left.as_view().cmp(&right_alias.as_view()), expected);
+            assert_eq!(left_alias.as_view().cmp(&right_alias.as_view()), expected);
+        }
+        let opaque = left.alias(true);
+        assert_ne!(
+            opaque.as_view().cmp(&left.as_view()),
+            std::cmp::Ordering::Equal
+        );
+        let wrapped = opaque.alias(false);
+        assert_eq!(
+            wrapped.as_view().cmp(&opaque.as_view()),
+            std::cmp::Ordering::Equal
+        );
+    }
+}

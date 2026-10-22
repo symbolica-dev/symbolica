@@ -66,6 +66,12 @@ pub(crate) const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
 static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
 
+#[inline(always)]
+fn raw_has_alias(data: &[u8]) -> bool {
+    let tag = data[0];
+    tag & HAS_ALIAS_FLAG != 0 || tag & TYPE_MASK == ALIAS_ID
+}
+
 #[inline]
 fn merge_aliases_from_view(dst: &mut RawAtom, view: AtomView<'_>) {
     if view.has_alias() {
@@ -600,7 +606,7 @@ impl RawAtom {
 
     #[inline]
     pub(crate) fn ensure_aliases_from_data(&mut self) {
-        if self.aliases.is_none() && AtomView::from(&self.data).has_alias() {
+        if self.aliases.is_none() && raw_has_alias(&self.data) {
             self.aliases = Self::collect_aliases_from_view_data(&self.data, &[]);
         }
     }
@@ -1279,32 +1285,30 @@ impl Atom {
         }
     }
 
+    #[inline]
     pub(crate) fn clear_alias_handles(&mut self) {
-        match self {
-            Atom::Num(n) => {
-                n.data.clear_aliases();
-            }
-            Atom::Var(v) => {
-                v.data.clear_aliases();
-            }
-            Atom::Fun(f) => {
-                f.data.clear_aliases();
-                f.data[0] &= !HAS_ALIAS_FLAG;
-            }
-            Atom::Mul(m) => {
-                m.data.clear_aliases();
-                m.data[0] &= !HAS_ALIAS_FLAG;
-            }
-            Atom::Add(a) => {
-                a.data.clear_aliases();
-                a.data[0] &= !HAS_ALIAS_FLAG;
-            }
-            Atom::Pow(p) => {
-                p.data.clear_aliases();
-                p.data[0] &= !HAS_ALIAS_FLAG;
-            }
-            Atom::Alias(_) => {}
-            Atom::Zero => {}
+        let data = match self {
+            Atom::Num(n) => &mut n.data,
+            Atom::Var(v) => &mut v.data,
+            Atom::Fun(f) => &mut f.data,
+            Atom::Mul(m) => &mut m.data,
+            Atom::Add(a) => &mut a.data,
+            Atom::Pow(p) => &mut p.data,
+            Atom::Alias(_) | Atom::Zero => return,
+        };
+        // Ordinary recycled atoms have nothing to release. Inspect ownership,
+        // since normalization may already have cleared the subtree flag.
+        if data.aliases.is_some() {
+            Self::clear_owned_alias_handles(data);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn clear_owned_alias_handles(data: &mut RawAtom) {
+        data.clear_aliases();
+        if matches!(data[0] & TYPE_MASK, FUN_ID | MUL_ID | ADD_ID | POW_ID) {
+            data[0] &= !HAS_ALIAS_FLAG;
         }
     }
 
@@ -3173,14 +3177,7 @@ impl<'a> AtomView<'a> {
 
     #[inline(always)]
     pub(crate) fn has_alias(&self) -> bool {
-        match self {
-            AtomView::Num(_) | AtomView::Var(_) => false,
-            AtomView::Alias(_) => true,
-            AtomView::Fun(f) => f.has_alias(),
-            AtomView::Pow(p) => p.has_alias(),
-            AtomView::Mul(m) => m.has_alias(),
-            AtomView::Add(a) => a.has_alias(),
-        }
+        raw_has_alias(self.get_data())
     }
 
     /// Export the atom and state to a binary stream. It can be loaded
@@ -3728,6 +3725,80 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    fn recycling_releases_alias_ownership_even_without_subtree_flags() {
+        for expression in ["1", "x", "f(x)", "x^2", "x*y", "x+y"] {
+            let handle = register_alias_atom(parse!("recycling_stale_alias_body(x)"));
+            let weak = Arc::downgrade(&handle);
+            let mut raw = parse!(expression).into_raw();
+            // A normalized result may no longer contain aliases while its
+            // reusable buffer still owns handles from the original expression.
+            raw.sync_aliases_from(std::slice::from_ref(&handle));
+            let atom = unsafe { Atom::from_raw(raw) };
+            assert!(!atom.as_view().has_alias());
+            drop(handle);
+            drop(crate::state::RecycledAtom::wrap(atom));
+            assert!(weak.upgrade().is_none(), "{expression}");
+        }
+
+        for kind in 0..4 {
+            let handle = register_alias_atom(parse!("recycling_active_alias_body(x)"));
+            let weak = Arc::downgrade(&handle);
+            let alias = handle.to_atom();
+            let x = parse!("x");
+            let mut parent = Atom::new();
+            match kind {
+                0 => {
+                    parent
+                        .to_fun(symbol!("recycling_alias_parent"))
+                        .add_arg(alias.as_view());
+                }
+                1 => {
+                    parent.to_pow(alias.as_view(), x.as_view());
+                }
+                2 => {
+                    parent.to_mul().extend(alias.as_view());
+                }
+                _ => {
+                    parent.to_add().extend(alias.as_view());
+                }
+            }
+            assert!(parent.as_view().has_alias());
+            drop(alias);
+            drop(handle);
+            drop(crate::state::RecycledAtom::wrap(parent));
+            assert!(weak.upgrade().is_none(), "kind {kind}");
+        }
+    }
+
+    #[test]
+    fn alias_presence_ignores_other_header_flags() {
+        let linear = symbol!("alias_header_linear"; Linear);
+        let symmetric = symbol!("alias_header_symmetric"; Symmetric);
+        let x = parse!("x");
+        for atom in [
+            Atom::Zero,
+            Atom::num(2),
+            Atom::var(linear),
+            crate::function!(linear, x.clone()),
+            crate::function!(symmetric, x.clone()),
+            parse!("2*x*y"),
+            parse!("x+y"),
+            parse!("x^2"),
+        ] {
+            assert!(!atom.as_view().has_alias(), "{atom}");
+            let mut copied = atom.clone();
+            copied.clear_alias_handles();
+            assert_eq!(copied, atom);
+        }
+        for opaque in [false, true] {
+            let mut alias = x.alias(opaque);
+            assert!(alias.as_view().has_alias());
+            alias.clear_alias_handles();
+            assert_eq!(alias.inline_aliases(true), x);
+        }
+    }
 
     fn check_list(atom: AtomView<'_>, expected: &[AtomView<'_>]) {
         let slice = match atom {

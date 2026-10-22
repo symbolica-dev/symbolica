@@ -18,6 +18,10 @@ run_alias_performance.py in benches/. Build three versions:
                    changes under investigation.
   optimized        The same merged branch with the performance changes.
 
+Optionally keep an earlier optimized build as previous. This adds a fourth
+alias-free variant and, with previous-alias, a third live-alias variant. Use
+the same harness sources and build settings for these additional binaries.
+
 Use the identical alias_performance.rs source in all three versions. Build the
 identical global_alias_performance.rs only in global-baseline and optimized;
 main does not expose this global-alias API. This comparison separates the cost
@@ -71,6 +75,21 @@ The live-alias order alternates global-baseline/optimized and
 optimized/global-baseline. Each program runs to completion before the next
 starts. No benchmark runs concurrently with another benchmark.
 
+To compare a new optimization with the preceding optimization as well as main
+and the original global-alias baseline, add:
+
+  --previous /tmp/alias-bin/previous \
+  --previous-alias /tmp/alias-bin/previous-alias
+
+The first alias-free round then runs main, global-baseline, previous, optimized;
+the first live-alias round runs global-baseline, previous, optimized. Each suite
+rotates its starting variant by one position per round, for any variant count.
+Six rounds give each of the three live-alias variants equal exposure to each
+position; twelve rounds balance both the four-variant and three-variant suites.
+With both optional variants, six rounds of the default samples/duration measure
+about 202 seconds of work plus setup and calibration. --previous can be used
+alone; --previous-alias requires --previous and both other live-alias binaries.
+
 By default, --cpu auto uses taskset and the first CPU allowed by the runner's
 current affinity. If that cannot be detected or taskset is unavailable, affinity
 is unchanged and the summary says so. Use --cpu N to select a specific allowed
@@ -83,7 +102,7 @@ Useful options:
   --target-ms 100  Approximate duration of each sample after calibration.
   --filter add     Select workload names containing the substring "add".
 
-Omit both *-alias arguments to run only alias-free workloads. A filter must
+Omit all *-alias arguments to run only alias-free workloads. A filter must
 match at least one workload in every selected suite; for example, --filter
 expand requires omitting the live-alias binaries. Select a fresh output
 directory for each run: the runner refuses to overwrite its result files.
@@ -165,6 +184,12 @@ same round, then take the median ratio across rounds and report (ratio-1)*100.
 Negative values mean less time per operation. Percentages can differ slightly
 from ratios of the headline pooled medians. main is unavailable as a reference
 for live-alias workloads; compare those against global-baseline.
+
+When previous is supplied, paired_change_vs_previous_pct and the "vs previous"
+table column compare each variant with that earlier optimized build within
+the same suite and round. This comparison is blank for suites without a
+previous binary. Result byte sizes remain recorded without enforcing equality:
+different alias representations can encode equivalent results at different sizes.
 
 summary.csv also reports the minimum and maximum round median. These are a
 simple stability check, not confidence intervals. Adjacent samples are not
