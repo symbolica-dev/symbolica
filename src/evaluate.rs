@@ -161,6 +161,8 @@ mod test {
     use ahash::HashMap;
     use numerica::domains::{dual::HyperDual, float::Real};
 
+    #[cfg(feature = "native_code_generation")]
+    use crate::evaluate::{CompileOptions, ExportSettings, InlineASM, JITCompilationSettings};
     use crate::{
         atom::{Atom, AtomCore, EvaluationInfo},
         create_hyperdual_from_components,
@@ -169,9 +171,8 @@ mod test {
             rational::Rational,
         },
         evaluate::{
-            CompileOptions, Dualizer, EvaluationError, ExportSettings, ExportedInstructions,
-            FunctionMap, FunctionRegistrationOptions, InlineASM, InliningPolicy, Instruction,
-            JITCompilationSettings, OptimizationSettings, Slot,
+            Dualizer, EvaluationError, ExportedInstructions, FunctionMap,
+            FunctionRegistrationOptions, InliningPolicy, Instruction, OptimizationSettings, Slot,
         },
         parse, symbol,
     };
@@ -231,12 +232,15 @@ mod test {
         r_f64.evaluate(&[0.1], &mut res);
         assert_eq!(res[0], 0.2727397524895022);
 
-        let mut jit_compiled = r_f64
-            .jit_compile(JITCompilationSettings::default())
-            .unwrap();
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit_compiled = r_f64
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
 
-        jit_compiled.evaluate(&[0.1], &mut res);
-        assert_eq!(res[0], 0.2727397524895022);
+            jit_compiled.evaluate(&[0.1], &mut res);
+            assert_eq!(res[0], 0.2727397524895022);
+        }
 
         let mut r_wide = r_f64.map_coeff(&|x| (*x).into());
 
@@ -742,11 +746,14 @@ mod test {
                 let mut output = [0.; 2];
                 evaluator.evaluate(&[3.], &mut output);
                 assert_eq!(output, expected);
-                let mut compiled = evaluator
-                    .jit_compile(JITCompilationSettings::default())
-                    .unwrap();
-                compiled.evaluate(&[3.], &mut output);
-                assert_eq!(output, expected);
+                #[cfg(feature = "native_code_generation")]
+                {
+                    let mut compiled = evaluator
+                        .jit_compile(JITCompilationSettings::default())
+                        .unwrap();
+                    compiled.evaluate(&[3.], &mut output);
+                    assert_eq!(output, expected);
+                }
             }
         }
     }
@@ -1384,6 +1391,7 @@ mod test {
         assert!((exported.constants[0] - numerical).abs() / numerical < f64::EPSILON);
     }
 
+    #[cfg(feature = "native_code_generation")]
     #[test]
     fn export_cpp_includes_evaluation_info_snippet() {
         let _ = symbol!(
@@ -1406,6 +1414,7 @@ mod test {
         assert!(code.contains("cpp_external(params[0])"));
     }
 
+    #[cfg(feature = "native_code_generation")]
     #[test]
     fn jit_compile() {
         use crate::parse;
