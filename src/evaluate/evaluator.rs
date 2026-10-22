@@ -760,6 +760,39 @@ impl<T: Default> ExpressionEvaluator<T> {
         count
     }
 
+    /// Optimize a fresh SSA program before allocating its temporary stack.
+    /// Retained bodies use this same pipeline once, before becoming shared.
+    pub(super) fn optimize_instructions(&mut self) {
+        loop {
+            let r = self.remove_common_instructions();
+            if r == 0 || self.settings.abort_level > 0 {
+                self.settings.abort_level = 0;
+                break;
+            }
+            if self.settings.verbose {
+                info!(
+                    "Removed {} common instructions: {}",
+                    r,
+                    self.count_operations()
+                );
+            }
+        }
+        for _ in 0..self.settings.cpe_iterations.unwrap_or(usize::MAX) {
+            let r = self.remove_common_pairs();
+            if r == 0 || self.settings.abort_level > 0 {
+                self.settings.abort_level = 0;
+                break;
+            }
+            // Pair extraction can make previously different instruction DAGs
+            // identical, including functions and powers that CPE cannot merge.
+            self.remove_common_instructions();
+
+            if self.settings.verbose {
+                info!("Removed {} common pairs: {}", r, self.count_operations());
+            }
+        }
+    }
+
     /// Remove common instructions and return the number of removed instructions.
     pub(super) fn remove_common_instructions(&mut self) -> usize {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

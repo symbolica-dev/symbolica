@@ -1260,37 +1260,7 @@ impl<'a> AtomView<'a> {
     fn optimize_evaluator_instructions(
         mut e: ExpressionEvaluator<Complex<Rational>>,
     ) -> ExpressionEvaluator<Complex<Rational>> {
-        loop {
-            let r = e.remove_common_instructions();
-
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            if e.settings.verbose {
-                let count = e.count_operations();
-                info!("Removed {} common instructions: {}", r, count);
-            }
-        }
-
-        for _ in 0..e.settings.cpe_iterations.unwrap_or(usize::MAX) {
-            let r = e.remove_common_pairs();
-            if r == 0 || e.settings.abort_level > 0 {
-                e.settings.abort_level = 0;
-                break;
-            }
-
-            // Pair extraction can make previously different instruction DAGs
-            // identical, including functions and powers that CPE cannot merge.
-            e.remove_common_instructions();
-
-            if e.settings.verbose {
-                let count = e.count_operations();
-                info!("Removed {} common pairs: {}", r, count);
-            }
-        }
-
+        e.optimize_instructions();
         e
     }
 
@@ -1623,11 +1593,8 @@ impl<'a> AtomView<'a> {
             let stack_size = param_count + instr.len();
             let (instructions, result_indices) =
                 Self::lower_instructions(instr, result_indices, param_count, param_count, context)?;
-            // This is fresh SSA, just like a newly lowered root evaluator. Reuse
-            // its allocator before storing the immutable shared body. Explicit
-            // arguments and captured values are reserved inputs; numerical
-            // coefficients are unnecessary for this instruction-only pass.
-            let mut allocation = ExpressionEvaluator {
+            // Create an optimized function body.
+            let mut function_evaluator = ExpressionEvaluator {
                 stack: vec![(); stack_size],
                 param_count,
                 reserved_indices: param_count,
@@ -1636,12 +1603,13 @@ impl<'a> AtomView<'a> {
                 external_fns: vec![],
                 settings: settings.clone(),
             };
-            allocation.optimize_stack();
+            function_evaluator.optimize_instructions();
+            function_evaluator.optimize_stack();
             let body = FunctionBody {
-                instructions: allocation.instructions,
+                instructions: function_evaluator.instructions,
                 param_count,
-                result_index: allocation.result_indices[0],
-                stack_size: allocation.stack.len(),
+                result_index: function_evaluator.result_indices[0],
+                stack_size: function_evaluator.stack.len(),
             };
             // Recursive compilation has already registered every callee.
             context.external_indices.insert(
