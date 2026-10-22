@@ -1,0 +1,180 @@
+Global alias performance benchmarks
+==================================
+
+These small benchmarks compare ordinary expression work before and after global
+alias support, and check that improvements do not move costs into the live-alias
+path. The Rust programs use only Symbolica and the standard library; the runner
+uses Python's standard library. No additional benchmark crate is required.
+
+Files and builds
+----------------
+
+Put alias_performance.rs and global_alias_performance.rs in examples/. Put
+run_alias_performance.py in benches/. Build three versions:
+
+  main             Latest main without global aliases.
+  global-baseline  The global-alias branch merged with that same main, including
+                   required compatibility/correctness fixes but no performance
+                   changes under investigation.
+  optimized        The same merged branch with the performance changes.
+
+Use the identical alias_performance.rs source in all three versions. Build the
+identical global_alias_performance.rs only in global-baseline and optimized;
+main does not expose this global-alias API. This comparison separates the cost
+of global alias support from unrelated changes since the original branch.
+
+From each checkout, build with the same Rust compiler, release profile, feature
+set, target CPU flags, allocator settings, and dependency versions:
+
+  cargo build --release --example alias_performance
+
+From each global-alias checkout, also build:
+
+  cargo build --release --example global_alias_performance
+
+Save each executable under a distinct name before rebuilding the next version.
+For example, /tmp/alias-bin/main, /tmp/alias-bin/global-baseline,
+/tmp/alias-bin/optimized, /tmp/alias-bin/global-baseline-alias, and
+/tmp/alias-bin/optimized-alias. Cargo target directories can instead be separate
+for each checkout. Verify every supplied path names the intended executable.
+
+Record the commit IDs (and any local diff), rustc -Vv, build flags, CPU model, and
+binary checksums alongside the results. The runner records its commands, CPU
+affinity, parameters, execution order, exit statuses, and UTC timestamps; it
+does not infer Git revisions or build flags from executable files.
+
+Running
+-------
+
+Finish builds and tests before timing. Run the programs sequentially on an idle
+machine with the same power settings. Choose one available physical CPU if
+possible, and keep unrelated work off its SMT sibling as well.
+
+  python3 benches/run_alias_performance.py \
+    --baseline /tmp/alias-bin/main \
+    --global-baseline /tmp/alias-bin/global-baseline \
+    --optimized /tmp/alias-bin/optimized \
+    --global-baseline-alias /tmp/alias-bin/global-baseline-alias \
+    --optimized-alias /tmp/alias-bin/optimized-alias \
+    --output-dir /tmp/alias-results
+
+Defaults: three paired rounds, seven samples per workload per round, and a
+100 ms target duration per sample. With all nine no-alias and four live-alias
+workloads, allow about 73 seconds of measured work plus setup and calibration.
+The alias-free order rotates across rounds:
+
+  1. main, global-baseline, optimized
+  2. global-baseline, optimized, main
+  3. optimized, main, global-baseline
+
+The live-alias order alternates global-baseline/optimized and
+optimized/global-baseline. Each program runs to completion before the next
+starts. No benchmark runs concurrently with another benchmark.
+
+By default, --cpu auto uses taskset and the first CPU allowed by the runner's
+current affinity. If that cannot be detected or taskset is unavailable, affinity
+is unchanged and the summary says so. Use --cpu N to select a specific allowed
+CPU; explicit pinning requires taskset. Use --cpu none to disable pinning.
+
+Useful options:
+
+  --rounds 6       More paired rounds and balanced live-alias ordering.
+  --samples 7      Samples for each workload in each program invocation.
+  --target-ms 100  Approximate duration of each sample after calibration.
+  --filter add     Select workload names containing the substring "add".
+
+Omit both *-alias arguments to run only alias-free workloads. A filter must
+match at least one workload in every selected suite; for example, --filter
+expand requires omitting the live-alias binaries. Select a fresh output
+directory for each run: the runner refuses to overwrite its result files.
+
+For a single program without the runner:
+
+  SYMBOLICA_HIDE_BANNER=1 /tmp/alias-bin/main \
+    --samples 7 --target-ms 100 > /tmp/main-timings.csv
+
+What the measurements include
+-----------------------------
+
+Every iteration performs one complete operation and drops the returned Atom
+inside the timed region. std::hint::black_box makes the input/output observable
+to the optimizer. The measurement therefore includes normal result allocation,
+normalization, alias-handle retention where applicable, and destruction. It
+does not measure only the arithmetic kernel.
+
+Parsing, symbol/alias registration, expression construction used as input,
+license initialization, initial result checks, calibration, and CSV formatting
+are outside the timed samples. A workload doubles its calibration iteration
+count until at least 10 ms has elapsed, then estimates a fixed iteration count
+for the requested sample duration. All samples of that workload in one program
+invocation use that fixed count; counts can differ between builds and rounds.
+Samples describe warmed-up steady-state throughput rather than first-call
+latency. Very slow operations can exceed the requested target with one iteration.
+
+Alias-free workloads
+--------------------
+
+  construct          Repeated small sums, products, and powers.
+  add_pair           Addition of two existing terms.
+  add_chain          Repeated addition of 32 terms into an accumulator.
+  add_many           Batched addition of the same 32 terms, including duplicate
+                     monomials that need coefficient combination.
+  normalize_product  Rational coefficients, positive/negative powers, and
+                     repeated function factors in a product.
+  expand_power       Expansion of a five-term sum raised to the seventh power.
+  expand_product     Expansion of a product of three polynomial powers.
+  differentiate      Differentiation of a mixed algebraic/transcendental input.
+  replace            Pattern replacement across 24 function-call terms.
+
+This executable never creates a global alias. Its result_bytes column records
+the materialized result size before calibration, not a semantic checksum.
+Check unexpected size changes and keep correctness tests alongside performance
+work; byte size equality alone does not prove mathematical equivalence.
+
+Live-alias workloads
+--------------------
+
+  construct_with_live_alias  The same construction as construct, with an
+                             unrelated alias kept alive. No related alias has
+                             been registered when this workload executes.
+  copy_alias_power          Copying an AtomView of a power with an aliased base,
+                             including retention and release of alias ownership.
+  add_alias_plain           Adding an aliased term to its ordinary body.
+  multiply_alias_powers     Multiplying powers that share an aliased base.
+
+Each workload checks one result against its ordinary expected expression using
+inline_aliases(true) before calibration. These checks protect the measured
+operation from silently changing semantics while leaving timing unaffected.
+Alias registration is setup, so these workloads do not measure store insertion,
+removal of the last live alias, or repeated-subexpression discovery.
+
+Outputs and interpretation
+--------------------------
+
+  samples.csv       All samples, tagged by suite, build, round, and run position.
+  summary.csv       Per-workload/build medians and paired percentage changes.
+  summary.md        Readable table with the same headline comparisons.
+  metadata.json     Run settings, execution commands/order, and timestamps.
+  round-*.stdout.csv / round-*.stderr.log
+                    Original stdout/stderr from every program invocation.
+
+The headline Median ns/op is the median of all samples for that workload/build.
+Percentage changes use paired rounds to reduce drift: compute each build's
+median within a round, divide by the corresponding reference median in that
+same round, then take the median ratio across rounds and report (ratio-1)*100.
+Negative values mean less time per operation. Percentages can differ slightly
+from ratios of the headline pooled medians. main is unavailable as a reference
+for live-alias workloads; compare those against global-baseline.
+
+summary.csv also reports the minimum and maximum round median. These are a
+simple stability check, not confidence intervals. Adjacent samples are not
+independent experiments. Small changes comparable to round-to-round variation
+need more paired rounds or a repeat run. Compare workloads separately; an
+arithmetic average of nanosecond timings across different workloads is not a
+meaningful aggregate speedup.
+
+Coverage is deliberately focused. It does not establish performance for large
+production expressions, multithreaded alias-store contention, opaque/nested
+aliases, import/export, alias discovery, Python calls, or evaluator execution.
+Use existing regression tests for correctness and add representative workloads
+when the implementation changes those paths.

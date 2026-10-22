@@ -68,10 +68,14 @@ static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
 
 #[inline]
 fn merge_aliases_from_view(dst: &mut RawAtom, view: AtomView<'_>) {
-    if !view.has_alias() {
-        return;
+    if view.has_alias() {
+        merge_aliases_from_aliased_view(dst, view);
     }
+}
 
+// Keep allocation and handle sorting out of the alias-free append path.
+#[inline(never)]
+fn merge_aliases_from_aliased_view(dst: &mut RawAtom, view: AtomView<'_>) {
     let dst = dst.aliases_mut();
     let old_len = dst.len();
     collect_aliases_from_data(view.get_data(), view.aliases_ref(), dst);
@@ -132,7 +136,11 @@ fn collect_aliases_from_data(
             (_, n_args, c) = c.get_frac_u64();
             collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
         }
-        POW_ID => collect_aliases_from_data_list(&data[1..], 2, aliases, handles),
+        POW_ID => {
+            if data[0] & HAS_ALIAS_FLAG != 0 {
+                collect_aliases_from_data_list(&data[1..], 2, aliases, handles);
+            }
+        }
         MUL_ID => {
             if data[0] & HAS_ALIAS_FLAG == 0 {
                 return;
@@ -178,6 +186,41 @@ fn skip_raw_atom(mut data: &[u8]) -> &[u8] {
     }
 }
 
+// Older global-alias data did not store the subtree flag on powers. Upgrade it
+// at raw-data entry points, keeping recursive decoding out of ordinary copies.
+fn refresh_raw_power_alias_flags(data: &mut [u8]) -> bool {
+    let (children, n_args) = match data[0] & TYPE_MASK {
+        NUM_ID | VAR_ID => return false,
+        ALIAS_ID => return true,
+        POW_ID => (&data[1..], 2),
+        FUN_ID | MUL_ID | ADD_ID if data[0] & HAS_ALIAS_FLAG == 0 => return false,
+        FUN_ID => {
+            let (_, n_args, children) = read_packed_pair(function_metadata(data));
+            (children, n_args)
+        }
+        MUL_ID | ADD_ID => {
+            let (n_args, _, children) = read_packed_pair(&data[1..]);
+            (children, n_args)
+        }
+        x => unreachable!("Bad id {}", x),
+    };
+    let offset = data.len() - children.len();
+    let mut rest = &mut data[offset..];
+    let mut has_alias = false;
+    for _ in 0..n_args {
+        let len = rest.len() - skip_raw_atom(rest).len();
+        let (child, next) = rest.split_at_mut(len);
+        has_alias |= refresh_raw_power_alias_flags(child);
+        rest = next;
+    }
+    if has_alias {
+        data[0] |= HAS_ALIAS_FLAG;
+    } else {
+        data[0] &= !HAS_ALIAS_FLAG;
+    }
+    has_alias
+}
+
 pub(crate) fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io::Error> {
     // should also set whether rat poly coefficient needs to be converted
     let mut flags_buf = [0; 1];
@@ -200,8 +243,9 @@ pub(crate) fn read_raw_atom<R: Read>(source: &mut R) -> Result<RawAtom, std::io:
     Ok(upgrade_atom_format(flags_buf[0], dest))
 }
 
-fn upgrade_atom_format(format: u8, raw: RawAtom) -> RawAtom {
+fn upgrade_atom_format(format: u8, mut raw: RawAtom) -> RawAtom {
     if format != 1 {
+        refresh_raw_power_alias_flags(&mut raw);
         return raw;
     }
     let mut out = RawAtom::new();
@@ -332,12 +376,17 @@ fn remap_aliases_in_raw_data(
             Ok(has_alias)
         }
         POW_ID => {
-            out.put_u8(data[0]);
+            let start = out.len();
+            out.put_u8(data[0] & !HAS_ALIAS_FLAG);
             let mut c = &data[1..];
             let base_has_alias = remap_aliases_in_raw_data(c, aliases, out)?;
             c = skip_raw_atom(c);
             let exp_has_alias = remap_aliases_in_raw_data(c, aliases, out)?;
-            Ok(base_has_alias || exp_has_alias)
+            let has_alias = base_has_alias || exp_has_alias;
+            if has_alias {
+                out[start] |= HAS_ALIAS_FLAG;
+            }
+            Ok(has_alias)
         }
         x => unreachable!("Bad id {}", x),
     }
@@ -464,7 +513,10 @@ impl RawAtom {
     }
 
     #[inline]
-    pub fn from_data(data: Vec<u8>) -> Self {
+    pub fn from_data(mut data: Vec<u8>) -> Self {
+        if !data.is_empty() {
+            refresh_raw_power_alias_flags(&mut data);
+        }
         Self {
             data,
             aliases: None,
@@ -523,24 +575,33 @@ impl RawAtom {
         aliases: &[Arc<AliasHandle>],
     ) {
         if has_alias {
-            let mut new_aliases = Vec::new();
-            collect_aliases_from_data(data, aliases, &mut new_aliases);
-            new_aliases.sort_by_key(|handle| handle.token());
-            new_aliases.dedup_by_key(|handle| handle.token());
-            if new_aliases.is_empty() {
-                self.aliases = None;
-            } else {
-                self.aliases = Some(Box::new(new_aliases));
-            }
+            self.aliases = Self::collect_aliases_from_view_data(data, aliases);
         } else {
             self.aliases = None;
         }
     }
 
+    // Keep handle allocation, collection and sorting out of the common copying path.
+    #[inline(never)]
+    fn collect_aliases_from_view_data(
+        data: &[u8],
+        aliases: &[Arc<AliasHandle>],
+    ) -> Option<Box<Vec<Arc<AliasHandle>>>> {
+        let mut new_aliases = Vec::new();
+        collect_aliases_from_data(data, aliases, &mut new_aliases);
+        new_aliases.sort_by_key(|handle| handle.token());
+        new_aliases.dedup_by_key(|handle| handle.token());
+        if new_aliases.is_empty() {
+            None
+        } else {
+            Some(Box::new(new_aliases))
+        }
+    }
+
     #[inline]
     pub(crate) fn ensure_aliases_from_data(&mut self) {
-        if self.aliases.is_none() {
-            self.sync_aliases_from(&aliases_from_raw_data(&self.data));
+        if self.aliases.is_none() && AtomView::from(&self.data).has_alias() {
+            self.aliases = Self::collect_aliases_from_view_data(&self.data, &[]);
         }
     }
 }
@@ -1240,6 +1301,7 @@ impl Atom {
             }
             Atom::Pow(p) => {
                 p.data.clear_aliases();
+                p.data[0] &= !HAS_ALIAS_FLAG;
             }
             Atom::Alias(_) => {}
             Atom::Zero => {}
@@ -1272,6 +1334,7 @@ impl Atom {
             Atom::Pow(p) => {
                 let aliases = aliases_from_view(p.to_pow_view().as_view());
                 p.data.sync_aliases_from(&aliases);
+                p.refresh_alias_flag_from_tree();
             }
             Atom::Alias(a) => {
                 a.data.ensure_aliases_from_data();
@@ -1814,9 +1877,13 @@ impl Pow {
     #[inline]
     pub(crate) fn set_from_base_and_exp(&mut self, base: AtomView, exp: AtomView) {
         self.data.clear();
-        merge_aliases_from_view(&mut self.data, base);
-        merge_aliases_from_view(&mut self.data, exp);
-        self.data.put_u8(POW_ID | NOT_NORMALIZED);
+        let has_alias = base.has_alias() || exp.has_alias();
+        if has_alias {
+            merge_aliases_from_view(&mut self.data, base);
+            merge_aliases_from_view(&mut self.data, exp);
+        }
+        self.data
+            .put_u8(POW_ID | NOT_NORMALIZED | if has_alias { HAS_ALIAS_FLAG } else { 0 });
         self.data.extend(base.get_data());
         self.data.extend(exp.get_data());
     }
@@ -1864,6 +1931,16 @@ impl Pow {
     pub(crate) unsafe fn from_raw(mut raw: RawAtom) -> Pow {
         raw.ensure_aliases_from_data();
         Pow { data: raw }
+    }
+
+    #[inline]
+    pub(crate) fn refresh_alias_flag_from_tree(&mut self) {
+        let (base, exp) = self.to_pow_view().get_base_exp();
+        if base.has_alias() || exp.has_alias() {
+            self.data[0] |= HAS_ALIAS_FLAG;
+        } else {
+            self.data[0] &= !HAS_ALIAS_FLAG;
+        }
     }
 }
 
@@ -1997,6 +2074,9 @@ impl Mul {
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
         update_list_header(&mut self.data, first_arg_start, n_args);
+        if !self.to_mul_view().has_alias() && !other.has_alias() {
+            return;
+        }
         let aliases = aliases_from_view(self.to_mul_view().as_view());
         self.data.sync_aliases_from(&aliases);
         let has_alias = self.to_mul_view().iter().any(|x| x.has_alias());
@@ -2714,8 +2794,7 @@ impl<'a> PowView<'a> {
 
     #[inline]
     pub(crate) fn has_alias(&self) -> bool {
-        let (base, exp) = self.get_base_exp();
-        base.has_alias() || exp.has_alias()
+        (self.data[0] & HAS_ALIAS_FLAG) != 0
     }
 
     #[inline]
@@ -3921,6 +4000,53 @@ mod tests {
         source.extend_from_slice(&variable);
         imported.read(&mut source.as_slice()).unwrap();
         assert_eq!(imported, Atom::var(head));
+    }
+
+    #[test]
+    fn legacy_global_power_flags_are_restored_inside_packed_parents() {
+        let body = parse!("legacy_global_power::x");
+        let power = body.alias(false).pow(parse!("legacy_global_power::y"));
+        let power_bytes = power.as_view().get_data();
+        let mut fun = Fun::new_into(symbol!("legacy_global_power::f"), RawAtom::new());
+        for value in 0..200 {
+            fun.add_arg(Atom::num(value).as_view());
+        }
+        fun.add_arg(power.as_view());
+        fun.set_normalized(true);
+        let z = parse!("legacy_global_power::z");
+        for expression in [power.clone(), fun.into(), &power * &z, &power + &z] {
+            let mut legacy = expression.as_view().get_data().to_vec();
+            let power_offset = legacy
+                .windows(power_bytes.len())
+                .position(|window| window == power_bytes)
+                .expect("parent preserves power bytes");
+            legacy[power_offset] &= !HAS_ALIAS_FLAG;
+            let mut bytes = vec![ATOM_EXPORT_FORMAT];
+            bytes.extend_from_slice(&(legacy.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&legacy);
+
+            let mut restored = Atom::new();
+            restored.read(&mut bytes.as_slice()).unwrap();
+            assert_eq!(restored, expression);
+            assert!(restored.as_view().has_alias());
+            assert_eq!(
+                restored.inline_aliases(true),
+                expression.inline_aliases(true)
+            );
+
+            #[cfg(feature = "bincode")]
+            {
+                let (restored, read): (Atom, usize) = bincode::decode_from_slice_with_context(
+                    &bytes,
+                    bincode::config::standard(),
+                    StateMap::default(),
+                )
+                .unwrap();
+                assert_eq!(read, bytes.len());
+                assert_eq!(restored, expression);
+                assert!(restored.as_view().has_alias());
+            }
+        }
     }
 
     #[test]

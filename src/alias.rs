@@ -1084,3 +1084,183 @@ fn test_alias_inside_function_map_uses_outer_arguments() {
     let mut evaluator = tree_evaluator.map_coeff(&|x| x.re.to_f64());
     assert_eq!(evaluator.evaluate_single(&[3.]), 13.);
 }
+
+#[test]
+fn alias_power_copies_keep_base_exponent_and_nested_handles_alive() {
+    let x = Atom::var(crate::symbol!("alias_power_copies::x"));
+    let y = Atom::var(crate::symbol!("alias_power_copies::y"));
+    let z = Atom::var(crate::symbol!("alias_power_copies::z"));
+
+    for position in 0..3 {
+        for opaque in [false, true] {
+            let handle = register_alias_atom(x.clone());
+            let token = handle.token();
+            let alias = if opaque {
+                handle.to_opaque_atom()
+            } else {
+                handle.to_atom()
+            };
+            let (power, expected) = match position {
+                0 => (alias.pow(&y), x.pow(&y)),
+                1 => (y.pow(&alias), y.pow(&x)),
+                _ => (y.pow(&alias).pow(&z), y.pow(&x).pow(&z)),
+            };
+            assert!(power.as_view().has_alias());
+
+            let copied = power.as_view().to_owned();
+            let raw = copied.into_raw();
+            drop(power);
+            drop(alias);
+            drop(handle);
+            assert!(get_alias(token).is_some());
+
+            let restored = unsafe { Atom::from_raw(raw) };
+            assert!(restored.as_view().has_alias());
+            assert_eq!(restored.inline_aliases(true), expected);
+            if opaque {
+                assert_eq!(restored.inline_aliases(false), restored);
+            } else {
+                assert_eq!(restored.inline_aliases(false), expected);
+            }
+
+            drop(restored);
+            assert!(get_alias(token).is_none());
+        }
+    }
+}
+
+#[test]
+fn alias_nested_power_export_import_preserves_opacity_and_ownership() {
+    let x = Atom::var(crate::symbol!("alias_nested_power_export_import::x"));
+    let y = Atom::var(crate::symbol!("alias_nested_power_export_import::y"));
+    let z = Atom::var(crate::symbol!("alias_nested_power_export_import::z"));
+    let base_alias = register_alias_atom(x.clone());
+    let exponent_alias = register_alias_atom(z.clone());
+    let base_token = base_alias.token();
+    let exponent_token = exponent_alias.token();
+    let power = base_alias
+        .to_atom()
+        .pow(&y)
+        .pow(exponent_alias.to_opaque_atom());
+    let expected = x.pow(&y).pow(&z);
+
+    let mut data = Vec::new();
+    power.export(&mut data).unwrap();
+    drop(power);
+    drop(base_alias);
+    drop(exponent_alias);
+    assert!(get_alias(base_token).is_none());
+    assert!(get_alias(exponent_token).is_none());
+
+    let imported = Atom::import(&mut std::io::Cursor::new(data), None).unwrap();
+    let AtomView::Pow(outer) = imported.as_view() else {
+        panic!("Expected imported outer power");
+    };
+    let (AtomView::Pow(inner), AtomView::Alias(exponent)) = outer.get_base_exp() else {
+        panic!("Expected nested power and aliased exponent");
+    };
+    let AtomView::Alias(base) = inner.get_base() else {
+        panic!("Expected aliased base");
+    };
+    assert!(!base.is_opaque());
+    assert!(exponent.is_opaque());
+    assert_ne!(base.get_token(), base_token);
+    assert_ne!(exponent.get_token(), exponent_token);
+    let imported_tokens = [base.get_token(), exponent.get_token()];
+
+    let copied = imported.as_view().to_owned();
+    drop(imported);
+    assert!(copied.as_view().has_alias());
+    assert_eq!(copied.inline_aliases(true), expected);
+    assert!(copied.inline_aliases(false).as_view().has_alias());
+    drop(copied);
+    for token in imported_tokens {
+        assert!(get_alias(token).is_none());
+    }
+}
+
+#[test]
+fn alias_power_normalization_releases_cancelled_base_and_exponent_aliases() {
+    let x = Atom::var(crate::symbol!("alias_power_normalization_cancellation::x"));
+    let y = Atom::var(crate::symbol!("alias_power_normalization_cancellation::y"));
+    let two = Atom::num(2);
+
+    for alias_in_base in [false, true] {
+        let (normalized, token) = {
+            let handle = register_alias_atom(y.clone());
+            let token = handle.token();
+            let negative_alias = -handle.to_atom();
+            let mut sum = Atom::new();
+            let add = sum.to_add();
+            add.extend(y.as_view());
+            add.extend(negative_alias.as_view());
+            add.extend(if alias_in_base {
+                x.as_view()
+            } else {
+                two.as_view()
+            });
+
+            let mut power = Atom::new();
+            if alias_in_base {
+                power.to_pow(sum.as_view(), two.as_view());
+            } else {
+                power.to_pow(x.as_view(), sum.as_view());
+            }
+            assert!(power.as_view().has_alias());
+            let mut normalized = Atom::new();
+            crate::state::Workspace::get_local()
+                .with(|ws| power.as_view().normalize(ws, &mut normalized));
+            (normalized, token)
+        };
+
+        assert_eq!(normalized, x.pow(&two));
+        assert!(!normalized.as_view().has_alias());
+        assert!(get_alias(token).is_none());
+    }
+}
+
+#[test]
+fn alias_power_buffer_reuse_drops_handles_for_unaliased_powers() {
+    let x = Atom::var(crate::symbol!("alias_power_buffer_reuse::x"));
+    let handle = register_alias_atom(x.clone());
+    let token = handle.token();
+    let mut power = handle.to_atom().pow(Atom::num(2));
+    let expected = crate::parse!("(f(x)^y)^(z+1)");
+
+    power.set_from_view(&expected.as_view());
+    drop(handle);
+    assert!(get_alias(token).is_none());
+    assert!(!power.as_view().has_alias());
+
+    let restored = unsafe { Atom::from_raw(power.into_raw()) };
+    let mut data = Vec::new();
+    restored.export(&mut data).unwrap();
+    let imported = Atom::import(&mut std::io::Cursor::new(data), None).unwrap();
+    assert_eq!(imported, expected);
+    assert!(!imported.as_view().has_alias());
+    assert!(imported.get_aliases().is_empty());
+}
+
+#[test]
+fn alias_power_legacy_raw_bytes_recover_alias_ownership() {
+    let x = Atom::var(crate::symbol!("alias_power_legacy_raw_bytes::x"));
+    let handle = register_alias_atom(x.clone());
+    let token = handle.token();
+    let power = handle.to_atom().pow(Atom::num(2));
+    let mut data = power.into_raw().into_data();
+    // Earlier serialized powers did not set the has-alias bit in their header.
+    data[0] &= !0x40;
+    let restored = unsafe { Atom::from_raw(crate::atom::representation::RawAtom::from_data(data)) };
+    drop(handle);
+    assert!(get_alias(token).is_some());
+    assert!(restored.as_view().has_alias());
+    assert_eq!(restored.inline_aliases(true), x.pow(Atom::num(2)));
+
+    let mut exported = Vec::new();
+    restored.export(&mut exported).unwrap();
+    drop(restored);
+    assert!(get_alias(token).is_none());
+    let imported = Atom::import(&mut std::io::Cursor::new(exported), None).unwrap();
+    assert!(imported.as_view().has_alias());
+    assert_eq!(imported.inline_aliases(true), x.pow(Atom::num(2)));
+}

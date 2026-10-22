@@ -3796,6 +3796,7 @@ impl Atom {
     pub(crate) fn refresh_alias_flags_from_tree(&mut self) {
         match self {
             Atom::Fun(f) => f.refresh_alias_flag_from_tree(),
+            Atom::Pow(p) => p.refresh_alias_flag_from_tree(),
             Atom::Mul(m) => m.refresh_alias_flag_from_tree(),
             Atom::Add(a) => a.refresh_alias_flag_from_tree(),
             _ => {}

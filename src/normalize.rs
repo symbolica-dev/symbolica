@@ -213,6 +213,9 @@ impl AtomView<'_> {
                 if name_comp != Ordering::Equal {
                     return name_comp;
                 }
+                if f1 == f2 {
+                    return Ordering::Equal;
+                }
 
                 // if cfg!(feature = "full_fn_cmp") {
                 let len_cmp = f1.get_nargs().cmp(&f2.get_nargs());
@@ -370,8 +373,19 @@ fn resolve_alias_loop(mut a: AtomView<'_>) -> AtomView<'_> {
 }
 
 #[inline]
-fn semantic_eq_slices(a: ListSlice<'_>, b: ListSlice<'_>) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| a.cmp(&b).is_eq())
+fn semantic_eq(a: AtomView<'_>, b: AtomView<'_>) -> bool {
+    // Normalized alias-free expressions have a canonical byte representation.
+    // Alias bodies can also contain unnormalized atoms from the raw builders.
+    a == b
+        || ((a.has_alias() || b.has_alias() || a.needs_normalization() || b.needs_normalization())
+            && a.cmp(&b).is_eq())
+}
+
+#[inline]
+fn semantic_eq_slices(a: ListSlice<'_>, b: ListSlice<'_>, needs_semantic_cmp: bool) -> bool {
+    a.len() == b.len()
+        && (a.get_data() == b.get_data()
+            || (needs_semantic_cmp && a.iter().zip(b.iter()).all(|(a, b)| semantic_eq(a, b))))
 }
 
 #[inline]
@@ -401,7 +415,7 @@ impl Atom {
 
                 let (base1, exp1) = p1.to_pow_view().get_base_exp();
 
-                if !base1.cmp(&base2).is_eq() {
+                if !semantic_eq(base1, base2) {
                     return false;
                 }
 
@@ -447,7 +461,7 @@ impl Atom {
             let pv = p1.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(other, Atom::Num(_)) && base.cmp(&other.as_view()).is_eq() {
+            if !matches!(other, Atom::Num(_)) && semantic_eq(base, other.as_view()) {
                 if let AtomView::Num(n) = &exp {
                     let new_exp = n.get_coeff_view() + 1;
 
@@ -483,13 +497,17 @@ impl Atom {
             let pv = p.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(self, Atom::Num(_)) && base.cmp(&self.as_view()).is_eq() {
-                let mut semantic_base = workspace.new_atom();
-                if self.as_view().has_alias() {
+            if !matches!(self, Atom::Num(_)) && semantic_eq(base, self.as_view()) {
+                // The base borrowed from `other` survives mutations of `self`.
+                // Copy only when preserving an alias held by `self` instead.
+                let mut semantic_base;
+                let base = if self.as_view().has_alias() {
+                    semantic_base = workspace.new_atom();
                     semantic_base.set_from_view(&self.as_view());
+                    semantic_base.as_view()
                 } else {
-                    semantic_base.set_from_view(&base);
-                }
+                    base
+                };
 
                 if let AtomView::Num(n) = &exp {
                     let new_exp = n.get_coeff_view() + 1;
@@ -497,10 +515,10 @@ impl Atom {
                     if new_exp.is_zero() {
                         self.to_num(1);
                     } else if new_exp == 1.into() {
-                        self.set_from_view(&semantic_base.as_view());
+                        self.set_from_view(&base);
                     } else {
                         let num = helper.to_num(new_exp);
-                        self.to_pow(semantic_base.as_view(), AtomView::Num(num.to_num_view()));
+                        self.to_pow(base, AtomView::Num(num.to_num_view()));
                     }
                 } else {
                     self.to_num(1);
@@ -510,7 +528,7 @@ impl Atom {
                     new_exp.extend(exp);
                     let mut helper2 = workspace.new_atom();
                     helper.as_view().normalize(workspace, &mut helper2);
-                    self.to_pow(semantic_base.as_view(), helper2.as_view());
+                    self.to_pow(base, helper2.as_view());
                 }
 
                 self.set_normalized(true);
@@ -531,7 +549,7 @@ impl Atom {
         }
 
         // x * x => x^2
-        if self.as_view().cmp(&other.as_view()).is_eq() {
+        if semantic_eq(self.as_view(), other.as_view()) {
             // add powers
             let exp = other.to_num(2);
             helper.to_pow(self.as_view(), AtomView::Num(exp.to_num_view()));
@@ -552,6 +570,15 @@ impl Atom {
     pub(crate) fn merge_terms(&mut self, other: AtomView, helper: &mut Self) -> bool {
         let a = resolve_alias(self.as_view());
         let b = resolve_alias(other);
+
+        // Callers normalize ordinary terms, but transparent aliases can still
+        // contain raw bodies. Normalize those before copying their children
+        // into a parent that will be marked normalized.
+        if (matches!(self, Atom::Alias(_)) && a.needs_normalization())
+            || (matches!(other, AtomView::Alias(_)) && b.needs_normalization())
+        {
+            return self.merge_terms_with_normalized_alias_bodies(other, helper);
+        }
 
         if let Atom::Num(n1) = self {
             if let AtomView::Num(n2) = b {
@@ -580,7 +607,11 @@ impl Atom {
                     (coeff2, slice2) = slice2.pop_first();
                 }
 
-                if semantic_eq_slices(slice, slice2) {
+                if semantic_eq_slices(
+                    slice,
+                    slice2,
+                    m.has_alias() || m2.has_alias() || !m.is_normalized() || !m2.is_normalized(),
+                ) {
                     // TODO: not correct for finite fields!
                     let num = if let AtomView::Num(n) = coeff {
                         n.get_coeff_view()
@@ -640,7 +671,7 @@ impl Atom {
                     return true;
                 }
             } else {
-                if slice.len() != 1 || !b.cmp(&slice.get(0)).is_eq() {
+                if slice.len() != 1 || !semantic_eq(b, slice.get(0)) {
                     return false;
                 }
 
@@ -664,6 +695,7 @@ impl Atom {
                 } else {
                     let m = self.to_mul();
                     m.extend(on.to_num_view().as_view());
+                    m.extend(b);
                     m.set_has_coefficient(true);
                     m.set_normalized(true);
                 }
@@ -684,7 +716,7 @@ impl Atom {
             let coeff = m.to_slice().get(0);
             let term = slice.get(0);
 
-            if a.cmp(&term).is_eq() {
+            if semantic_eq(a, term) {
                 let (new_coeff, has_num) = if let AtomView::Num(n) = &coeff {
                     (n.get_coeff_view() + 1, true)
                 } else {
@@ -720,7 +752,7 @@ impl Atom {
                 self.set_normalized(true);
                 return true;
             }
-        } else if self.as_view().cmp(&b).is_eq() {
+        } else if semantic_eq(self.as_view(), b) {
             let mul = helper.to_mul();
             self.to_num((2, 1));
             mul.extend(self.as_view());
@@ -733,6 +765,26 @@ impl Atom {
         };
 
         false
+    }
+
+    #[cold]
+    fn merge_terms_with_normalized_alias_bodies(
+        &mut self,
+        other: AtomView,
+        helper: &mut Self,
+    ) -> bool {
+        Workspace::get_local().with(|ws| {
+            let mut left = ws.new_atom();
+            let mut right = ws.new_atom();
+            resolve_alias(self.as_view()).normalize(ws, &mut left);
+            resolve_alias(other).normalize(ws, &mut right);
+            if left.merge_terms(right.as_view(), helper) {
+                self.set_from_view(&left.as_view());
+                true
+            } else {
+                false
+            }
+        })
     }
 }
 
@@ -1383,8 +1435,9 @@ impl AtomView<'_> {
         }
     }
 
-    #[cfg_attr(debug_assertions, inline(never))]
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    // Keep alias-specific traversal and temporary buffers out of the ordinary
+    // normalization frame. This path is only selected for sums with aliases.
+    #[inline(never)]
     fn normalize_add_alias(
         a: &AddView<'_>,
         workspace: &Workspace,
@@ -2768,6 +2821,158 @@ mod test {
         );
         assert_eq!(parse!("(v1^v2)^2"), parse!("v1^(2*v2)"));
         assert_eq!(parse!("(v1^(1/2))^2"), parse!("v1"));
+    }
+
+    #[test]
+    fn merge_nested_terms_and_factors_with_and_without_aliases() {
+        let body = parse!("normalization_fast_f(x)*(y+z)^2");
+        let x = parse!("x");
+        let x_alias = x.alias(false);
+        let aliased = body.replace_map(|atom, _, out| {
+            if atom == x.as_view() {
+                out.set_from_view(&x_alias.as_view());
+            }
+        });
+        assert!(aliased.as_view().has_alias());
+
+        for left in [&body, &aliased] {
+            for right in [&body, &aliased] {
+                let sum = left * 2 + right * 3;
+                assert_eq!(sum.inline_aliases(false), &body * 5);
+
+                let product = left * right;
+                assert_eq!(product.inline_aliases(false), body.pow(2));
+            }
+        }
+    }
+
+    #[test]
+    fn merge_aliases_of_unnormalized_bodies() {
+        let x = parse!("raw_alias_merge_x");
+        let y = parse!("raw_alias_merge_y");
+        let two = Atom::num(2);
+
+        let mut raw_power = Atom::new();
+        raw_power.to_pow(x.as_view(), two.as_view());
+        let power = x.pow(2);
+
+        let mut raw_product = Atom::new();
+        let mul = raw_product.to_mul();
+        mul.extend(power.as_view());
+        mul.extend(y.as_view());
+        let product = &power * &y;
+
+        let mut raw_nested_product = Atom::new();
+        let mul = raw_nested_product.to_mul();
+        mul.extend(raw_power.as_view());
+        mul.extend(y.as_view());
+
+        for (raw, normalized) in [
+            (&raw_power, &power),
+            (&raw_product, &product),
+            (&raw_nested_product, &product),
+        ] {
+            assert!(raw.as_view().needs_normalization());
+            let alias = raw.alias(false);
+            for (left, right) in [(normalized, &alias), (&alias, normalized)] {
+                let sum = left + right;
+                assert_eq!(sum.nterms(), 1);
+                assert!(sum.as_view().cmp(&((normalized * 2).as_view())).is_eq());
+            }
+        }
+    }
+
+    #[test]
+    fn merging_raw_aliases_keeps_followup_operations_canonical() {
+        let x = parse!("raw_alias_followup_x");
+        let two = Atom::num(2);
+        let y = parse!("raw_alias_followup_y");
+        let mut raw_power = Atom::new();
+        raw_power.to_pow(x.as_view(), two.as_view());
+        let power = x.pow(2);
+        let f = crate::symbol!("raw_alias_followup_f");
+        let mut raw_function = Atom::new();
+        raw_function.to_fun(f).add_arg(raw_power.as_view());
+        let mut raw_product = Atom::new();
+        raw_product.to_mul().extend(raw_power.as_view());
+        if let Atom::Mul(m) = &mut raw_product {
+            m.extend(y.as_view());
+        }
+
+        for (raw, canonical) in [
+            (raw_power, power.clone()),
+            (raw_function, crate::function!(f, &power)),
+            (raw_product, &power * &y),
+        ] {
+            let alias = raw.alias(false);
+            let expected = &canonical * 2;
+            for (mut merged, other) in [
+                (canonical.clone(), alias.as_view()),
+                (alias.clone(), canonical.as_view()),
+            ] {
+                let mut helper = Atom::new();
+                assert!(merged.merge_terms(other, &mut helper));
+                assert_eq!(merged, expected);
+                let left = crate::function!(f, merged);
+                let right = crate::function!(f, &expected);
+                assert_eq!(&left * &right, right.pow(2));
+            }
+
+            let mut unchanged = alias.clone();
+            assert!(!unchanged.merge_terms(two.as_view(), &mut Atom::new()));
+            assert_eq!(unchanged, alias);
+            let opaque = raw.alias(true);
+            let mut unchanged = canonical.clone();
+            assert!(!unchanged.merge_terms(opaque.as_view(), &mut Atom::new()));
+            assert_eq!(unchanged, canonical);
+
+            // A normalized function can still contain a raw aliased argument.
+            // Retaining that alias must retain the semantic comparison path.
+            let nested = crate::function!(f, alias);
+            let canonical_nested = crate::function!(f, canonical);
+            assert_eq!(
+                (&nested * &canonical_nested).inline_aliases(false),
+                canonical_nested.pow(2)
+            );
+        }
+    }
+
+    #[test]
+    fn merging_aliased_products_preserves_factors_and_normalizes_raw_bodies() {
+        let x = parse!("raw_alias_coefficient_x");
+        let y = parse!("raw_alias_coefficient_y");
+        let two = Atom::num(2);
+        let mut raw_power = Atom::new();
+        raw_power.to_pow(x.as_view(), two.as_view());
+        let mut raw_product = Atom::new();
+        let m = raw_product.to_mul();
+        m.extend(two.as_view());
+        m.extend(raw_power.as_view());
+        m.extend(y.as_view());
+        let term = x.pow(2) * &y;
+        let canonical_product = &term * 2;
+
+        for body in [raw_product, canonical_product] {
+            let alias = body.alias(false);
+            for coefficient in [-2, -1, 1, 3] {
+                let other = &term * coefficient;
+                let expected = &term * (coefficient + 2);
+                for (mut merged, other) in [
+                    (other.clone(), alias.as_view()),
+                    (alias.clone(), other.as_view()),
+                ] {
+                    assert!(merged.merge_terms(other, &mut Atom::new()));
+                    assert_eq!(merged, expected);
+                }
+            }
+        }
+
+        // This also exercises the resolved-Mul / ordinary-factor branch.
+        let alias = (&x * 2).alias(false);
+        for (mut merged, other) in [(alias.clone(), x.as_view()), (x.clone(), alias.as_view())] {
+            assert!(merged.merge_terms(other, &mut Atom::new()));
+            assert_eq!(merged, &x * 3);
+        }
     }
 
     #[test]
