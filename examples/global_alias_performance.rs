@@ -18,7 +18,7 @@ use std::{
 };
 
 use symbolica::{
-    atom::{Atom, AtomCore},
+    atom::{Atom, AtomCore, AtomView, FunctionBuilder},
     parse, symbol,
 };
 
@@ -162,5 +162,76 @@ fn main() {
         target,
         &filter,
         || black_box(&left_power) * black_box(&right_power),
+    );
+
+    // A compressed power should not repeatedly traverse or hash its large body.
+    let large_body = parse!(&format!(
+        "large_alias_body({})",
+        (0..512)
+            .map(|i| format!("large_x{i}*large_y{i}"))
+            .collect::<Vec<_>>()
+            .join("+")
+    ));
+    let large_alias = large_body.alias(false);
+    let large_power = large_alias.pow(7);
+    let large_expected = large_body.pow(7);
+    measure(
+        "copy_large_alias_power",
+        &large_expected,
+        samples,
+        target,
+        &filter,
+        || black_box(large_power.as_view()).to_owned(),
+    );
+
+    let large_left = large_alias.pow(3);
+    let large_right = large_alias.pow(4);
+    measure(
+        "multiply_large_alias_powers",
+        &large_expected,
+        samples,
+        target,
+        &filter,
+        || black_box(&large_left) * black_box(&large_right),
+    );
+
+    // Repeated aliases exercise deduplication; a child view carries the parent's
+    // whole ownership set, so copying it must select only the handles it uses.
+    let child_name = symbol!("alias_copy_child");
+    let parent_name = symbol!("alias_copy_parent");
+    let children: Vec<_> = (0..64)
+        .map(|i| {
+            let alias = parse!(&format!("alias_copy_body(x+{i})")).alias(i % 2 == 0);
+            FunctionBuilder::new(child_name)
+                .add_args(std::iter::repeat_n(&alias, 8))
+                .finish()
+        })
+        .collect();
+    let multi_owner = FunctionBuilder::new(parent_name)
+        .add_args(&children)
+        .finish();
+    assert_eq!(multi_owner.get_aliases().len(), 64);
+    let multi_owner_expected = multi_owner.inline_aliases(true);
+    measure(
+        "copy_repeated_multi_aliases",
+        &multi_owner_expected,
+        samples,
+        target,
+        &filter,
+        || black_box(multi_owner.as_view()).to_owned(),
+    );
+
+    let AtomView::Fun(parent) = multi_owner.as_view() else {
+        unreachable!()
+    };
+    let child = parent.iter().next().unwrap();
+    let child_expected = children[0].inline_aliases(true);
+    measure(
+        "copy_alias_child_from_multi_owner",
+        &child_expected,
+        samples,
+        target,
+        &filter,
+        || black_box(child).to_owned(),
     );
 }

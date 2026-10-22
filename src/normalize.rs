@@ -2950,59 +2950,63 @@ mod test {
         use std::sync::Arc;
 
         for opaque in [false, true] {
-            let handle = crate::alias::register_alias_atom(parse!("move_alias_body(x)"));
-            let weak = Arc::downgrade(&handle);
-            let alias = if opaque {
-                handle.to_opaque_atom()
-            } else {
-                handle.to_atom()
-            };
-            let y = parse!("move_alias_y");
-            let mut canonical = Atom::new();
-            let mul = canonical.to_mul();
-            mul.extend(y.as_view());
-            mul.extend(alias.as_view());
-            canonical.set_normalized(true);
-            // The transparent parent alias prevents Mul::extend from flattening
-            // the product before normalize_mul can borrow its canonical body.
-            let parent_handle = crate::alias::register_alias_atom(canonical);
-            let parent_weak = Arc::downgrade(&parent_handle);
-            let parent = parent_handle.to_atom();
-            let mut dirty = Atom::new();
-            let mul = dirty.to_mul();
-            mul.extend(parent.as_view());
-            mul.extend(y.pow(-1).as_view());
-            drop(parent);
-            drop(parent_handle);
-            drop(alias);
-            drop(handle);
-
-            Workspace::get_local().with(|ws| {
-                let old = crate::alias::register_alias_atom(parse!("move_alias_old(x)"));
-                let old_weak = Arc::downgrade(&old);
-                let mut out = crate::function!(crate::symbol!("move_alias_parent"), old.to_atom());
-                drop(old);
-                dirty.as_view().normalize(ws, &mut out);
-                drop(dirty);
-                assert!(parent_weak.upgrade().is_none());
-                assert!(old_weak.upgrade().is_none());
-                assert!(weak.upgrade().is_some());
-                assert!(out.as_view().has_alias());
-                assert!(!out.as_view().needs_normalization());
-                let AtomView::Alias(result) = out.as_view() else {
-                    panic!("the surviving child alias should remain an alias");
+            // Recycled top-level Alias atoms retain their handles. A fresh
+            // thread lets us check final release after its workspace is dropped.
+            let weak = std::thread::spawn(move || {
+                let handle = crate::alias::register_alias_atom(parse!("move_alias_body(x)"));
+                let weak = Arc::downgrade(&handle);
+                let alias = if opaque {
+                    handle.to_opaque_atom()
+                } else {
+                    handle.to_atom()
                 };
-                assert_eq!(result.is_opaque(), opaque);
-                assert_eq!(result.get_body(), parse!("move_alias_body(x)").as_view());
-                eprintln!("opaque={opaque}, before drop: {}", weak.strong_count());
-                drop(out);
-                eprintln!("after drop: {}", weak.strong_count());
-                let pooled: Vec<_> = (0..30).map(|_| ws.new_atom().into_inner()).collect();
-                eprintln!("pooled aliases: {:?}", pooled.iter().filter(|a| a.has_alias()).collect::<Vec<_>>());
-                drop(pooled);
-                eprintln!("after pool: {}", weak.strong_count());
-                assert!(weak.upgrade().is_none());
-            });
+                let y = parse!("move_alias_y");
+                let mut canonical = Atom::new();
+                let mul = canonical.to_mul();
+                mul.extend(y.as_view());
+                mul.extend(alias.as_view());
+                canonical.set_normalized(true);
+                // The transparent parent alias prevents Mul::extend from flattening
+                // the product before normalize_mul can borrow its canonical body.
+                let parent_handle = crate::alias::register_alias_atom(canonical);
+                let parent_weak = Arc::downgrade(&parent_handle);
+                let parent = parent_handle.to_atom();
+                let mut dirty = Atom::new();
+                let mul = dirty.to_mul();
+                mul.extend(parent.as_view());
+                mul.extend(y.pow(-1).as_view());
+                drop(parent);
+                drop(parent_handle);
+                drop(alias);
+                drop(handle);
+
+                Workspace::get_local().with(|ws| {
+                    let old = crate::alias::register_alias_atom(parse!("move_alias_old(x)"));
+                    let old_weak = Arc::downgrade(&old);
+                    let mut out =
+                        crate::function!(crate::symbol!("move_alias_parent"), old.to_atom());
+                    drop(old);
+                    dirty.as_view().normalize(ws, &mut out);
+                    drop(dirty);
+                    assert!(parent_weak.upgrade().is_none());
+                    assert!(old_weak.upgrade().is_none());
+                    assert!(weak.upgrade().is_some());
+                    assert!(out.as_view().has_alias());
+                    assert!(!out.as_view().needs_normalization());
+                    let AtomView::Alias(result) = out.as_view() else {
+                        panic!("the surviving child alias should remain an alias");
+                    };
+                    assert_eq!(result.is_opaque(), opaque);
+                    assert_eq!(result.get_body(), parse!("move_alias_body(x)").as_view());
+                    let owners = weak.strong_count();
+                    drop(out);
+                    assert_eq!(weak.strong_count(), owners - 1);
+                });
+                weak
+            })
+            .join()
+            .unwrap();
+            assert!(weak.upgrade().is_none());
         }
     }
 
