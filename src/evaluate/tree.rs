@@ -1623,11 +1623,25 @@ impl<'a> AtomView<'a> {
             let stack_size = param_count + instr.len();
             let (instructions, result_indices) =
                 Self::lower_instructions(instr, result_indices, param_count, param_count, context)?;
-            let body = FunctionBody {
-                instructions,
+            // This is fresh SSA, just like a newly lowered root evaluator. Reuse
+            // its allocator before storing the immutable shared body. Explicit
+            // arguments and captured values are reserved inputs; numerical
+            // coefficients are unnecessary for this instruction-only pass.
+            let mut allocation = ExpressionEvaluator {
+                stack: vec![(); stack_size],
                 param_count,
-                result_index: result_indices[0],
-                stack_size,
+                reserved_indices: param_count,
+                instructions,
+                result_indices,
+                external_fns: vec![],
+                settings: settings.clone(),
+            };
+            allocation.optimize_stack();
+            let body = FunctionBody {
+                instructions: allocation.instructions,
+                param_count,
+                result_index: allocation.result_indices[0],
+                stack_size: allocation.stack.len(),
             };
             // Recursive compilation has already registered every callee.
             context.external_indices.insert(
@@ -2012,6 +2026,9 @@ impl<'a> AtomView<'a> {
 
                     let temp = Slot::Temp(instr.len());
                     instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
+                    // The completed result now dominates this scope. Branch-local
+                    // values remain in their cloned caches, never in the parent.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else if let Some(fun) = fn_map.get(*self) {
                     fun
