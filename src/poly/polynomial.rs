@@ -2087,7 +2087,8 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Multiply every coefficient with `other`.
     pub fn mul_coeff(mut self, other: F::Element) -> Self {
-        if self.ring().is_one(&other) {
+        // A numerical unit may still carry precision that multiplication must preserve.
+        if self.ring().is_one(&other) && other == self.ring().one() {
             return self;
         }
 

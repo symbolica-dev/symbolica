@@ -431,6 +431,11 @@ impl Coefficient {
         }
     }
 
+    /// Whether this unit can be removed without discarding floating-point precision.
+    pub(crate) fn is_exact_one(&self) -> bool {
+        !matches!(self, Coefficient::Float(_)) && self.is_one()
+    }
+
     /// Compute a coefficient GCD. Floating-point coefficients and non-finite
     /// values use one as their GCD; incompatible coefficient domains yield
     /// [`Coefficient::Indeterminate`].
@@ -1436,6 +1441,11 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Whether this unit can be removed without discarding floating-point precision.
+    pub(crate) fn is_exact_one(&self) -> bool {
+        !self.is_float() && self.is_one()
+    }
+
     /// Convert to a complex floating-point number with `binary_prec` bits.
     /// Existing floats retain their precision unless it must be lowered.
     /// Returns an error for finite fields, rational polynomials, indeterminate
@@ -1449,13 +1459,13 @@ impl CoefficientView<'_> {
             CoefficientView::Float(r, i) => {
                 let mut f = r.to_float();
                 let mut g = i.to_float();
-                if f.prec() > binary_prec || g.prec() > binary_prec {
+                if f.prec() > binary_prec {
                     f.set_prec(binary_prec);
-                    g.set_prec(binary_prec);
-                    Ok(Complex::new(f, g))
-                } else {
-                    Ok(Complex::new(f, g))
                 }
+                if g.prec() > binary_prec {
+                    g.set_prec(binary_prec);
+                }
+                Ok(Complex::new(f, g))
             }
             CoefficientView::Large(r, d) => Ok(Complex::new(
                 r.to_rat().to_multi_prec_float(binary_prec),
@@ -3879,5 +3889,67 @@ mod test {
         assert_eq!(parse!("¿ * x + 5"), Coefficient::Indeterminate);
         assert_eq!(parse!("log(0)"), -Coefficient::positive_infinity());
         assert_eq!(parse!("(-2+1i)∞ (3+2i)∞"), parse!("(-1-1i/8)∞"));
+    }
+
+    #[test]
+    fn mixed_float_component_precision_survives_direct_evaluation() {
+        use std::collections::HashMap;
+
+        use crate::domains::float::{Complex, ErrorPropagatingFloat};
+
+        let map = HashMap::<Atom, Complex<ErrorPropagatingFloat<Float>>>::new();
+        for (real_precision, imaginary_precision) in [(40, 200), (200, 40)] {
+            let coefficient = Atom::num(Complex::new(
+                Float::with_val(real_precision, 1.25),
+                Float::with_val(imaginary_precision, 2.5),
+            ));
+
+            for requested_precision in [20, 80, 256] {
+                let result = coefficient
+                    .evaluate_with_prec(&map, requested_precision)
+                    .unwrap();
+
+                assert_eq!(
+                    result.re.get_num().prec(),
+                    real_precision.min(requested_precision)
+                );
+                assert_eq!(
+                    result.im.get_num().prec(),
+                    imaginary_precision.min(requested_precision)
+                );
+                assert_eq!(result.re.get_num(), &Float::with_val(256, 1.25));
+                assert_eq!(result.im.get_num(), &Float::with_val(256, 2.5));
+            }
+        }
+    }
+
+    #[test]
+    fn low_precision_component_error_is_not_reduced_by_other_component() {
+        use std::collections::HashMap;
+
+        use crate::domains::float::{Complex, ErrorPropagatingFloat};
+
+        let map = HashMap::<Atom, Complex<ErrorPropagatingFloat<Float>>>::new();
+        for (real_precision, imaginary_precision) in [(40, 200), (200, 40)] {
+            let coefficient = Atom::num(Complex::new(
+                Float::with_val(real_precision, 1.25),
+                Float::with_val(imaginary_precision, 2.5),
+            ));
+            let original = coefficient.evaluate_with_prec(&map, 256).unwrap();
+            let lowered = coefficient.evaluate_with_prec(&map, 80).unwrap();
+
+            let (original_low, lowered_low, original_high, lowered_high) =
+                if real_precision < imaginary_precision {
+                    (&original.re, &lowered.re, &original.im, &lowered.im)
+                } else {
+                    (&original.im, &lowered.im, &original.re, &lowered.re)
+                };
+
+            assert_eq!(
+                lowered_low.get_absolute_error(),
+                original_low.get_absolute_error()
+            );
+            assert!(lowered_high.get_absolute_error() > original_high.get_absolute_error());
+        }
     }
 }
