@@ -1,0 +1,117 @@
+Global alias performance: second optimization pass — 2026-10-22
+=============================================================
+
+Branch: codex/global-alias-performance.
+Original alias branch: 3dab8484; latest main: a2051681; merged baseline: 2d43058f.
+Previous optimized code: 41668877; new code: 6ba7ea56 and ed95637f.
+
+Outcome
+-------
+The pairwise addition regression is fixed: 61.3% less time than the previous
+optimized code, and 50.0% less than main. Construction is 6.0% faster than main.
+The nine no-alias workloads use 18.1% less time than the previous optimization
+and 28.0% less than the merged global-alias baseline (geometric means).
+
+In this same run, aggregate overhead versus main falls from 24.6% to 2.1%.
+That aggregate is strongly influenced by pair addition. Excluding pair addition,
+overhead falls from 24.2% to 11.6%; several workloads remain 10–21% slower than
+main. These unweighted workload aggregates do not estimate application speedup.
+
+No aliases: median ns/op; changes use paired within-round median ratios.
+Negative percentages mean less time. Paired ratios can differ from ratios of
+pooled medians because the former account for run-to-run drift.
+
+Workload                      main    previous       final    vs prior    vs main  vs global
+construct                    1331.4      1656.8      1234.8      -24.8%      -6.0%     -31.0%
+add_pair                      175.1       224.5        87.4      -61.3%     -50.0%     -60.1%
+add_chain                   12833.6     13938.5     13118.7       -7.4%      +2.1%     -21.1%
+add_many                     4155.8      4698.2      4678.0       -0.4%     +12.5%     -40.0%
+normalize_product            1962.1      2677.3      2393.1      -10.7%     +20.5%     -16.9%
+expand_power               338539.6    439668.5    398423.4       -9.5%     +16.8%     -20.2%
+expand_product             274363.6    358289.1    325070.8       -8.6%     +18.9%     -17.0%
+differentiate                7098.3      9329.4      8673.9       -7.8%     +20.8%     -16.5%
+replace                     24292.7     29649.7     27058.3       -9.0%     +10.5%     -13.4%
+
+Live-alias workloads: paired time changes.
+
+Workload                      vs previous    vs global
+construct_with_live_alias          -25.8%       -29.7%
+copy_alias_power                    +4.2%        -8.3%
+add_alias_plain                     -3.0%       -16.7%
+multiply_alias_powers               -1.5%        -7.9%
+
+The small alias-power copy regression versus the previous optimization remains.
+Diagnostic counters show essentially unchanged instructions (-0.25%) and
+branches, with about 3% more cycles. The hot routines are unchanged or smaller.
+This suggests throughput/code-layout or allocator effects rather than new
+algorithmic work; the specific cause is not established. All four live-alias
+workloads remain faster than the original merged global baseline.
+
+Changes and profiling evidence
+------------------------------
+- Borrow ordinary views in structural/factor comparisons and semantic equality.
+  Resolve transparent aliases only when an actual Alias view is encountered.
+- Skip recycling cleanup when a buffer owns no alias handles; retain the cold
+  ownership-release path even when normalization already cleared subtree flags.
+- Add distinct normalized nonnumeric terms directly in canonical order, before
+  allocating sum-merge scratch atoms. Numeric, matching, dirty, and alias-bearing
+  inputs keep the existing normalization rules.
+- Read alias presence from the encoded header; avoid redundant ownership resets
+  after clearing and copying ordinary compound expressions.
+- Decode only a power's base when requested; initialize empty Add/Mul headers
+  with one four-byte copy.
+
+Final perf diagnostics versus main show about 46% fewer retired instructions
+for pair addition. In product normalization, cmp_factors falls from 11.5% of
+round-1 samples to 2.0%; cmp falls from 4.3% to 1.5%. Assembly confirms that
+the unconditional comparator-entry copies and duplicate ownership cleanup
+after copying an ordinary subtree are gone.
+
+Remaining normalization/expansion instruction overhead is about 11% versus main.
+Samples concentrate on moving temporary owned atoms, including the factor
+SmallVec and power-construction buffers. Atom is 40 bytes versus main's 32.
+This identifies further work in normalization's scratch ownership/copies; it
+does not establish that the remaining gap is unavoidable. Alias-store lookups
+are not the measured no-alias bottleneck.
+
+A separate eight-round, two-build comparison confirmed the last batch improves
+all nine workloads versus intermediate commit 6ba7ea56: 4.9% geometric mean
+less time, with individual improvements of 2.7–11.5%.
+
+Validation
+----------
+cargo test --tests --features bincode -j 8 -- --test-threads=1
+  Passed: 929 library tests + 69 integration tests = 998; 2 existing ignores.
+cargo check --lib --features python_export,bincode -j 8
+  Passed. Changed Rust files also pass rustfmt and git diff --check.
+Both release benchmark examples built successfully. Live-alias workloads assert
+semantic equivalence before timing. No-alias result byte counts match all four
+variants (byte counts alone are not a proof of semantic equivalence).
+New tests exercise coefficient domains, infinities, raw/dirty inputs, transparent
+and opaque aliases, canonical comparison, and ownership through buffer reuse.
+
+Method and retained evidence
+----------------------------
+Twelve paired rounds x three approximately 100 ms samples per workload/variant;
+36 samples each. Four no-alias variants and three live-alias variants rotate
+order, balanced across all positions. Binaries run sequentially on logical CPU 6
+of an AMD Ryzen 9 5900X. No concurrent builds/tests/profiles during timing;
+normal desktop background activity remains. Setup/calibration is untimed,
+and result destruction is timed. Rust 1.99.0, release LTO, one codegen unit,
+native CPU flags, identical dependency versions and default features.
+
+perf uses cycles:u at 1999 Hz (4 x 300ms) and hardware counters (5 x 500ms),
+also sequentially on CPU 6. Counters include setup/calibration, so normalized
+per-operation counts are diagnostic upper estimates. Leaf-IP sampling can skid;
+it locates candidate hot code rather than proving a precise causal attribution.
+
+Reproduce with examples/alias_performance.rs, examples/global_alias_performance.rs
+and benches/run_alias_performance.py; use --previous and --previous-alias with
+--rounds 12 --samples 3 --target-ms 100 --cpu 6. See benches/alias_performance.txt.
+Generated raw measurements, per-round ranges, binary hashes, validation logs,
+and profile evidence are retained locally in:
+  benches/results/global-alias-round2-final-2026-10-22/
+Intermediate measurements are in global-alias-round2-2026-10-22; the direct
+last-batch comparison and reproduction script are in
+  benches/results/global-alias-round2-last-batch-2026-10-22/
+These generated-results directories are ignored by Git, per repository policy.
