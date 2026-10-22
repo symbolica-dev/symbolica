@@ -65,7 +65,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
     }
 
     /// Inline generated scalar instructions without dualizing them again.
-    fn inline_vector_components<V: Vectorize<T>>(
+    pub(super) fn inline_vector_components<V: Vectorize<T>>(
         &self,
         vectorizer: &V,
         args: &[Slot],
