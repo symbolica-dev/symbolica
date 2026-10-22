@@ -399,19 +399,19 @@ fn resolve_alias_loop(mut a: AtomView<'_>) -> AtomView<'_> {
 }
 
 #[inline]
-fn semantic_eq(a: AtomView<'_>, b: AtomView<'_>) -> bool {
+fn semantic_eq(a: &AtomView<'_>, b: &AtomView<'_>) -> bool {
     // Normalized alias-free expressions have a canonical byte representation.
     // Alias bodies can also contain unnormalized atoms from the raw builders.
     a == b
         || ((a.has_alias() || b.has_alias() || a.needs_normalization() || b.needs_normalization())
-            && a.cmp(&b).is_eq())
+            && a.cmp(b).is_eq())
 }
 
 #[inline]
 fn semantic_eq_slices(a: ListSlice<'_>, b: ListSlice<'_>, needs_semantic_cmp: bool) -> bool {
     a.len() == b.len()
         && (a.get_data() == b.get_data()
-            || (needs_semantic_cmp && a.iter().zip(b.iter()).all(|(a, b)| semantic_eq(a, b))))
+            || (needs_semantic_cmp && a.iter().zip(b.iter()).all(|(a, b)| semantic_eq(&a, &b))))
 }
 
 #[inline]
@@ -441,7 +441,7 @@ impl Atom {
 
                 let (base1, exp1) = p1.to_pow_view().get_base_exp();
 
-                if !semantic_eq(base1, base2) {
+                if !semantic_eq(&base1, &base2) {
                     return false;
                 }
 
@@ -487,7 +487,7 @@ impl Atom {
             let pv = p1.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(other, Atom::Num(_)) && semantic_eq(base, other.as_view()) {
+            if !matches!(other, Atom::Num(_)) && semantic_eq(&base, &other.as_view()) {
                 if let AtomView::Num(n) = &exp {
                     let new_exp = n.get_coeff_view() + 1;
 
@@ -523,7 +523,7 @@ impl Atom {
             let pv = p.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(self, Atom::Num(_)) && semantic_eq(base, self.as_view()) {
+            if !matches!(self, Atom::Num(_)) && semantic_eq(&base, &self.as_view()) {
                 // The base borrowed from `other` survives mutations of `self`.
                 // Copy only when preserving an alias held by `self` instead.
                 let mut semantic_base;
@@ -575,7 +575,7 @@ impl Atom {
         }
 
         // x * x => x^2
-        if semantic_eq(self.as_view(), other.as_view()) {
+        if semantic_eq(&self.as_view(), &other.as_view()) {
             // add powers
             let exp = other.to_num(2);
             helper.to_pow(self.as_view(), AtomView::Num(exp.to_num_view()));
@@ -697,7 +697,7 @@ impl Atom {
                     return true;
                 }
             } else {
-                if slice.len() != 1 || !semantic_eq(b, slice.get(0)) {
+                if slice.len() != 1 || !semantic_eq(&b, &slice.get(0)) {
                     return false;
                 }
 
@@ -742,7 +742,7 @@ impl Atom {
             let coeff = m.to_slice().get(0);
             let term = slice.get(0);
 
-            if semantic_eq(a, term) {
+            if semantic_eq(&a, &term) {
                 let (new_coeff, has_num) = if let AtomView::Num(n) = &coeff {
                     (n.get_coeff_view() + 1, true)
                 } else {
@@ -778,7 +778,7 @@ impl Atom {
                 self.set_normalized(true);
                 return true;
             }
-        } else if semantic_eq(self.as_view(), b) {
+        } else if semantic_eq(&self.as_view(), &b) {
             let mul = helper.to_mul();
             self.to_num((2, 1));
             mul.extend(self.as_view());

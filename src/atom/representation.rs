@@ -1677,7 +1677,9 @@ impl Fun {
     pub fn from_view_into(a: &FunView<'_>, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data_if(a.has_alias(), a.data, a.aliases);
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Fun { data: buffer }
     }
 
@@ -1796,8 +1798,10 @@ impl Fun {
     pub fn set_from_view(&mut self, view: &FunView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.data
-            .sync_aliases_from_view_data_if(view.has_alias(), view.data, view.aliases);
+        if view.has_alias() {
+            self.data
+                .sync_aliases_from_view_data(view.data, view.aliases);
+        }
     }
 
     #[inline(always)]
@@ -1874,7 +1878,9 @@ impl Pow {
     pub fn from_view_into(a: &PowView<'_>, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data_if(a.has_alias(), a.data, a.aliases);
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Pow { data: buffer }
     }
 
@@ -1915,8 +1921,10 @@ impl Pow {
     pub fn set_from_view(&mut self, view: &PowView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.data
-            .sync_aliases_from_view_data_if(view.has_alias(), view.data, view.aliases);
+        if view.has_alias() {
+            self.data
+                .sync_aliases_from_view_data(view.data, view.aliases);
+        }
     }
 
     #[inline(always)]
@@ -1983,8 +1991,8 @@ impl Mul {
     #[inline]
     pub(crate) fn new_into(mut buffer: RawAtom) -> Mul {
         buffer.clear();
-        buffer.put_u8(MUL_ID | NOT_NORMALIZED);
-        (0u64, 0).write_packed(&mut buffer);
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        buffer.extend_from_slice(&[MUL_ID | NOT_NORMALIZED, 0x11, 0, 0]);
 
         Mul { data: buffer }
     }
@@ -1994,7 +2002,9 @@ impl Mul {
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data_if(a.has_alias(), a.data, a.aliases);
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Mul { data: buffer }
     }
 
@@ -2012,8 +2022,10 @@ impl Mul {
     pub fn set_from_view(&mut self, view: &MulView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.data
-            .sync_aliases_from_view_data_if(view.has_alias(), view.data, view.aliases);
+        if view.has_alias() {
+            self.data
+                .sync_aliases_from_view_data(view.data, view.aliases);
+        }
     }
 
     #[inline]
@@ -2178,8 +2190,8 @@ impl Add {
     #[inline]
     pub(crate) fn new_into(mut buffer: RawAtom) -> Add {
         buffer.clear();
-        buffer.put_u8(ADD_ID | NOT_NORMALIZED);
-        (0u64, 0).write_packed(&mut buffer);
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        buffer.extend_from_slice(&[ADD_ID | NOT_NORMALIZED, 0x11, 0, 0]);
         Add { data: buffer }
     }
 
@@ -2188,7 +2200,9 @@ impl Add {
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
-        buffer.sync_aliases_from_view_data_if(a.has_alias(), a.data, a.aliases);
+        if a.has_alias() {
+            buffer.sync_aliases_from_view_data(a.data, a.aliases);
+        }
         Add { data: buffer }
     }
 
@@ -2244,8 +2258,10 @@ impl Add {
     pub fn set_from_view(&mut self, view: AddView) {
         self.data.clear();
         self.data.extend(view.data);
-        self.data
-            .sync_aliases_from_view_data_if(view.has_alias(), view.data, view.aliases);
+        if view.has_alias() {
+            self.data
+                .sync_aliases_from_view_data(view.data, view.aliases);
+        }
     }
 
     #[inline(always)]
@@ -2498,7 +2514,9 @@ impl<'a> FunView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(self.data);
-        buffer.sync_aliases_from_view_data_if(self.has_alias(), self.data, self.aliases);
+        if self.has_alias() {
+            buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        }
         Fun { data: buffer }
     }
 
@@ -2773,15 +2791,16 @@ impl<'a> PowView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(self.data);
-        buffer.sync_aliases_from_view_data_if(self.has_alias(), self.data, self.aliases);
+        if self.has_alias() {
+            buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        }
         Pow { data: buffer }
     }
 
     #[inline]
     /// Borrow the base of this power.
     pub fn get_base(&self) -> AtomView<'a> {
-        let (b, _) = self.get_base_exp();
-        b
+        self.iter().next().unwrap()
     }
 
     #[inline]
@@ -2899,7 +2918,9 @@ impl<'a> MulView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(self.data);
-        buffer.sync_aliases_from_view_data_if(self.has_alias(), self.data, self.aliases);
+        if self.has_alias() {
+            buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        }
         Mul { data: buffer }
     }
 
@@ -3046,7 +3067,9 @@ impl<'a> AddView<'a> {
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(self.data);
-        buffer.sync_aliases_from_view_data_if(self.has_alias(), self.data, self.aliases);
+        if self.has_alias() {
+            buffer.sync_aliases_from_view_data(self.data, self.aliases);
+        }
         Add { data: buffer }
     }
 
@@ -3725,6 +3748,80 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    fn copying_compound_views_replaces_alias_ownership() {
+        fn parent(kind: usize, child: AtomView<'_>) -> Atom {
+            let mut atom = Atom::new();
+            match kind {
+                0 => atom.to_fun(symbol!("copy_alias_parent")).add_arg(child),
+                1 => {
+                    atom.to_pow(child, InlineNum::new(2, 1).as_view());
+                }
+                2 => atom.to_mul().extend(child),
+                _ => atom.to_add().extend(child),
+            }
+            atom
+        }
+
+        for kind in 0..4 {
+            for method in 0..3 {
+                for has_alias in [false, true] {
+                    let old_handle = register_alias_atom(parse!("copy_old_alias_body(x)"));
+                    let old_weak = Arc::downgrade(&old_handle);
+                    let old_alias = old_handle.to_atom();
+                    let mut target = parent(kind, old_alias.as_view());
+                    drop(old_alias);
+                    drop(old_handle);
+
+                    let new_handle = register_alias_atom(parse!("copy_new_alias_body(x)"));
+                    let new_weak = Arc::downgrade(&new_handle);
+                    let child = if has_alias {
+                        new_handle.to_atom()
+                    } else {
+                        parse!("copy_plain_child")
+                    };
+                    let source = parent(kind, child.as_view());
+                    let expected = source.inline_aliases(true);
+                    drop(child);
+                    drop(new_handle);
+
+                    macro_rules! copy_view {
+                        ($variant:ident, $view:ident) => {{
+                            if method == 0 {
+                                target = Atom::$variant($variant::from_view_into(
+                                    &$view,
+                                    target.into_raw(),
+                                ));
+                            } else if method == 1 {
+                                target = Atom::$variant($view.clone_into_raw(target.into_raw()));
+                            } else if let Atom::$variant(value) = &mut target {
+                                $view.clone_into(value);
+                            } else {
+                                unreachable!();
+                            }
+                        }};
+                    }
+                    match source.as_view() {
+                        AtomView::Fun(view) => copy_view!(Fun, view),
+                        AtomView::Pow(view) => copy_view!(Pow, view),
+                        AtomView::Mul(view) => copy_view!(Mul, view),
+                        AtomView::Add(view) => copy_view!(Add, view),
+                        _ => unreachable!(),
+                    }
+
+                    assert_eq!(target, source);
+                    assert!(old_weak.upgrade().is_none());
+                    drop(source);
+                    assert_eq!(new_weak.upgrade().is_some(), has_alias);
+                    assert_eq!(target.as_view().has_alias(), has_alias);
+                    assert_eq!(target.inline_aliases(true), expected);
+                    drop(target);
+                    assert!(new_weak.upgrade().is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn recycling_releases_alias_ownership_even_without_subtree_flags() {
