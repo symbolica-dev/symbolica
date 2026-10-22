@@ -1194,12 +1194,18 @@ impl Mul {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Mul {
-        buffer.clear();
-        buffer.put_u8(MUL_ID | NOT_NORMALIZED);
-        (0u64, 0).write_packed(&mut buffer);
+    pub(crate) fn new_into(buffer: RawAtom) -> Mul {
+        let mut value = Mul { data: buffer };
+        value.clear();
+        value
+    }
 
-        Mul { data: buffer }
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        self.data
+            .extend_from_slice(&[MUL_ID | NOT_NORMALIZED, 0x11, 0, 0]);
     }
 
     #[inline]
@@ -1342,11 +1348,18 @@ impl Add {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Add {
-        buffer.clear();
-        buffer.put_u8(ADD_ID | NOT_NORMALIZED);
-        (0u64, 0).write_packed(&mut buffer);
-        Add { data: buffer }
+    pub(crate) fn new_into(buffer: RawAtom) -> Add {
+        let mut value = Add { data: buffer };
+        value.clear();
+        value
+    }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        self.data
+            .extend_from_slice(&[ADD_ID | NOT_NORMALIZED, 0x11, 0, 0]);
     }
 
     #[inline]
@@ -1808,8 +1821,7 @@ impl<'a> PowView<'a> {
     #[inline]
     /// Borrow the base of this power.
     pub fn get_base(&self) -> AtomView<'a> {
-        let (b, _) = self.get_base_exp();
-        b
+        self.iter().next().unwrap()
     }
 
     #[inline]
