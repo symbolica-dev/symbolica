@@ -416,6 +416,21 @@ impl AtomView<'_> {
                 series.truncate_absolute_order(order + &(1.into(), order.denominator()).into());
                 break Ok(series);
             } else {
+                // An empty truncation alone does not prove the input zero.
+                // Check the exact stored coefficients before retrying a
+                // relative expansion whose leading term may not exist.
+                if !depth.is_absolute()
+                    && series.is_zero()
+                    && self
+                        .check_zero_with(
+                            &crate::atom::ZeroTestSettings::new()
+                                .treat_floats_as_exact(true)
+                                .numerical_samples(0),
+                        )
+                        .is_true()
+                {
+                    return Atom::Zero.as_view().series(x, expansion_point, depth);
+                }
                 // increase the expansion depth
                 // TODO: find better heuristic
                 current_depth = &current_depth * &2.into();
@@ -1125,6 +1140,52 @@ mod test {
 
         assert_eq!(t.relative_order(), (4, 1));
         assert_eq!(t.to_atom(), parse!("v1^-1+1+1/2*v1"));
+    }
+
+    #[test]
+    fn series_relative_noncanonical_exact_zero() {
+        let x = symbol!("relative_exact_zero_x");
+        let depth = SeriesDepth::relative(4);
+        let expected = Atom::Zero.series(x, 0, depth.clone()).unwrap();
+        for text in [
+            "0.125*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
+            "1/8*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
+        ] {
+            let input = parse!(text).expand();
+            assert!(!input.is_zero());
+            let result = input.series(x, 0, depth.clone()).unwrap();
+            assert!(result.to_atom().is_zero());
+            assert_eq!(result.relative_order(), expected.relative_order());
+            assert_eq!(result.absolute_order(), expected.absolute_order());
+        }
+    }
+
+    #[test]
+    fn series_relative_zero_proof_preserves_nonzero_and_unresolved_terms() {
+        let x = symbol!("relative_zero_control_x");
+        let zero = parse!(
+            "0.125*(1/(relative_zero_control_x*(relative_zero_control_x-1))-1/(relative_zero_control_x-1)+1/relative_zero_control_x)"
+        )
+        .expand();
+        for remainder in [
+            parse!("relative_zero_control_x^12"),
+            parse!("relative_zero_control_a"),
+            parse!("relative_zero_control_f(0)"),
+        ] {
+            let input = &zero + &remainder;
+            let result = input.series(x, 0, SeriesDepth::relative(1)).unwrap();
+            assert_eq!(result.to_atom(), remainder);
+        }
+        let tiny = &zero + parse!("1e-1000");
+        assert!(
+            !tiny
+                .check_zero_with(
+                    &crate::atom::ZeroTestSettings::new()
+                        .treat_floats_as_exact(true)
+                        .numerical_samples(0),
+                )
+                .is_true()
+        );
     }
 
     #[test]
