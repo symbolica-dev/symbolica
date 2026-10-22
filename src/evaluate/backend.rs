@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "jit_callback.rs"]
+mod jit_callback;
+
+#[doc(hidden)]
+pub use jit_callback::JITCallbackContext;
+
 /// Represents the exported code for a compiled function.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
@@ -685,6 +691,17 @@ pub trait JITCompiledNumber: Sized {
         settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String>;
 
+    /// Internal conversion hook for evaluator-owned callback environments.
+    /// Custom numerical domains may keep their existing standalone conversion.
+    #[doc(hidden)]
+    fn convert_external_functions_with_context(
+        external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
+        _context: Option<&JITCallbackContext>,
+    ) -> Result<symjit::Defuns, String> {
+        Self::convert_external_functions(external_functions, settings)
+    }
+
     /// Create a JIT-compiled evaluator for this number type.
     fn jit_compile(
         instructions: Vec<Instruction>,
@@ -758,9 +775,17 @@ impl JITCompiledNumber for f64 {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
+        Self::convert_external_functions_with_context(external_functions, settings, None)
+    }
+
+    fn convert_external_functions_with_context(
+        external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
+        context: Option<&JITCallbackContext>,
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
-        for f in external_functions {
+        for (index, f) in external_functions.iter().enumerate() {
             if f.constant_index.is_some() {
                 continue;
             }
@@ -769,11 +794,17 @@ impl JITCompiledNumber for f64 {
                 continue;
             }
 
-            let Some(imp) = f.callable() else {
+            if f.imp.is_none() {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
                 ));
+            }
+            let imp: Box<dyn ExternalFunction<Self>> = if let Some(context) = context {
+                let context = context.clone();
+                Box::new(move |args: &[Self]| jit_callback::real::call(&context, index, args))
+            } else {
+                f.callable().unwrap()
             };
 
             let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
@@ -798,13 +829,15 @@ impl JITCompiledNumber for f64 {
         }
 
         let external_functions = external_functions.to_vec();
+        let callback_context = jit_callback::context_for(&external_functions);
 
         let mut config = Config::default();
         config.set_complex(false);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(
+        config.set_defuns(Self::convert_external_functions_with_context(
             &external_functions,
             &settings,
+            callback_context.as_ref(),
         )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -815,6 +848,7 @@ impl JITCompiledNumber for f64 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
+            callback_context,
             external_functions,
             compressed_ir,
             settings,
@@ -825,11 +859,23 @@ impl JITCompiledNumber for f64 {
 
     #[inline(always)]
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
-        eval.code.evaluate(args, out);
+        jit_callback::real::with(
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            || {
+                eval.code.evaluate(args, out);
+            },
+        );
     }
 
     fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
-        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
+        Box::new(move |args: &[Self]| {
+            jit_callback::real::with(
+                eval.callback_context.as_ref(),
+                &eval.external_functions,
+                || eval.code.evaluate_single(args),
+            )
+        })
     }
 
     #[inline(always)]
@@ -839,7 +885,14 @@ impl JITCompiledNumber for f64 {
         out: &mut [Self],
         rows: usize,
     ) {
-        eval.code.evaluate_matrix(args, out, rows);
+        jit_callback::real::batch(
+            &eval.code,
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            args,
+            out,
+            rows,
+        );
     }
 }
 
@@ -851,6 +904,7 @@ impl JITCompiledNumber for f64 {
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
     code: Applet,
+    callback_context: Option<JITCallbackContext>,
     #[allow(dead_code)]
     external_functions: Vec<ExternalFunctionContainer<T>>,
     #[allow(dead_code)]
@@ -960,11 +1014,13 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
         external_functions: Vec<ExternalFunctionContainer<T>>,
         settings: JITCompilationSettings,
     ) -> Result<Self, String> {
+        let callback_context = jit_callback::context_for(&external_functions);
         let mut config = Config::default();
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(T::convert_external_functions(
+        config.set_defuns(T::convert_external_functions_with_context(
             &external_functions,
             &settings,
+            callback_context.as_ref(),
         )?);
 
         let app = symjit::Application::load(&mut compressed_ir.as_slice(), &config)
@@ -973,6 +1029,7 @@ impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
             .map_err(|e| e.to_string())?;
         Ok(JITCompiledEvaluator {
             code: app,
+            callback_context,
             external_functions,
             compressed_ir,
             settings,
@@ -1023,8 +1080,16 @@ impl JITCompiledNumber for wide::f64x4 {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
+        Self::convert_external_functions_with_context(external_functions, settings, None)
+    }
+
+    fn convert_external_functions_with_context(
+        external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
+        context: Option<&JITCallbackContext>,
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
-        for f in external_functions {
+        for (index, f) in external_functions.iter().enumerate() {
             if f.constant_index.is_some()
                 || f.body.is_none()
                     && f.symbol.is_builtin()
@@ -1037,11 +1102,17 @@ impl JITCompiledNumber for wide::f64x4 {
                 continue;
             }
 
-            let Some(imp) = f.callable() else {
+            if f.imp.is_none() {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
                 ));
+            }
+            let imp: Box<dyn ExternalFunction<Self>> = if let Some(context) = context {
+                let context = context.clone();
+                Box::new(move |args: &[Self]| jit_callback::real_simd::call(&context, index, args))
+            } else {
+                f.callable().unwrap()
             };
 
             let r: Box<Box<dyn Fn(&[Self]) -> Self + Send + Sync>> = Box::new(imp);
@@ -1061,14 +1132,16 @@ impl JITCompiledNumber for wide::f64x4 {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let external_functions = external_functions.to_vec();
+        let callback_context = jit_callback::context_for(&external_functions);
 
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(
+        config.set_defuns(Self::convert_external_functions_with_context(
             &external_functions,
             &settings,
+            callback_context.as_ref(),
         )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1079,6 +1152,7 @@ impl JITCompiledNumber for wide::f64x4 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
+            callback_context,
             external_functions,
             compressed_ir,
             settings,
@@ -1093,11 +1167,23 @@ impl JITCompiledNumber for wide::f64x4 {
         args: &[wide::f64x4],
         out: &mut [wide::f64x4],
     ) {
-        eval.code.evaluate(args, out);
+        jit_callback::real_simd::with(
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            || {
+                eval.code.evaluate(args, out);
+            },
+        );
     }
 
     fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
-        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
+        Box::new(move |args: &[Self]| {
+            jit_callback::real_simd::with(
+                eval.callback_context.as_ref(),
+                &eval.external_functions,
+                || eval.code.evaluate_single(args),
+            )
+        })
     }
 
     #[inline(always)]
@@ -1107,7 +1193,14 @@ impl JITCompiledNumber for wide::f64x4 {
         out: &mut [Self],
         rows: usize,
     ) {
-        eval.code.evaluate_matrix(args, out, rows);
+        jit_callback::real_simd::batch(
+            &eval.code,
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            args,
+            out,
+            rows,
+        );
     }
 }
 
@@ -1210,9 +1303,17 @@ impl JITCompiledNumber for Complex<f64> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
+        Self::convert_external_functions_with_context(external_functions, settings, None)
+    }
+
+    fn convert_external_functions_with_context(
+        external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
+        context: Option<&JITCallbackContext>,
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
-        for f in external_functions {
+        for (index, f) in external_functions.iter().enumerate() {
             if f.constant_index.is_some()
                 || f.body.is_none()
                     && f.symbol.is_builtin()
@@ -1225,11 +1326,17 @@ impl JITCompiledNumber for Complex<f64> {
                 continue;
             }
 
-            let Some(imp) = f.callable() else {
+            if f.imp.is_none() {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
                 ));
+            }
+            let imp: Box<dyn ExternalFunction<Self>> = if let Some(context) = context {
+                let context = context.clone();
+                Box::new(move |args: &[Self]| jit_callback::complex::call(&context, index, args))
+            } else {
+                f.callable().unwrap()
             };
 
             // TODO: implement symjit::Element on numeric::Complex
@@ -1255,13 +1362,15 @@ impl JITCompiledNumber for Complex<f64> {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
         let external_functions = external_functions.to_vec();
+        let callback_context = jit_callback::context_for(&external_functions);
 
         let mut config = Config::default();
         config.set_complex(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(
+        config.set_defuns(Self::convert_external_functions_with_context(
             &external_functions,
             &settings,
+            callback_context.as_ref(),
         )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1272,6 +1381,7 @@ impl JITCompiledNumber for Complex<f64> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
+            callback_context,
             external_functions,
             compressed_ir,
             settings,
@@ -1289,13 +1399,23 @@ impl JITCompiledNumber for Complex<f64> {
     ) {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
-        eval.code.evaluate(args, out);
+        jit_callback::complex::with(
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            || {
+                eval.code.evaluate(args, out);
+            },
+        );
     }
 
     fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
         Box::new(move |args: &[Self]| {
             let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
-            let result = eval.code.evaluate_single(args);
+            let result = jit_callback::complex::with(
+                eval.callback_context.as_ref(),
+                &eval.external_functions,
+                || eval.code.evaluate_single(args),
+            );
             Complex::new(result.re, result.im)
         })
     }
@@ -1309,7 +1429,14 @@ impl JITCompiledNumber for Complex<f64> {
     ) {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
-        eval.code.evaluate_matrix(args, out, rows);
+        jit_callback::complex::batch(
+            &eval.code,
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            args,
+            out,
+            rows,
+        );
     }
 }
 
@@ -1359,9 +1486,17 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         external_functions: &[ExternalFunctionContainer<Self>],
         settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
+        Self::convert_external_functions_with_context(external_functions, settings, None)
+    }
+
+    fn convert_external_functions_with_context(
+        external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
+        context: Option<&JITCallbackContext>,
+    ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
-        for f in external_functions {
+        for (index, f) in external_functions.iter().enumerate() {
             if f.constant_index.is_some()
                 || f.body.is_none()
                     && f.symbol.is_builtin()
@@ -1374,11 +1509,19 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
                 continue;
             }
 
-            let Some(imp) = f.callable() else {
+            if f.imp.is_none() {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
                 ));
+            }
+            let imp: Box<dyn ExternalFunction<Self>> = if let Some(context) = context {
+                let context = context.clone();
+                Box::new(move |args: &[Self]| {
+                    jit_callback::complex_simd::call(&context, index, args)
+                })
+            } else {
+                f.callable().unwrap()
             };
 
             // TODO: implement symjit::Element on numeric::Complex
@@ -1405,14 +1548,16 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
         settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         let external_functions = external_functions.to_vec();
+        let callback_context = jit_callback::context_for(&external_functions);
 
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
         settings.apply_to_config(&mut config)?;
-        config.set_defuns(Self::convert_external_functions(
+        config.set_defuns(Self::convert_external_functions_with_context(
             &external_functions,
             &settings,
+            callback_context.as_ref(),
         )?);
 
         let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
@@ -1423,6 +1568,7 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
+            callback_context,
             external_functions,
             compressed_ir,
             settings,
@@ -1439,13 +1585,23 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
-        eval.code.evaluate(args, out);
+        jit_callback::complex_simd::with(
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            || {
+                eval.code.evaluate(args, out);
+            },
+        );
     }
 
     fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
         Box::new(move |args: &[Self]| {
             let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
-            let result = eval.code.evaluate_single(args);
+            let result = jit_callback::complex_simd::with(
+                eval.callback_context.as_ref(),
+                &eval.external_functions,
+                || eval.code.evaluate_single(args),
+            );
             Complex::new(result.re, result.im)
         })
     }
@@ -1459,7 +1615,14 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
-        eval.code.evaluate_matrix(args, out, rows);
+        jit_callback::complex_simd::batch(
+            &eval.code,
+            eval.callback_context.as_ref(),
+            &eval.external_functions,
+            args,
+            out,
+            rows,
+        );
     }
 }
 
@@ -3401,3 +3564,142 @@ impl Default for InlineASM {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "native_code_generation"))]
+mod callback_context_tests {
+    use crate::{
+        atom::{Atom, AtomCore, EvaluationInfo},
+        domains::float::Complex,
+        evaluate::{EvaluationDomain, JITCompilationSettings, JITCompiledNumber},
+        function, symbol,
+    };
+    use std::{
+        collections::BTreeSet,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    type Calls = Arc<Mutex<BTreeSet<usize>>>;
+    struct Workspace {
+        id: usize,
+        calls: Calls,
+    }
+    impl Workspace {
+        fn new(calls: Calls) -> Self {
+            Self {
+                id: NEXT.fetch_add(1, Ordering::Relaxed),
+                calls,
+            }
+        }
+        fn call<T: Clone>(&self, args: &[T]) -> T {
+            self.calls.lock().unwrap().insert(self.id);
+            args[0].clone()
+        }
+    }
+    impl Clone for Workspace {
+        fn clone(&self) -> Self {
+            Self::new(self.calls.clone())
+        }
+    }
+    fn callback<T: Clone>(calls: Calls) -> impl Fn(&[T]) -> T + Clone + Send + Sync {
+        let workspace = Workspace::new(calls);
+        move |args| workspace.call(args)
+    }
+    fn settings(threads: bool) -> JITCompilationSettings {
+        JITCompilationSettings::default()
+            .optimization_level(2)
+            .direct_translation(true)
+            .with_option("use_threads", if threads { "true" } else { "false" })
+    }
+
+    fn cloned_domain<T>(value: T)
+    where
+        T: JITCompiledNumber
+            + EvaluationDomain
+            + Clone
+            + Default
+            + PartialEq
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + 'static,
+    {
+        let calls = Calls::default();
+        let f = symbol!(
+            &format!("jit_clone_domain_{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+            eval = EvaluationInfo::new().register(callback::<T>(calls.clone()))
+        );
+        let x = Atom::var(symbol!("jit_clone_domain_x"));
+        let exact = function!(f, &x).evaluator(&[x]).build().unwrap();
+        for threads in [false, true] {
+            let original = exact.jit_compile::<T>(settings(threads)).unwrap();
+            let mut a = original.clone();
+            let mut b = original.clone();
+            drop(original);
+            calls.lock().unwrap().clear();
+            let mut output = [T::default()];
+            a.evaluate(std::slice::from_ref(&value), &mut output);
+            assert_eq!(output[0], value);
+            b.evaluate(std::slice::from_ref(&value), &mut output);
+            assert_eq!(output[0], value);
+            assert_eq!(calls.lock().unwrap().len(), 2);
+            // More than one SIMD-aligned chunk and a non-aligned tail, including
+            // the public native packed-domain path for SIMD number types.
+            calls.lock().unwrap().clear();
+            let input = vec![value.clone(); 1031];
+            let mut output = vec![T::default(); input.len()];
+            a.batch_evaluate(&input, &mut output, input.len());
+            assert!(output.iter().all(|v| *v == value));
+            b.batch_evaluate(&input, &mut output, input.len());
+            assert!(output.iter().all(|v| *v == value));
+            assert_eq!(calls.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn cloned_callbacks_use_independent_environments() {
+        cloned_domain(3.25f64);
+        cloned_domain(Complex::new(3.25, -0.125));
+        cloned_domain(wide::f64x4::from([1., 2., 3., 4.]));
+    }
+
+    #[test]
+    fn nested_compiled_callback_restores_outer_registry() {
+        let calls = Calls::default();
+        let leaf = symbol!(
+            "jit_nested_leaf",
+            eval = EvaluationInfo::new().register(callback::<f64>(calls.clone()))
+        );
+        let x = Atom::var(symbol!("jit_nested_x"));
+        let inner = function!(leaf, &x)
+            .evaluator(std::slice::from_ref(&x))
+            .build()
+            .unwrap()
+            .jit_compile::<f64>(settings(false))
+            .unwrap();
+        let nested = symbol!(
+            "jit_nested_compiled",
+            eval = EvaluationInfo::new().register(f64::into_external_function(inner))
+        );
+        let expression = function!(nested, &x) + function!(leaf, &x) + function!(leaf, &x + 1);
+        let original = expression
+            .evaluator(&[x])
+            .build()
+            .unwrap()
+            .jit_compile::<f64>(settings(false))
+            .unwrap();
+        let mut a = original.clone();
+        let mut b = original.clone();
+        drop(original);
+        calls.lock().unwrap().clear();
+        let mut output = [0.];
+        a.evaluate(&[3.], &mut output);
+        assert_eq!(output, [10.]);
+        b.evaluate(&[3.], &mut output);
+        assert_eq!(output, [10.]);
+        assert_eq!(calls.lock().unwrap().len(), 4);
+    }
+}
