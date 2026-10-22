@@ -402,7 +402,14 @@ function render({ model, el }) {
     // its own cell width. Root-flow conversion stays outside nested MathML.
     for (const cell of container.querySelectorAll('[data-symbolica-cell]')) {
       const parent = cell.parentElement.closest('[data-symbolica-cell]');
-      if (!parent || parent === container) setWrapWidth(cell, cell.clientWidth);
+      if (!parent || parent === container) {
+        // clientWidth rounds to integer CSS pixels. Rounding down a column by
+        // even a fraction of a pixel can wrap a sum that fits exactly. Keep
+        // its used width (independent of the ancestor's expression zoom).
+        // A subpixel guard covers computed-style serialization precision.
+        const used = parseFloat(getComputedStyle(cell).width);
+        setWrapWidth(cell, Number.isFinite(used) ? used + .05 : cell.clientWidth);
+      }
     }
   }
   function widthWithCells(container, width, available) {

@@ -78,9 +78,13 @@ frame keeps its row and column layout while large rational-polynomial cells
 have independent omission markers. Numerators and denominators can be inspected
 and paged separately. Only requested entry and term ranges are rendered.
 
-For a large matrix, entry pages show original row and column numbers so a partial
-window cannot be confused with the complete matrix. Text and LaTeX formatting
-remain available through the existing methods. Static HTML provides a bounded
+At the matrix root, `page_size` counts complete rows; cell previews count terms.
+Every displayed row contains all its entries. Large entries retain their own
+omission markers. When rows are omitted, row labels show their original positions.
+The matrix uses its natural width up to the available output width; long cell
+sums wrap within their columns, and the outer container owns horizontal overflow.
+
+Text and LaTeX formatting remain available through the existing methods. Static HTML provides a bounded
 MathML preview; interactive markers require the viewer host.
 
 A viewer retains a snapshot: later matrix row swaps or reductions do not change

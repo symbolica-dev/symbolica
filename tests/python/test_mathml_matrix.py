@@ -35,7 +35,7 @@ class MatrixMathMLTests(unittest.TestCase):
         original = str(matrix)
         try:
             _, page = viewer.handle_message({'action': 'attach', 'view': 'matrix'})
-            self.assertEqual(page['total'], 4)
+            self.assertEqual(page['total'], 2)
             self.assertEqual([m[0] for m in page['markers']], [[0], [1]])
             self.assertEqual(page['marker_ids'], [0, 1])
             _, expanded = viewer.handle_message({'action': 'expand', 'value': [0], 'size': 14})
@@ -77,6 +77,9 @@ class MatrixMathMLTests(unittest.TestCase):
             seen = []
             while True:
                 self.assertLess(len(json.dumps(page)), 256 * 1024)
+                self.assertEqual(page['unit'], 'rows')
+                self.assertEqual(len(cells(page['html'])), (page['end'] - page['start']) * 11)
+                self.assertNotIn('Outside this page', page['html'])
                 for cell in cells(page['html']):
                     index = int(cell.get('data-symbolica-entry'))
                     value = mathml_expression(fragment(root(ET.tostring(cell, encoding='unicode'))))
@@ -88,8 +91,26 @@ class MatrixMathMLTests(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_wide_rows_and_last_page_have_no_placeholder_cells(self):
+        matrix = Matrix.from_linear(8, 40, list(range(320)))
+        viewer = matrix.mathml_viewer(page_size=3)
+        try:
+            page = viewer.page()
+            self.assertEqual((page['start'], page['end'], page['total']), (0, 3, 8))
+            self.assertEqual(len(cells(page['html'])), 120)
+            _, page = viewer.handle_message({'action': 'expand', 'value': [], 'size': 3})
+            self.assertEqual((page['start'], page['end']), (0, 6))
+            self.assertEqual(len(cells(page['html'])), 240)
+            _, page = viewer.handle_message({'action': 'next'})
+            self.assertEqual((page['start'], page['end']), (6, 8))
+            self.assertEqual(len(cells(page['html'])), 80)
+            self.assertIsNone(page['next'])
+            self.assertNotIn('Outside this page', page['html'])
+        finally:
+            viewer.close()
+
     def test_coordinates_only_label_truncated_dimensions(self):
-        for rows, cols, expected_rows, expected_cols in [(12, 11, True, False), (1, 40, False, True), (2, 2, False, False)]:
+        for rows, cols, expected_rows, expected_cols in [(32, 11, True, False), (1, 40, False, False), (2, 2, False, False)]:
             viewer = Matrix.from_linear(rows, cols, list(range(rows * cols))).mathml_viewer()
             try:
                 html = ET.fromstring(viewer.page()['html'])
@@ -100,13 +121,13 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_dense_large_cells_stay_within_the_transfer_budget(self):
         large = E('(1+x)^100').expand()
-        matrix = Matrix.from_nested([[large] * 8 for _ in range(8)])
+        matrix = Matrix.from_nested([[large] * 8 for _ in range(32)])
         viewer = matrix.mathml_viewer()
         try:
             page = viewer.page()
-            self.assertEqual((page['start'], page['end'], page['total']), (0, 25, 64))
+            self.assertEqual((page['start'], page['end'], page['total']), (0, 25, 32))
             self.assertLess(len(json.dumps(page)), 512 * 1024)
-            self.assertTrue(any(path == [] and label == 'Open remaining matrix entries'
+            self.assertTrue(any(path == [] and label == 'Open remaining matrix rows'
                                 for path, label in page['markers']))
             self.assertEqual(len(page['marker_ids']), len(set(page['marker_ids'])))
             table = ET.fromstring(page['html']).find('.//table')

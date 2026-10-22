@@ -94,6 +94,44 @@ class MathMLWrappingTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         await browser.close()
 
+    async def test_fractional_cell_width_does_not_wrap_a_fitting_sum(self):
+        async with async_playwright() as playwright:
+            for engine in ("chromium", "firefox", "webkit"):
+                with self.subTest(engine=engine):
+                    options = {"headless": True}
+                    executable = os.environ.get(f"{engine.upper()}_EXECUTABLE")
+                    if executable:
+                        options["executable_path"] = executable
+                    browser = await getattr(playwright, engine).launch(**options)
+                    try:
+                        page = await browser.new_page()
+                        await page.route("https://cdn.jsdelivr.net/**", lambda route: route.abort())
+                        await page.set_content('<div id="host" style="width:300px"></div>')
+                        html = ('<div data-symbolica-cell="" style="width:70.125px">'
+                                '<math><mrow style="display:flex;flex-wrap:wrap">'
+                                '<mrow><mspace width="35.25px" height="10px"/></mrow>'
+                                '<mrow><mspace width="34.875px" height="10px"/></mrow>'
+                                '</mrow></math></div>')
+                        fixture = dict(html=html, start=0, end=1, total=1,
+                                       kind="Matrix", unit="rows", markers=[], layout=0,
+                                       previous=False, next=None, back=False, page_size=25)
+                        await page.evaluate("""async ({source, fixture}) => {
+                          const url = URL.createObjectURL(new Blob([source], {type:'text/javascript'}));
+                          const {mount} = await import(url);
+                          URL.revokeObjectURL(url);
+                          mount({el:document.querySelector('#host'),page:fixture,send:()=>{}});
+                        }""", {"source": JAVASCRIPT, "fixture": fixture})
+                        await page.wait_for_function("""() => document.querySelector('#host')
+                          .shadowRoot.querySelectorAll('.math-flow > math').length === 2""")
+                        for _ in range(2):
+                            bottoms = await page.locator('#host').evaluate("""host =>
+                              [...host.shadowRoot.querySelectorAll('.math-flow > math')]
+                                .map(term => term.getBoundingClientRect().bottom)""")
+                            self.assertLess(max(bottoms) - min(bottoms), 1, bottoms)
+                            await page.locator('#host').locator('.math').press('=')
+                    finally:
+                        await browser.close()
+
     async def test_product_cell_padding_survives_measured_repacking(self):
         async with async_playwright() as playwright:
             for engine in ("chromium", "firefox", "webkit"):

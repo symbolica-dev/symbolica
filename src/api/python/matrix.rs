@@ -638,7 +638,7 @@ impl PythonMatrix {
         display::matrix::static_html(self)
     }
 
-    /// Create a pager for matrix entries and their polynomial terms.
+    /// Create a pager for complete matrix rows and individual entry terms.
     #[pyo3(signature = (page_size=25))]
     #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
     pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {

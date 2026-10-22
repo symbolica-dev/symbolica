@@ -1,7 +1,7 @@
 //! Keep matrix geometry in HTML and retain native, independently paged cells.
 use super::*;
 use crate::printer::mathml::AlgebraicMathMl;
-use std::{collections::BTreeSet, ops::Deref};
+use std::ops::Deref;
 
 const HTML_BUDGET: usize = 32 * 1024;
 const LAYOUT_COUNT: usize = 6;
@@ -48,36 +48,21 @@ impl Source<'_> {
     ) -> PyResult<MathMLPage> {
         let rows = self.matrix.matrix.nrows();
         let cols = self.matrix.matrix.ncols();
-        let total = rows * cols;
-        if total == 0 {
+        let total = rows;
+        if total == 0 || cols == 0 {
             let mut page =
                 MathMLPage::new("<math><mrow><mo>[</mo><mo>]</mo></mrow></math>", 0, 0, 0);
             page.kind = format!("Matrix {rows}×{cols}");
-            page.unit = "entries".into();
+            page.unit = "rows".into();
             return Ok(page);
         }
         let start = request.start.min(total - 1);
         let end = (start + request.size).min(total);
-        let columns = (start..end).map(|i| i % cols).collect::<BTreeSet<_>>();
-        let show_rows = start / cols != 0 || (end - 1) / cols + 1 < rows;
-        let show_columns = columns.len() < cols;
+        let show_rows = start != 0 || end != rows;
         let mut markers = Vec::new();
         let mut body = String::new();
-        if show_columns {
-            body.push_str("<tr>");
-            if show_rows {
-                body.push_str("<th></th>");
-            }
-            for col in &columns {
-                body.push_str(&format!(
-                    "<th scope=\"col\" style=\"font:12px system-ui;padding:.2em\">{}</th>",
-                    col + 1
-                ));
-            }
-            body.push_str("</tr>");
-        }
         let mut bytes = 0;
-        for row in start / cols..=(end - 1) / cols {
+        for row in start..end {
             body.push_str("<tr>");
             if show_rows {
                 body.push_str(&format!(
@@ -85,72 +70,67 @@ impl Source<'_> {
                     row + 1
                 ));
             }
-            for &col in &columns {
+            for col in 0..cols {
                 let index = row * cols + col;
                 body.push_str("<td style=\"padding:.4em .6em;vertical-align:middle;min-width:0\">");
                 body.push_str(&format!("<div data-symbolica-cell=\"\" data-symbolica-entry=\"{index}\" style=\"min-width:0\">"));
-                if !(start..end).contains(&index) {
-                    body.push_str("<span aria-label=\"Outside this page\">⋯</span>");
+                let expansions = request
+                    .expansions
+                    .iter()
+                    .filter_map(|(path, count)| {
+                        path.strip_prefix(&[index])
+                            .map(|rest| (rest.to_vec(), *count))
+                    })
+                    .collect::<Vec<_>>();
+                let compact_size = (self.cell_size >> request.layout).max(1);
+                let size = expansions
+                    .iter()
+                    .filter(|(path, _)| path.is_empty())
+                    .map(|(_, count)| *count)
+                    .max()
+                    .unwrap_or(compact_size)
+                    .max(compact_size);
+                let page = self
+                    .entry(index)?
+                    .page_expanded(&default_options(), &[], 0, size, &expansions)
+                    .unwrap();
+                if bytes + page.html.len() > HTML_BUDGET || markers.len() + page.markers.len() > 900
+                {
+                    let id = markers.len();
+                    body.push_str(&format!("<math>{}</math>", MathMLMarker::marker(id)));
+                    markers.push(MathMLMarker::new(
+                        vec![index],
+                        format!("Open entry ({}, {})", row + 1, col + 1),
+                        0,
+                    ));
                 } else {
-                    let expansions = request
-                        .expansions
-                        .iter()
-                        .filter_map(|(path, count)| {
-                            path.strip_prefix(&[index])
-                                .map(|rest| (rest.to_vec(), *count))
-                        })
-                        .collect::<Vec<_>>();
-                    let compact_size = (self.cell_size >> request.layout).max(1);
-                    let size = expansions
-                        .iter()
-                        .filter(|(path, _)| path.is_empty())
-                        .map(|(_, count)| *count)
-                        .max()
-                        .unwrap_or(compact_size)
-                        .max(compact_size);
-                    let page = self
-                        .entry(index)?
-                        .page_expanded(&default_options(), &[], 0, size, &expansions)
-                        .unwrap();
-                    if bytes + page.html.len() > HTML_BUDGET
-                        || markers.len() + page.markers.len() > 900
-                    {
-                        let id = markers.len();
-                        body.push_str(&format!("<math>{}</math>", MathMLMarker::marker(id)));
+                    bytes += page.html.len();
+                    let offset = markers.len();
+                    let mut html = page.html;
+                    // Descending replacement avoids renumbering an ID twice.
+                    for id in (0..page.markers.len()).rev() {
+                        html = html
+                            .replace(
+                                &format!("data-symbolica-marker=\"{id}\""),
+                                &format!("data-symbolica-marker=\"{}\"", offset + id),
+                            )
+                            .replace(
+                                &format!(">[{}]</mtext>", id + 1),
+                                &format!(">[{}]</mtext>", offset + id + 1),
+                            );
+                    }
+                    if static_output {
+                        html = super::html::wrapping_mathml(&html).unwrap_or(html);
+                    }
+                    body.push_str(&html);
+                    for marker in page.markers {
+                        let mut path = vec![index];
+                        path.extend(marker.path);
                         markers.push(MathMLMarker::new(
-                            vec![index],
-                            format!("Open entry ({}, {})", row + 1, col + 1),
-                            0,
+                            path,
+                            format!("Entry ({}, {}): {}", row + 1, col + 1, marker.label),
+                            marker.start,
                         ));
-                    } else {
-                        bytes += page.html.len();
-                        let offset = markers.len();
-                        let mut html = page.html;
-                        // Descending replacement avoids renumbering an ID twice.
-                        for id in (0..page.markers.len()).rev() {
-                            html = html
-                                .replace(
-                                    &format!("data-symbolica-marker=\"{id}\""),
-                                    &format!("data-symbolica-marker=\"{}\"", offset + id),
-                                )
-                                .replace(
-                                    &format!(">[{}]</mtext>", id + 1),
-                                    &format!(">[{}]</mtext>", offset + id + 1),
-                                );
-                        }
-                        if static_output {
-                            html = super::html::wrapping_mathml(&html).unwrap_or(html);
-                        }
-                        body.push_str(&html);
-                        for marker in page.markers {
-                            let mut path = vec![index];
-                            path.extend(marker.path);
-                            markers.push(MathMLMarker::new(
-                                path,
-                                format!("Entry ({}, {}): {}", row + 1, col + 1, marker.label),
-                                marker.start,
-                            ));
-                        }
                     }
                 }
                 body.push_str("</div></td>");
@@ -159,16 +139,12 @@ impl Source<'_> {
         }
         if end < total {
             let id = markers.len();
-            let span = columns.len() + usize::from(show_rows);
+            let span = cols + usize::from(show_rows);
             body.push_str(&format!(
                 "<tr data-symbolica-matrix-omission=\"\"><td colspan=\"{span}\" style=\"padding:.5em .6em;text-align:center\"><math>{}</math></td></tr>",
                 MathMLMarker::marker(id)
             ));
-            markers.push(MathMLMarker::new(
-                vec![],
-                "Open remaining matrix entries",
-                end,
-            ));
+            markers.push(MathMLMarker::new(vec![], "Open remaining matrix rows", end));
         }
         // CSS draws square brackets around HTML cells. Each cell keeps a
         // MathML root, so the shared frontend can wrap its sums portably.
@@ -178,7 +154,7 @@ impl Source<'_> {
         );
         let mut result = MathMLPage::new(html, start, end, total);
         result.kind = format!("Matrix {rows}×{cols}");
-        result.unit = "entries".into();
+        result.unit = "rows".into();
         result.markers = markers;
         Ok(result)
     }
