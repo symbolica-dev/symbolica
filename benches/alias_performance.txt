@@ -3,8 +3,9 @@ Global alias performance benchmarks
 
 These small benchmarks compare ordinary expression work before and after global
 alias support, and check that improvements do not move costs into the live-alias
-path. The Rust programs use only Symbolica and the standard library; the runner
-uses Python's standard library. No additional benchmark crate is required.
+path. The arithmetic programs use only Symbolica and the standard library; key
+benchmarks also use the existing ahash dependency. The runner uses Python's
+standard library. No additional benchmark crate is required.
 
 Files and builds
 ----------------
@@ -63,8 +64,8 @@ possible, and keep unrelated work off its SMT sibling as well.
     --output-dir /tmp/alias-results
 
 Defaults: three paired rounds, seven samples per workload per round, and a
-100 ms target duration per sample. With all nine no-alias and four live-alias
-workloads, allow about 73 seconds of measured work plus setup and calibration.
+100 ms target duration per sample. With all nine no-alias and eight live-alias
+workloads, allow about 90 seconds of measured work plus setup and calibration.
 The alias-free order rotates across rounds:
 
   1. main, global-baseline, optimized
@@ -87,7 +88,7 @@ rotates its starting variant by one position per round, for any variant count.
 Six rounds give each of the three live-alias variants equal exposure to each
 position; twelve rounds balance both the four-variant and three-variant suites.
 With both optional variants, six rounds of the default samples/duration measure
-about 202 seconds of work plus setup and calibration. --previous can be used
+about 252 seconds of work plus setup and calibration. --previous can be used
 alone; --previous-alias requires --previous and both other live-alias binaries.
 
 By default, --cpu auto uses taskset and the first CPU allowed by the runner's
@@ -160,12 +161,48 @@ Live-alias workloads
                              including retention and release of alias ownership.
   add_alias_plain           Adding an aliased term to its ordinary body.
   multiply_alias_powers     Multiplying powers that share an aliased base.
+  copy_large_alias_power    Copying a power whose alias body has 512 terms.
+  multiply_large_alias_powers
+                            Multiplying powers with that large aliased base.
+  copy_repeated_multi_aliases
+                            Copying 64 distinct owners repeated eight times,
+                            including transparent and opaque references.
+  copy_alias_child_from_multi_owner
+                            Copying one child from a parent with many owners;
+                            only the child's dependencies should be retained.
 
 Each workload checks one result against its ordinary expected expression using
 inline_aliases(true) before calibration. These checks protect the measured
 operation from silently changing semantics while leaving timing unaffected.
 Alias registration is setup, so these workloads do not measure store insertion,
 removal of the last live alias, or repeated-subexpression discovery.
+
+Equality and hashing
+--------------------
+
+Build examples/equality_hash_performance.rs identically on main and the global
+alias branch. Its CSV schema and command-line options match the arithmetic
+harnesses. It measures owned/view hashing, equality of separately allocated
+equal expressions, early/late mismatches, and owned Ord comparisons. Hashing
+uses fixed AHash seeds and includes hasher construction. Scalar result_bytes
+records the result type's size, not the input expression's size.
+
+  cargo build --release --example equality_hash_performance
+
+The alias-only example asserts transparent Eq/Hash first, then compares direct
+and nested aliases with ordinary expressions in the same binary:
+
+  cargo build --release --example alias_equality_hash_performance
+
+Do not compare those alias timings against an older implementation that hashes
+alias tokens: the older implementation does not satisfy the same contract.
+Use owned Ord for comparisons against main; main's AtomView trait Ord used
+byte order, inconsistent with its structural PartialOrd.
+
+Expression maps on the alias branch accept BorrowedAtom::new(view) for borrowed
+queries. Raw encoded bytes remain storage keys, but cannot be borrowed expression
+keys because their Eq/Hash do not resolve aliases. Public expression Eq/Hash
+preserve stored structure and dirty flags, and do not normalize or run callbacks.
 
 Outputs and interpretation
 --------------------------
