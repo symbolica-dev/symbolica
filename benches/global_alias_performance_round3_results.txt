@@ -1,0 +1,215 @@
+Global alias performance: third pass — 2026-10-22
+================================================
+
+Source and fair reference
+-------------------------
+Main: c6ccb7eb3307388e33e47769a4422d36508b9493.
+Global: 1bc9e8a714a34509f5b3cb7c66b41c86da345bc6, comprising semantic fixes
+6a37122d, the exact-tree main merge 393e168e, and harness commit 1bc9e8a7.
+The reference includes the same general optimizations as the global branch.
+Before snapshots: main a3aeaf58; global 49c69f93 (merged main, before this pass).
+
+Both branches include same-variant Atom::set_from_view allocation reuse,
+direct no-alias hash dispatch, and the comparator wrapper optimization. These
+build on the shared pair-addition, constructor/header, power-base decoding,
+and normalization-copy improvements from the previous pass. Only alias
+ownership and transparent-alias semantics remain specific to the global branch.
+
+Ownership optimization
+----------------------
+Single-owner alias copies/appends bypass recursive collection. Multi-owner
+contexts are sorted uniquely by full generation-aware token, with binary
+searches and deduplication before Arc cloning. Subtree copies retain only
+referenced dependencies; detached byte views retain registry fallback.
+Ownership discovery now keys its collection by token, avoiding body hashing
+while retaining distinct handles with semantically equal bodies. Ordinary
+child subtrees can be skipped, while mutation paths still handle a temporarily
+stale root alias flag. The experimental identity-hash.patch was NOT USED.
+Public AliasHandle Eq/Hash was not replaced with that proposed shortcut.
+
+Expression-key contract and API change
+-------------------------------------
+Atom, AtomView, AtomOrView, and typed compound expression keys compare and hash
+transparent aliases as their bodies. Opaque aliases retain token identity.
+No-alias keys use encoded bytes. Alias expansion preserves dirty flags and
+stored structural metadata, rebuilding normalized sum order as needed.
+Equality/hashing do not normalize expressions or invoke user callbacks.
+Equal expressions provide identical hash write sequences for arbitrary hashers.
+Public Eq/Ord/PartialOrd agree, including metadata distinctions. The inherent
+AtomView::cmp remains the normalization comparator.
+
+Borrow<[u8]> cannot satisfy this semantic expression-key contract. Its
+replacement is Borrow<BorrowedAtom>, including the KeyLookup bound. A map
+query now uses:
+
+  use symbolica::atom::BorrowedAtom;
+  expression_map.get(BorrowedAtom::new(expression.as_view()))
+
+Evaluation, zero-test, and legacy alias-map queries have been migrated.
+RawAtom and the global alias store's AliasKey retain byte-oriented keys.
+
+Normalization and convergence
+-----------------------------
+Numeric aliases participate correctly in sums, products, and powers. Flat,
+linear, builtin, argument-splicing, and custom-normalized functions expose
+transparent argument shapes when needed. Ordinary functions preserve alias
+compression when no such rule applies, and opaque aliases remain opaque.
+Rebuilding requires a raw representation change; an outer custom normalizer
+runs once. Key comparisons/hashes remain callback-free.
+Representation-sensitive convergence/change checks use raw bytes in
+alias_known_aliases, repeat_map, Transformer::Repeat/IfChanged, replacement,
+and legacy alias expansion, so alias-only rewrites are retained.
+
+Validation
+----------
+Main: 862 library + 91 integration tests passed, 953 total; 2 ignored.
+Global: 965 library + 91 integration tests passed, 1056 total; 2 ignored.
+Both branches pass cargo checks with python_export and bincode enabled.
+With full_fn_cmp enabled, main's 18 normalization tests pass; global's 7
+semantic-key, 33 normalization, and 63 alias tests pass.
+
+Coverage includes ownership/generation lifetimes, borrowed HashSet/BTreeSet keys,
+opaque/dirty metadata, callback-free hash traces, normalization and convergence.
+
+Final arithmetic results
+------------------------
+Eight paired rounds, three samples per workload, 100 ms target, pinned to CPU 6.
+Columns show median ns/op; percentage changes pair within-round medians.
+Negative changes mean less time. "Before" binaries precede this pass.
+
+Workload             main-before alias-before updated-main final-alias vs main vs alias-before
+construct                 962.9       1128.9        955.5      1141.6 +19.64%          +1.49%
+add_pair                   80.6         84.5         78.8        82.9  +5.24%          -1.30%
+add_chain               11657.0      12231.5      11451.1     11899.8  +4.59%          -2.78%
+add_many                 3858.4       4216.9       3636.8      4047.3 +11.62%          -3.18%
+normalize_product        1740.3       2035.9       1723.4      2078.2 +19.52%          +1.86%
+expand_power           298592.4     352413.3     297447.2    358107.5 +20.40%          +1.51%
+expand_product         244504.5     279975.2     240735.3    291178.4 +21.09%          +3.53%
+differentiate            6270.5       7566.3       6537.2      7868.8 +20.52%          +4.32%
+replace                 21374.8      23478.2      21391.8     23533.0 +10.18%          +0.37%
+
+Final no-alias geometric-mean time is 14.57% above updated main
+and +0.62% versus alias-before. Main improves by 1.03% versus
+main-before. The final alias implementation also includes the transparent-key
+correctness changes; this is not an isolated ablation of ownership optimizations.
+
+Live workload                       alias-before final-alias vs alias-before
+construct_with_live_alias                 1120.8      1124.6          +0.72%
+copy_alias_power                            57.2        46.1         -18.76%
+add_alias_plain                            471.7       426.5          -8.92%
+multiply_alias_powers                      499.6       444.7         -11.25%
+copy_large_alias_power                      57.2        45.5         -19.16%
+multiply_large_alias_powers                625.3       443.8         -29.18%
+copy_repeated_multi_aliases              17911.0      8175.1         -54.05%
+copy_alias_child_from_multi_owner          144.3       106.9         -26.98%
+
+Live-alias geometric-mean time falls 22.73%, including unrelated-alias
+construction (+0.72%). Repeated multi-owner copying is the largest improvement.
+Several rounds contain substantial outliers; summary.json retains min/max paired
+ratios. Small percentage changes should not be treated as robust speedups.
+
+Final expression-key results
+----------------------------
+6 paired rounds, 3 samples, 100 ms target, CPU 6; median ns/op and paired changes.
+Workload                         updated-main final-alias  vs main
+hash_small                               2.29        3.13   +36.71%
+hash_large                             177.55      182.22    +2.71%
+hash_view_small                          2.78        4.03   +44.89%
+hash_view_large                        179.98      181.16    +0.84%
+eq_small_equal                           2.68        3.12   +16.67%
+eq_large_equal                          67.83       67.89    +0.12%
+eq_large_unequal_early                   0.98        1.78   +82.68%
+eq_large_unequal_late                   68.43       68.71    +0.34%
+eq_view_small_equal                      2.92        4.92   +68.37%
+eq_view_large_equal                     67.94       69.23    +2.12%
+ord_owned_small_equal                    4.67        5.44   +16.56%
+ord_owned_large_equal                   68.43       71.85    +5.19%
+ord_owned_large_unequal_late           140.00      144.21    +3.67%
+
+Final small owned hashing/equality cost 3.13/3.12 ns. Early mismatch costs
+1.78 ns versus main's 0.98 ns; small view equality costs 4.92 versus 2.92 ns.
+The view benchmark materializes black_box values: global AtomView is 32 bytes
+versus main's 24, so this includes view movement as well as comparison.
+Large late-mismatch owned Ord is 144.21 ns versus main's 140.00 ns; the earlier
+discarded trial's roughly 8.8 us regression is fixed.
+
+Main's shared small-owned-hash optimization reduces 14.08 to 2.29 ns (-83.67%
+paired). The main-old-hash diagnostic binary already includes the copy-only
+candidate; it is not the original untouched main. Updated main is the fair
+reference for every final table above.
+
+Alias key operation               ordinary body  transparent alias (ns/op)
+Direct hash                              178.53                   190.19
+Direct equality                           67.34                    78.29
+Nested hash                              358.16                  1451.56
+Nested equality                          188.10                  1305.58
+
+These alias costs compare equivalent inputs within the final global binary.
+Nested aliases still allocate expanded encodings, costing about 4.1x in hash
+and 6.9x in equality on this workload. Old token-only hashing is not a valid
+baseline for the new transparent-key contract.
+
+Final profiles
+--------------
+Two counter rounds per workload, rotating main/global order, five 300 ms samples.
+Approximate events per measured operation; changes use paired round ratios:
+Workload             main instr global instr  delta   main cycles global cycles delta
+construct                 12924        14793 +14.46%        4370          5208 +19.21%
+normalize_product         23233        25802 +11.06%        8141          9706 +19.22%
+add_many                  46820        51699 +10.42%       16805         19822 +17.92%
+
+Counters include process setup/calibration divided by measured iterations, so
+use these as diagnostics, not exact kernel counts. User-cycle sample profiles
+used perf record -e cycles:u -F 1999 without call graphs (call-graph access was
+denied). Product-normalization hotspots, main/global sample shares: normalize
+10.57/12.24%, rational to_element 8.64/8.24%, coefficient addition 7.45/6.29%,
+merge_factors 6.94/9.39%, and power-base decoding 4.99/6.09%. These are sample
+shares within separate runs, not per-routine speed ratios. Normalization, factor
+management and representation handling remain the main areas of overhead.
+Atom is 40 vs 32 bytes and AtomView 32 vs 24; size alone has not been isolated
+as the cause. Raw counters/reports are preserved under cache/profiles-final/.
+
+Reproduction and artifacts
+--------------------------
+Global worktree: /home/ben/.codex/worktrees/global-alias-performance/symbolica
+Main worktree: /home/ben/.codex/worktrees/main-pair-add/symbolica
+Persistent cache: /home/ben/.cache/symbolica-alias-performance
+Source/compiler/lock hashes: cache/candidates/final-source-metadata.json
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28), LLVM 23.1.1, x86_64 Linux.
+Final binaries: cache/bin/*finished*; validation logs: cache/logs/*finished*.log.
+
+For main, first copy examples/alias_performance.rs and
+examples/equality_hash_performance.rs from global commit 1bc9e8a7. They were
+temporary harness copies and are not committed to main.
+Release settings: opt-level=3, LTO=true, codegen-units=1, target-cpu=native,
+mold linker; default features include GMP, MPFR and mimalloc. The Linux flags
+are -C target-cpu=native -C link-arg=-fuse-ld=mold (from ~/.cargo/config.toml).
+Use separate CARGO_TARGET_DIR directories for each worktree/profile. Test/check
+runs use CARGO_PROFILE_DEV_DEBUG=0 and CARGO_PROFILE_TEST_DEBUG=0.
+From each matching worktree:
+
+  cargo build --release --example alias_performance --example equality_hash_performance
+  # Additional global examples:
+  cargo build --release --example global_alias_performance --example alias_equality_hash_performance
+  cargo test --tests --features bincode -j4 -- --test-threads=1
+  cargo check --lib --features python_export,bincode -j4
+  cargo test --lib --features bincode,full_fn_cmp -j4 normalize:: -- --test-threads=1
+  # Additional global semantic and alias suites:
+  cargo test --lib --features bincode,full_fn_cmp -j4 atom::representation::semantic::tests:: -- --test-threads=1
+  cargo test --lib --features bincode,full_fn_cmp -j4 alias:: -- --test-threads=1
+
+Local preserved raw result directories (git-ignored), relative to the global worktree:
+  benches/results/global-alias-round3-final-2026-10-22
+  benches/results/global-alias-round3-keys-final-2026-10-22
+Their metadata records exact commands, binary hashes, settings and run order.
+For arithmetic reruns use benches/run_alias_performance.py with saved binaries
+and a fresh --output-dir; see benches/alias_performance.txt. The cache compare.py
+runner supports key suites and saves its own reproduction script and metadata.
+Each standalone executable accepts --samples 7 --target-ms 100 --filter TEXT.
+
+Run sequentially with CPU affinity after builds/tests complete. Setup/checks/
+calibration are untimed; output allocation/destruction is included.
+Equal key inputs own separate byte buffers. Ratios pair within-round medians
+and rotate execution order. Workload geometric means are not application
+speedups. Store contention, alias discovery, Python, serialization, and broad
+production workloads are outside this timing suite.
