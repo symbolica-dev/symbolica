@@ -36,6 +36,8 @@
 
 use std::sync::Arc;
 
+use ahash::HashMap;
+
 use crate::domains::{
     float::{Constructible, FloatLike, Real, SingleFloat},
     rational::Rational,
@@ -225,11 +227,33 @@ const fn is_single_derivative_component<const N: usize>(
 
 /// Get the size of the multiplication table.
 pub const fn get_mult_table_size<const N: usize, const C: usize>(r: &[[usize; N]; C]) -> usize {
+    let mut max_single_pow = [0; N];
     let mut i = 0;
+    while i < r.len() {
+        let mut j = 0;
+        while j < N {
+            if r[i][j] > max_single_pow[j] {
+                max_single_pow[j] = r[i][j];
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
     let mut ri = 0;
+    i = 0;
     while i < r.len() {
         let mut j = 1; // skip first entry
-        while j < r.len() {
+        'next_inner: while j < r.len() {
+            let mut k = 0;
+            while k < N {
+                if r[i][k] + r[j][k] > max_single_pow[k] {
+                    j += 1;
+                    continue 'next_inner;
+                }
+                k += 1;
+            }
+
             if get_multiplication_index::<N, C>(r, i, j).is_some() {
                 ri += 1;
             }
@@ -247,11 +271,33 @@ pub const fn get_mult_table<const N: usize, const C: usize, const T: usize>(
 ) -> [(usize, usize, usize); T] {
     let mut res = [(0, 0, 0); T];
 
-    let mut ri = 0;
+    let mut max_single_pow = [0; N];
     let mut i = 0;
     while i < r.len() {
+        let mut j = 0;
+        while j < N {
+            if r[i][j] > max_single_pow[j] {
+                max_single_pow[j] = r[i][j];
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+
+    let mut ri = 0;
+    i = 0;
+    while i < r.len() {
         let mut j = 1; // skip first entry
-        while j < r.len() {
+        'next_inner: while j < r.len() {
+            let mut k = 0;
+            while k < N {
+                if r[i][k] + r[j][k] > max_single_pow[k] {
+                    j += 1;
+                    continue 'next_inner;
+                }
+                k += 1;
+            }
+
             if let Some(index) = get_multiplication_index::<N, C>(r, i, j) {
                 res[ri] = (i, j, index);
                 ri += 1;
@@ -358,6 +404,10 @@ pub trait DualNumberStructure {
 #[macro_export]
 macro_rules! create_hyperdual_from_components {
     ($t: ident, $var: expr) => {
+        #[allow(unused_imports)]
+        use $crate::domains::float::FloatLike as _;
+
+        #[allow(long_running_const_eval)]
         const _: () = assert!(
             $crate::domains::dual::is_dual_shape_ancestor_closed(&$var),
             "Dual shape is not ancestor-closed"
@@ -391,6 +441,7 @@ macro_rules! create_hyperdual_from_components {
                 }
                 max_pow
             };
+            #[allow(long_running_const_eval)]
             const MULT_TABLE: [(usize, usize, usize); {
                 $crate::domains::dual::get_mult_table_size(&$var)
             }] = $crate::domains::dual::get_mult_table(&$var);
@@ -773,6 +824,14 @@ macro_rules! create_hyperdual_from_components {
         }
 
         impl<T: $crate::domains::float::FloatLike> $crate::domains::float::FloatLike for $t<T> {
+            fn nan(&self) -> Option<Self> {
+                let mut result = self.clone();
+                for value in &mut result.values {
+                    *value = value.nan()?;
+                }
+                Some(result)
+            }
+
             #[inline]
             fn set_from(&mut self, other: &Self) {
                 for (a, b) in self.values.iter_mut().zip(&other.values) {
@@ -862,6 +921,13 @@ macro_rules! create_hyperdual_from_components {
             }
 
             #[inline(always)]
+            fn set_precision(&mut self, precision: u32) {
+                for value in &mut self.values {
+                    value.set_precision(precision);
+                }
+            }
+
+            #[inline(always)]
             fn get_epsilon(&self) -> f64 {
                 self.values[0].get_epsilon()
             }
@@ -871,7 +937,7 @@ macro_rules! create_hyperdual_from_components {
                 self.values[0].fixed_precision()
             }
 
-            fn sample_unit<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> Self {
+            fn sample_unit<R: $crate::rand::Rng + ?Sized>(&self, rng: &mut R) -> Self {
                 let mut res = self.zero();
                 res.values[0] = self.values[0].sample_unit(rng);
                 res
@@ -900,7 +966,7 @@ macro_rules! create_hyperdual_from_components {
             }
 
             #[inline(always)]
-            fn from_rational(&self, rat: &Rational) -> Self {
+            fn from_rational(&self, rat: &$crate::domains::rational::Rational) -> Self {
                 let mut res = self.zero();
                 res.values[0] = self.values[0].from_rational(rat);
                 res
@@ -932,7 +998,7 @@ macro_rules! create_hyperdual_from_components {
             }
 
             #[inline(always)]
-            fn new_sample_unit<R: rand::Rng + ?Sized>(rng: &mut R) -> Self {
+            fn new_sample_unit<R: $crate::rand::Rng + ?Sized>(rng: &mut R) -> Self {
                 let mut res = <Self as $crate::domains::float::FloatLike>::new_zero();
                 res.values[0] = T::new_sample_unit(rng);
                 res
@@ -1302,17 +1368,32 @@ impl<T> HyperDual<T> {
             .max()
             .unwrap_or(0);
 
+        let max_single_pow: Vec<_> = (0..shape[0].len())
+            .map(|i| shape.iter().map(|s| s[i]).max().unwrap())
+            .collect();
+
         let mut mult_table = vec![];
+
+        let entries = shape
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.clone(), i))
+            .collect::<HashMap<_, _>>();
 
         let mut sum = vec![0; shape[0].len()];
         for (i, vi) in shape.iter().enumerate() {
-            for (j, vj) in shape.iter().enumerate().skip(1) {
-                for (s, (vii, vjj)) in sum.iter_mut().zip(vi.iter().zip(vj.iter())) {
+            'next_inner: for (j, vj) in shape.iter().enumerate().skip(1) {
+                for (r, (s, (vii, vjj))) in sum.iter_mut().zip(vi.iter().zip(vj.iter())).enumerate()
+                {
                     *s = vii + vjj;
+
+                    if *s > max_single_pow[r] {
+                        continue 'next_inner;
+                    }
                 }
 
-                if let Some(p) = shape.iter().position(|s| s == &sum) {
-                    mult_table.push((i, j, p));
+                if let Some(p) = entries.get(&sum) {
+                    mult_table.push((i, j, *p));
                 }
             }
         }
@@ -1825,6 +1906,17 @@ impl<T: FloatLike> std::ops::DivAssign<HyperDual<T>> for HyperDual<T> {
 }
 
 impl<T: FloatLike> FloatLike for HyperDual<T> {
+    fn nan(&self) -> Option<Self> {
+        Some(Self {
+            values: self
+                .values
+                .iter()
+                .map(FloatLike::nan)
+                .collect::<Option<_>>()?,
+            shape: self.shape.clone(),
+        })
+    }
+
     #[inline]
     fn set_from(&mut self, other: &Self) {
         for (a, b) in self.values.iter_mut().zip(&other.values) {
@@ -1917,6 +2009,13 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
     #[inline(always)]
     fn get_precision(&self) -> u32 {
         self.values[0].get_precision()
+    }
+
+    #[inline(always)]
+    fn set_precision(&mut self, precision: u32) {
+        for value in &mut self.values {
+            value.set_precision(precision);
+        }
     }
 
     #[inline(always)]

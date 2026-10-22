@@ -44,17 +44,54 @@ impl<
 /// [Transformer::Stats].
 #[derive(Clone, Debug)]
 pub struct StatsOptions {
-    pub tag: String,
-    pub color_medium_change_threshold: Option<f64>,
-    pub color_large_change_threshold: Option<f64>,
+    pub(crate) tag: String,
+    pub(crate) color_medium_change_threshold: Option<f64>,
+    pub(crate) color_large_change_threshold: Option<f64>,
 }
 
+/// Represents the state of the transformer, including statistics export options.
 #[derive(Clone, Default)]
 pub struct TransformerState {
+    /// An optional shared writer for JSON statistics events. When absent,
+    /// statistics are printed to standard output.
     pub stats_export: Option<Arc<Mutex<dyn std::io::Write + Send>>>,
 }
 
 impl StatsOptions {
+    /// Create statistics options with default thresholds.
+    pub fn new(tag: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
+            color_medium_change_threshold: Some(1.),
+            color_large_change_threshold: Some(5.),
+        }
+    }
+
+    /// Set the tag printed with statistics events.
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = tag.into();
+        self
+    }
+
+    /// Set the threshold for medium changes.
+    pub fn color_medium_change_threshold(
+        mut self,
+        color_medium_change_threshold: Option<f64>,
+    ) -> Self {
+        self.color_medium_change_threshold = color_medium_change_threshold;
+        self
+    }
+
+    /// Set the threshold for large changes.
+    pub fn color_large_change_threshold(
+        mut self,
+        color_large_change_threshold: Option<f64>,
+    ) -> Self {
+        self.color_large_change_threshold = color_large_change_threshold;
+        self
+    }
+
+    /// Format a byte count with a size suffix, scaling by powers of 1024.
     pub fn format_size(&self, size: usize) -> String {
         let mut s = size as f64;
         let kb = 1024.;
@@ -71,6 +108,7 @@ impl StatsOptions {
         format!("{s:.2}EB")
     }
 
+    /// Format a term count as a decimal string.
     pub fn format_count(&self, count: usize) -> String {
         format!("{count}")
     }
@@ -82,6 +120,12 @@ impl StatsOptions {
         s
     }
 
+    /// Write one JSON statistics event, including input/output sizes and term
+    /// counts. `t` is the start time since the Unix epoch; `dt` is the elapsed time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing to `out` fails.
     pub fn print_json(
         &self,
         input: AtomView,
@@ -119,6 +163,8 @@ impl StatsOptions {
         ).unwrap();
     }
 
+    /// Print input/output term counts, encoded sizes, and elapsed duration to
+    /// standard output. The start-time argument is currently unused.
     pub fn print(
         &self,
         input: AtomView,
@@ -175,15 +221,21 @@ impl StatsOptions {
 /// Errors that can occur during transformations.
 #[derive(Clone, Debug)]
 pub enum TransformerError {
+    /// An invalid value or unsupported transformation, with an explanation.
     ValueError(String),
+    /// Transformation was interrupted.
     Interrupt,
 }
 
 /// Operations that take an expression as the input and produce a new expression.
 #[derive(Clone)]
 pub enum Transformer {
+    /// Evaluate a condition and execute the true or false transformer chain.
     IfElse(Condition<Relation>, Vec<Transformer>, Vec<Transformer>),
+    /// Execute the first chain, then apply the second if the expression changed
+    /// or the third if it did not.
     IfChanged(Vec<Transformer>, Vec<Transformer>, Vec<Transformer>),
+    /// Stop execution of the current chain.
     BreakChain,
     /// Expand the rhs.
     Expand(Option<Atom>, bool),
@@ -201,8 +253,11 @@ pub enum Transformer {
     CollectFactors,
     /// Construct a Horner form.
     CollectHorner(Option<Vec<Indeterminate>>),
+    /// Collect terms that have the same numerical coefficient.
+    CollectByCoefficient,
     /// Collect numbers.
     CollectNum,
+    /// Take the complex conjugate of the input.
     Conjugate,
     /// Apply find-and-replace on the lhs.
     ReplaceAll(
@@ -234,24 +289,49 @@ pub enum Transformer {
     MapTerms(Vec<Transformer>, Option<Arc<ThreadPool>>),
     /// Split a `Mul` or `Add` into a list of arguments.
     Split,
+    /// Partition an `arg(...)` list into function calls of the given names and
+    /// sizes, summing the resulting products with their multiplicities. The flags
+    /// allow the last group to take remaining arguments and allow repeated groups.
     Partition(Vec<(Symbol, usize)>, bool, bool),
+    /// Sort the arguments of `arg(...)` in expression order.
     Sort,
+    /// Rotate a function's arguments to the smallest cyclic ordering.
     CycleSymmetrize,
+    /// Remove duplicate arguments of `arg(...)`, keeping their first occurrences.
     Deduplicate,
+    /// Sum calls to the given function over permutations of an `arg(...)` list,
+    /// including the multiplicity of repeated arguments.
     Permutations(Symbol),
+    /// Repeat the chain until the expression stops changing or the chain breaks.
     Repeat(Vec<Transformer>),
+    /// Print the input with the supplied options and pass it through unchanged.
     Print(PrintOptions),
+    /// Execute a chain and report its elapsed time and input/output sizes.
     Stats(StatsOptions, Vec<Transformer>),
+    /// Convert a rational-polynomial coefficient into an ordinary expression.
+    /// Other inputs pass through unchanged.
     FromNumber,
 }
 
 impl std::fmt::Debug for Transformer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Transformer::IfElse(_, _, _) => f.debug_tuple("IfElse").finish(),
-            Transformer::IfChanged(_, _, _) => f.debug_tuple("IfChanged").finish(),
+            Transformer::IfElse(condition, if_block, else_block) => f
+                .debug_tuple("IfElse")
+                .field(condition)
+                .field(if_block)
+                .field(else_block)
+                .finish(),
+            Transformer::IfChanged(condition, if_block, else_block) => f
+                .debug_tuple("IfChanged")
+                .field(condition)
+                .field(if_block)
+                .field(else_block)
+                .finish(),
             Transformer::BreakChain => f.debug_tuple("BreakChain").finish(),
-            Transformer::Expand(s, _) => f.debug_tuple("Expand").field(s).finish(),
+            Transformer::Expand(s, via_poly) => {
+                f.debug_tuple("Expand").field(s).field(via_poly).finish()
+            }
             Transformer::ExpandNum => f.debug_tuple("ExpandNum").finish(),
             Transformer::Derivative(x) => f.debug_tuple("Derivative").field(x).finish(),
             Transformer::Collect(x, a, b) => {
@@ -259,6 +339,7 @@ impl std::fmt::Debug for Transformer {
             }
             Transformer::CollectFactors => f.debug_tuple("CollectFactors").finish(),
             Transformer::CollectHorner(x) => f.debug_tuple("CollectHorner").field(x).finish(),
+            Transformer::CollectByCoefficient => f.debug_tuple("CollectByCoefficient").finish(),
             Transformer::CollectSymbol(x, a, b) => f
                 .debug_tuple("CollectSymbol")
                 .field(x)
@@ -267,9 +348,14 @@ impl std::fmt::Debug for Transformer {
                 .finish(),
             Transformer::CollectNum => f.debug_tuple("CollectNum").finish(),
             Transformer::Conjugate => f.debug_tuple("Conjugate").finish(),
-            Transformer::ReplaceAll(pat, rhs, ..) => {
-                f.debug_tuple("ReplaceAll").field(pat).field(rhs).finish()
-            }
+            Transformer::ReplaceAll(pat, rhs, condition, match_settings, replace_settings) => f
+                .debug_tuple("ReplaceAll")
+                .field(pat)
+                .field(rhs)
+                .field(condition)
+                .field(match_settings)
+                .field(replace_settings)
+                .finish(),
             Transformer::ReplaceAllMultiple(pats, settings) => f
                 .debug_tuple("ReplaceAllMultiple")
                 .field(pats)
@@ -280,7 +366,11 @@ impl std::fmt::Debug for Transformer {
             Transformer::ArgCount(p) => f.debug_tuple("ArgCount").field(p).finish(),
             Transformer::Linearize(s) => f.debug_tuple("Linearize").field(s).finish(),
             Transformer::Map(_) => f.debug_tuple("Map").finish(),
-            Transformer::MapTerms(v, c) => f.debug_tuple("Map").field(v).field(c).finish(),
+            Transformer::MapTerms(v, pool) => f
+                .debug_tuple("MapTerms")
+                .field(v)
+                .field(&pool.as_ref().map(|p| p.current_num_threads()))
+                .finish(),
             Transformer::ForEach(t) => f.debug_tuple("ForEach").field(t).finish(),
             Transformer::Split => f.debug_tuple("Split").finish(),
             Transformer::Partition(g, b1, b2) => f
@@ -538,11 +628,15 @@ impl Transformer {
 
             match t {
                 Transformer::IfElse(cond, t1, t2) => {
-                    if cond
+                    let decision = cond
                         .evaluate(&Some(cur_input))
-                        .map_err(TransformerError::ValueError)?
-                        .is_true()
-                    {
+                        .map_err(TransformerError::ValueError)?;
+                    if decision.is_inconclusive() {
+                        return Err(TransformerError::ValueError(
+                            "Transformer condition is undecidable for this input".into(),
+                        ));
+                    }
+                    if decision.is_true() {
                         if Transformer::execute_chain(cur_input, t1, workspace, state, out)?
                             .is_break()
                         {
@@ -706,6 +800,9 @@ impl Transformer {
                 Transformer::CollectHorner(x) => {
                     *out = cur_input.collect_horner(x.as_ref().map(|v| v.as_slice()));
                 }
+                Transformer::CollectByCoefficient => {
+                    *out = cur_input.collect_by_coefficient();
+                }
                 Transformer::CollectNum => {
                     *out = cur_input.collect_num();
                 }
@@ -771,12 +868,12 @@ impl Transformer {
                     if let AtomView::Fun(f) = cur_input {
                         if !*only_for_arg_fun || f.get_symbol_id() == Symbol::ARG_ID {
                             let n_args = f.get_nargs();
-                            out.to_num((n_args as i64).into());
+                            out.to_num(n_args as i64);
                         } else {
-                            out.to_num(1.into());
+                            out.to_num(1);
                         }
                     } else if !only_for_arg_fun {
-                        out.to_num(1.into());
+                        out.to_num(1);
                     } else {
                         out.to_num(Coefficient::zero());
                     }
@@ -988,7 +1085,7 @@ impl Transformer {
                     std::mem::swap(out, &mut tmp);
                 },
                 Transformer::Print(o) => {
-                    println!("{}", AtomPrinter::new_with_options(cur_input, *o));
+                    println!("{}", AtomPrinter::new_with_options(cur_input, o.clone()));
                     std::mem::swap(out, &mut tmp);
                 }
                 Transformer::Stats(o, r) => {

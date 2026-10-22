@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, parse, symbol};
+use symbolica::prelude::*;
 
 fn main() {
     let x = symbol!("x");

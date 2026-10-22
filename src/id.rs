@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```
-//! use symbolica::{atom::AtomCore, id::Pattern, parse};
+//! use symbolica::prelude::*;
 //!
 //! let expr = parse!("f(1,2,x) + f(1,2,3)");
 //! let pat = parse!("f(1,2,y_)");
@@ -16,22 +16,32 @@
 //! assert_eq!(out, parse!("f(1,2,x+1)+f(1,2,4)"));
 //! ```
 
-use std::ops::DerefMut;
+use std::{
+    hash::Hash,
+    ops::{Add, BitOr, DerefMut, Div, Mul},
+};
 
 use ahash::{HashMap, HashSet};
 use dyn_clone::DynClone;
 
 use crate::{
     atom::{
-        Atom, AtomCore, AtomType, AtomView, Indeterminate, ListIterator, SliceType, Symbol,
-        representation::InlineVar,
+        Atom, AtomCore, AtomType, AtomView, Indeterminate, InlineNum, ListIterator, SliceType,
+        Symbol, representation::InlineVar,
     },
     coefficient::{Coefficient, CoefficientView},
     domains::rational::Rational,
+    evaluate::OperationCount,
+    poly::PolyVariable,
     state::{RecycledAtom, Workspace},
     transformer::{Transformer, TransformerError},
     utils::{BorrowedOrOwned, Settable},
 };
+
+pub use crate::atom::AliasedAtom;
+
+static ZERO: InlineNum = InlineNum::zero();
+static ONE: InlineNum = InlineNum::one();
 
 /// A general expression that can contain pattern-matching wildcards
 /// and transformers.
@@ -39,18 +49,100 @@ use crate::{
 /// # Examples
 /// Patterns can be created from atoms:
 /// ```
-/// # use symbolica::{atom::AtomCore, parse};
+/// # use symbolica::prelude::*;
 /// parse!("x_+1").to_pattern();
 /// ```
 #[derive(Clone)]
 pub enum Pattern {
+    /// A literal expression without pattern substitution.
     Literal(Atom),
-    Wildcard(Symbol),
+    /// A wildcard symbol and a flag indicating whether its match is optional.
+    Wildcard(Symbol, bool),
+    /// A function-head symbol and its argument patterns.
     Fn(Symbol, Vec<Pattern>),
+    /// A base pattern and an exponent pattern, in that order.
     Pow(Box<[Pattern; 2]>),
+    /// A product of patterns.
     Mul(Vec<Pattern>),
+    /// A sum of patterns.
     Add(Vec<Pattern>),
+    /// Alternative patterns, tried in the supplied order.
+    Alternative(Vec<Pattern>),
+    /// A transformer chain with an optional input pattern. With no explicit
+    /// input, the chain operates on the current expression.
     Transformer(Box<(Option<Pattern>, Vec<Transformer>)>),
+}
+
+impl<T: Into<Pattern>> Mul<T> for &Pattern {
+    type Output = Pattern;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.mul(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Mul<T> for Pattern {
+    type Output = Pattern;
+
+    fn mul(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).mul(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Add<T> for &Pattern {
+    type Output = Pattern;
+
+    fn add(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.add(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Add<T> for Pattern {
+    type Output = Pattern;
+
+    fn add(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).add(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Div<T> for &Pattern {
+    type Output = Pattern;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| self.div(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> Div<T> for Pattern {
+    type Output = Pattern;
+
+    fn div(self, rhs: T) -> Self::Output {
+        Workspace::get_local().with(|ws| (&self).div(&rhs.into(), ws))
+    }
+}
+
+impl<T: Into<Pattern>> BitOr<T> for &Pattern {
+    type Output = Pattern;
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    ///
+    /// Panics if `self` or `rhs` do not contain the same wildcards.
+    /// Use [`Pattern::alternative`] if you want to handle the error instead of panicking.
+    fn bitor(self, rhs: T) -> Self::Output {
+        self.clone().alternative(rhs.into()).unwrap()
+    }
+}
+
+impl<T: Into<Pattern>> BitOr<T> for Pattern {
+    type Output = Pattern;
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    ///
+    /// Panics if `self` or `rhs` do not contain the same wildcards.
+    /// Use [`Pattern::alternative`] if you want to handle the error instead of panicking.
+    fn bitor(self, rhs: T) -> Self::Output {
+        self.alternative(rhs.into()).unwrap()
+    }
 }
 
 impl From<Symbol> for Pattern {
@@ -59,10 +151,10 @@ impl From<Symbol> for Pattern {
     /// # Examples
     ///
     /// ```
-    /// use symbolica::{symbol, id::Pattern};
+    /// use symbolica::prelude::*;
     ///
     /// let p = symbol!("x_").into();
-    /// assert!(matches!(p, Pattern::Wildcard(_)));
+    /// assert!(matches!(p, Pattern::Wildcard(_, _)));
     /// ```
     fn from(symbol: Symbol) -> Pattern {
         InlineVar::new(symbol).to_pattern()
@@ -94,6 +186,8 @@ impl std::fmt::Display for Pattern {
     }
 }
 
+/// A cloneable, thread-safe callback that constructs a replacement from
+/// the current wildcard assignments.
 pub trait MatchMap: Fn(&MatchStack) -> Atom + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(MatchMap);
 impl<T: Clone + Send + Sync + Fn(&MatchStack) -> Atom> MatchMap for T {}
@@ -103,7 +197,9 @@ impl<T: Clone + Send + Sync + Fn(&MatchStack) -> Atom> MatchMap for T {}
 /// expressed using atom transformations.
 #[derive(Clone)]
 pub enum ReplaceWith<'a> {
+    /// A pattern whose wildcards are substituted using the match.
     Pattern(BorrowedOrOwned<'a, Pattern>),
+    /// A callback that constructs the replacement from the wildcard assignments.
     Map(Box<dyn MatchMap>),
 }
 
@@ -157,12 +253,27 @@ impl std::fmt::Display for ReplaceWith<'_> {
 
 /// A replacement, specified by a pattern and the right-hand side,
 /// with optional conditions and settings.
+///
+/// # Example
+///
+/// ```
+/// use symbolica::prelude::*;
+///
+/// let expr = parse!("x+y");
+/// let result = expr.replace_multiple([Replacement::new(parse!("x"), 1),
+///                                     Replacement::new(parse!("y"), 2)]);
+/// assert_eq!(result, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Replacement {
+    /// The pattern to find in the target expression.
     pub pat: Pattern,
+    /// The replacement pattern or callback.
     pub rhs: ReplaceWith<'static>,
+    /// Additional restrictions on wildcard assignments, or `None` for no restrictions.
     pub conditions: Option<Condition<PatternRestriction>>,
-    pub settings: Option<MatchSettings>,
+    /// Settings controlling traversal and wildcard matching.
+    pub match_settings: MatchSettings,
 }
 
 impl std::fmt::Display for Replacement {
@@ -178,112 +289,20 @@ impl std::fmt::Display for Replacement {
 }
 
 impl Replacement {
+    /// Creates a new replacement with the given pattern and right-hand side.
+    /// Can also be constructed using [`Pattern::replace_with`].
     pub fn new<P: Into<Pattern>, R: Into<ReplaceWith<'static>>>(pat: P, rhs: R) -> Self {
         Replacement {
             pat: pat.into(),
             rhs: rhs.into(),
             conditions: None,
-            settings: None,
-        }
-    }
-
-    pub fn with_conditions(mut self, conditions: Condition<PatternRestriction>) -> Self {
-        self.conditions = Some(conditions);
-        self
-    }
-
-    pub fn with_settings(mut self, settings: MatchSettings) -> Self {
-        self.settings = Some(settings);
-        self
-    }
-}
-
-/// A borrowed version of a [Replacement].
-#[derive(Clone, Copy)]
-pub struct BorrowedReplacement<'a> {
-    pub pattern: &'a Pattern,
-    pub rhs: &'a ReplaceWith<'a>,
-    pub conditions: Option<&'a Condition<PatternRestriction>>,
-    pub settings: Option<&'a MatchSettings>,
-}
-
-pub trait BorrowReplacement {
-    fn borrow(&self) -> BorrowedReplacement<'_>;
-}
-
-impl BorrowReplacement for Replacement {
-    fn borrow(&self) -> BorrowedReplacement<'_> {
-        BorrowedReplacement {
-            pattern: &self.pat,
-            rhs: &self.rhs,
-            conditions: self.conditions.as_ref(),
-            settings: self.settings.as_ref(),
-        }
-    }
-}
-
-impl BorrowReplacement for &Replacement {
-    fn borrow(&self) -> BorrowedReplacement<'_> {
-        BorrowedReplacement {
-            pattern: &self.pat,
-            rhs: &self.rhs,
-            conditions: self.conditions.as_ref(),
-            settings: self.settings.as_ref(),
-        }
-    }
-}
-
-impl BorrowReplacement for BorrowedReplacement<'_> {
-    fn borrow(&self) -> BorrowedReplacement<'_> {
-        *self
-    }
-}
-
-/// Settings for the replacement strategy and tree traversal.
-#[derive(Debug, Default, Copy, Clone)]
-pub struct ReplaceSettings {
-    pub once: bool,
-    pub bottom_up: bool,
-    pub nested: bool,
-}
-
-/// Construct a replacement by specifying the pattern and finishing it with the right-hand side
-/// using [ReplaceBuilder::with], [ReplaceBuilder::with_into], or [ReplaceBuilder::iter].
-#[derive(Debug, Clone)]
-pub struct ReplaceBuilder<'a, 'b> {
-    target: AtomView<'a>,
-    pattern: BorrowedOrOwned<'b, Pattern>,
-    conditions: Option<BorrowedOrOwned<'b, Condition<PatternRestriction>>>,
-    match_settings: MatchSettings,
-    replace_settings: ReplaceSettings,
-    repeat: bool,
-}
-
-impl<'a, 'b> ReplaceBuilder<'a, 'b> {
-    pub fn new<T: Into<BorrowedOrOwned<'b, Pattern>>>(
-        target: AtomView<'a>,
-        replacement: T,
-    ) -> Self {
-        ReplaceBuilder {
-            target,
-            pattern: replacement.into(),
-            conditions: None,
             match_settings: MatchSettings::default(),
-            repeat: false,
-            replace_settings: ReplaceSettings::default(),
         }
     }
 
     /// Specifies wildcards that try to match as little as possible.
     pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
         self.match_settings.non_greedy_wildcards = non_greedy_wildcards;
-        self
-    }
-    /// Specifies the `[min,max]` level at which the pattern is allowed to match.
-    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
-    /// depending on `level_is_tree_depth`.
-    pub fn level_range(mut self, level_range: (usize, Option<usize>)) -> Self {
-        self.match_settings.level_range = level_range;
         self
     }
 
@@ -295,11 +314,12 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         self
     }
 
-    /// Set the maximum level at which the pattern is allowed to match.
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
-    pub fn max_level(mut self, max_level: usize) -> Self {
-        self.match_settings.level_range.1 = Some(max_level);
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.match_settings.level_range.1 = max_level.into();
         self
     }
 
@@ -324,6 +344,190 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// This can be used to prevent expensive recomputations.
     pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
         self.match_settings.rhs_cache_size = rhs_cache_size;
+        self
+    }
+
+    /// Add a condition to the replacement.
+    pub fn when<'b, R: Into<BorrowedOrOwned<'b, Condition<PatternRestriction>>>>(
+        mut self,
+        conditions: R,
+    ) -> Self {
+        self.conditions = Some(conditions.into().yield_owned());
+        self
+    }
+}
+
+/// A borrowed version of a [Replacement].
+#[derive(Clone, Copy)]
+pub struct BorrowedReplacement<'a> {
+    /// The pattern to find in the target expression.
+    pub pattern: &'a Pattern,
+    /// The replacement pattern or callback.
+    pub rhs: &'a ReplaceWith<'a>,
+    /// Additional restrictions, or `None` for no restrictions.
+    pub conditions: Option<&'a Condition<PatternRestriction>>,
+    /// Matching settings, or `None` to use the defaults.
+    pub settings: Option<&'a MatchSettings>,
+}
+
+/// Borrow a replacement rule without cloning its patterns or callbacks.
+pub trait BorrowReplacement {
+    /// Return a view of the replacement and its matching configuration.
+    fn borrow(&self) -> BorrowedReplacement<'_>;
+}
+
+impl BorrowReplacement for Replacement {
+    fn borrow(&self) -> BorrowedReplacement<'_> {
+        BorrowedReplacement {
+            pattern: &self.pat,
+            rhs: &self.rhs,
+            conditions: self.conditions.as_ref(),
+            settings: Some(&self.match_settings),
+        }
+    }
+}
+
+impl BorrowReplacement for &Replacement {
+    fn borrow(&self) -> BorrowedReplacement<'_> {
+        BorrowedReplacement {
+            pattern: &self.pat,
+            rhs: &self.rhs,
+            conditions: self.conditions.as_ref(),
+            settings: Some(&self.match_settings),
+        }
+    }
+}
+
+impl BorrowReplacement for BorrowedReplacement<'_> {
+    fn borrow(&self) -> BorrowedReplacement<'_> {
+        *self
+    }
+}
+
+/// Settings for the replacement strategy and tree traversal.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct ReplaceSettings {
+    pub(crate) once: bool,
+    pub(crate) bottom_up: bool,
+    pub(crate) nested: bool,
+}
+
+impl ReplaceSettings {
+    /// Create replacement settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace only the first match.
+    pub fn once(mut self, once: bool) -> Self {
+        self.once = once;
+        self
+    }
+
+    /// Traverse the expression bottom-up during replacement.
+    pub fn bottom_up(mut self, bottom_up: bool) -> Self {
+        self.bottom_up = bottom_up;
+        self
+    }
+
+    /// Allow nested replacement matches.
+    pub fn nested(mut self, nested: bool) -> Self {
+        self.nested = nested;
+        self
+    }
+}
+
+/// Construct a replacement by specifying the pattern and finishing it with the right-hand side
+/// using [ReplaceBuilder::with], [ReplaceBuilder::with_into], or [ReplaceBuilder::iter].
+#[derive(Debug, Clone)]
+pub struct ReplaceBuilder<'a, 'b> {
+    target: AtomView<'a>,
+    pattern: BorrowedOrOwned<'b, Pattern>,
+    conditions: Option<BorrowedOrOwned<'b, Condition<PatternRestriction>>>,
+    match_settings: MatchSettings,
+    replace_settings: ReplaceSettings,
+    repeat: bool,
+}
+
+impl<'a, 'b> ReplaceBuilder<'a, 'b> {
+    /// Start a replacement on `target` with the supplied search pattern.
+    /// Finish the builder with a right-hand side using [`Self::with`].
+    pub fn new<T: Into<BorrowedOrOwned<'b, Pattern>>>(
+        target: AtomView<'a>,
+        replacement: T,
+    ) -> Self {
+        ReplaceBuilder {
+            target,
+            pattern: replacement.into(),
+            conditions: None,
+            match_settings: MatchSettings::default(),
+            repeat: false,
+            replace_settings: ReplaceSettings::default(),
+        }
+    }
+
+    /// Specifies wildcards that try to match as little as possible.
+    pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
+        self.match_settings.non_greedy_wildcards = non_greedy_wildcards;
+        self
+    }
+
+    /// Set the minimum level at which the pattern is allowed to match.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn min_level(mut self, min_level: usize) -> Self {
+        self.match_settings.level_range.0 = min_level;
+        self
+    }
+
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum.
+    /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
+    /// depending on `level_is_tree_depth`.
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.match_settings.level_range.1 = max_level.into();
+        self
+    }
+
+    /// Determine whether a level reflects the expression tree depth or the function depth.
+    pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
+        self.match_settings.level_is_tree_depth = level_is_tree_depth;
+        self
+    }
+
+    /// If true, the pattern may match a subexpression. If false, it must match the entire expression.
+    pub fn partial(mut self, partial: bool) -> Self {
+        self.match_settings.partial = partial;
+        self
+    }
+
+    /// Allow wildcards on the right-hand side that do not appear in the pattern.
+    pub fn allow_new_wildcards_on_rhs(mut self, allow: bool) -> Self {
+        self.match_settings.allow_new_wildcards_on_rhs = allow;
+        self
+    }
+    /// The maximum size of the cache for the right-hand side of a replacement.
+    /// This can be used to prevent expensive recomputations.
+    pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
+        self.match_settings.rhs_cache_size = rhs_cache_size;
+        self
+    }
+
+    /// Set a wildcard as optional and replace it with a default value. The following matches work for optional `y_`:
+    /// - `x^y_` matches `x`, and `y_` is set to 1
+    /// - `x*y_` matches `x`, and `y_` is set to 1
+    /// - `x+y_` matches `x`, and `y_` is set to 0
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let res = parse!("x").replace(parse!("x_^y_")).set_optional(symbol!("y_")).with(1);
+    /// assert_eq!(res, 1);
+    /// ```
+    pub fn set_optional(mut self, wildcard: Symbol) -> Self {
+        self.pattern = BorrowedOrOwned::Owned(self.pattern.yield_owned().set_optional(wildcard));
         self
     }
 
@@ -369,15 +573,35 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     ///
     /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
     /// assert_eq!(r, parse!("f(3)"));
-    pub fn with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(&self, rhs: R) -> Atom {
+    pub fn with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(&mut self, rhs: R) -> Atom {
         let rhs = ReplaceWith::Pattern(rhs.into());
         let mut expr_ref = self.target;
         let mut out = RecycledAtom::new();
         let mut out2 = RecycledAtom::new();
+
+        // add extra conditions if the rhs contains wildcard functions,
+        // to prevent matching non-symbols
+        let mut c = Condition::True;
+        for fn_name in self.pattern.borrow().get_wildcard_function_names() {
+            c = Condition::And(Box::new((
+                c,
+                fn_name.restrict(WildcardRestriction::IsAtomType(AtomType::Var)),
+            )));
+        }
+
+        if matches!(c, Condition::True) {
+            if let Some(s) = self.conditions.as_mut() {
+                let old = std::mem::replace(s, BorrowedOrOwned::Owned(Condition::True));
+                *s = BorrowedOrOwned::Owned(Condition::And(Box::new((old.yield_owned(), c))));
+            } else {
+                self.conditions = Some(BorrowedOrOwned::Owned(c));
+            }
+        }
+
         while expr_ref.replace_into(
             self.pattern.borrow(),
             &rhs,
@@ -395,6 +619,34 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
         }
 
         out.into_inner()
+    }
+
+    /// Execute the replacement by specifying the right-hand side.
+    /// If the right-hand side contains wildcards that do not appear in the pattern, an error is returned
+    /// unless [ReplaceBuilder::allow_new_wildcards_on_rhs] is set to `true`.
+    ///
+    /// To use a map as a right-hand side, use [ReplaceBuilder::with_map].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let r = parse!("f(2)").replace(parse!("f(x_)")).with(parse!("f(x_+1)"));
+    /// assert_eq!(r, parse!("f(3)"));
+    pub fn try_with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(
+        &mut self,
+        rhs: R,
+    ) -> Result<Atom, Symbol> {
+        let rhs = rhs.into();
+
+        if !self.match_settings.allow_new_wildcards_on_rhs {
+            if let Some(w) = self.pattern.find_new_wildcard(rhs.borrow()) {
+                return Err(w);
+            }
+        }
+
+        Ok(self.with(rhs))
     }
 
     /// Execute the replacement by specifying the right-hand side and writing the result in `out`.
@@ -437,7 +689,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     ///
     /// Prefix the argument of a function with `p`:
     /// ```
-    /// use symbolica::{atom::AtomCore, function, parse, printer::PrintOptions, symbol};
+    /// use symbolica::prelude::*;
     /// let (f, x_) = symbol!("f", "x_");
     /// let a = function!(f, 1) * function!(f, 3);
     /// let p = function!(f, x_);
@@ -486,8 +738,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse};
-    /// use symbolica::id::Pattern;
+    /// use symbolica::prelude::*;
     /// let expr = parse!("f(x) + f(y)");
     /// let pattern = parse!("f(x_)").to_pattern();
     /// let replacement = parse!("f(z)").to_pattern();
@@ -525,7 +776,7 @@ impl<'a, 'b> ReplaceBuilder<'a, 'b> {
     /// # Example
     ///
     /// ```
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     ///
     /// for x in parse!("f(x,y)").replace(parse!("x_")).match_iter() {
     ///     println!("{}", x[&symbol!("x_")]);
@@ -598,132 +849,26 @@ impl<'a> AtomView<'a> {
         Pattern::from_view(self, true)
     }
 
-    /// Returns true iff an expression where all indeterminates have the attribute `Scalar`.
-    pub(crate) fn is_scalar(&self) -> bool {
-        match self {
-            AtomView::Num(_) => true,
-            AtomView::Alias(a) => !a.is_opaque() && a.get_body().is_scalar(),
-            AtomView::Var(v) => v.get_symbol().is_scalar(),
-            AtomView::Fun(f) => f.get_symbol().is_scalar(),
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_scalar() && exp.is_scalar()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_scalar()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_scalar()),
-        }
-    }
-
-    /// Returns true iff an expression only consists of integer numbers and symbols with the `Integer` attribute.
-    pub(crate) fn is_integer(&self) -> bool {
-        match self {
-            AtomView::Num(n) => n.get_coeff_view().is_integer(),
-            AtomView::Alias(a) => !a.is_opaque() && a.get_body().is_integer(),
-            AtomView::Var(v) => v.get_symbol().is_integer(),
-            AtomView::Fun(f) => f.get_symbol().is_integer(),
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_integer() && exp.is_integer()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_integer()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_integer()),
-        }
-    }
-
-    /// Returns true iff an expression only consists of real numbers and symbols with the `Real` attribute.
-    pub(crate) fn is_real(&self) -> bool {
-        match self {
-            AtomView::Num(n) => n.get_coeff_view().is_real(),
-            AtomView::Alias(a) => !a.is_opaque() && a.get_body().is_real(),
-            AtomView::Var(v) => v.get_symbol().is_real(),
-            AtomView::Fun(f) => {
-                let s = f.get_symbol();
-                match s.get_id() {
-                    Symbol::EXP_ID | Symbol::SIN_ID | Symbol::COS_ID => {
-                        f.iter().next().is_some_and(|arg| arg.is_real())
-                    }
-                    Symbol::SQRT_ID | Symbol::LOG_ID => {
-                        f.iter().next().is_some_and(|arg| arg.is_positive())
-                    }
-                    Symbol::IF_ID => {
-                        let mut iter = f.iter();
-                        iter.next().is_some()
-                            && iter.next().is_some_and(|arg| arg.is_real())
-                            && iter.next().is_some_and(|arg| arg.is_real())
-                    }
-                    _ => s.is_real(),
-                }
-            }
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-                base.is_real() && (exp.is_integer() || base.is_positive() && exp.is_real())
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_real()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_real()),
-        }
-    }
-
     /// Test if the attributes and tags of `s` are shared by `self`.
     #[inline]
     pub fn has_attributes_of(&self, s: Symbol) -> bool {
         if let Some(ss) = self.get_symbol() {
-            return ss.has_attributes_of(s);
+            // The builtin abs symbol historically carries Positive, but an
+            // application can vanish. A strict restriction needs a proof about
+            // this expression as well as matching symbol metadata.
+            return ss.has_attributes_of(s) && (!s.is_positive() || self.is_positive().is_true());
         }
 
         !s.is_antisymmetric()
             && !s.is_symmetric()
             && !s.is_cyclesymmetric()
             && !s.is_linear()
+            && !s.is_flat()
             && s.get_tags().is_empty()
-            && (!s.is_positive() || self.is_positive())
-            && (!s.is_integer() || self.is_integer())
-            && (!s.is_real() || self.is_real())
-            && (!s.is_scalar() || self.is_scalar())
-    }
-
-    /// Returns true iff an expression only consists of real numbers and symbols with the `Real` attribute.
-    pub(crate) fn is_positive(&self) -> bool {
-        match self {
-            AtomView::Num(_) => {
-                if let Ok(k) = Rational::try_from(*self) {
-                    !k.is_negative()
-                } else {
-                    false
-                }
-            }
-            AtomView::Alias(a) => !a.is_opaque() && a.get_body().is_positive(),
-            AtomView::Var(v) => v.get_symbol().is_positive(),
-            AtomView::Fun(f) => {
-                let s = f.get_symbol();
-                match s.get_id() {
-                    Symbol::EXP_ID => f.iter().next().is_some_and(|arg| arg.is_real()),
-                    Symbol::SQRT_ID => f.iter().next().is_some_and(|arg| arg.is_positive()),
-                    Symbol::IF_ID => {
-                        let mut iter = f.iter();
-                        iter.next().is_some()
-                            && iter.next().is_some_and(|arg| arg.is_positive())
-                            && iter.next().is_some_and(|arg| arg.is_positive())
-                    }
-                    _ => s.is_positive(),
-                }
-            }
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
-
-                // base negative is also possible if exp is an even integer
-                if let AtomView::Num(_) = exp
-                    && let Ok(k) = Rational::try_from(exp)
-                    && k.is_integer()
-                    && k.numerator_ref() % 2 == 0
-                {
-                    return base.is_real();
-                }
-
-                base.is_positive() && exp.is_real()
-            }
-            AtomView::Mul(m) => m.iter().all(|child| child.is_positive()),
-            AtomView::Add(a) => a.iter().all(|child| child.is_positive()),
-        }
+            && (!s.is_positive() || self.is_positive().is_true())
+            && (!s.is_integer() || self.is_integer().is_true())
+            && (!s.is_real() || self.is_real().is_true())
+            && (!s.is_scalar() || self.is_scalar().is_true())
     }
 
     /// Returns true iff an expression only consists of finite numbers.
@@ -789,7 +934,32 @@ impl<'a> AtomView<'a> {
         out: &mut HashSet<Symbol>,
     ) {
         match self {
-            AtomView::Num(_) => {}
+            AtomView::Num(n) => {
+                if n.is_rational_polynomial()
+                    && let CoefficientView::RationalPolynomial(r) = n.get_coeff_view()
+                {
+                    let r = r.deserialize();
+                    for x in r.numerator.variables().iter() {
+                        match x {
+                            PolyVariable::Symbol(s) => {
+                                out.insert(*s);
+                            }
+                            PolyVariable::Function(s, a) => {
+                                if include_function_symbols {
+                                    out.insert(*s);
+                                    a.as_view()
+                                        .get_all_symbols_impl(include_function_symbols, out);
+                                }
+                            }
+                            PolyVariable::Power(p) => {
+                                p.as_view()
+                                    .get_all_symbols_impl(include_function_symbols, out);
+                            }
+                            PolyVariable::Temporary(_) => {}
+                        }
+                    }
+                }
+            }
             AtomView::Alias(a) => {
                 if !a.is_opaque() {
                     a.get_body()
@@ -917,12 +1087,12 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Return the number of additions and multiplications needed to evaluate the aliased atom.
+    /// Return the number of operations needed to evaluate the aliased atom.
     pub fn count_operations_with_subexpressions(
         &self,
         cses: &mut HashSet<AtomView<'a>>,
-    ) -> (usize, usize) {
-        let (mut add, mut mul) = (0, 0);
+    ) -> OperationCount {
+        let mut count = OperationCount::default();
 
         let mut counter = |a: AtomView<'a>| {
             if !cses.insert(a) {
@@ -931,16 +1101,18 @@ impl<'a> AtomView<'a> {
 
             match a {
                 AtomView::Mul(m) => {
-                    mul += m.get_nargs() - 1;
+                    count.multiplications += m.get_nargs() - 1;
                     true
                 }
                 AtomView::Add(a) => {
-                    add += a.get_nargs() - 1;
+                    count.additions += a.get_nargs() - 1;
                     true
                 }
                 AtomView::Pow(p) => {
                     if let Ok(i) = isize::try_from(p.get_exp()) {
-                        mul += i.unsigned_abs() - 1;
+                        count.add_integer_power(i as i64);
+                    } else {
+                        count.add_function_call();
                     }
                     true
                 }
@@ -950,7 +1122,7 @@ impl<'a> AtomView<'a> {
 
         self.visitor(&mut counter);
 
-        (add, mul)
+        count
     }
 
     /// Returns true iff `self` contains `a` literally or contains the symbol of `a` if `a` is a variable.
@@ -1066,17 +1238,59 @@ impl<'a> AtomView<'a> {
         false
     }
 
+    /// Returns true iff `self` contains a wildcard symbol.
+    pub(crate) fn contains_wildcard(&self) -> bool {
+        let mut stack = Vec::with_capacity(20);
+        stack.push(*self);
+        while let Some(c) = stack.pop() {
+            match c {
+                AtomView::Num(_) => {}
+                AtomView::Alias(a) => {
+                    if !a.is_opaque() {
+                        stack.push(a.get_body());
+                    }
+                }
+                AtomView::Var(v) => {
+                    if v.get_symbol().get_wildcard_level() > 0 {
+                        return true;
+                    }
+                }
+                AtomView::Fun(f) => {
+                    if f.get_symbol().get_wildcard_level() > 0 {
+                        return true;
+                    }
+                    for arg in f {
+                        stack.push(arg);
+                    }
+                }
+                AtomView::Pow(p) => {
+                    let (base, exp) = p.get_base_exp();
+                    stack.push(base);
+                    stack.push(exp);
+                }
+                AtomView::Mul(m) => {
+                    for child in m {
+                        stack.push(child);
+                    }
+                }
+                AtomView::Add(a) => {
+                    for child in a {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     pub(crate) fn visitor<F: FnMut(AtomView<'a>) -> bool>(&self, v: &mut F) {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => {
                 v(*self);
             }
             AtomView::Alias(a) => {
-                if !v(*self) {
-                    return;
-                }
-
-                if !a.is_opaque() {
+                if v(*self) && !a.is_opaque() {
                     a.get_body().visitor(v);
                 }
             }
@@ -1115,6 +1329,87 @@ impl<'a> AtomView<'a> {
                 for child in a {
                     child.visitor(v);
                 }
+            }
+        }
+    }
+
+    /// Get the position of `part` within `self`, if it is contained within it.
+    /// This position can be used with [`Atom::index`] to retrieve the corresponding [`Atom`] within `self`.
+    pub(crate) fn position(&self, part: AtomView) -> Option<Vec<usize>> {
+        let mut index = Vec::new();
+        if self.position_in_impl(part, &mut index) {
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    fn position_in_impl(&self, part: AtomView, index: &mut Vec<usize>) -> bool {
+        let part_ptr = part.get_data().as_ptr();
+        let self_ptr = self.get_data().as_ptr();
+
+        if self_ptr == part_ptr {
+            return true;
+        }
+
+        // check if the pointer fits within the data range
+        if part_ptr < self_ptr || part_ptr >= self_ptr.wrapping_add(self.get_data().len()) {
+            return false;
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => false,
+            AtomView::Alias(a) => {
+                if a.is_opaque() {
+                    return false;
+                }
+                index.push(0);
+                if a.get_body().position_in_impl(part, index) {
+                    true
+                } else {
+                    index.pop();
+                    false
+                }
+            }
+            AtomView::Fun(f) => {
+                for (i, arg) in f.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Pow(p) => {
+                for (i, arg) in p.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Mul(m) => {
+                for (i, arg) in m.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
+            }
+            AtomView::Add(a) => {
+                for (i, arg) in a.iter().enumerate() {
+                    index.push(i);
+                    if arg.position_in_impl(part, index) {
+                        return true;
+                    }
+                    index.pop();
+                }
+                false
             }
         }
     }
@@ -1384,9 +1679,9 @@ impl<'a> AtomView<'a> {
             let mut set = Settable::from(&mut out);
             self.replace_map_no_norm(ws, &mut m, context, &mut set);
 
-            if set.is_set() {
+            if let Some(value) = set.get() {
                 let mut a = ws.new_atom();
-                set.as_view().normalize(ws, &mut a);
+                value.as_view().normalize(ws, &mut a);
                 std::mem::swap(&mut out, &mut a);
             } else {
                 out.set_from_view(self);
@@ -1438,11 +1733,7 @@ impl<'a> AtomView<'a> {
                         fun_o.add_arg(set.as_view());
                         fun = Some(fun_o);
                     } else if let Some(fun) = &mut fun {
-                        if set.is_set() {
-                            fun.add_arg(set.as_view());
-                        } else {
-                            fun.add_arg(arg);
-                        }
+                        fun.add_arg(set.as_view_or(arg));
                     }
                 }
             }
@@ -1461,12 +1752,8 @@ impl<'a> AtomView<'a> {
                 let mut exp_set = Settable::from(exp_h.deref_mut());
                 exp.replace_map_no_norm(ws, m, context, &mut exp_set);
 
-                if base_set.is_set() && exp_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp_set.as_view());
-                } else if base_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp);
-                } else if exp_set.is_set() {
-                    out.to_pow(base, exp_set.as_view());
+                if base_set.is_set() || exp_set.is_set() {
+                    out.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
                 }
             }
             AtomView::Mul(mm) => {
@@ -1489,11 +1776,7 @@ impl<'a> AtomView<'a> {
                         mul_o.extend(set.as_view());
                         mul = Some(mul_o);
                     } else if let Some(mul_o) = &mut mul {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -1517,11 +1800,7 @@ impl<'a> AtomView<'a> {
                         add_o.extend(set.as_view());
                         add = Some(add_o);
                     } else if let Some(mul_o) = &mut add {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -1551,9 +1830,9 @@ impl<'a> AtomView<'a> {
             let mut set = Settable::from(&mut out);
             self.replace_map_bottom_up_impl(ws, &mut m, context, nested, &mut set);
 
-            if set.is_set() {
+            if let Some(value) = set.get() {
                 let mut a = ws.new_atom();
-                set.as_view().normalize(ws, &mut a);
+                value.as_view().normalize(ws, &mut a);
                 std::mem::swap(&mut out, &mut a);
             } else {
                 out.set_from_view(self);
@@ -1606,11 +1885,7 @@ impl<'a> AtomView<'a> {
                         fun_o.add_arg(set.as_view());
                         fun = Some(fun_o);
                     } else if let Some(fun) = &mut fun {
-                        if set.is_set() {
-                            fun.add_arg(set.as_view());
-                        } else {
-                            fun.add_arg(arg);
-                        }
+                        fun.add_arg(set.as_view_or(arg));
                     }
                 }
             }
@@ -1629,15 +1904,9 @@ impl<'a> AtomView<'a> {
                 let mut exp_set = Settable::from(exp_h.deref_mut());
                 exp.replace_map_bottom_up_impl(ws, m, context, nested, &mut exp_set);
 
-                if base_set.is_set() && exp_set.is_set() {
+                if base_set.is_set() || exp_set.is_set() {
                     parent_context.child_changed = true;
-                    out.to_pow(base_set.as_view(), exp_set.as_view());
-                } else if base_set.is_set() {
-                    parent_context.child_changed = true;
-                    out.to_pow(base_set.as_view(), exp);
-                } else if exp_set.is_set() {
-                    parent_context.child_changed = true;
-                    out.to_pow(base, exp_set.as_view());
+                    out.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
                 }
             }
             AtomView::Mul(mm) => {
@@ -1661,11 +1930,7 @@ impl<'a> AtomView<'a> {
                         mul_o.extend(set.as_view());
                         mul = Some(mul_o);
                     } else if let Some(mul_o) = &mut mul {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -1690,11 +1955,7 @@ impl<'a> AtomView<'a> {
                         add_o.extend(set.as_view());
                         add = Some(add_o);
                     } else if let Some(mul_o) = &mut add {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -1703,6 +1964,11 @@ impl<'a> AtomView<'a> {
         if !parent_context.child_changed {
             m(*self, &parent_context, out);
         } else if nested {
+            let mut norm = ws.new_atom();
+
+            out.as_view().normalize(ws, &mut norm);
+            std::mem::swap(out.deref_mut(), norm.deref_mut());
+
             let mut child_h = ws.new_atom();
             let mut set = Settable::from(child_h.deref_mut());
             m(out.as_view(), &parent_context, &mut set);
@@ -1775,11 +2041,8 @@ impl<'a> AtomView<'a> {
             .iter()
             .map(|r| {
                 (
-                    AtomMatchIterator::new(r.borrow().pattern, *self),
-                    WrappedMatchStack::new(
-                        r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
-                        r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
-                    ),
+                    AtomMatchIterator::new(r.borrow().pattern),
+                    WrappedMatchStack::from_replacement(r.borrow()),
                 )
             })
             .collect::<Vec<_>>();
@@ -1810,9 +2073,9 @@ impl<'a> AtomView<'a> {
                 &mut set,
             );
 
-            if set.is_set() {
+            if let Some(value) = set.get() {
                 let mut norm = ws.new_atom();
-                set.as_view().normalize(ws, &mut norm);
+                value.as_view().normalize(ws, &mut norm);
                 std::mem::swap(out, &mut norm);
                 true
             } else {
@@ -1868,10 +2131,10 @@ impl<'a> AtomView<'a> {
 
             if r.pattern.could_match(*self) {
                 let (match_iter, match_stack) = &mut atom_match_iterators[rep_id];
-                match_iter.set_new_target(*self);
-                match_stack.truncate(0);
+                match_stack.reset();
+                match_iter.set_new_target(*self, match_stack);
                 let it = match_iter;
-                if let Some((_, used_flags)) = it.next(match_stack) {
+                if let Some(used_flags) = it.next(match_stack) {
                     let mut rhs_subs = workspace.new_atom();
 
                     let key = (rep_id, std::mem::take(&mut match_stack.stack.stack));
@@ -1973,8 +2236,9 @@ impl<'a> AtomView<'a> {
         replace_settings: ReplaceSettings,
         out: &mut Settable<Atom>,
     ) {
-        if !replace_settings.bottom_up && !replace_settings.nested {
-            if !self.replace_node(
+        if !replace_settings.bottom_up
+            && !replace_settings.nested
+            && (!self.replace_node(
                 replacements,
                 atom_match_iterators,
                 workspace,
@@ -1982,10 +2246,9 @@ impl<'a> AtomView<'a> {
                 fn_level,
                 rhs_cache,
                 out,
-            ) || out.is_set()
-            {
-                return;
-            }
+            ) || out.is_set())
+        {
+            return;
         }
 
         // no match found at this level, so check the children
@@ -2050,11 +2313,7 @@ impl<'a> AtomView<'a> {
                         fun_o.add_arg(set.as_view());
                         fun = Some(fun_o);
                     } else if let Some(fun) = &mut fun {
-                        if set.is_set() {
-                            fun.add_arg(set.as_view());
-                        } else {
-                            fun.add_arg(arg);
-                        }
+                        fun.add_arg(set.as_view_or(arg));
                     }
                 }
             }
@@ -2100,12 +2359,8 @@ impl<'a> AtomView<'a> {
                     &mut exp_set,
                 );
 
-                if base_set.is_set() && exp_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp_set.as_view());
-                } else if base_set.is_set() {
-                    out.to_pow(base_set.as_view(), exp);
-                } else if exp_set.is_set() {
-                    out.to_pow(base, exp_set.as_view());
+                if base_set.is_set() || exp_set.is_set() {
+                    out.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
                 }
             }
             AtomView::Mul(m) => {
@@ -2152,11 +2407,7 @@ impl<'a> AtomView<'a> {
                         mul_o.extend(set.as_view());
                         mul = Some(mul_o);
                     } else if let Some(mul_o) = &mut mul {
-                        if set.is_set() {
-                            mul_o.extend(set.as_view());
-                        } else {
-                            mul_o.extend(child);
-                        }
+                        mul_o.extend(set.as_view_or(child));
                     }
                 }
 
@@ -2207,11 +2458,7 @@ impl<'a> AtomView<'a> {
                         add_o.extend(set.as_view());
                         add = Some(add_o);
                     } else if let Some(add_o) = &mut add {
-                        if set.is_set() {
-                            add_o.extend(set.as_view());
-                        } else {
-                            add_o.extend(child);
-                        }
+                        add_o.extend(set.as_view_or(child));
                     }
                 }
             }
@@ -2219,7 +2466,7 @@ impl<'a> AtomView<'a> {
         }
 
         if replace_settings.bottom_up && !out.is_set() || replace_settings.nested {
-            if out.is_set() {
+            if let Some(value) = out.get() {
                 let mut buf = workspace.new_atom();
                 let mut set = Settable::from(buf.deref_mut());
 
@@ -2228,7 +2475,7 @@ impl<'a> AtomView<'a> {
                     .iter()
                     .map(|r| {
                         (
-                            AtomMatchIterator::new(r.borrow().pattern, out.as_view()),
+                            AtomMatchIterator::new(r.borrow().pattern),
                             WrappedMatchStack::new(
                                 r.borrow().conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
                                 r.borrow().settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
@@ -2237,7 +2484,7 @@ impl<'a> AtomView<'a> {
                     })
                     .collect::<Vec<_>>();
 
-                out.as_view().replace_node(
+                value.as_view().replace_node(
                     replacements,
                     &mut atom_iter,
                     workspace,
@@ -2287,7 +2534,7 @@ impl<'a> AtomView<'a> {
             .iter()
             .map(|r| {
                 (
-                    AtomMatchIterator::new(r.pattern, *self),
+                    AtomMatchIterator::new(r.pattern),
                     WrappedMatchStack::new(
                         r.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
                         r.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
@@ -2321,9 +2568,9 @@ impl<'a> AtomView<'a> {
             &mut set,
         );
 
-        if set.is_set() {
+        if let Some(value) = set.get() {
             let mut norm = workspace.new_atom();
-            out.as_view().normalize(workspace, &mut norm);
+            value.as_view().normalize(workspace, &mut norm);
             std::mem::swap(out, &mut norm);
             true
         } else {
@@ -2337,6 +2584,11 @@ impl Pattern {
     /// Create a pattern from an expression.
     pub fn new(atom: Atom) -> Pattern {
         atom.to_pattern()
+    }
+
+    #[inline(always)]
+    fn is_optional_wildcard(&self) -> bool {
+        matches!(self, Pattern::Wildcard(_, true))
     }
 
     /// Convert the pattern to an atom, if there are not transformers present.
@@ -2353,8 +2605,12 @@ impl Pattern {
             Pattern::Literal(a) => {
                 out.set_from_view(&a.as_view());
             }
-            Pattern::Wildcard(s) => {
-                out.to_var(*s);
+            Pattern::Wildcard(s, optional) => {
+                if *optional {
+                    *out = s.optional();
+                } else {
+                    out.to_var(*s);
+                }
             }
             Pattern::Fn(s, a) => {
                 let mut f = ws.new_atom();
@@ -2403,12 +2659,168 @@ impl Pattern {
 
                 add_h.as_view().normalize(ws, out);
             }
+            Pattern::Alternative(a) => {
+                let mut f = ws.new_atom();
+                let fun = f.to_fun(Symbol::ALT);
+
+                let mut arg_h = ws.new_atom();
+                for arg in a {
+                    arg.to_atom_impl(ws, &mut arg_h)?;
+                    fun.add_arg(arg_h.as_view());
+                }
+
+                f.as_view().normalize(ws, out);
+            }
             Pattern::Transformer(_) => Err("Cannot convert transformer to atom")?,
         }
 
         Ok(())
     }
 
+    fn get_all_wildcards(&self) -> HashSet<Symbol> {
+        let mut wildcards = HashSet::default();
+        self.get_all_wildcards_impl(&mut wildcards);
+        wildcards
+    }
+
+    fn get_all_wildcards_impl(&self, wildcards: &mut HashSet<Symbol>) {
+        match self {
+            Pattern::Literal(_) => {}
+            Pattern::Wildcard(s, _) => {
+                wildcards.insert(*s);
+            }
+            Pattern::Fn(s, args) => {
+                if s.get_wildcard_level() > 0 {
+                    wildcards.insert(*s);
+                }
+
+                for arg in args {
+                    arg.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Pow(p) => {
+                p[0].get_all_wildcards_impl(wildcards);
+                p[1].get_all_wildcards_impl(wildcards);
+            }
+            Pattern::Mul(m) | Pattern::Add(m) => {
+                for arg in m {
+                    arg.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Alternative(alts) => {
+                for alt in alts {
+                    alt.get_all_wildcards_impl(wildcards);
+                }
+            }
+            Pattern::Transformer(_) => {}
+        }
+    }
+
+    /// Create an alternative pattern that matches either `self` or `rhs`.
+    /// You can also use the `|` operator to create an alternative pattern.
+    ///
+    /// This function will return an error if `self` or `rhs` do not contain the same wildcards.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let pat = (parse!("x").to_pattern() | parse!("y")) * parse!("z");
+    /// let res = parse!("x*z + y*z + a*z").replace(pat).with(1);
+    /// assert_eq!(res, parse!("2 + a*z"));
+    /// ```
+    pub fn alternative(self, rhs: Self) -> Result<Self, String> {
+        let wc_1 = self.get_all_wildcards();
+        let wc_2 = rhs.get_all_wildcards();
+        if wc_1 != wc_2 {
+            return Err(format!(
+                "Cannot create alternative pattern with different wildcards: {:?} and {:?}",
+                wc_1, wc_2
+            ));
+        }
+
+        match (self, rhs) {
+            (Pattern::Alternative(mut alts1), Pattern::Alternative(alts2)) => {
+                alts1.extend(alts2);
+                Ok(Pattern::Alternative(alts1))
+            }
+            (Pattern::Alternative(mut alts), p) | (p, Pattern::Alternative(mut alts)) => {
+                alts.push(p);
+                Ok(Pattern::Alternative(alts))
+            }
+            (p1, p2) => Ok(Pattern::Alternative(vec![p1, p2])),
+        }
+    }
+
+    /// Set a wildcard as optional and replace it with a default value. The following matches work for optional `y_`:
+    /// - `x^y_` matches `x`, and `y_` is set to 1
+    /// - `x*y_` matches `x`, and `y_` is set to 1
+    /// - `x+y_` matches `x`, and `y_` is set to 0
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let pat = parse!("x_^y_").to_pattern().set_optional(symbol!("y_"));
+    /// let res = parse!("x").replace(pat).with(1);
+    /// assert_eq!(res, 1);
+    /// ```
+    pub fn set_optional(self, symbol: Symbol) -> Self {
+        self.set_optional_impl(symbol)
+    }
+
+    fn set_optional_impl(self, symbol: Symbol) -> Self {
+        match self {
+            Pattern::Literal(t) => Pattern::Literal(t),
+            Pattern::Wildcard(w, mut optional) => {
+                if w == symbol {
+                    optional = true;
+                }
+                Pattern::Wildcard(w, optional)
+            }
+            Pattern::Fn(s, args) => {
+                let new_args = args
+                    .into_iter()
+                    .map(|arg| arg.set_optional_impl(symbol))
+                    .collect::<Vec<_>>();
+                Pattern::Fn(s, new_args)
+            }
+            Pattern::Pow(p) => {
+                let (base, exp) = (
+                    p[0].clone().set_optional_impl(symbol),
+                    p[1].clone().set_optional_impl(symbol),
+                );
+                Pattern::Pow(Box::new([base, exp]))
+            }
+            Pattern::Add(a) => {
+                let mut new_args = vec![];
+                for x in a {
+                    new_args.push(x.set_optional_impl(symbol));
+                }
+
+                Pattern::Add(new_args)
+            }
+            Pattern::Mul(a) => {
+                let mut new_args = vec![];
+                for x in a {
+                    new_args.push(x.set_optional_impl(symbol));
+                }
+
+                Pattern::Mul(new_args)
+            }
+            Pattern::Alternative(alts) => Pattern::Alternative(
+                alts.into_iter()
+                    .map(|p| p.set_optional_impl(symbol))
+                    .collect(),
+            ),
+            Pattern::Transformer(t) => Pattern::Transformer(t),
+        }
+    }
+
+    /// Construct the sum of two patterns, normalizing when both are literals.
+    /// Temporary expression storage is borrowed from `workspace`.
     pub fn add(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2442,6 +2854,8 @@ impl Pattern {
         Pattern::Add(new_args)
     }
 
+    /// Construct the product of two patterns, normalizing when both are literals.
+    /// Temporary expression storage is borrowed from `workspace`.
     pub fn mul(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2474,10 +2888,12 @@ impl Pattern {
         Pattern::Mul(new_args)
     }
 
+    /// Construct a quotient pattern by multiplying by the reciprocal of `rhs`,
+    /// normalizing literal expressions using `workspace`.
     pub fn div(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l2) = rhs {
             let mut pow = workspace.new_atom();
-            pow.to_num((-1).into());
+            pow.to_num(-1);
 
             let mut e = workspace.new_atom();
             e.to_pow(l2.as_view(), pow.as_view());
@@ -2518,6 +2934,8 @@ impl Pattern {
         }
     }
 
+    /// Construct a power pattern, normalizing when both operands are literals
+    /// using temporary storage from `workspace`.
     pub fn pow(&self, rhs: &Self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self
             && let Pattern::Literal(l2) = rhs
@@ -2534,13 +2952,14 @@ impl Pattern {
         Pattern::Pow(Box::new([self.clone(), rhs.clone()]))
     }
 
+    /// Negate this pattern, normalizing a literal operand using `workspace`.
     pub fn neg(&self, workspace: &Workspace) -> Self {
         if let Pattern::Literal(l1) = self {
             let mut e = workspace.new_atom();
             let a = e.to_mul();
 
             let mut sign = workspace.new_atom();
-            sign.to_num((-1).into());
+            sign.to_num(-1);
 
             a.extend(l1.as_view());
             a.extend(sign.as_view());
@@ -2554,9 +2973,81 @@ impl Pattern {
             Pattern::Mul(vec![self.clone(), Pattern::Literal(Atom::num(-1))])
         }
     }
-}
 
-impl Pattern {
+    /// Create a replacement that replaces this pattern with a given value.
+    pub fn replace_with<'c, R: Into<BorrowedOrOwned<'c, Pattern>>>(self, rhs: R) -> Replacement {
+        Replacement::new(self, ReplaceWith::Pattern(rhs.into().into_owned()))
+    }
+
+    /// Create a replacement that replaces this pattern with a given map function.
+    pub fn replace_with_map<'c, R: MatchMap + 'static>(self, rhs: R) -> Replacement {
+        Replacement::new(self, ReplaceWith::Map(Box::new(rhs)))
+    }
+
+    /// Visit each pattern in this pattern, calling `f` on each one.
+    pub fn visitor<F: FnMut(&Pattern)>(&self, f: &mut F) {
+        f(self);
+        match self {
+            Pattern::Fn(_, a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            Pattern::Pow(a) => {
+                a[0].visitor(f);
+                a[1].visitor(f);
+            }
+            Pattern::Mul(a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            Pattern::Add(a) => {
+                for p in a {
+                    p.visitor(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Get all wildcards that are used as function names.
+    pub fn get_wildcard_function_names(&self) -> Vec<Symbol> {
+        let mut function_names = vec![];
+        self.visitor(&mut |p| {
+            if let Pattern::Fn(s, _) = p
+                && s.get_wildcard_level() > 0
+            {
+                function_names.push(*s);
+            }
+        });
+        function_names
+    }
+
+    /// Check if the rhs of this replacement contains a new wildcard. If so,
+    /// return the first new wildcard found.
+    pub fn find_new_wildcard(&self, rhs: &Self) -> Option<Symbol> {
+        let mut wildcards = HashSet::default();
+        self.visitor(&mut |p| {
+            if let Pattern::Wildcard(w, _) = p {
+                wildcards.insert(*w);
+            }
+        });
+
+        let mut new_found = None;
+        rhs.visitor(&mut |p| {
+            if new_found.is_none()
+                && let Pattern::Wildcard(w, _) = p
+            {
+                if wildcards.insert(*w) {
+                    new_found = Some(*w);
+                };
+            }
+        });
+
+        new_found
+    }
+
     /// A quick check to see if a pattern can match.
     #[inline]
     fn could_match(&self, target: AtomView) -> bool {
@@ -2571,29 +3062,68 @@ impl Pattern {
                 let s = f2.get_symbol();
                 f1.get_wildcard_level() > 0 && s.has_attributes_of(*f1) || *f1 == s
             }
+            (Pattern::Fn(f1, args), AtomView::Var(v)) => {
+                let s = v.get_symbol();
+                (f1.get_wildcard_level() > 0 && s.has_attributes_of(*f1) || *f1 == s)
+                    && args.iter().all(Pattern::is_optional_wildcard)
+            }
             (Pattern::Mul(_), AtomView::Mul(_)) => true,
             (Pattern::Add(_), AtomView::Add(_)) => true,
-            (Pattern::Wildcard(w), x) => x.has_attributes_of(*w),
             (Pattern::Pow(_), AtomView::Pow(_)) => true,
             (Pattern::Literal(p), _) => p.as_view() == target,
+            (Pattern::Wildcard(w, _), x) => x.has_attributes_of(*w),
+            (Pattern::Mul(args), _) => Self::optional_wildcards_can_match_single(args, target),
+            (Pattern::Add(args), _) => Self::optional_wildcards_can_match_single(args, target),
+            (Pattern::Pow(args), _) => {
+                args[1].is_optional_wildcard() && args[0].could_match_rec(target)
+            }
+            (Pattern::Alternative(alternatives), _) => {
+                alternatives.iter().any(|p| p.could_match_rec(target))
+            }
             (Pattern::Transformer(_), _) => panic!("Pattern is a transformer"),
             (_, _) => false,
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn could_match_rec(&self, target: AtomView) -> bool {
+        self.could_match(target)
+    }
+
+    #[inline(always)]
+    fn optional_wildcards_can_match_single(args: &[Pattern], target: AtomView) -> bool {
+        let mut non_optional = None;
+        for arg in args {
+            if !arg.is_optional_wildcard() {
+                if non_optional.is_some() {
+                    return false;
+                }
+                non_optional = Some(arg);
+            }
+        }
+
+        if let Some(arg) = non_optional {
+            arg.could_match_rec(target)
+        } else {
+            true
+        }
+    }
+
     /// Check if the expression `atom` contains a wildcard.
-    fn has_wildcard(atom: AtomView<'_>) -> bool {
+    fn has_wildcard_or_alternative(atom: AtomView<'_>) -> bool {
         match atom {
-            AtomView::Alias(a) => !a.is_opaque() && Self::has_wildcard(a.get_body()),
+            AtomView::Alias(a) => !a.is_opaque() && Self::has_wildcard_or_alternative(a.get_body()),
             AtomView::Num(_) => false,
             AtomView::Var(v) => v.get_wildcard_level() > 0,
             AtomView::Fun(f) => {
-                if f.get_symbol().get_wildcard_level() > 0 {
+                let s = f.get_symbol();
+                if s.get_wildcard_level() > 0 || s == Symbol::ALT {
                     return true;
                 }
 
                 for arg in f {
-                    if Self::has_wildcard(arg) {
+                    if Self::has_wildcard_or_alternative(arg) {
                         return true;
                     }
                 }
@@ -2602,11 +3132,11 @@ impl Pattern {
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
-                Self::has_wildcard(base) || Self::has_wildcard(exp)
+                Self::has_wildcard_or_alternative(base) || Self::has_wildcard_or_alternative(exp)
             }
             AtomView::Mul(m) => {
                 for child in m {
-                    if Self::has_wildcard(child) {
+                    if Self::has_wildcard_or_alternative(child) {
                         return true;
                     }
                 }
@@ -2614,7 +3144,7 @@ impl Pattern {
             }
             AtomView::Add(a) => {
                 for child in a {
-                    if Self::has_wildcard(child) {
+                    if Self::has_wildcard_or_alternative(child) {
                         return true;
                     }
                 }
@@ -2637,12 +3167,12 @@ impl Pattern {
                 (Pattern::Literal(_), Pattern::Literal(_)) => std::cmp::Ordering::Equal,
                 (Pattern::Literal(_), _) => std::cmp::Ordering::Less,
                 (_, Pattern::Literal(_)) => std::cmp::Ordering::Greater,
-                (Pattern::Wildcard(w1), Pattern::Wildcard(w2)) => w1
+                (Pattern::Wildcard(w1, _), Pattern::Wildcard(w2, _)) => w1
                     .get_wildcard_level()
                     .cmp(&w2.get_wildcard_level())
                     .then_with(|| w2.has_attributes().cmp(&w1.has_attributes())), // sort more attributes first
-                (Pattern::Wildcard(_), _) => std::cmp::Ordering::Greater, // move wildcards to the end
-                (_, Pattern::Wildcard(_)) => std::cmp::Ordering::Less,
+                (Pattern::Wildcard(..), _) => std::cmp::Ordering::Greater, // move wildcards to the end
+                (_, Pattern::Wildcard(..)) => std::cmp::Ordering::Less,
                 (Pattern::Pow(p1), Pattern::Pow(p2)) => sort_on_specificity(&p1[0], &p2[0])
                     .then_with(|| sort_on_specificity(&p1[1], &p2[1])),
                 (Pattern::Pow(_), _) => std::cmp::Ordering::Less,
@@ -2680,18 +3210,21 @@ impl Pattern {
                 }),
                 (Pattern::Add(_), _) => std::cmp::Ordering::Less,
                 (_, Pattern::Add(_)) => std::cmp::Ordering::Greater,
+                (Pattern::Alternative(_), Pattern::Alternative(_)) => std::cmp::Ordering::Equal,
+                (Pattern::Alternative(_), _) => std::cmp::Ordering::Less,
+                (_, Pattern::Alternative(_)) => std::cmp::Ordering::Greater,
                 (Pattern::Transformer(_), Pattern::Transformer(_)) => std::cmp::Ordering::Equal,
             }
         }
 
         // split up Add and Mul for literal patterns as well so that x+y can match to x+y+z
-        if Self::has_wildcard(atom)
+        if Self::has_wildcard_or_alternative(atom)
             || is_top_layer && matches!(atom, AtomView::Mul(_) | AtomView::Add(_))
         {
             match atom {
                 AtomView::Alias(a) if !a.is_opaque() => Self::from_view(a.get_body(), is_top_layer),
                 AtomView::Alias(_) => Pattern::Literal(atom.to_owned()),
-                AtomView::Var(v) => Pattern::Wildcard(v.get_symbol()),
+                AtomView::Var(v) => Pattern::Wildcard(v.get_symbol(), false),
                 AtomView::Fun(f) => {
                     let name = f.get_symbol();
 
@@ -2705,7 +3238,16 @@ impl Pattern {
                         args.sort_unstable_by(sort_on_specificity);
                     }
 
-                    Pattern::Fn(name, args)
+                    if name == Symbol::ALT {
+                        Pattern::Alternative(args)
+                    } else if name == Symbol::OPT
+                        && args.len() == 1
+                        && let Pattern::Wildcard(w, _) = &args[0]
+                    {
+                        Pattern::Wildcard(w.clone(), true)
+                    } else {
+                        Pattern::Fn(name, args)
+                    }
                 }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
@@ -2747,12 +3289,10 @@ impl Pattern {
     }
 
     /// Substitute the wildcards in the pattern.
-    pub fn replace_wildcards(&self, matches: &HashMap<Symbol, Atom>) -> Atom {
+    pub fn replace_wildcards(&self, matches: &HashMap<Symbol, Atom>) -> Result<Atom, String> {
         let mut out = Atom::new();
-        Workspace::get_local().with(|ws| {
-            self.replace_wildcards_impl(matches, ws, &mut out);
-        });
-        out
+        Workspace::get_local().with(|ws| self.replace_wildcards_impl(matches, ws, &mut out))?;
+        Ok(out)
     }
 
     fn replace_wildcards_impl(
@@ -2760,10 +3300,10 @@ impl Pattern {
         matches: &HashMap<Symbol, Atom>,
         ws: &Workspace,
         out: &mut Atom,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Pattern::Literal(atom) => out.set_from_view(&atom.as_view()),
-            Pattern::Wildcard(symbol) => {
+            Pattern::Wildcard(symbol, _) => {
                 if let Some(a) = matches.get(symbol) {
                     out.set_from_view(&a.as_view());
                 } else {
@@ -2772,7 +3312,15 @@ impl Pattern {
             }
             Pattern::Fn(symbol, args) => {
                 let symbol = if let Some(a) = matches.get(symbol) {
-                    a.as_view().get_symbol().expect("Function name expected")
+                    if let Some(s) = a.as_view().get_symbol() {
+                        s
+                    } else {
+                        return Err(format!(
+                            "Wildcard function name expected for {}, got {}",
+                            symbol.get_name(),
+                            a
+                        ));
+                    }
                 } else {
                     *symbol
                 };
@@ -2782,7 +3330,7 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     f.add_arg(arg.as_view());
                 }
 
@@ -2792,9 +3340,9 @@ impl Pattern {
                 let mut pow = ws.new_atom();
 
                 let mut base = ws.new_atom();
-                args[0].replace_wildcards_impl(matches, ws, &mut base);
+                args[0].replace_wildcards_impl(matches, ws, &mut base)?;
                 let mut exp = ws.new_atom();
-                args[1].replace_wildcards_impl(matches, ws, &mut exp);
+                args[1].replace_wildcards_impl(matches, ws, &mut exp)?;
                 pow.to_pow(base.as_view(), exp.as_view());
 
                 pow.as_view().normalize(ws, out);
@@ -2805,7 +3353,7 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     m.extend(arg.as_view());
                 }
 
@@ -2817,16 +3365,25 @@ impl Pattern {
 
                 let mut arg = ws.new_atom();
                 for a in args {
-                    a.replace_wildcards_impl(matches, ws, &mut arg);
+                    a.replace_wildcards_impl(matches, ws, &mut arg)?;
                     aa.extend(arg.as_view());
                 }
 
                 add.as_view().normalize(ws, out);
             }
+            Pattern::Alternative(_) => {
+                return Err(format!(
+                    "Encountered alternative during substitution of wildcards from a map",
+                ));
+            }
             Pattern::Transformer(_) => {
-                panic!("Encountered transformer during substitution of wildcards from a map")
+                return Err(format!(
+                    "Encountered transformer during substitution of wildcards from a map",
+                ));
             }
         }
+
+        Ok(())
     }
 
     /// Substitute the wildcards in the pattern with the values in the match stack.
@@ -2849,7 +3406,7 @@ impl Pattern {
         transformer_input: Option<&Pattern>,
     ) -> Result<(), TransformerError> {
         match self {
-            Pattern::Wildcard(name) => {
+            Pattern::Wildcard(name, _) => {
                 if let Some(w) = match_stack.get(*name) {
                     w.to_atom_into(out);
                 } else if allow_new_wildcards_on_rhs {
@@ -2891,7 +3448,7 @@ impl Pattern {
                 let func = func_h.to_fun(name);
 
                 for arg in args {
-                    if let Pattern::Wildcard(w) = arg {
+                    if let Pattern::Wildcard(w, _) = arg {
                         if let Some(w) = match_stack.get(*w) {
                             match w {
                                 Match::Single(s) => func.add_arg(*s),
@@ -2939,7 +3496,7 @@ impl Pattern {
                 let mut oas = [&mut base, &mut exp];
 
                 for (out, arg) in oas.iter_mut().zip(base_and_exp.iter()) {
-                    if let Pattern::Wildcard(w) = arg {
+                    if let Pattern::Wildcard(w, _) = arg {
                         if let Some(w) = match_stack.get(*w) {
                             match w {
                                 Match::Single(s) => out.set_from_view(s),
@@ -2983,7 +3540,7 @@ impl Pattern {
                 let mul = mul_h.to_mul();
 
                 for arg in args {
-                    if let Pattern::Wildcard(w) = arg {
+                    if let Pattern::Wildcard(w, _) = arg {
                         if let Some(w) = match_stack.get(*w) {
                             match w {
                                 Match::Single(s) => mul.extend(*s),
@@ -3029,7 +3586,7 @@ impl Pattern {
                 let add = add_h.to_add();
 
                 for arg in args {
-                    if let Pattern::Wildcard(w) = arg {
+                    if let Pattern::Wildcard(w, _) = arg {
                         if let Some(w) = match_stack.get(*w) {
                             match w {
                                 Match::Single(s) => add.extend(*s),
@@ -3073,6 +3630,9 @@ impl Pattern {
             Pattern::Literal(oa) => {
                 out.set_from_view(&oa.as_view());
             }
+            Pattern::Alternative(_) => Err(TransformerError::ValueError(
+                "Cannot replace wildcards in an alternative pattern.".to_owned(),
+            ))?,
             Pattern::Transformer(p) => {
                 let (pat, ts) = &**p;
 
@@ -3112,29 +3672,37 @@ impl Pattern {
 impl std::fmt::Debug for Pattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Wildcard(arg0) => f.debug_tuple("Wildcard").field(arg0).finish(),
+            Self::Wildcard(arg0, arg1) => {
+                f.debug_tuple("Wildcard").field(arg0).field(arg1).finish()
+            }
             Self::Fn(arg0, arg1) => f.debug_tuple("Fn").field(arg0).field(arg1).finish(),
             Self::Pow(arg0) => f.debug_tuple("Pow").field(arg0).finish(),
             Self::Mul(arg0) => f.debug_tuple("Mul").field(arg0).finish(),
             Self::Add(arg0) => f.debug_tuple("Add").field(arg0).finish(),
             Self::Literal(arg0) => f.debug_tuple("Literal").field(arg0).finish(),
+            Self::Alternative(arg0) => f.debug_tuple("Alternative").field(arg0).finish(),
             Self::Transformer(arg0) => f.debug_tuple("Transformer").field(arg0).finish(),
         }
     }
 }
 
+/// A cloneable, thread-safe predicate on a wildcard match, including multi-element matches.
 pub trait FilterFn: Fn(&Match) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(FilterFn);
 impl<T: Clone + Send + Sync + Fn(&Match) -> bool> FilterFn for T {}
 
+/// A cloneable, thread-safe predicate on a single matched expression.
 pub trait FilterSingleFn: Fn(AtomView<'_>) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(FilterSingleFn);
 impl<T: Clone + Send + Sync + Fn(AtomView<'_>) -> bool> FilterSingleFn for T {}
 
+/// A cloneable, thread-safe predicate comparing two wildcard matches.
 pub trait CmpFn: Fn(&Match, &Match) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(CmpFn);
 impl<T: Clone + Send + Sync + Fn(&Match, &Match) -> bool> CmpFn for T {}
 
+/// A cloneable, thread-safe condition on the current wildcard assignments.
+/// Return [`ConditionResult::Inconclusive`] when more assignments are needed.
 pub trait MatchStackFn: Fn(&MatchStack) -> ConditionResult + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(MatchStackFn);
 impl<T: Clone + Send + Sync + Fn(&MatchStack) -> ConditionResult> MatchStackFn for T {}
@@ -3145,12 +3713,19 @@ impl<T: Clone + Send + Sync + Fn(&MatchStack) -> ConditionResult> MatchStackFn f
 /// does not match to `x*y*f(x*y)`, since the pattern `x_` has length
 /// 1 inside the function argument.
 pub enum WildcardRestriction {
+    /// Require a match length within inclusive lower and optional upper bounds.
     Length(usize, Option<usize>), // min-max range
+    /// Require the matched expression to have the given atom type.
     IsAtomType(AtomType),
+    /// Require the matched symbol to carry the given tag.
     HasTag(String),
+    /// Match the supplied wildcard symbol literally rather than treating it as a placeholder.
     IsLiteralWildcard(Symbol),
+    /// Accept only matches for which the predicate returns true.
     Filter(Box<dyn FilterFn>),
+    /// Compare this match with the assignment of the given wildcard symbol.
     Cmp(Symbol, Box<dyn CmpFn>),
+    /// Try shorter matches before longer matches for this wildcard.
     NotGreedy,
 }
 
@@ -3160,7 +3735,7 @@ impl WildcardRestriction {
     /// # Examples
     /// Check if `x` is greater than 1:
     /// ```
-    /// # use symbolica::id::WildcardRestriction;
+    /// # use symbolica::prelude::*;
     /// WildcardRestriction::filter(|x| x.to_atom() > 1);
     /// ```
     pub fn filter(f: impl FilterFn + 'static) -> Self {
@@ -3188,6 +3763,7 @@ impl std::fmt::Display for WildcardRestriction {
     }
 }
 
+/// A wildcard symbol paired with its restriction.
 pub type WildcardAndRestriction = (Symbol, WildcardRestriction);
 
 /// A restriction on a wildcard or wildcards.
@@ -3205,8 +3781,7 @@ impl Condition<PatternRestriction> {
     ///
     /// # Example
     /// ```
-    /// use symbolica::id::{Condition, ConditionResult, Pattern};
-    /// use symbolica::{atom::AtomCore, parse, symbol};
+    /// use symbolica::prelude::*;
     /// let expr = parse!("f(1, 2, 3)");
     /// let out = expr
     ///     .replace(parse!("f(x_,y_,z_)"))
@@ -3277,7 +3852,7 @@ impl Symbol {
     /// # Example
     /// Restrict the wildcard `x__` to a length between 2 and 3:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x__").restrict(WildcardRestriction::Length(2, Some(3)));
     /// ```
     pub fn restrict(&self, restriction: WildcardRestriction) -> Condition<PatternRestriction> {
@@ -3289,7 +3864,7 @@ impl Symbol {
     ///
     /// # Examples
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_tag("symbolica::real".into());
     /// ```
     pub fn filter_tag(&self, tag: String) -> Condition<PatternRestriction> {
@@ -3305,29 +3880,16 @@ impl Symbol {
     /// # Examples
     /// Restrict the wildcard `x_` to be greater than 1:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
-    /// symbol!("x_").filter(|x| x.to_atom() > 1);
+    /// use symbolica::prelude::*;
+    /// symbol!("x_").filter(|x| x > 1);
     /// ```
-    #[deprecated(since = "1.4.0", note = "Use filter_single or filter_match")]
-    pub fn filter(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
-        self.restrict(WildcardRestriction::filter(f))
-    }
-
-    /// Restrict a wildcard symbol with a filter function `f`.
-    ///
-    /// # Examples
-    /// Restrict the wildcard `x_` to be greater than 1:
-    /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
-    /// symbol!("x_").filter_single(|x| x > 1);
-    /// ```
-    pub fn filter_single(
+    pub fn filter(
         &self,
         f: impl FilterSingleFn + 'static + Clone,
     ) -> Condition<PatternRestriction> {
         if self.get_wildcard_level() != 1 {
             panic!(
-                "filter_single can only be used on single wildcards (with one underscore), but {} has level {}",
+                "filter can only be used on single wildcards (with one underscore), but {} has level {}",
                 self,
                 self.get_wildcard_level()
             );
@@ -3335,17 +3897,17 @@ impl Symbol {
 
         self.restrict(WildcardRestriction::filter(move |m| match m {
             Match::Single(a) => f(*a),
-            _ => unreachable!("Expected single match for filter_single, but got {m:?}"),
+            _ => unreachable!("Expected single match for filter, but got {m:?}"),
         }))
     }
 
     /// Restrict a wildcard symbol with a filter function `f`.
     ///
     /// # Examples
-    /// Restrict the wildcard `x_` to be greater than 1:
+    /// Restrict the wildcard `x___`.
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
-    /// symbol!("x_").filter(|x| x.to_atom() > 1);
+    /// use symbolica::prelude::*;
+    /// symbol!("x___").filter_match(|x| matches!(x, Match::Multiple(_, _)));
     /// ```
     pub fn filter_match(&self, f: impl FilterFn + 'static) -> Condition<PatternRestriction> {
         self.restrict(WildcardRestriction::filter(f))
@@ -3356,7 +3918,7 @@ impl Symbol {
     /// # Example
     /// Restrict the wildcard `x_` to be greater than `y_ + 1`:
     /// ```
-    /// use symbolica::{id::WildcardRestriction, symbol};
+    /// use symbolica::prelude::*;
     /// symbol!("x_").filter_cmp(symbol!("y_"), |x, y| x.to_atom() > y.to_atom() + 1);
     /// ```
     pub fn filter_cmp(&self, s: Symbol, f: impl CmpFn + 'static) -> Condition<PatternRestriction> {
@@ -3369,12 +3931,18 @@ static DEFAULT_PATTERN_CONDITION: Condition<PatternRestriction> = Condition::Tru
 /// A logical expression.
 #[derive(Clone, Debug, Default)]
 pub enum Condition<T> {
+    /// Logical conjunction of two conditions.
     And(Box<(Condition<T>, Condition<T>)>),
+    /// Logical disjunction of two conditions.
     Or(Box<(Condition<T>, Condition<T>)>),
+    /// Logical negation of a condition.
     Not(Box<Condition<T>>),
+    /// A leaf test evaluated using its own condition implementation.
     Yield(T),
     #[default]
+    /// An unconditionally true condition.
     True,
+    /// An unconditionally false condition.
     False,
 }
 
@@ -3391,7 +3959,10 @@ impl<T: std::fmt::Display> std::fmt::Display for Condition<T> {
     }
 }
 
+/// Evaluate a test with a supplied context, allowing an inconclusive result
+/// when the available information does not determine its truth.
 pub trait Evaluate {
+    /// The context needed to evaluate this test, which may borrow matched expressions.
     type State<'a>;
 
     /// Evaluate a condition.
@@ -3447,8 +4018,11 @@ impl<T> std::ops::Not for Condition<T> {
 /// true, false, or inconclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConditionResult {
+    /// The condition is known to hold.
     True,
+    /// The condition is known not to hold.
     False,
+    /// The available information does not determine the condition.
     Inconclusive,
 }
 
@@ -3500,15 +4074,28 @@ impl From<bool> for ConditionResult {
     }
 }
 
+impl From<ConditionResult> for Option<bool> {
+    fn from(value: ConditionResult) -> Self {
+        match value {
+            ConditionResult::True => Some(true),
+            ConditionResult::False => Some(false),
+            ConditionResult::Inconclusive => None,
+        }
+    }
+}
+
 impl ConditionResult {
+    /// Return whether the condition was established as true.
     pub fn is_true(&self) -> bool {
         matches!(self, ConditionResult::True)
     }
 
+    /// Return whether the condition was established as false.
     pub fn is_false(&self) -> bool {
         matches!(self, ConditionResult::False)
     }
 
+    /// Return whether the condition could not be decided.
     pub fn is_inconclusive(&self) -> bool {
         matches!(self, ConditionResult::Inconclusive)
     }
@@ -3518,20 +4105,80 @@ impl ConditionResult {
 /// a [ConditionResult] when evaluated.
 #[derive(Clone, Debug)]
 pub enum Relation {
+    /// Test equality after substituting pattern values.
     Eq(Pattern, Pattern),
+    /// Test inequality after substituting pattern values.
     Ne(Pattern, Pattern),
+    /// Test whether the first value is greater than the second.
     Gt(Pattern, Pattern),
+    /// Test whether the first value is greater than or equal to the second.
     Ge(Pattern, Pattern),
+    /// Test whether the first value is less than the second.
     Lt(Pattern, Pattern),
+    /// Test whether the first value is less than or equal to the second.
     Le(Pattern, Pattern),
+    /// Test whether the first expression contains the second expression.
     Contains(Pattern, Pattern),
+    /// Test the resulting expression's atom type.
     IsType(Pattern, AtomType),
+    /// Match the first expression against the second pattern using the supplied
+    /// wildcard restrictions and matching settings.
     Matches(
         Pattern,
         Pattern,
         Condition<PatternRestriction>,
         MatchSettings,
     ),
+}
+
+/// Recover the exact stored value of a finite scalar coefficient, including floats.
+pub(crate) fn exact_numeric_value(
+    atom: AtomView<'_>,
+) -> Option<crate::domains::float::Complex<Rational>> {
+    let AtomView::Num(n) = atom else {
+        return None;
+    };
+    match n.get_coeff_view().to_owned() {
+        Coefficient::Complex(value) => Some(value),
+        Coefficient::Float(value) => Some(crate::domains::float::Complex::new(
+            value.re.try_to_rational()?,
+            value.im.try_to_rational()?,
+        )),
+        _ => None,
+    }
+}
+
+/// Structural equality for expressions, with exact-value equality for scalars.
+pub(crate) fn equal_atoms(lhs: AtomView<'_>, rhs: AtomView<'_>) -> bool {
+    if let (Some(a), Some(b)) = (exact_numeric_value(lhs), exact_numeric_value(rhs)) {
+        a == b
+    } else {
+        lhs == rhs
+    }
+}
+
+/// Mathematical ordering where it can be established without numerical guessing.
+/// Storage ordering is deliberately not a fallback for symbolic or complex values.
+pub(crate) fn compare_real_atoms(
+    lhs: AtomView<'_>,
+    rhs: AtomView<'_>,
+) -> Option<std::cmp::Ordering> {
+    if let (Some(a), Some(b)) = (exact_numeric_value(lhs), exact_numeric_value(rhs)) {
+        return (a.im.is_zero() && b.im.is_zero()).then(|| a.re.cmp(&b.re));
+    }
+    if !lhs.is_real().is_true() || !rhs.is_real().is_true() {
+        return None;
+    }
+    let difference = lhs - rhs;
+    if difference == Atom::Zero {
+        Some(std::cmp::Ordering::Equal)
+    } else if difference.is_positive().is_true() {
+        Some(std::cmp::Ordering::Greater)
+    } else if (-difference).is_positive().is_true() {
+        Some(std::cmp::Ordering::Less)
+    } else {
+        None
+    }
 }
 
 impl std::fmt::Display for Relation {
@@ -3580,13 +4227,35 @@ impl Evaluate for Relation {
                             TransformerError::ValueError(v) => v,
                         })?;
 
+                    if out1
+                        .get_all_symbols(true)
+                        .iter()
+                        .chain(out2.get_all_symbols(true).iter())
+                        .any(|symbol| symbol.get_wildcard_level() > 0)
+                    {
+                        return Ok(ConditionResult::Inconclusive);
+                    }
+
+                    if matches!(
+                        self,
+                        Relation::Gt(..) | Relation::Ge(..) | Relation::Lt(..) | Relation::Le(..)
+                    ) {
+                        let Some(order) = compare_real_atoms(out1.as_view(), out2.as_view()) else {
+                            return Ok(ConditionResult::Inconclusive);
+                        };
+                        return Ok(match self {
+                            Relation::Gt(..) => order.is_gt(),
+                            Relation::Ge(..) => order.is_ge(),
+                            Relation::Lt(..) => order.is_lt(),
+                            Relation::Le(..) => order.is_le(),
+                            _ => unreachable!(),
+                        }
+                        .into());
+                    }
+
                     match self {
-                        Relation::Eq(_, _) => out1 == out2,
-                        Relation::Ne(_, _) => out1 != out2,
-                        Relation::Gt(_, _) => out1.as_view() > out2.as_view(),
-                        Relation::Ge(_, _) => out1.as_view() >= out2.as_view(),
-                        Relation::Lt(_, _) => out1.as_view() < out2.as_view(),
-                        Relation::Le(_, _) => out1.as_view() <= out2.as_view(),
+                        Relation::Eq(_, _) => equal_atoms(out1.as_view(), out2.as_view()),
+                        Relation::Ne(_, _) => !equal_atoms(out1.as_view(), out2.as_view()),
                         Relation::Contains(_, _) => out1.contains(out2.as_view()),
                         _ => unreachable!(),
                     }
@@ -3648,50 +4317,9 @@ impl Evaluate for Condition<PatternRestriction> {
             Condition::True => ConditionResult::True,
             Condition::False => ConditionResult::False,
             Condition::Yield(t) => match t {
-                PatternRestriction::Wildcard((v, r)) => {
-                    if let Some((_, value)) = state.stack.iter().find(|(k, _)| k == v) {
-                        match r {
-                            WildcardRestriction::IsAtomType(t) => match value {
-                                Match::Single(AtomView::Num(_)) => *t == AtomType::Num,
-                                Match::Single(AtomView::Var(_)) => *t == AtomType::Var,
-                                Match::Single(AtomView::Add(_)) => *t == AtomType::Add,
-                                Match::Single(AtomView::Mul(_)) => *t == AtomType::Mul,
-                                Match::Single(AtomView::Pow(_)) => *t == AtomType::Pow,
-                                Match::Single(AtomView::Fun(_)) => *t == AtomType::Fun,
-                                _ => false,
-                            },
-                            WildcardRestriction::IsLiteralWildcard(wc) => match value {
-                                Match::Single(AtomView::Var(v)) => wc == &v.get_symbol(),
-                                Match::FunctionName(s) => wc == s,
-                                _ => false,
-                            },
-                            WildcardRestriction::Length(min, max) => match value {
-                                Match::Single(_) | Match::FunctionName(_) => {
-                                    *min <= 1 && max.map(|m| m >= 1).unwrap_or(true)
-                                }
-                                Match::Multiple(_, slice) => {
-                                    *min <= slice.len()
-                                        && max.map(|m| m >= slice.len()).unwrap_or(true)
-                                }
-                            },
-                            WildcardRestriction::Filter(f) => f(value),
-                            WildcardRestriction::Cmp(v2, f) => {
-                                if let Some((_, value2)) = state.stack.iter().find(|(k, _)| k == v2)
-                                {
-                                    f(value, value2)
-                                } else {
-                                    return Ok(ConditionResult::Inconclusive);
-                                }
-                            }
-                            WildcardRestriction::NotGreedy => true,
-                            WildcardRestriction::HasTag(tag) => match value {
-                                Match::Single(AtomView::Var(v)) => v.get_symbol().has_tag(tag),
-                                Match::Single(AtomView::Fun(f)) => f.get_symbol().has_tag(tag),
-                                Match::FunctionName(s) => s.has_tag(tag),
-                                _ => false,
-                            },
-                        }
-                        .into()
+                PatternRestriction::Wildcard((v, _)) => {
+                    if let Some(value) = state.get(*v) {
+                        self.check_possible(*v, value, state)
                     } else {
                         ConditionResult::Inconclusive
                     }
@@ -3984,6 +4612,18 @@ impl<'a> Match<'a> {
         }
     }
 
+    /// Compare two matches. A function head match and a variable match are considered equal if the variable matches the function name.
+    pub fn matches(&self, other: &Match<'a>) -> bool {
+        match (self, other) {
+            (Self::Single(a), Self::Single(b)) => a == b,
+            (Self::Multiple(t1, list1), Self::Multiple(t2, list2)) => t1 == t2 && list1 == list2,
+            (Self::FunctionName(n1), Self::FunctionName(n2)) => n1 == n2,
+            (Self::Single(a), Self::FunctionName(n)) => a == n,
+            (Self::FunctionName(n), Self::Single(b)) => b == n,
+            _ => false,
+        }
+    }
+
     /// Create a new atom from a matched subexpression.
     /// Arguments lists are wrapped in the function `arg`.
     pub fn to_atom_into(&self, out: &mut Atom) {
@@ -4041,25 +4681,27 @@ impl<'a> Match<'a> {
 #[derive(Debug, Clone)]
 pub struct MatchSettings {
     /// Specifies wildcards that try to match as little as possible.
-    pub non_greedy_wildcards: Vec<Symbol>,
+    pub(crate) non_greedy_wildcards: Vec<Symbol>,
     /// Specifies the `[min,max]` level at which the pattern is allowed to match.
     /// The first level is 0 and the level is increased when entering a function, or going one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
-    pub level_range: (usize, Option<usize>),
+    pub(crate) level_range: (usize, Option<usize>),
     /// Determine whether a level reflects the expression tree depth or the function depth.
-    pub level_is_tree_depth: bool,
+    pub(crate) level_is_tree_depth: bool,
     /// If true, the pattern may match a subexpression. If false, it must match the entire expression.
-    pub partial: bool,
+    pub(crate) partial: bool,
     /// Allow wildcards on the right-hand side that do not appear in the pattern.
-    pub allow_new_wildcards_on_rhs: bool,
+    pub(crate) allow_new_wildcards_on_rhs: bool,
     /// The maximum size of the cache for the right-hand side of a replacement.
     /// This can be used to prevent expensive recomputations.
-    pub rhs_cache_size: usize,
+    pub(crate) rhs_cache_size: usize,
 }
 
 static DEFAULT_MATCH_SETTINGS: MatchSettings = MatchSettings::new();
 
 impl MatchSettings {
+    /// Create default settings: search all levels, allow partial matches,
+    /// use greedy wildcards, and disable right-hand-side caching.
     pub const fn new() -> Self {
         Self {
             non_greedy_wildcards: Vec::new(),
@@ -4081,6 +4723,52 @@ impl MatchSettings {
             allow_new_wildcards_on_rhs: false,
             rhs_cache_size: 100,
         }
+    }
+
+    /// Specify wildcards that try to match as little as possible.
+    pub fn non_greedy_wildcards(mut self, non_greedy_wildcards: Vec<Symbol>) -> Self {
+        self.non_greedy_wildcards = non_greedy_wildcards;
+        self
+    }
+
+    /// Set the inclusive minimum level at which the pattern is allowed to match.
+    /// Level zero is the root. Levels count function nesting unless
+    /// [`Self::level_is_tree_depth`] is enabled.
+    pub fn min_level(mut self, min_level: usize) -> Self {
+        self.level_range.0 = min_level;
+        self
+    }
+
+    /// Set the inclusive maximum level at which the pattern is allowed to match.
+    /// Use `None` for no maximum. Levels count function nesting unless
+    /// [`Self::level_is_tree_depth`] is enabled.
+    pub fn max_level(mut self, max_level: impl Into<Option<usize>>) -> Self {
+        self.level_range.1 = max_level.into();
+        self
+    }
+
+    /// Set whether a level reflects tree depth or function depth.
+    pub fn level_is_tree_depth(mut self, level_is_tree_depth: bool) -> Self {
+        self.level_is_tree_depth = level_is_tree_depth;
+        self
+    }
+
+    /// Set whether the pattern may match a subexpression.
+    pub fn partial(mut self, partial: bool) -> Self {
+        self.partial = partial;
+        self
+    }
+
+    /// Allow or disallow wildcards on the right-hand side that do not appear in the pattern.
+    pub fn allow_new_wildcards_on_rhs(mut self, allow_new_wildcards_on_rhs: bool) -> Self {
+        self.allow_new_wildcards_on_rhs = allow_new_wildcards_on_rhs;
+        self
+    }
+
+    /// Set the maximum size of the replacement right-hand-side cache.
+    pub fn rhs_cache_size(mut self, rhs_cache_size: usize) -> Self {
+        self.rhs_cache_size = rhs_cache_size;
+        self
     }
 }
 
@@ -4195,6 +4883,21 @@ impl std::fmt::Debug for WrappedMatchStack<'_, '_> {
 }
 
 impl<'a, 'b> WrappedMatchStack<'a, 'b> {
+    /// Create an empty match stack using a replacement's restrictions and
+    /// settings, substituting defaults when they are absent.
+    pub fn from_replacement(replacement: BorrowedReplacement<'b>) -> WrappedMatchStack<'a, 'b> {
+        WrappedMatchStack {
+            stack: MatchStack::new(),
+            conditions: replacement.conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
+            settings: replacement.settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
+        }
+    }
+
+    /// Clear the match stack.
+    pub fn reset(&mut self) {
+        self.stack.stack.clear();
+    }
+
     /// Create a new match stack wrapped with the conditions and settings.
     pub fn new(
         conditions: &'b Condition<PatternRestriction>,
@@ -4236,7 +4939,7 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
 
         for (rk, rv) in self.stack.stack.iter() {
             if rk == &key {
-                if rv == &value {
+                if rv.matches(&value) {
                     return Ok(self.stack.stack.len());
                 } else {
                     return Err(MatchError::ImpossibleDueToConstraints);
@@ -4284,6 +4987,20 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
     /// Get the range of an identifier based on previous matches and based
     /// on conditions.
     pub fn get_range(&self, identifier: Symbol) -> (usize, Option<usize>) {
+        self.get_range_impl(identifier, false)
+    }
+
+    /// Get the range of an identifier, allowing an unbound optional wildcard to
+    /// be matched by the zero-width/default value of the surrounding context.
+    pub fn get_range_with_optional(
+        &self,
+        identifier: Symbol,
+        optional: bool,
+    ) -> (usize, Option<usize>) {
+        self.get_range_impl(identifier, optional)
+    }
+
+    fn get_range_impl(&self, identifier: Symbol, optional: bool) -> (usize, Option<usize>) {
         if identifier.get_wildcard_level() == 0 {
             return (1, Some(1));
         }
@@ -4291,7 +5008,14 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
         for (rk, rv) in self.stack.stack.iter() {
             if *rk == identifier {
                 return match rv {
-                    Match::Single(_) => (1, Some(1)),
+                    Match::Single(a) => (
+                        if optional && (*a == ZERO.as_view() || *a == ONE.as_view()) {
+                            0
+                        } else {
+                            1
+                        },
+                        Some(1),
+                    ),
                     Match::Multiple(slice_type, slice) => {
                         match slice_type {
                             SliceType::Empty => (0, Some(0)),
@@ -4312,11 +5036,13 @@ impl<'a, 'b> WrappedMatchStack<'a, 'b> {
 
         let (minimal, maximal) = self.conditions.get_range_hint(identifier); // TODO: precompute and store?
 
-        match identifier.get_wildcard_level() {
+        let range = match identifier.get_wildcard_level() {
             1 => (minimal.unwrap_or(1), Some(maximal.unwrap_or(1))), // x_
             2 => (minimal.unwrap_or(1), maximal),                    // x__
             _ => (minimal.unwrap_or(0), maximal),                    // x___
-        }
+        };
+
+        if optional { (0, range.1) } else { range }
     }
 }
 
@@ -4329,110 +5055,498 @@ struct WildcardIter {
     min_size: u32,
     max_size: u32,
     greedy: bool,
+    resume_point: Option<Checkpoint>,
+}
+
+/// A checkpoint in the match stack that can be used to restore the stack to a previous state.
+#[derive(Clone, Copy, Debug)]
+struct Checkpoint(usize);
+
+impl Checkpoint {
+    fn new(stack_len: usize) -> Self {
+        Self(stack_len)
+    }
+
+    fn restore(self, match_stack: &mut WrappedMatchStack<'_, '_>) {
+        debug_assert!(
+            match_stack.len() >= self.0,
+            "match stack was cleaned past its frame"
+        );
+        match_stack.truncate(self.0);
+    }
 }
 
 #[derive(Debug)]
 enum PatternIter<'a, 'b> {
-    Literal(Option<usize>, AtomView<'b>),
     Wildcard(WildcardIter),
-    Fn(Option<usize>, Symbol, Box<SubSliceIterator<'a, 'b>>), // index first
-    Sequence(Option<usize>, Box<SubSliceIterator<'a, 'b>>),
+    Node(Option<usize>, Box<AtomMatchIterator<'a, 'b>>),
+}
+
+#[derive(Debug)]
+struct FnMatchIterator<'a, 'b> {
+    initialized: bool,
+    name: Symbol,
+    args: SubSliceIterator<'a, 'b>,
+    target: AtomView<'a>,
+}
+
+impl<'a, 'b> FnMatchIterator<'a, 'b> {
+    fn new(name: Symbol, args: &'b [Pattern]) -> Self {
+        FnMatchIterator {
+            initialized: false,
+            name,
+            args: SubSliceIterator::new(args, SliceType::Arg),
+            target: AtomView::ZERO,
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>) {
+        self.initialized = false;
+        self.target = target;
+    }
+
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<(), MatchError> {
+        if !self.initialized {
+            self.initialized = true;
+
+            match self.target {
+                AtomView::Fun(f) => {
+                    let target_name = f.get_symbol();
+                    if self.name.get_wildcard_level() > 0 {
+                        match_stack.insert(self.name, Match::FunctionName(target_name))?;
+                    } else if target_name != self.name {
+                        return Err(MatchError::StructurallyImpossible);
+                    }
+
+                    self.args.set_list_target(
+                        self.target,
+                        match_stack,
+                        true,
+                        !target_name.is_symmetric(),
+                        target_name.is_cyclesymmetric(),
+                    );
+                }
+                AtomView::Var(v) => {
+                    if !self.args.pattern.iter().all(Pattern::is_optional_wildcard) {
+                        return Err(MatchError::StructurallyImpossible);
+                    }
+
+                    let target_name = v.get_symbol();
+                    if self.name.get_wildcard_level() > 0 {
+                        match_stack.insert(self.name, Match::FunctionName(target_name))?;
+                    } else if target_name != self.name {
+                        return Err(MatchError::StructurallyImpossible);
+                    }
+
+                    self.args
+                        .set_empty_list_target(match_stack, true, true, false);
+                }
+                _ => return Err(MatchError::StructurallyImpossible),
+            }
+        }
+
+        self.args.next(match_stack).map(|_| ())
+    }
+}
+
+#[derive(Debug)]
+struct AlternativeIter<'a, 'b> {
+    variants: Vec<AtomMatchIterator<'a, 'b>>,
+    variant_index: usize,
+    variant_initialized: bool,
+    target: AtomView<'a>,
+    structural_impossible: bool,
+}
+
+impl<'a, 'b> AlternativeIter<'a, 'b> {
+    fn new(alternatives: &'b [Pattern]) -> Self {
+        AlternativeIter {
+            variants: alternatives
+                .iter()
+                .map(|pattern| AtomMatchIterator::new(pattern))
+                .collect(),
+            variant_index: 0,
+            variant_initialized: false,
+            target: AtomView::ZERO,
+            structural_impossible: true,
+        }
+    }
+
+    fn set_target(&mut self, target: AtomView<'a>) {
+        self.variant_index = 0;
+        self.variant_initialized = false;
+        self.target = target;
+        self.structural_impossible = true;
+    }
+
+    fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Result<(), MatchError> {
+        while self.variant_index < self.variants.len() {
+            let variant_index = self.variant_index;
+
+            if !self.variant_initialized {
+                self.variants[variant_index].set_new_target_complete(self.target, match_stack);
+                self.variant_initialized = true;
+            }
+
+            match self.variants[variant_index].next_result(match_stack) {
+                Ok(_) => {
+                    self.structural_impossible = false;
+                    return Ok(());
+                }
+                Err(e) => {
+                    if !matches!(e, MatchError::StructurallyImpossible) {
+                        self.structural_impossible = false;
+                    }
+                }
+            }
+
+            self.variant_index += 1;
+            self.variant_initialized = false;
+        }
+
+        if self.structural_impossible {
+            Err(MatchError::StructurallyImpossible)
+        } else {
+            Err(MatchError::NoMoreMatches)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LiteralAtomIter<'b> {
+    literal: &'b Atom,
+    try_match_atom: bool,
+}
+
+impl<'b> LiteralAtomIter<'b> {
+    fn new(literal: &'b Atom) -> Self {
+        LiteralAtomIter {
+            literal,
+            try_match_atom: true,
+        }
+    }
+
+    fn set_target(&mut self) {
+        self.try_match_atom = true;
+    }
+
+    fn next<'a>(&mut self, target: AtomView<'a>) -> Result<(), MatchError> {
+        if self.try_match_atom {
+            self.try_match_atom = false;
+
+            if self.literal.as_view() == target {
+                return Ok(());
+            }
+        }
+
+        Err(MatchError::StructurallyImpossible)
+    }
+}
+
+#[derive(Debug)]
+struct SliceAtomIter<'a, 'b> {
+    pattern: &'b Pattern,
+    target: AtomView<'a>,
+    iter: SubSliceIterator<'a, 'b>,
+    single_atom_fallback: Option<AtomView<'a>>,
+    used_flags: Vec<bool>,
+}
+
+impl<'a, 'b> SliceAtomIter<'a, 'b> {
+    fn new(pattern: &'b Pattern, pat_list: &'b [Pattern], slice_type: SliceType) -> Self {
+        SliceAtomIter {
+            pattern,
+            target: AtomView::ZERO,
+            iter: SubSliceIterator::new(pat_list, slice_type),
+            single_atom_fallback: None,
+            used_flags: Vec::new(),
+        }
+    }
+
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
+        self.target = target;
+        self.single_atom_fallback = self
+            .iter
+            .can_match_list_atom_as_single_with_optional(self.target)
+            .then_some(self.target);
+        self.iter.set_target(
+            self.target,
+            match_stack,
+            true,
+            matches!(self.pattern, Pattern::Wildcard(..) | Pattern::Literal(_)),
+        );
+
+        if force_complete {
+            self.iter.complete = true;
+        }
+    }
+
+    fn next(
+        &mut self,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<Option<&[bool]>, MatchError> {
+        let primary_error = match self.iter.next(match_stack) {
+            Ok(used_flags) => {
+                self.used_flags.clear();
+                self.used_flags.extend_from_slice(used_flags);
+                return Ok(Some(&self.used_flags));
+            }
+            Err(e) => e,
+        };
+
+        if let Some(target) = self.single_atom_fallback.take() {
+            let complete = self.iter.complete;
+            self.iter.set_single_atom_target(target, complete);
+
+            match self.iter.next(match_stack) {
+                Ok(used_flags) => {
+                    self.used_flags.clear();
+                    self.used_flags.extend_from_slice(used_flags);
+                    Ok(Some(&self.used_flags))
+                }
+                Err(fallback_error) => {
+                    if matches!(primary_error, MatchError::StructurallyImpossible)
+                        && matches!(fallback_error, MatchError::StructurallyImpossible)
+                    {
+                        Err(MatchError::StructurallyImpossible)
+                    } else {
+                        Err(fallback_error)
+                    }
+                }
+            }
+        } else {
+            Err(primary_error)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WildcardAtomIter<'a, 'b> {
+    name: Symbol,
+    optional: bool,
+    try_match_atom: bool,
+    direct_resume_point: Option<Checkpoint>,
+    slice: SliceAtomIter<'a, 'b>,
+}
+
+impl<'a, 'b> WildcardAtomIter<'a, 'b> {
+    fn new(pattern: &'b Pattern, name: Symbol, optional: bool) -> Self {
+        WildcardAtomIter {
+            name,
+            optional,
+            try_match_atom: true,
+            direct_resume_point: None,
+            slice: SliceAtomIter::new(pattern, std::slice::from_ref(pattern), SliceType::One),
+        }
+    }
+
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
+        self.try_match_atom = true;
+        self.direct_resume_point = None;
+        self.slice.set_target(target, match_stack, force_complete);
+    }
+
+    fn next(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<Option<&[bool]>, MatchError> {
+        if self.try_match_atom {
+            self.try_match_atom = false;
+
+            let range = match_stack.get_range_with_optional(self.name, self.optional);
+            if range.0 <= 1
+                && range.1.map(|w| w >= 1).unwrap_or(true)
+                && let Ok(new_stack_len) = match_stack.insert(self.name, Match::Single(target))
+            {
+                self.direct_resume_point = Some(Checkpoint::new(new_stack_len));
+                return Ok(None);
+            }
+        }
+
+        if let Some(resume_point) = self.direct_resume_point.take() {
+            resume_point.restore(match_stack);
+        }
+
+        self.slice.next(match_stack)
+    }
+}
+
+#[derive(Debug)]
+enum AtomMatcher<'a, 'b> {
+    Literal(LiteralAtomIter<'b>),
+    Wildcard(WildcardAtomIter<'a, 'b>),
+    Slice(SliceAtomIter<'a, 'b>),
+    Function(FnMatchIterator<'a, 'b>),
+    Alternative(AlternativeIter<'a, 'b>),
+}
+
+impl<'a, 'b> AtomMatcher<'a, 'b> {
+    fn new(pattern: &'b Pattern) -> Self {
+        match pattern {
+            Pattern::Literal(literal) => AtomMatcher::Literal(LiteralAtomIter::new(literal)),
+            Pattern::Wildcard(name, optional) => {
+                AtomMatcher::Wildcard(WildcardAtomIter::new(pattern, *name, *optional))
+            }
+            Pattern::Pow(p) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, p.as_slice(), SliceType::Pow))
+            }
+            Pattern::Mul(m) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, m.as_slice(), SliceType::Mul))
+            }
+            Pattern::Add(a) => {
+                AtomMatcher::Slice(SliceAtomIter::new(pattern, a.as_slice(), SliceType::Add))
+            }
+            Pattern::Fn(name, args) => AtomMatcher::Function(FnMatchIterator::new(*name, args)),
+            Pattern::Alternative(alternatives) => {
+                AtomMatcher::Alternative(AlternativeIter::new(alternatives))
+            }
+            Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
+        }
+    }
+
+    fn set_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
+        match self {
+            AtomMatcher::Literal(iter) => iter.set_target(),
+            AtomMatcher::Wildcard(iter) => iter.set_target(target, match_stack, force_complete),
+            AtomMatcher::Slice(iter) => iter.set_target(target, match_stack, force_complete),
+            AtomMatcher::Function(iter) => iter.set_target(target),
+            AtomMatcher::Alternative(iter) => iter.set_target(target),
+        }
+    }
+
+    fn next(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &mut WrappedMatchStack<'a, 'b>,
+    ) -> Result<Option<&[bool]>, MatchError> {
+        match self {
+            AtomMatcher::Literal(iter) => iter.next(target).map(|_| None),
+            AtomMatcher::Wildcard(iter) => iter.next(target, match_stack),
+            AtomMatcher::Slice(iter) => iter.next(match_stack),
+            AtomMatcher::Function(iter) => iter.next(match_stack).map(|_| None),
+            AtomMatcher::Alternative(iter) => iter.next(match_stack).map(|_| None),
+        }
+    }
 }
 
 /// An iterator that tries to match an entire atom or
 /// a subslice to a pattern.
+#[derive(Debug)]
 pub struct AtomMatchIterator<'a, 'b> {
-    try_match_atom: bool,
-    reset_subslice_iter: bool,
-    subslice_iter: SubSliceIterator<'a, 'b>,
-    pattern: &'b Pattern,
+    matcher: AtomMatcher<'a, 'b>,
     target: AtomView<'a>,
-    old_match_stack_len: Option<usize>,
+    used_flags: Vec<bool>,
+    frame: Option<Checkpoint>,
 }
 
 impl<'a, 'b> AtomMatchIterator<'a, 'b> {
-    pub fn new(pattern: &'b Pattern, target: AtomView<'a>) -> AtomMatchIterator<'a, 'b> {
-        let target = match target {
-            AtomView::Alias(a) if !a.is_opaque() => a.get_body(),
-            _ => target,
-        };
-        let try_match_atom = matches!(pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
-
-        let (pat_list, slice_type) = match pattern {
-            Pattern::Mul(m1) => (m1.as_slice(), SliceType::Mul),
-            Pattern::Add(a1) => (a1.as_slice(), SliceType::Add),
-            _ => (std::slice::from_ref(pattern), SliceType::One),
-        };
-
+    /// Create a matcher for `pattern`. Set its target with
+    /// [`Self::set_new_target`] before requesting matches.
+    pub fn new(pattern: &'b Pattern) -> AtomMatchIterator<'a, 'b> {
         AtomMatchIterator {
-            try_match_atom,
-            reset_subslice_iter: true,
-            subslice_iter: SubSliceIterator::new(pat_list, slice_type),
-            pattern,
-            target,
-            old_match_stack_len: None,
+            matcher: AtomMatcher::new(pattern),
+            target: AtomView::ZERO,
+            used_flags: Vec::new(),
+            frame: None,
         }
     }
 
     /// Reuse the iterator for a new target atom.
     #[inline]
-    pub fn set_new_target(&mut self, target: AtomView<'a>) {
-        self.target = match target {
-            AtomView::Alias(a) if !a.is_opaque() => a.get_body(),
-            _ => target,
-        };
-        self.try_match_atom = matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_));
-        self.reset_subslice_iter = true;
-        self.old_match_stack_len = None;
+    pub fn set_new_target(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) {
+        self.set_new_target_impl(target, match_stack, false);
     }
 
-    pub fn next(
+    #[inline]
+    fn set_new_target_complete(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) {
+        self.set_new_target_impl(target, match_stack, true);
+    }
+
+    #[inline]
+    fn set_new_target_impl(
+        &mut self,
+        target: AtomView<'a>,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        force_complete: bool,
+    ) {
+        let mut target = target;
+        while let AtomView::Alias(a) = target
+            && !a.is_opaque()
+        {
+            target = a.get_body();
+        }
+        self.target = target;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
+        self.matcher.set_target(target, match_stack, force_complete);
+    }
+
+    /// Find the next match whose conditions are proven true, updating
+    /// `match_stack`. The returned flags identify matched children for a partial
+    /// match and are empty when no child-selection mask is needed. Returns
+    /// `None` when matching fails or is exhausted.
+    pub fn next(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) -> Option<&[bool]> {
+        // Only a complete, proven match may escape to replacement/tree callers.
+        // Nested matchers use next_result so unbound outer wildcards can still
+        // leave a restriction inconclusive while the match is being built.
+        loop {
+            self.next_result(match_stack).ok()?;
+            if match_stack.conditions.evaluate(&match_stack.stack).ok()
+                == Some(ConditionResult::True)
+            {
+                return Some(&self.used_flags);
+            }
+        }
+    }
+
+    /// Advance the matcher and update `match_stack`, returning child-selection
+    /// flags or the reason matching failed. Conditions may still be inconclusive
+    /// when outer wildcards have not been assigned; use [`Self::next`] when
+    /// only fully validated matches should be returned.
+    pub fn next_result(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Option<(usize, &[bool])> {
-        if self.try_match_atom {
-            self.try_match_atom = false;
-
-            if let Pattern::Wildcard(w) = self.pattern {
-                let range = match_stack.get_range(*w);
-                if range.0 <= 1 && range.1.map(|w| w >= 1).unwrap_or(true) {
-                    // TODO: any problems with matching Single vs a list?
-                    if let Some(new_stack_len) =
-                        match_stack.insert(*w, Match::Single(self.target)).ok()
-                    {
-                        self.old_match_stack_len = Some(new_stack_len);
-                        return Some((new_stack_len, &[]));
-                    }
+    ) -> Result<&[bool], MatchError> {
+        match self.matcher.next(self.target, match_stack) {
+            Ok(used_flags) => {
+                self.used_flags.clear();
+                if let Some(used_flags) = used_flags {
+                    self.used_flags.extend_from_slice(used_flags);
                 }
-            } else if let Pattern::Literal(w) = self.pattern
-                && w.as_view() == self.target
-            {
-                return Some((match_stack.len(), &[]));
+                Ok(&self.used_flags)
             }
-            // TODO: also do type matches, Fn Fn, etc?
+            Err(e) => {
+                self.frame.unwrap().restore(match_stack);
+                Err(e)
+            }
         }
+    }
 
-        if let Some(oml) = self.old_match_stack_len {
-            match_stack.truncate(oml);
-            self.old_match_stack_len = None;
-        }
-
-        if matches!(self.pattern, Pattern::Literal(_)) {
-            // TODO: also catch Pattern:Add(_) and Pattern:Mul(_) without any sub-wildcards
-            return None;
-        }
-
-        if self.reset_subslice_iter {
-            self.reset_subslice_iter = false;
-            self.subslice_iter.set_target(
-                self.target,
-                match_stack,
-                true,
-                matches!(self.pattern, Pattern::Wildcard(_) | Pattern::Literal(_)),
-            );
-        }
-
-        self.subslice_iter.next(match_stack).ok()
+    fn discard_current(&mut self, match_stack: &mut WrappedMatchStack<'a, 'b>) {
+        self.frame.unwrap().restore(match_stack);
     }
 }
 
@@ -4455,6 +5569,11 @@ impl<'a> TypedSlice<'a> {
         self.data.clear();
         self.data.push(a);
         self.slice_type = SliceType::One;
+    }
+
+    fn set_empty(&mut self, slice_type: SliceType) {
+        self.data.clear();
+        self.slice_type = slice_type;
     }
 
     fn set_list(&mut self, a: AtomView<'a>) {
@@ -4539,7 +5658,7 @@ pub struct SubSliceIterator<'a, 'b> {
     compatibility_flag: Vec<u64>, // track which iterators are compatible with which index
     initialized: bool,
     processed_iterators: usize,
-    matches: Vec<usize>,   // track match stack length
+    frame: Option<Checkpoint>,
     complete: bool,        // match needs to consume entire target
     ordered_gapless: bool, // pattern should appear ordered and have no gaps
     cyclic: bool,          // pattern is cyclic
@@ -4551,8 +5670,11 @@ pub struct SubSliceIterator<'a, 'b> {
 /// Errors that can occur during iteration over matches.
 /// A match could be structurally impossible or impossible due to mismatches on wildcards.
 pub enum MatchError {
+    /// The expression structure cannot match the pattern.
     StructurallyImpossible,
+    /// Wildcard assignments or restrictions prevent a match.
     ImpossibleDueToConstraints,
+    /// All candidate matches have been exhausted.
     NoMoreMatches,
 }
 
@@ -4563,7 +5685,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         let iterators = pattern
             .iter()
             .map(|p| match &p {
-                Pattern::Wildcard(name) => PatternIter::Wildcard(WildcardIter {
+                Pattern::Wildcard(name, _) => PatternIter::Wildcard(WildcardIter {
                     initialized: false,
                     name: *name,
                     indices: Vec::new(),
@@ -4571,44 +5693,107 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     min_size: 0,
                     max_size: 0,
                     greedy: false,
+                    resume_point: None,
                 }),
-                Pattern::Fn(name, args) => PatternIter::Fn(
-                    None,
-                    *name,
-                    Box::new(SubSliceIterator::new(args, SliceType::Arg)),
-                ),
-                Pattern::Pow(base_exp) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(base_exp.as_slice(), SliceType::Pow)),
-                ),
-                Pattern::Mul(pat) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(pat, SliceType::Mul)),
-                ),
-                Pattern::Add(pat) => PatternIter::Sequence(
-                    None,
-                    Box::new(SubSliceIterator::new(pat, SliceType::Add)),
-                ),
-                Pattern::Literal(atom) => PatternIter::Literal(None, atom.as_view()),
                 Pattern::Transformer(_) => panic!("Transformer is not allowed on lhs"),
+                _ => PatternIter::Node(None, Box::new(AtomMatchIterator::new(p))),
             })
             .collect();
 
         SubSliceIterator {
             pattern,
             iterators,
-            matches: Vec::with_capacity(pattern.len()),
             used_flag: Vec::with_capacity(pattern.len()),
             compatibility_flag: Vec::with_capacity(pattern.len()),
             target: TypedSlice::empty(),
             initialized: false,
             processed_iterators: 0,
+            frame: None,
             complete: false,
             ordered_gapless: false,
             cyclic: false,
             do_not_match_to_single_atom_in_list: false,
             do_not_match_entire_slice: false,
             slice_type,
+        }
+    }
+
+    fn optional_wildcard_can_be_empty(&self, pattern_index: usize) -> bool {
+        match self.slice_type {
+            SliceType::Add | SliceType::Mul | SliceType::Arg => true,
+            SliceType::Pow => pattern_index == 1,
+            _ => false,
+        }
+    }
+
+    fn pattern_length_range(
+        &self,
+        pattern_index: usize,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+    ) -> (usize, Option<usize>) {
+        if let Pattern::Wildcard(id, optional) = self.pattern[pattern_index] {
+            match_stack.get_range_with_optional(
+                id,
+                optional && self.optional_wildcard_can_be_empty(pattern_index),
+            )
+        } else {
+            (1, Some(1))
+        }
+    }
+
+    fn can_match_single_with_optional(&self, target: AtomView<'a>) -> bool {
+        if !matches!(self.slice_type, SliceType::Add | SliceType::Mul) {
+            return false;
+        }
+
+        Pattern::optional_wildcards_can_match_single(self.pattern, target)
+    }
+
+    fn can_match_pow_as_single(&self, target: AtomView<'a>) -> bool {
+        self.slice_type == SliceType::Pow
+            && self.pattern.len() == 2
+            && self.pattern[1].is_optional_wildcard()
+            && self.pattern[0].could_match(target)
+    }
+
+    fn can_match_as_single_with_optional(&self, target: AtomView<'a>) -> bool {
+        match self.slice_type {
+            SliceType::Add | SliceType::Mul => self.can_match_single_with_optional(target),
+            SliceType::Pow => self.can_match_pow_as_single(target),
+            _ => false,
+        }
+    }
+
+    fn can_match_list_atom_as_single_with_optional(&self, target: AtomView<'a>) -> bool {
+        matches!(
+            (target, self.slice_type),
+            (AtomView::Mul(_), SliceType::Mul)
+                | (AtomView::Add(_), SliceType::Add)
+                | (AtomView::Pow(_), SliceType::Pow)
+        ) && self.can_match_as_single_with_optional(target)
+    }
+
+    fn set_single_atom_target(&mut self, target: AtomView<'a>, complete: bool) {
+        self.target.set_one(target);
+        self.used_flag.clear();
+        self.compatibility_flag.clear();
+        self.used_flag.resize(self.target.len(), false);
+        self.compatibility_flag.resize(self.target.len(), 0);
+        self.initialized = false;
+        self.processed_iterators = 0;
+        self.complete = complete;
+        self.ordered_gapless = self.slice_type == SliceType::Pow;
+        self.cyclic = false;
+        self.do_not_match_to_single_atom_in_list = false;
+        self.do_not_match_entire_slice = false;
+    }
+
+    fn optional_default_match_for(slice_type: SliceType) -> Match<'a> {
+        match slice_type {
+            SliceType::Add => Match::Single(ZERO.as_view()),
+            SliceType::Mul | SliceType::Pow => Match::Single(ONE.as_view()),
+            SliceType::Arg => Match::Multiple(SliceType::Arg, Vec::new()),
+            _ => Match::Multiple(SliceType::Empty, Vec::new()),
         }
     }
 
@@ -4627,17 +5812,25 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         // for (single, list), upgrade single to a slice with one element
 
         match (self.slice_type, target) {
-            (SliceType::Mul, AtomView::Mul(_)) => self.target.set_list(target),
-            (SliceType::Add, AtomView::Add(_)) => self.target.set_list(target),
-            (SliceType::Mul | SliceType::Add, _) => {
-                shortcut_done = true; // cannot match
+            (SliceType::Mul, AtomView::Mul(_))
+            | (SliceType::Add, AtomView::Add(_))
+            | (SliceType::Pow, AtomView::Pow(_)) => {
+                self.target.set_list(target);
+            }
+            (SliceType::Mul | SliceType::Add | SliceType::Pow, _) => {
                 self.target.set_one(target);
+                if !self.can_match_as_single_with_optional(target) {
+                    shortcut_done = true; // cannot match
+                }
             }
             (SliceType::One, AtomView::Mul(_) | AtomView::Add(_)) => {
-                if matches!(self.pattern[0], Pattern::Wildcard(_)) {
+                if matches!(self.pattern[0], Pattern::Wildcard(..)) {
                     self.target.set_list(target);
                 } else {
-                    if do_not_match_to_single_atom_in_list {
+                    if do_not_match_to_single_atom_in_list
+                        && !matches!(self.pattern[0], Pattern::Alternative(_))
+                        && !self.pattern[0].could_match(target)
+                    {
                         shortcut_done = true; // cannot match
                     }
                     self.target.set_one(target);
@@ -4652,10 +5845,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         let min_length: usize = self
             .pattern
             .iter()
-            .map(|x| match x {
-                Pattern::Wildcard(id) => match_stack.get_range(*id).0,
-                _ => 1,
-            })
+            .enumerate()
+            .map(|(i, _)| self.pattern_length_range(i, match_stack).0)
             .sum();
 
         let mut target_len = self.target.len();
@@ -4667,7 +5858,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             shortcut_done = true;
         };
 
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         if !shortcut_done {
@@ -4678,10 +5868,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.initialized = shortcut_done;
         self.processed_iterators = 0;
         self.complete = !match_stack.settings.partial;
-        self.ordered_gapless = false;
+        self.ordered_gapless = self.slice_type == SliceType::Pow;
         self.cyclic = false;
         self.do_not_match_to_single_atom_in_list = do_not_match_to_single_atom_in_list;
         self.do_not_match_entire_slice = do_not_match_entire_slice;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
     }
 
     /// Create a new sub-slice iterator.
@@ -4701,10 +5892,8 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         let min_length: usize = self
             .pattern
             .iter()
-            .map(|x| match x {
-                Pattern::Wildcard(id) => match_stack.get_range(*id).0,
-                _ => 1,
-            })
+            .enumerate()
+            .map(|(i, _)| self.pattern_length_range(i, match_stack).0)
             .sum();
 
         if min_length > self.target.len() {
@@ -4714,9 +5903,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         let max_length: usize = self
             .pattern
             .iter()
-            .map(|x| match x {
-                Pattern::Wildcard(id) => match_stack.get_range(*id).1.unwrap_or(self.target.len()),
-                _ => 1,
+            .enumerate()
+            .map(|(i, _)| {
+                self.pattern_length_range(i, match_stack)
+                    .1
+                    .unwrap_or(self.target.len())
             })
             .sum();
 
@@ -4724,7 +5915,6 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             shortcut_done = true;
         };
 
-        self.matches.clear();
         self.used_flag.clear();
         self.compatibility_flag.clear();
         self.used_flag.resize(self.target.len(), false);
@@ -4736,17 +5926,51 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
         self.cyclic = cyclic;
         self.do_not_match_to_single_atom_in_list = false;
         self.do_not_match_entire_slice = false;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
     }
 
-    /// Get the next matches, where the map of matches is written into `match_stack`.
-    /// The function returns the length of the match stack before the last subiterator
-    /// matched. This value can be ignored by the end-user. If `None` is returned,
-    /// all potential matches will have been generated and the iterator will generate
-    /// `None` if called again.
+    /// Set an empty list target for degenerate matches such as `f(x___)` matching
+    /// the variable `f`, where the argument wildcard is allowed to be empty.
+    pub fn set_empty_list_target(
+        &mut self,
+        match_stack: &WrappedMatchStack<'a, 'b>,
+        complete: bool,
+        ordered: bool,
+        cyclic: bool,
+    ) {
+        let mut shortcut_done = false;
+
+        self.target.set_empty(self.slice_type);
+
+        let min_length: usize = self
+            .pattern
+            .iter()
+            .enumerate()
+            .map(|(i, _)| self.pattern_length_range(i, match_stack).0)
+            .sum();
+
+        if min_length > 0 {
+            shortcut_done = true;
+        };
+
+        self.used_flag.clear();
+        self.compatibility_flag.clear();
+        self.initialized = shortcut_done;
+        self.processed_iterators = 0;
+        self.complete = complete;
+        self.ordered_gapless = ordered;
+        self.cyclic = cyclic;
+        self.do_not_match_to_single_atom_in_list = false;
+        self.do_not_match_entire_slice = false;
+        self.frame = Some(Checkpoint::new(match_stack.len()));
+    }
+
+    /// Get the next match, writing wildcard bindings into `match_stack`.
+    /// On error, all bindings owned by this iterator have been removed.
     pub fn next(
         &mut self,
         match_stack: &mut WrappedMatchStack<'a, 'b>,
-    ) -> Result<(usize, &[bool]), MatchError> {
+    ) -> Result<&[bool], MatchError> {
         let mut forward_pass = !self.initialized;
         self.initialized = true;
 
@@ -4755,11 +5979,13 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
         'next_match: loop {
             if !forward_pass && self.processed_iterators == 0 {
-                if structural_mismatch {
-                    return Err(MatchError::StructurallyImpossible);
+                let error = if structural_mismatch {
+                    MatchError::StructurallyImpossible
                 } else {
-                    return Err(MatchError::NoMoreMatches); // done as all options have been exhausted
-                }
+                    MatchError::NoMoreMatches
+                };
+                self.frame.unwrap().restore(match_stack);
+                return Err(error);
             }
 
             if forward_pass && self.processed_iterators == self.pattern.len() {
@@ -4773,16 +5999,41 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                     forward_pass = false;
                 } else {
                     // yield the current match
-                    return Ok((*self.matches.last().unwrap(), &self.used_flag));
+                    return Ok(&self.used_flag);
                 }
             }
 
             if forward_pass {
+                let wildcard_ranges = if matches!(
+                    self.pattern[self.processed_iterators],
+                    Pattern::Wildcard(..)
+                ) {
+                    Some((
+                        self.pattern_length_range(self.processed_iterators, match_stack),
+                        if self.complete {
+                            self.pattern[self.processed_iterators + 1..]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, _)| {
+                                    self.pattern_length_range(
+                                        self.processed_iterators + 1 + offset,
+                                        match_stack,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        },
+                    ))
+                } else {
+                    None
+                };
                 let it = &mut self.iterators[self.processed_iterators];
                 match (&self.pattern[self.processed_iterators], it) {
-                    (Pattern::Wildcard(name), PatternIter::Wildcard(w)) => {
+                    (Pattern::Wildcard(name, _), PatternIter::Wildcard(w)) => {
                         let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
-                        let range = match_stack.get_range(*name);
+                        let (range, future_ranges) = wildcard_ranges.as_ref().unwrap();
+                        let range = *range;
 
                         if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
                             // a previously matched ranged wildcard will constrain the slice matching
@@ -4808,13 +6059,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         if self.complete {
                             let mut new_min = size_left;
                             let mut new_max = size_left;
-                            for p in &self.pattern[self.processed_iterators + 1..] {
-                                let p_range = if let Pattern::Wildcard(name) = p {
-                                    match_stack.get_range(*name)
-                                } else {
-                                    (1, Some(1))
-                                };
-
+                            for p_range in future_ranges {
                                 if new_min > 0 {
                                     if let Some(m) = p_range.1 {
                                         new_min -= m.min(new_min);
@@ -4833,11 +6078,11 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
 
                             range.0 = range.0.max(new_min);
                             range.1 = range.1.min(new_max);
+                        }
 
-                            if range.0 > range.1 {
-                                forward_pass = false;
-                                continue 'next_match;
-                            }
+                        if range.0 > range.1 {
+                            forward_pass = false;
+                            continue 'next_match;
                         }
 
                         let greedy = !match_stack.settings.non_greedy_wildcards.contains(name);
@@ -4853,40 +6098,29 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         w.min_size = range.0 as u32;
                         w.max_size = range.1 as u32;
                         w.greedy = greedy;
-                    }
-                    (Pattern::Fn(..), PatternIter::Fn(index, _, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Pow(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Mul(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Add(..), PatternIter::Sequence(index, _)) => {
-                        *index = None;
-                    }
-                    (Pattern::Literal(..), PatternIter::Literal(index, _)) => {
-                        *index = None;
+                        w.resume_point = None;
                     }
                     (Pattern::Transformer(_), _) => panic!("Transformer is not allowed on lhs"),
+                    (_, PatternIter::Node(index, _)) => *index = None,
                     (p, i) => panic!("Pattern and iterator type mismatch: {:?} vs {:?}", p, i),
                 }
 
                 self.processed_iterators += 1;
-            } else {
-                // update an existing iterator, so pop the latest matches (this implies every iter pushes to the match)
-                match_stack.truncate(self.matches.pop().unwrap());
             }
 
             // assume we are in forward pass mode
             // if the iterator does not match this variable is set to false
             forward_pass = true;
+            let optional_default_match = Self::optional_default_match_for(self.slice_type);
 
             match &mut self.iterators[self.processed_iterators - 1] {
                 PatternIter::Wildcard(w) => {
                     let mut wildcard_forward_pass = !w.initialized;
                     w.initialized = true;
+
+                    if !wildcard_forward_pass {
+                        w.resume_point.take().unwrap().restore(match_stack);
+                    }
 
                     'next_wildcard_match: loop {
                         // a wildcard collects indices in increasing order
@@ -4938,13 +6172,24 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             }
                         }
 
+                        // check if there are enough remaining indices to satisfy the wildcard size target
+                        if !self.cyclic {
+                            // indices are collected in increasing order
+                            let remaining_available = self.used_flag[start_index..]
+                                .iter()
+                                .filter(|used| !**used)
+                                .count();
+                            if w.indices.len() + remaining_available < w.size_target as usize {
+                                wildcard_forward_pass = false;
+                                continue 'next_wildcard_match;
+                            }
+                        }
+
                         // check for an empty slice match
                         if w.size_target == 0 && w.indices.is_empty() {
-                            match match_stack
-                                .insert(w.name, Match::Multiple(SliceType::Empty, Vec::new()))
-                            {
+                            match match_stack.insert(w.name, optional_default_match.clone()) {
                                 Ok(new_stack_len) => {
-                                    self.matches.push(new_stack_len);
+                                    w.resume_point = Some(Checkpoint::new(new_stack_len));
                                     continue 'next_match;
                                 }
                                 Err(MatchError::StructurallyImpossible) => {}
@@ -4970,7 +6215,10 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                             }
 
                             if self.ordered_gapless && tried_first_option {
-                                break;
+                                // cyclic sequences can start at any position
+                                if !self.cyclic || self.used_flag.iter().any(|x| *x) {
+                                    break;
+                                }
                             }
 
                             if self.used_flag[k]
@@ -5025,15 +6273,15 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                                 // add the match to the stack if it is compatible
                                 match match_stack.insert(w.name, matched) {
                                     Ok(new_stack_len) => {
-                                        self.matches.push(new_stack_len);
+                                        w.resume_point = Some(Checkpoint::new(new_stack_len));
                                         continue 'next_match;
                                     }
                                     Err(MatchError::StructurallyImpossible) => {
-                                        if self.processed_iterators < 64 {
-                                            if w.name.get_wildcard_level() == 1 {
-                                                self.compatibility_flag[k] |=
-                                                    1 << (self.processed_iterators - 1) as u64;
-                                            }
+                                        if self.processed_iterators < 64
+                                            && w.name.get_wildcard_level() == 1
+                                        {
+                                            self.compatibility_flag[k] |=
+                                                1 << (self.processed_iterators - 1) as u64;
                                         }
                                     }
                                     Err(_) => {
@@ -5053,7 +6301,7 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         wildcard_forward_pass = false;
                     }
                 }
-                PatternIter::Fn(index, name, s) => {
+                PatternIter::Node(index, s) => {
                     let mut tried_first_option = false;
 
                     // query an existing iterator
@@ -5061,31 +6309,17 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         Some(jj) => {
                             // get the next iteration of the function
                             if !structural_mismatch {
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        self.matches.push(x);
+                                match s.next_result(match_stack) {
+                                    Ok(_) => {
                                         continue 'next_match;
                                     }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        unreachable!(
-                                            "Structural mismatch after successful match of subiterator {:?}",
-                                            s.pattern
-                                        );
-                                    }
-                                    _ => {}
+                                    Err(_) => {}
                                 }
                             } else {
                                 // there is a structural mismatch for a future iterator, so
                                 // this iterator needs to move its position in the target list
-                                // clear all matches from this iterator
-                                match_stack.truncate(s.matches[0]);
-                            }
-
-                            if name.get_wildcard_level() > 0 {
-                                // pop the matched name and truncate the stack
-                                // we cannot wait until the truncation at the start of 'next_match
-                                // as we will try to match this iterator to a new index
-                                match_stack.truncate(self.matches.pop().unwrap());
+                                // discard all matches from this iterator
+                                s.discard_current(match_stack);
                             }
 
                             self.used_flag[*jj] = false;
@@ -5132,226 +6366,24 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
                         tried_first_option = true;
 
                         let new_target = self.target.get(ii);
-                        if let AtomView::Fun(f) = new_target {
-                            let target_name = f.get_symbol();
-                            let name_match = if name.get_wildcard_level() > 0 {
-                                match match_stack.insert(*name, Match::FunctionName(target_name)) {
-                                    Ok(new_stack_len) => {
-                                        self.matches.push(new_stack_len);
-                                        true
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        ii += 1;
-                                        continue;
-                                    }
-                                    Err(_) => {
-                                        // skipping based on previous match means we cannot prove structural mismatch
-                                        structural_mismatch = false;
-                                        ii += 1;
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                target_name == *name
-                            };
+                        s.set_new_target_complete(new_target, match_stack);
 
-                            if name_match {
-                                // inherit symmetric attributes from the matched target
-
-                                s.set_list_target(
-                                    new_target,
-                                    match_stack,
-                                    true,
-                                    !target_name.is_antisymmetric() && !target_name.is_symmetric(),
-                                    target_name.is_cyclesymmetric(),
-                                );
-
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        *index = Some(ii);
-                                        self.matches.push(x);
-                                        self.used_flag[ii] = true;
-                                        continue 'next_match;
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        if self.processed_iterators < 64 {
-                                            self.compatibility_flag[ii] |=
-                                                1 << (self.processed_iterators - 1) as u64;
-                                        }
-                                    }
-                                    _ => {
-                                        structural_mismatch = false;
-                                    }
-                                }
-
-                                if name.get_wildcard_level() > 0 {
-                                    // pop the matched name and truncate the stack
-                                    // we cannot wait until the truncation at the start of 'next_match
-                                    // as we will try to match this iterator to a new index
-                                    match_stack.truncate(self.matches.pop().unwrap());
-                                }
-                            }
-                        }
-
-                        ii += 1;
-                    }
-                }
-                PatternIter::Literal(index, atom) => {
-                    let mut tried_first_option = false;
-                    let mut ii = match index {
-                        Some(jj) => {
-                            self.used_flag[*jj] = false;
-                            tried_first_option = true;
-                            *jj + 1
-                        }
-                        None => {
-                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
-                                // start after the last used index
-                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
-                                while self.used_flag[pos] {
-                                    pos = (pos + 1) % self.used_flag.len();
-                                }
-                                pos
-                            } else {
-                                0
-                            }
-                        }
-                    };
-
-                    while ii < self.target.len() {
-                        if self.used_flag[ii] {
-                            if self.cyclic {
-                                break;
-                            }
-
-                            ii += 1;
-                            continue;
-                        }
-
-                        if self.ordered_gapless && tried_first_option {
-                            // cyclic sequences can start at any position
-                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
-                                break;
-                            }
-                        }
-
-                        tried_first_option = true;
-
-                        if self.target.get(ii) == *atom {
-                            *index = Some(ii);
-                            self.matches.push(match_stack.len());
-                            self.used_flag[ii] = true;
-                            continue 'next_match;
-                        }
-                        ii += 1;
-                    }
-                }
-                PatternIter::Sequence(index, s) => {
-                    let mut tried_first_option = false;
-
-                    // query an existing iterator
-                    let mut ii = match index {
-                        Some(jj) => {
-                            // get the next iteration of the function
-                            if !structural_mismatch {
-                                match s.next(match_stack) {
-                                    Ok((x, _)) => {
-                                        self.matches.push(x);
-                                        continue 'next_match;
-                                    }
-                                    Err(MatchError::StructurallyImpossible) => {
-                                        unreachable!(
-                                            "Structural mismatch after successful match of subiterator {:?}",
-                                            s.pattern
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                // there is a structural mismatch for a future iterator, so
-                                // this iterator needs to move its position in the target list
-                                // clear all matches from this iterator
-                                match_stack.truncate(s.matches[0]);
-                            }
-
-                            self.used_flag[*jj] = false;
-                            tried_first_option = true;
-                            *jj + 1
-                        }
-                        None => {
-                            if self.cyclic && !self.used_flag.iter().all(|u| *u) {
-                                // start after the last used index
-                                let mut pos = self.used_flag.iter().position(|x| *x).unwrap_or(0);
-                                while self.used_flag[pos] {
-                                    pos = (pos + 1) % self.used_flag.len();
-                                }
-                                pos
-                            } else {
-                                0
-                            }
-                        }
-                    };
-
-                    // find a new match and create a new iterator
-                    while ii < self.target.len() {
-                        if self.used_flag[ii]
-                            || self.processed_iterators < 64
-                                && self.compatibility_flag[ii]
-                                    & (1 << (self.processed_iterators - 1))
-                                    != 0
-                        {
-                            if self.cyclic {
-                                break;
-                            }
-
-                            ii += 1;
-                            continue;
-                        }
-
-                        if self.ordered_gapless && tried_first_option {
-                            // cyclic sequences can start at any position
-                            if !self.cyclic || self.used_flag.iter().any(|x| *x) {
-                                break;
-                            }
-                        }
-
-                        tried_first_option = true;
-
-                        let new_target = self.target.get(ii);
-                        match (new_target, s.slice_type) {
-                            (AtomView::Mul(_), SliceType::Mul) => {}
-                            (AtomView::Add(_), SliceType::Add) => {}
-                            (AtomView::Pow(_), SliceType::Pow) => {}
-                            _ => {
-                                ii += 1;
-                                continue;
-                            }
-                        };
-
-                        let ordered = match s.slice_type {
-                            SliceType::Add | SliceType::Mul => false,
-                            SliceType::Pow => true, // make sure pattern (base,exp) is not exchanged
-                            _ => unreachable!(),
-                        };
-
-                        s.set_list_target(new_target, match_stack, true, ordered, false);
-
-                        match s.next(match_stack) {
-                            Ok((x, _)) => {
+                        match s.next_result(match_stack) {
+                            Ok(_) => {
                                 *index = Some(ii);
-                                self.matches.push(x);
                                 self.used_flag[ii] = true;
 
                                 continue 'next_match;
                             }
-                            Err(MatchError::StructurallyImpossible) => {
-                                if self.processed_iterators < 64 {
-                                    self.compatibility_flag[ii] |=
-                                        1 << (self.processed_iterators - 1) as u64;
-                                };
-                            }
-                            _ => {
-                                structural_mismatch = false;
+                            Err(e) => {
+                                if matches!(e, MatchError::StructurallyImpossible) {
+                                    if self.processed_iterators < 64 {
+                                        self.compatibility_flag[ii] |=
+                                            1 << (self.processed_iterators - 1) as u64;
+                                    };
+                                } else {
+                                    structural_mismatch = false;
+                                }
                             }
                         }
 
@@ -5447,10 +6479,8 @@ impl<'a> Iterator for AtomTreeIterator<'a> {
     /// Return the next position and atom in the tree.
     fn next(&mut self) -> Option<Self::Item> {
         let mut location = Vec::new();
-        match self.next_into(Some(&mut location)) {
-            Some(atom) => Some((location, atom)),
-            None => None,
-        }
+        self.next_into(Some(&mut location))
+            .map(|atom| (location, atom))
     }
 }
 
@@ -5461,7 +6491,7 @@ pub struct PatternAtomTreeIterator<'a, 'b> {
     match_stack: WrappedMatchStack<'a, 'b>,
     tree_pos: Vec<usize>,
     used_flags: Vec<bool>,
-    first_match: bool,
+    has_target: bool,
 }
 
 /// A part of an expression with its position that yields a match.
@@ -5477,39 +6507,51 @@ pub struct PatternMatch<'a, 'b> {
 }
 
 impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
+    /// Search the target expression tree for a pattern. Missing conditions
+    /// mean no restrictions; missing settings use [`MatchSettings::new`].
     pub fn new(
         pattern: &'b Pattern,
         target: AtomView<'a>,
         conditions: Option<&'b Condition<PatternRestriction>>,
         settings: Option<&'b MatchSettings>,
     ) -> PatternAtomTreeIterator<'a, 'b> {
-        let mut it =
-            AtomTreeIterator::new(target, settings.unwrap_or(&DEFAULT_MATCH_SETTINGS).clone());
-        it.next(); // prevent a repeated match attempt on the entire target
+        let settings = settings.unwrap_or(&DEFAULT_MATCH_SETTINGS);
+        let mut it = AtomTreeIterator::new(target, settings.clone());
+
+        let match_stack =
+            WrappedMatchStack::new(conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION), settings);
+        let mut pattern_iter = AtomMatchIterator::new(pattern);
+        let mut tree_pos = Vec::new();
+        let first_target = if !settings.partial && settings.level_range.0 > 0 {
+            None
+        } else {
+            it.next_into(Some(&mut tree_pos))
+        };
+        if let Some(target) = first_target {
+            pattern_iter.set_new_target(target, &match_stack);
+        }
 
         PatternAtomTreeIterator {
             atom_tree_iterator: it,
-            pattern_iter: AtomMatchIterator::new(pattern, target),
-            match_stack: WrappedMatchStack::new(
-                conditions.unwrap_or(&DEFAULT_PATTERN_CONDITION),
-                settings.unwrap_or(&DEFAULT_MATCH_SETTINGS),
-            ),
-            tree_pos: Vec::new(),
+            pattern_iter,
+            match_stack,
+            tree_pos,
             used_flags: Vec::new(),
-            first_match: false,
+            has_target: first_target.is_some(),
         }
     }
 
     /// Generate the next match if it exists, with detailed information about the
     /// matched position. Use the iterator [Self::next] to obtain a map of wildcard matches.
     pub fn next_detailed(&mut self) -> Option<PatternMatch<'a, '_>> {
+        if !self.has_target {
+            return None;
+        }
         loop {
-            if let Some((_, used_flags)) = self.pattern_iter.next(&mut self.match_stack) {
-                // duplicate matches are prevented because the atom match iterator does not match to single atoms in a list
+            if let Some(used_flags) = self.pattern_iter.next(&mut self.match_stack) {
                 self.used_flags.clear();
                 self.used_flags.extend_from_slice(used_flags);
 
-                self.first_match = true;
                 return Some(PatternMatch {
                     position: &self.tree_pos,
                     used_flags: &self.used_flags,
@@ -5519,12 +6561,15 @@ impl<'a: 'b, 'b> PatternAtomTreeIterator<'a, 'b> {
             }
 
             if !self.match_stack.settings.partial {
+                self.has_target = false;
                 return None;
             }
 
             if let Some(cur_target) = self.atom_tree_iterator.next_into(Some(&mut self.tree_pos)) {
-                self.pattern_iter.set_new_target(cur_target);
+                self.pattern_iter
+                    .set_new_target(cur_target, &self.match_stack);
             } else {
+                self.has_target = false;
                 return None;
             }
         }
@@ -5559,6 +6604,8 @@ pub struct ReplaceIterator<'a, 'b> {
 }
 
 impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
+    /// Create an iterator of expressions obtained by replacing one match at a
+    /// time in the original target. Missing conditions and settings use the defaults.
     pub fn new(
         pattern: &'b Pattern,
         target: AtomView<'a>,
@@ -5727,7 +6774,7 @@ impl<'a: 'b, 'b> ReplaceIterator<'a, 'b> {
                 ReplaceIterator::copy_and_replace(
                     &mut h,
                     pattern_match.position,
-                    &pattern_match.used_flags,
+                    pattern_match.used_flags,
                     self.target,
                     new_rhs.as_view(),
                     ws,
@@ -5753,6 +6800,10 @@ impl<'a: 'b, 'b> Iterator for ReplaceIterator<'a, 'b> {
 
 #[cfg(test)]
 mod test {
+    use super::{
+        AtomMatchIterator, DEFAULT_MATCH_SETTINGS, DEFAULT_PATTERN_CONDITION,
+        PatternAtomTreeIterator, WrappedMatchStack,
+    };
     use crate::{
         atom::{Atom, AtomCore, AtomType},
         id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
@@ -5760,6 +6811,25 @@ mod test {
         printer::PrintOptions,
         symbol,
     };
+
+    fn assert_contains_all(got: &[Atom], expected: &[Atom]) {
+        for expected in expected {
+            assert!(
+                got.contains(expected),
+                "missing expected replacement {expected}; got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_optional() {
+        let x = parse!("x*y");
+        let pattern = parse!("(a_+x)*(a_+y)")
+            .to_pattern()
+            .set_optional(symbol!("a_"));
+        let r = x.replace(pattern).with(1);
+        assert_eq!(r, 1);
+    }
 
     #[test]
     fn complete_match() {
@@ -5772,6 +6842,22 @@ mod test {
         let mut it = pat.iter(parse!("g(x_,y_)"));
         assert_eq!(it.next(), Some(parse!("g(1,2)")));
         assert_eq!(it.next(), Some(parse!("g(2,1)")));
+    }
+
+    #[test]
+    fn exhaust_large_fixed_size_wildcard() {
+        let input = parse!(
+            "f(a0+a1+a2+a3+a4+a5+a6+a7+a8+a9+
+               a10+a11+a12+a13+a14+a15+a16+a17+a18+a19+
+               a20+a21+a22+a23+a24+a25+a26+a27+a28+x*y)"
+        );
+        let pattern = parse!("f(g__+x*h__)").to_pattern();
+        let settings = MatchSettings::default();
+
+        assert_eq!(
+            input.pattern_match(&pattern, None, Some(&settings)).count(),
+            1
+        );
     }
 
     #[test]
@@ -5813,15 +6899,17 @@ mod test {
     #[test]
     fn replace_wildcards_with_map() {
         let a = parse!("f1(v1__, 5) + v1*v2_ + v3^v3_").to_pattern();
-        let r = a.replace_wildcards(
-            &[
-                (symbol!("v1__"), parse!("arg(v4, v5)")),
-                (symbol!("v2_"), Atom::num(4)),
-                (symbol!("v3_"), Atom::num(5)),
-            ]
-            .into_iter()
-            .collect(),
-        );
+        let r = a
+            .replace_wildcards(
+                &[
+                    (symbol!("v1__"), parse!("arg(v4, v5)")),
+                    (symbol!("v2_"), Atom::num(4)),
+                    (symbol!("v3_"), Atom::num(5)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .unwrap();
 
         let res = parse!("f1(v4, v5, 5) + v1*4 + v3^5");
         assert_eq!(r, res);
@@ -5889,9 +6977,44 @@ mod test {
         let p = parse!("v1");
         let rhs = parse!("1");
 
-        let r = a.replace(p).level_range((1, Some(1))).with(rhs);
+        let r = a.replace(p).min_level(1).max_level(1).with(rhs);
         let res = parse!("v1*f1(1,f1(v1))");
         assert_eq!(r, res);
+
+        let replacement = Replacement::new(parse!("v1"), parse!("1"))
+            .min_level(1)
+            .max_level(1);
+        assert_eq!(a.replace_multiple([replacement]), res);
+
+        let settings = MatchSettings::new().min_level(1).max_level(1);
+        let count_variables = |settings| {
+            AtomTreeIterator::new(a.as_view(), settings)
+                .filter(|(_, atom)| *atom == parse!("v1").as_view())
+                .count()
+        };
+        assert_eq!(count_variables(settings.clone()), 1);
+        assert_eq!(count_variables(settings.clone().max_level(None)), 2);
+        let pattern = parse!("v1").to_pattern();
+        let mut matches =
+            PatternAtomTreeIterator::new(&pattern, a.as_view(), None, Some(&settings));
+        let first = matches.next_detailed().unwrap();
+        assert!(!first.position.is_empty());
+        assert_eq!(first.target, parse!("v1").as_view());
+        assert!(matches.next().is_none());
+        let root_pattern = a.to_pattern();
+        assert!(
+            PatternAtomTreeIterator::new(&root_pattern, a.as_view(), None, Some(&settings))
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            a.replace(parse!("v1"))
+                .min_level(1)
+                .max_level(1)
+                .max_level(None)
+                .with(parse!("1")),
+            parse!("v1*f1(1,f1(1))")
+        );
     }
 
     #[test]
@@ -5990,10 +7113,30 @@ mod test {
         let expr = parse!("f1(1)*f1(2)+f1(1)*f1(2)*f2");
         let pat = parse!("v1_(id1_)*v2_(id2_)");
 
+        let replacements = expr
+            .replace(pat.clone())
+            .iter(parse!("f1(id1_)"))
+            .collect::<Vec<_>>();
+        let expected_replacements = [
+            parse!("f2*f1(1)+f1(1)*f1(2)"),
+            parse!("f2*f1(2)+f1(1)*f1(2)"),
+            parse!("f2*f1(1)*f1(2)+f1(1)"),
+            parse!("f2*f1(1)*f1(2)+f1(2)"),
+        ];
+        assert_eq!(replacements.len(), expected_replacements.len());
+        for expected in expected_replacements {
+            assert!(
+                replacements.contains(&expected),
+                "missing expected replacement {expected}; got {replacements:?}"
+            );
+        }
+
         let expr = expr.replace(pat).with(parse!("f1(id1_)"));
 
-        let res = parse!("f1(1)+f2*f1(1)");
-        assert_eq!(expr, res);
+        assert!(
+            [parse!("f1(1)+f2*f1(1)"), parse!("f1(2)+f2*f1(2)")].contains(&expr),
+            "unexpected cached replacement result {expr}"
+        );
     }
 
     #[test]
@@ -6026,6 +7169,12 @@ mod test {
         // function shift
         let expr = parse!("fc1(f1(1),f1(2),f1(3))");
         let p = parse!("fc1(f1(v1_),f1(2),f1(3))");
+        let expr = expr.replace(p).with(&rhs);
+        assert_eq!(expr, 1);
+
+        // cross match
+        let expr = parse!("fc1(1,2,3)*f(2)");
+        let p = parse!("fc1(v1_,v2___)*f(v1_)");
         let expr = expr.replace(p).with(&rhs);
         assert_eq!(expr, 1);
     }
@@ -6068,7 +7217,7 @@ mod test {
     fn nested() {
         let res = parse!("f(x+x*y+f(x+x^2),x,f(x+x^2))").replace_map_bottom_up(|a, c, o| {
             if c.parent_type == Some(AtomType::Fun) {
-                let r = a.horner_scheme(None, false);
+                let r = a.horner_scheme(None, false, false);
                 if r.as_view() != a {
                     **o = r;
                 }
@@ -6076,5 +7225,473 @@ mod test {
         });
 
         assert_eq!(res, parse!("f(x*(1+y)+f(x*(1+x)),x,f(x*(1+x)))"));
+    }
+
+    #[test]
+    fn alternative() {
+        let pat = (parse!("x").to_pattern() | parse!("y").to_pattern()) * parse!("x_").to_pattern();
+
+        assert_eq!(parse!("alt(x,y)*x_"), pat.to_atom().unwrap());
+
+        let rhs = parse!("f(x_)").to_pattern();
+
+        let e = parse!("x*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(z)"));
+
+        let e = parse!("y*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(z)"));
+
+        let e = parse!("a*z").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("a*z"));
+    }
+
+    #[test]
+    fn match_stack_reset_during_backtracking() {
+        let replacements = parse!("f(1)*g(2)*g(3)")
+            .replace(parse!("h_(x_)*h_(y_)"))
+            .iter(parse!("hit(h_,x_,y_)"))
+            .collect::<Vec<_>>();
+        let expected = [parse!("f(1)*hit(g,2,3)"), parse!("f(1)*hit(g,3,2)")];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
+
+        let alt = parse!("f(x_,0)").to_pattern() | parse!("f(0,x_)").to_pattern();
+        let pat = alt * parse!("f(x_,1)").to_pattern();
+        let replacements = parse!("f(1,0)*f(0,2)*f(2,1)")
+            .replace(&pat)
+            .iter(parse!("hit(x_)"))
+            .collect::<Vec<_>>();
+        let expected = [parse!("f(1,0)*hit(2)")];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
+
+        let pat = parse!("g(x_*o_)*f(x_)")
+            .to_pattern()
+            .set_optional(symbol!("o_"));
+        let replacements = parse!("g(a*b)*f(a*b)")
+            .replace(&pat)
+            .iter(parse!("hit(x_,o_)"))
+            .collect::<Vec<_>>();
+        let expected = [parse!("hit(a*b,1)")];
+        assert_eq!(replacements.len(), expected.len());
+        assert_contains_all(&replacements, &expected);
+    }
+
+    #[test]
+    fn match_iterator_owns_cleanup_boundary() {
+        let outer_value = parse!("z");
+        let target = parse!("f(a,g(b))");
+        let pattern = parse!("f(x_,g(y_))").to_pattern();
+        let outer = symbol!("outer_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert!(match_stack.len() > 1);
+
+        iter.discard_current(&mut match_stack);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+
+        iter.set_new_target(target.as_view(), &match_stack);
+        while iter.next_result(&mut match_stack).is_ok() {}
+        assert_eq!(match_stack.len(), 1);
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+    }
+
+    #[test]
+    fn discard_match_that_adds_no_binding() {
+        let target = parse!("a");
+        let pattern = parse!("x_").to_pattern();
+        let wildcard = symbol!("x_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(wildcard, Match::Single(target.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 1);
+
+        iter.discard_current(&mut match_stack);
+        assert_eq!(match_stack.len(), 1);
+    }
+
+    #[test]
+    fn nested_function_bindings_restore_to_the_outer_frame() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("g(a(b),c(d))");
+        let pattern = parse!("g(f_(x_),h_(y_))").to_pattern();
+        let outer = symbol!("outer_");
+        let f = symbol!("f_");
+        let h = symbol!("h_");
+        let x = symbol!("x_");
+        let y = symbol!("y_");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 5);
+        assert_eq!(
+            match_stack.stack.get(f),
+            Some(&Match::FunctionName(symbol!("a")))
+        );
+        assert_eq!(
+            match_stack.stack.get(h),
+            Some(&Match::FunctionName(symbol!("c")))
+        );
+        assert_eq!(
+            match_stack.stack.get(x),
+            Some(&Match::Single(parse!("b").as_view()))
+        );
+        assert_eq!(
+            match_stack.stack.get(y),
+            Some(&Match::Single(parse!("d").as_view()))
+        );
+
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn failed_alternative_variant_does_not_leak_bindings() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("f(1,2)");
+        let pattern = parse!("f(x_,0)").to_pattern() | parse!("f(1,x_)").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x_");
+        let two = parse!("2");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 2);
+        assert_eq!(
+            match_stack.stack.get(x),
+            Some(&Match::Single(two.as_view()))
+        );
+
+        assert!(iter.next_result(&mut match_stack).is_err());
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn direct_wildcard_and_slice_fallback_share_one_cleanup_boundary() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("a*b*c");
+        let pattern = parse!("x__").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x__");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+
+        let mut match_count = 0;
+        while iter.next_result(&mut match_stack).is_ok() {
+            match_count += 1;
+            assert_eq!(match_stack.len(), 2);
+            let matched = match_stack.stack.get(x).unwrap();
+            if match_count == 1 {
+                assert_eq!(matched, &Match::Single(target.as_view()));
+            } else {
+                assert_ne!(matched, &Match::Single(target.as_view()));
+            }
+        }
+
+        assert_eq!(match_count, 4);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn sibling_backtracking_discards_nested_function_bindings() {
+        let outer_value = parse!("sentinel");
+        let target = parse!("f(a)*f(b)*g(b)");
+        let pattern = parse!("h_(x_)*g(x_)").to_pattern();
+        let outer = symbol!("outer_");
+        let h = symbol!("h_");
+        let x = symbol!("x_");
+        let b = parse!("b");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target(target.as_view(), &match_stack);
+        assert!(iter.next_result(&mut match_stack).is_ok());
+        assert_eq!(match_stack.len(), 3);
+        assert_eq!(
+            match_stack.stack.get(h),
+            Some(&Match::FunctionName(symbol!("f")))
+        );
+        assert_eq!(match_stack.stack.get(x), Some(&Match::Single(b.as_view())));
+
+        while iter.next_result(&mut match_stack).is_ok() {
+            assert_eq!(match_stack.len(), 3);
+        }
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn ranged_wildcard_backtracking_keeps_a_stable_stack_shape() {
+        let _ = symbol!("symbolica::id_test::stack_sym"; Symmetric);
+        let outer_value = parse!("sentinel");
+        let target = parse!("symbolica::id_test::stack_sym(a,b,g(c),d,e)");
+        let pattern = parse!("symbolica::id_test::stack_sym(x__,g(y_),z__)").to_pattern();
+        let outer = symbol!("outer_");
+        let x = symbol!("x__");
+        let y = symbol!("y_");
+        let z = symbol!("z__");
+        let mut match_stack =
+            WrappedMatchStack::new(&DEFAULT_PATTERN_CONDITION, &DEFAULT_MATCH_SETTINGS);
+        assert!(
+            match_stack
+                .insert(outer, Match::Single(outer_value.as_view()))
+                .is_ok()
+        );
+
+        let mut iter = AtomMatchIterator::new(&pattern);
+        iter.set_new_target_complete(target.as_view(), &match_stack);
+
+        let mut match_count = 0;
+        while iter.next_result(&mut match_stack).is_ok() {
+            match_count += 1;
+            assert_eq!(match_stack.len(), 4);
+            assert!(match_stack.stack.get(x).is_some());
+            assert!(match_stack.stack.get(y).is_some());
+            assert!(match_stack.stack.get(z).is_some());
+        }
+
+        assert!(match_count > 1);
+        assert_eq!(match_stack.len(), 1);
+        assert_eq!(
+            match_stack.stack.get(outer),
+            Some(&Match::Single(outer_value.as_view()))
+        );
+    }
+
+    #[test]
+    fn match_stack_reset_nested_slice_atom_fallback() {
+        let target = parse!("rubi_int(log(a/(a+b*x))*log(c*x/(a+b*x))^2/(x*(a+b*x)),x)");
+        let pattern =
+            parse!("rubi_int(u__*log(v_)*log(e__*(f__*(a__+b__*w_)^p_*(c__+d__*w_)^q_)^r_)^s_,w_)")
+                .to_pattern()
+                .set_optional(symbol!("e__"))
+                .set_optional(symbol!("f__"))
+                .set_optional(symbol!("a__"))
+                .set_optional(symbol!("b__"))
+                .set_optional(symbol!("c__"))
+                .set_optional(symbol!("d__"))
+                .set_optional(symbol!("p_"))
+                .set_optional(symbol!("q_"))
+                .set_optional(symbol!("r_"))
+                .set_optional(symbol!("s_"));
+        let bindings =
+            parse!("bindings(u__,v_,e__,f__,a__,b__,w_,p_,c__,d__,q_,r_,s_)").to_pattern();
+
+        let matched = target.replace(&pattern).iter(&bindings).next();
+
+        assert_eq!(
+            matched,
+            Some(parse!(
+                "bindings(1/(x*(a+b*x)),a/(a+b*x),1,c,0,1,x,1,a,b,-1,1,2)"
+            ))
+        );
+    }
+
+    #[test]
+    fn optional_wildcards_preserve_required_minimum_in_either_order() {
+        use super::Pattern;
+
+        let required = symbol!("x_");
+        let optional = symbol!("o_");
+        let target = parse!("x");
+        let rhs = parse!("f(x_,o_)").to_pattern();
+
+        for sum in [true, false] {
+            for optional_first in [false, true] {
+                for partial in [false, true] {
+                    let mut arguments = vec![
+                        Pattern::Wildcard(required, false),
+                        Pattern::Wildcard(optional, true),
+                    ];
+                    if optional_first {
+                        arguments.reverse();
+                    }
+                    let (pattern, expected) = if sum {
+                        (Pattern::Add(arguments), parse!("f(x,0)"))
+                    } else {
+                        (Pattern::Mul(arguments), parse!("f(x,1)"))
+                    };
+                    assert_eq!(
+                        target.replace(&pattern).partial(partial).with(&rhs),
+                        expected,
+                        "sum={sum}, optional_first={optional_first}, partial={partial}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optional() {
+        let pat = parse!("(a_+b_*x)^p_")
+            .to_pattern()
+            .set_optional(symbol!("a_"))
+            .set_optional(symbol!("b_"))
+            .set_optional(symbol!("p_"));
+
+        let rhs = parse!("f(a_,b_,p_)").to_pattern();
+
+        let e = parse!("(1+2*x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,2,3)"));
+
+        let e = parse!("(1+x)^3").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,1,3)"));
+
+        let e = parse!("1+2*x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,2,1)"));
+        let replacements = parse!("1+2*x").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        let non_default = parse!("f(1,2,1)");
+        let default = parse!("1+2*f(0,1,1)");
+        assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
+        assert!(
+            replacements.iter().position(|r| r == &non_default).unwrap()
+                < replacements.iter().position(|r| r == &default).unwrap(),
+            "non-default match should be yielded before optional-default fallback"
+        );
+
+        let e = parse!("1+x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1,1,1)"));
+
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(0,1,1)"));
+
+        let pat = parse!("x_*o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,1)"));
+
+        let pat = parse!("x_^o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,1)"));
+
+        let pat = parse!("x_+o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(x_,o_)").to_pattern();
+        let e = parse!("x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(x,0)"));
+
+        let pat = parse!("x*y*o_").to_pattern().set_optional(symbol!("o_"));
+        let rhs = parse!("f(o_)").to_pattern();
+        let e = parse!("x*y").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(1)"));
+        let replacements = parse!("x*y*z").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        let non_default = parse!("f(z)");
+        let default = parse!("z*f(1)");
+        assert_contains_all(&replacements, &[non_default.clone(), default.clone()]);
+        assert!(
+            replacements.iter().position(|r| r == &non_default).unwrap()
+                < replacements.iter().position(|r| r == &default).unwrap(),
+            "non-default match should be yielded before optional-default fallback"
+        );
+
+        let pat = parse!("(b_+2*x)*n_")
+            .to_pattern()
+            .set_optional(symbol!("b_"))
+            .set_optional(symbol!("n_"));
+        let rhs = parse!("f(b_,n_)").to_pattern();
+        let e = parse!("2*x").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f(0,1)"));
+
+        let pat = parse!("x*o1_*o2_")
+            .to_pattern()
+            .set_optional(symbol!("o1_"))
+            .set_optional(symbol!("o2_"));
+        let rhs = parse!("f(o1_,o2_)").to_pattern();
+        let replacements = parse!("x*y").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        assert_contains_all(&replacements, &[parse!("f(y,1)"), parse!("f(1,y)")]);
+        for replacement in replacements {
+            let s = replacement.to_string();
+            assert!(
+                !s.contains("arg") && !s.contains("()"),
+                "nonsensical optional wildcard replacement: {s}"
+            );
+        }
+        let replacements = parse!("x").replace(&pat).iter(&rhs).collect::<Vec<_>>();
+        assert_contains_all(&replacements, &[parse!("f(1,1)")]);
+        for replacement in replacements {
+            let s = replacement.to_string();
+            assert!(
+                !s.contains("arg") && !s.contains("()"),
+                "nonsensical both-default optional wildcard replacement: {s}"
+            );
+        }
+
+        let pat = parse!("f(x___)").to_pattern();
+        let rhs = parse!("g(x___)").to_pattern();
+
+        let e = parse!("f").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("f"));
+        assert!(parse!("f").replace(&pat).iter(&rhs).next().is_none());
+
+        let pat = pat.set_optional(symbol!("x___"));
+        let e = parse!("f").replace(&pat).with(&rhs);
+        assert_eq!(e, parse!("g()"));
     }
 }

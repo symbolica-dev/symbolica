@@ -2,7 +2,8 @@ use std::fmt::LowerExp;
 
 use rand::Rng;
 
-use super::{Constructible, Float, FloatLike, RealLike, SingleFloat};
+use super::Float;
+use super::{Constructible, FloatLike, RealLike, SingleFloat};
 use crate::domains::{integer::Integer, rational::Rational};
 
 impl TryFrom<Float> for Rational {
@@ -67,6 +68,9 @@ impl FloatLike for Rational {
     fn get_precision(&self) -> u32 {
         u32::MAX
     }
+
+    #[inline(always)]
+    fn set_precision(&mut self, _precision: u32) {}
 
     #[inline(always)]
     fn get_epsilon(&self) -> f64 {

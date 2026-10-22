@@ -1,8 +1,4 @@
-use symbolica::{
-    atom::Atom,
-    id::{AtomTreeIterator, MatchSettings},
-    parse,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let expr: Atom = parse!("f(z)*f(f(x),z)*f(y)");
@@ -11,11 +7,10 @@ fn main() {
 
     for (loc, view) in AtomTreeIterator::new(
         expr.as_view(),
-        MatchSettings {
-            level_range: (1, Some(2)),
-            level_is_tree_depth: false,
-            ..Default::default()
-        },
+        MatchSettings::new()
+            .min_level(1)
+            .max_level(2)
+            .level_is_tree_depth(false),
     ) {
         println!("\tAtom at location {loc:?}: {view}");
     }

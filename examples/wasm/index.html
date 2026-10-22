@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Symbolica WebAssembly example</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        max-width: 52rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+      }
+      form, label {
+        display: grid;
+        gap: 0.75rem;
+      }
+      form {
+        grid-template-columns: 1fr auto;
+      }
+      label:first-child, pre {
+        grid-column: 1 / -1;
+      }
+      input, select, button {
+        box-sizing: border-box;
+        font: inherit;
+        padding: 0.65rem;
+      }
+      pre {
+        min-height: 5rem;
+        overflow-x: auto;
+        padding: 1rem;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 0.35rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Symbolica in WebAssembly</h1>
+    <p>This page calls the Rust <code>evaluate_json</code> export in the browser.</p>
+
+    <form id="playground">
+      <label>
+        Expression
+        <input id="expression" value="(x+1)^5" autocomplete="off">
+      </label>
+      <select id="operation" aria-label="Operation">
+        <option value="expand">Expand</option>
+        <option value="factor">Factor</option>
+        <option value="derivative">Differentiate</option>
+        <option value="simplify">Simplify</option>
+        <option value="latex">Print LaTeX</option>
+        <option value="typst">Print Typst</option>
+      </select>
+      <button type="submit" disabled>Loading…</button>
+    </form>
+
+    <pre id="output" aria-live="polite"></pre>
+
+    <script type="module">
+      import init, { evaluate_json } from "./pkg/symbolica_wasm.js";
+
+      const form = document.querySelector("#playground");
+      const button = form.querySelector("button");
+      const output = document.querySelector("#output");
+
+      await init();
+      button.disabled = false;
+      button.textContent = "Evaluate";
+
+      function evaluate() {
+        const request = {
+          expression: document.querySelector("#expression").value,
+          operation: document.querySelector("#operation").value,
+          variable: "x",
+          point: "0",
+          depth: 6,
+          formats: ["symbolica", "latex", "typst"],
+        };
+        const response = JSON.parse(evaluate_json(JSON.stringify(request)));
+        output.textContent = response.ok ? response.result : `Error: ${response.error}`;
+      }
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        evaluate();
+      });
+      evaluate();
+    </script>
+  </body>
+</html>

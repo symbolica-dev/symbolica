@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use bytes::{Buf, BufMut};
-use rug::{Integer as MultiPrecisionInteger, integer::Order};
 
 use crate::{
     coefficient::{
@@ -9,6 +8,7 @@ use crate::{
         SerializedRationalPolynomial,
     },
     domains::{
+        backend::integer::{from_lsf_bytes, lsf_byte_size, write_lsf_bytes},
         finite_field::FiniteFieldElement,
         integer::{Integer, IntegerRing, Z},
         rational::Fraction,
@@ -37,6 +37,135 @@ const ARB_DEN: u8 = 0b01110000;
 const NUM_MASK: u8 = 0b00001111;
 const DEN_MASK: u8 = 0b01110000;
 const SIGN: u8 = 0b10000000;
+
+/// Inspect a canonical one-byte integer atom without general coefficient dispatch.
+#[inline]
+pub(crate) fn small_integer_atom(data: &[u8]) -> Option<i64> {
+    if (data[1] | SIGN) != (U8_NUM | SIGN) {
+        return None;
+    }
+    let n = i64::from(data[2]);
+    Some(if data[1] & SIGN == 0 { n } else { -n })
+}
+
+/// Read only the length when traversing an atom; avoid the full fraction dispatch.
+#[inline(always)]
+pub(crate) fn read_packed_u64(data: &[u8]) -> (u64, &[u8]) {
+    // Keep the common width out of the variable-width dispatch.
+    if data[0] == U8_NUM {
+        return (data[1] as u64, &data[2..]);
+    }
+    let mut rest = &data[1..];
+    let value = match data[0] {
+        U16_NUM => rest.get_u16_le() as u64,
+        U32_NUM => rest.get_u32_le() as u64,
+        U64_NUM => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed length"),
+    };
+    (value, rest)
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_denominator(data: &[u8]) -> (u64, &[u8]) {
+    let tag = data[0];
+    if tag == U8_NUM | U8_DEN {
+        return (data[2] as u64, &data[3..]);
+    }
+    read_packed_denominator_wide(data)
+}
+
+// Keep LLVM from merging the common case back into the wide jump table.
+#[cold]
+#[inline(always)]
+fn read_packed_denominator_wide(data: &[u8]) -> (u64, &[u8]) {
+    let tag = data[0];
+    // The count (or symbol ID) usually fits in one byte, even when the
+    // payload length is large. Keep its offset constant in these cases.
+    match tag {
+        U8_NUM_U16_DEN => {
+            return (
+                u16::from_le_bytes(data[2..4].try_into().unwrap()) as u64,
+                &data[4..],
+            );
+        }
+        U8_NUM_U32_DEN => {
+            return (
+                u32::from_le_bytes(data[2..6].try_into().unwrap()) as u64,
+                &data[6..],
+            );
+        }
+        U8_NUM_U64_DEN => {
+            return (
+                u64::from_le_bytes(data[2..10].try_into().unwrap()),
+                &data[10..],
+            );
+        }
+        U8_NUM => return (1, &data[2..]),
+        _ => {}
+    }
+    // Counts always occupy 1, 2, 4 or 8 bytes. No need to decode their value.
+    let count_size = 1usize << ((tag & NUM_MASK) - 1);
+    let mut rest = &data[1 + count_size..];
+    let value = match tag & DEN_MASK {
+        0 => 1,
+        U8_DEN => rest.get_u8() as u64,
+        U16_DEN => rest.get_u16_le() as u64,
+        U32_DEN => rest.get_u32_le() as u64,
+        U64_DEN => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed length"),
+    };
+    (value, rest)
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_numerator(data: &[u8]) -> u64 {
+    let tag = data[0] & NUM_MASK;
+    if tag == U8_NUM {
+        return data[1] as u64;
+    }
+    let mut rest = &data[1..];
+    match tag {
+        U16_NUM => rest.get_u16_le() as u64,
+        U32_NUM => rest.get_u32_le() as u64,
+        U64_NUM => rest.get_u64_le(),
+        _ => unreachable!("Invalid packed numerator"),
+    }
+}
+
+#[inline(always)]
+pub(crate) fn read_packed_pair(data: &[u8]) -> (u64, u64, &[u8]) {
+    if data[0] == U8_NUM_U8_DEN {
+        (data[1] as u64, data[2] as u64, &data[3..])
+    } else {
+        read_packed_pair_wide(data)
+    }
+}
+
+#[cold]
+#[inline(always)]
+fn read_packed_pair_wide(data: &[u8]) -> (u64, u64, &[u8]) {
+    data.get_frac_u64()
+}
+
+/// Skip a function's length header and payload.
+///
+/// # Safety
+/// `data` must start with a valid packed function length and contain its payload.
+#[inline(always)]
+pub(crate) unsafe fn skip_packed_function(data: &[u8]) -> &[u8] {
+    let (size, rest) = read_packed_u64(data);
+    unsafe { rest.get_unchecked(size as usize..) }
+}
+
+/// Skip a product/sum's packed count/length header and payload.
+///
+/// # Safety
+/// `data` must contain a valid packed count/length pair and its entire payload.
+#[inline(always)]
+pub(crate) unsafe fn skip_packed_list(data: &[u8]) -> &[u8] {
+    let (size, rest) = read_packed_denominator(data);
+    unsafe { rest.get_unchecked(size as usize..) }
+}
 
 const U8_NUM_U8_DEN: u8 = U8_NUM | U8_DEN;
 const U16_NUM_U8_DEN: u8 = U16_NUM | U8_DEN;
@@ -93,16 +222,25 @@ const fn get_size_of_natural(num_type: u8) -> u8 {
 }
 
 impl SerializedRationalPolynomial<'_> {
+    /// Decode the borrowed coefficient bytes into an owned rational polynomial.
+    /// The encoding must be valid and refer to the current symbol state.
     pub fn deserialize(self) -> RationalPolynomial<IntegerRing, u16> {
+        let (index, _, _) = self.0.get_frac_u64();
+        let vars = State::get_variable_list(VariableListIndex(index as usize));
+        self.deserialize_with_variables(vars)
+    }
+
+    pub(crate) fn deserialize_with_variables(
+        self,
+        vars: std::sync::Arc<Vec<crate::poly::PolyVariable>>,
+    ) -> RationalPolynomial<IntegerRing, u16> {
         let mut source = self.0;
 
-        let index;
         let num_nterms;
         let den_nterms;
-        (index, num_nterms, source) = source.get_frac_u64();
+        (_, num_nterms, source) = source.get_frac_u64();
         (den_nterms, _, source) = source.get_frac_u64();
 
-        let vars = State::get_variable_list(VariableListIndex(index as usize));
         let nvars = vars.len();
 
         let mut poly = RationalPolynomial::new(&Z, vars);
@@ -120,14 +258,11 @@ impl SerializedRationalPolynomial<'_> {
         fn parse_num(source: &mut &[u8]) -> Integer {
             match source.get_u8() {
                 1 => Integer::Single(source.get_i64_le()),
-                2 => Integer::Double(source.get_i128_le()),
+                2 => Integer::Double(source.get_i128_le().into()),
                 x @ 4 | x @ 5 => {
                     let (num_digits, _, new_source) = source.get_frac_u64();
                     *source = new_source;
-                    let i = MultiPrecisionInteger::from_digits(
-                        &source[..num_digits as usize],
-                        Order::Lsf,
-                    );
+                    let i = from_lsf_bytes(&source[..num_digits as usize]);
                     source.advance(num_digits as usize);
                     if x == 5 {
                         Integer::from(-i)
@@ -179,23 +314,20 @@ impl PackedRationalNumberWriter for Coefficient {
 
         #[inline(always)]
         fn write_multi_rational(r: &Fraction<IntegerRing>, dest: &mut Vec<u8>) {
-            let r = r.clone().to_multi_prec();
+            let num = r.numerator_ref().clone().to_multi_prec();
+            let den = r.denominator_ref().clone().to_multi_prec();
+            let num_digits = lsf_byte_size(&num);
+            let den_digits = lsf_byte_size(&den);
             dest.put_u8(ARB_NUM | ARB_DEN);
 
-            let num_digits = r.numer().significant_digits::<u8>();
-            let den_digits = r.denom().significant_digits::<u8>();
-
-            if r.numer() < &0 {
+            if r.numerator_ref().is_negative() {
                 (-(num_digits as i64), den_digits as u64).write_packed(dest);
             } else {
                 (num_digits as i64, den_digits as u64).write_packed(dest);
             }
 
-            let old_len = dest.len();
-            dest.resize(old_len + num_digits + den_digits, 0);
-            r.numer().write_digits(&mut dest[old_len..], Order::Lsf);
-            r.denom()
-                .write_digits(&mut dest[old_len + num_digits..], Order::Lsf);
+            write_lsf_bytes(&num, dest);
+            write_lsf_bytes(&den, dest);
         }
 
         match self {
@@ -264,7 +396,7 @@ impl PackedRationalNumberWriter for Coefficient {
                         }
                         Integer::Double(d) => {
                             dest.put_u8(2);
-                            dest.put_i128_le(*d);
+                            dest.put_i128_le(d.get());
                         }
                         Integer::Large(l) => {
                             if l.is_negative() {
@@ -272,11 +404,9 @@ impl PackedRationalNumberWriter for Coefficient {
                             } else {
                                 dest.put_u8(4);
                             }
-                            let num_digits = l.significant_digits::<u8>();
+                            let num_digits = lsf_byte_size(l);
                             (num_digits as u64, 1).write_packed(dest);
-                            let old_len = dest.len();
-                            dest.resize(old_len + num_digits, 0);
-                            l.write_digits(&mut dest[old_len..], Order::Lsf);
+                            write_lsf_bytes(l, dest);
                         }
                     }
                 }
@@ -348,9 +478,8 @@ impl PackedRationalNumberWriter for Coefficient {
 
         #[inline(always)]
         fn packed_size_multi_rat(r: &Fraction<IntegerRing>) -> u64 {
-            let l = r.clone().to_multi_prec();
-            let n = l.numer().significant_digits::<u8>() as u64;
-            let d = l.denom().significant_digits::<u8>() as u64;
+            let n = lsf_byte_size(&r.numerator_ref().clone().to_multi_prec()) as u64;
+            let d = lsf_byte_size(&r.denominator_ref().clone().to_multi_prec()) as u64;
             1 + (n, d).get_packed_size() + n + d
         }
 
@@ -380,7 +509,7 @@ impl PackedRationalNumberWriter for Coefficient {
     }
 }
 
-/// A reader for generalized rational numbers. See [`MultiPrecisionRationalNumberWriter`].
+/// A reader for generalized rational numbers. See also [`PackedRationalNumberWriter`].
 pub trait PackedRationalNumberReader {
     fn get_coeff_view(&self) -> (CoefficientView<'_>, &[u8]);
     fn get_frac_u64(&self) -> (u64, u64, &[u8]);
@@ -389,9 +518,16 @@ pub trait PackedRationalNumberReader {
     fn is_small_int(&self) -> bool;
     fn is_zero_rat(&self) -> bool;
     fn is_one_rat(&self) -> bool;
+
+    fn is_rational_polynomial(&self) -> bool;
 }
 
 impl PackedRationalNumberReader for [u8] {
+    #[inline(always)]
+    fn is_rational_polynomial(&self) -> bool {
+        self[1] == RAT_POLY
+    }
+
     #[inline(always)]
     fn get_coeff_view(&self) -> (CoefficientView<'_>, &[u8]) {
         let mut source = self;
@@ -633,7 +769,7 @@ impl PackedRationalNumberReader for [u8] {
             }
             U64_NUM => {
                 let v = source.get_u64_le();
-                (v as u64, source)
+                (v, source)
             }
             x => {
                 unreachable!("Unsupported numerator type {}", x)
@@ -657,7 +793,7 @@ impl PackedRationalNumberReader for [u8] {
             }
             U64_DEN => {
                 let v = source.get_u64_le();
-                (v as u64, source)
+                (v, source)
             }
             x => {
                 unreachable!("Unsupported denominator type {}", x)
@@ -834,6 +970,7 @@ impl PackedRationalNumberWriter for (u64, u64) {
         }
     }
 
+    #[inline]
     fn get_packed_size(&self) -> u64 {
         let mut size = 1;
         size += if self.0 <= u8::MAX as u64 {

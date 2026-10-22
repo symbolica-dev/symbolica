@@ -13,6 +13,7 @@ mod complex;
 mod double;
 mod error;
 mod field;
+mod interval;
 mod multiprecision;
 mod native;
 #[cfg(feature = "python")]
@@ -21,16 +22,23 @@ mod rational;
 mod simd;
 
 #[cfg(test)]
+mod complex_tests;
+#[cfg(test)]
 mod tests;
 
+pub use super::backend::float::RoundingDirection;
 pub use complex::Complex;
 pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
-pub use field::FloatField;
+pub use field::{FloatComparisonError, FloatField};
+pub use interval::{ComplexBall, RealBall};
 pub use multiprecision::Float;
 pub use native::F64;
 #[cfg(feature = "python")]
-pub use python::PythonMultiPrecisionFloat;
+pub use python::{
+    PythonComplexFloat, PythonFloat, PythonMultiPrecisionComplex, PythonMultiPrecisionFloat,
+    register_python_floats,
+};
 
 pub trait FloatLike:
     PartialEq
@@ -56,6 +64,28 @@ pub trait FloatLike:
     + MulAssign<Self>
     + DivAssign<Self>
 {
+    /// Compare ordered scalar values. Non-scalar types may return `None`.
+    #[inline]
+    fn real_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+
+    /// Classify a scalar float for exceptional-value handling.
+    /// Return `None` for domains without a scalar floating-point classification,
+    /// such as complex numbers, SIMD vectors, or exact types.
+    #[inline]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        None
+    }
+
+    /// Request scaled arithmetic for zero, subnormal or non-finite intermediates.
+    /// The default opts out of scalar range guards (for example for exact types
+    /// or types with multiple independently scaled components).
+    #[inline]
+    fn needs_rescaling(&self) -> bool {
+        false
+    }
+
     /// Set this value from another value. May reuse memory.
     fn set_from(&mut self, other: &Self);
 
@@ -63,6 +93,11 @@ pub trait FloatLike:
     fn mul_add(&self, a: &Self, b: &Self) -> Self;
     fn neg(&self) -> Self;
     fn zero(&self) -> Self;
+    /// Construct a NaN, preserving this value's precision and component shape.
+    /// Returns `None` for exact types, such as rationals, that cannot represent NaN.
+    fn nan(&self) -> Option<Self> {
+        None
+    }
     /// Create a zero that should only be used as a temporary value,
     /// as for some types it may have wrong precision information.
     fn new_zero() -> Self;
@@ -75,6 +110,11 @@ pub trait FloatLike:
 
     /// Get the number of precise binary digits.
     fn get_precision(&self) -> u32;
+    /// Set the working precision to `precision` binary digits. Types that loosely track
+    /// their precision discard the tracked loss, whereas certified enclosures stay valid.
+    /// The value is rounded when the precision is lowered. Types with a fixed precision
+    /// ignore this call.
+    fn set_precision(&mut self, precision: u32);
     fn get_epsilon(&self) -> f64;
     /// Return true iff the precision is fixed, or false
     /// if the precision is changed dynamically.
@@ -112,6 +152,17 @@ pub trait Constructible: FloatLike {
     fn new_sample_unit<R: Rng + ?Sized>(rng: &mut R) -> Self;
 }
 
+/// A float that has a fixed finite precision, such as `f64` (excluding multi-precision floats).
+pub trait FixedPrecision {
+    /// The number of binary digits in the mantissa.
+    const BINARY_PRECISION: usize;
+    /// The (rounded) number of decimal digits in the mantissa.
+    const DECIMAL_PRECISION: usize = Self::BINARY_PRECISION
+        .saturating_mul(30103)
+        .saturating_add(99999)
+        / 100000;
+}
+
 /// A number that behaves like a real number, with constants like π and e
 /// and functions like sine and cosine.
 ///
@@ -130,6 +181,57 @@ pub trait Real: FloatLike {
 
     fn conj(&self) -> Self;
     fn norm(&self) -> Self;
+    /// Magnitude of a pair, avoiding unnecessary overflow and underflow.
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let (mut a, mut b) = (self.norm(), other.norm());
+
+        match a.real_cmp(&b) {
+            Some(std::cmp::Ordering::Less) => std::mem::swap(&mut a, &mut b),
+            Some(_) => {}
+            None => return (self.clone() * self + other.clone() * other).sqrt(),
+        }
+
+        if b.is_fully_zero() {
+            return a;
+        }
+
+        let one = if a.get_precision() >= b.get_precision() {
+            a.one()
+        } else {
+            b.one()
+        };
+
+        let r = b / &a;
+        a * (one + r.clone() * r).sqrt()
+    }
+
+    /// Absolute value with the sign of `sign`, including signed zero where supported.
+    #[inline]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        if sign.real_cmp(&sign.zero()) == Some(std::cmp::Ordering::Less) {
+            -self.norm()
+        } else {
+            self.norm()
+        }
+    }
+
+    /// Compute log(1 + self), retaining small increments lost when adding one.
+    #[inline]
+    fn log1p(&self) -> Self {
+        if self.is_fully_zero() {
+            return self.clone();
+        }
+        if self.needs_rescaling() && self.real_cmp(&self.one()) == Some(std::cmp::Ordering::Greater)
+        {
+            return self.log();
+        }
+        // log(1+x) = 2 asinh(x / (2 sqrt(1+x))). This also avoids
+        // cancellation-induced precision loss in dynamically sized floats.
+        let two = self.from_usize(2);
+        (self.clone() / (self.one() + self).sqrt() / &two).asinh() * two
+    }
+
     fn sqrt(&self) -> Self;
     fn log(&self) -> Self;
     fn exp(&self) -> Self;
@@ -142,6 +244,22 @@ pub trait Real: FloatLike {
     fn sinh(&self) -> Self;
     fn cosh(&self) -> Self;
     fn tanh(&self) -> Self;
+    /// Reciprocal hyperbolic cosine, without overflowing an intermediate cosh.
+    #[inline]
+    fn sech(&self) -> Self {
+        // Split the exponential so that rounding exp(-|x|) to zero does not
+        // discard a representable subnormal value of 2 exp(-|x|).
+        let e = (-self.norm() / self.from_usize(2)).exp();
+        let e2 = e.clone() * &e;
+        (e.clone() + &e) * e / (e2.one() + e2.clone() * e2)
+    }
+
+    /// Reciprocal hyperbolic sine, retaining accuracy near zero and at infinity.
+    #[inline]
+    fn csch(&self) -> Self {
+        self.sech() / self.tanh()
+    }
+
     fn asinh(&self) -> Self;
     fn acosh(&self) -> Self;
     fn atanh(&self) -> Self;

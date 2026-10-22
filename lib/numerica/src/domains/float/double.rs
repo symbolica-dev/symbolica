@@ -6,11 +6,10 @@ use std::{
 
 use num_traits::FromPrimitive;
 use rand::Rng;
-use rug::Float as MultiPrecisionFloat;
 use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
-use super::{Constructible, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
@@ -144,6 +143,29 @@ impl DoubleFloat {
 }
 
 impl FloatLike for DoubleFloat {
+    fn nan(&self) -> Option<Self> {
+        Some(f64::NAN.into())
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(if self.is_nan() {
+            std::num::FpCategory::Nan
+        } else {
+            self.0.hi().classify()
+        })
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.0.hi().is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -209,6 +231,9 @@ impl FloatLike for DoubleFloat {
     fn get_precision(&self) -> u32 {
         106
     }
+
+    #[inline(always)]
+    fn set_precision(&mut self, _precision: u32) {}
 
     #[inline(always)]
     fn get_epsilon(&self) -> f64 {
@@ -455,6 +480,20 @@ impl Constructible for DoubleFloat {
 
 impl Real for DoubleFloat {
     #[inline(always)]
+    fn log1p(&self) -> Self {
+        self.0.ln_1p().into()
+    }
+
+    #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        if sign.0.hi().is_sign_negative() {
+            -self.norm()
+        } else {
+            self.norm()
+        }
+    }
+
+    #[inline(always)]
     fn pi(&self) -> Self {
         Df64::pi().into()
     }
@@ -620,6 +659,10 @@ impl Real for DoubleFloat {
     }
 }
 
+impl FixedPrecision for DoubleFloat {
+    const BINARY_PRECISION: usize = 106;
+}
+
 impl From<f64> for DoubleFloat {
     #[inline(always)]
     fn from(value: f64) -> Self {
@@ -649,7 +692,7 @@ impl From<&Rational> for DoubleFloat {
 
 impl From<Rational> for DoubleFloat {
     fn from(value: Rational) -> Self {
-        value.to_multi_prec_float(106).to_double_float()
+        (&value).into()
     }
 }
 
@@ -677,21 +720,20 @@ impl PartialOrd for DoubleFloat {
 
 impl InternalOrdering for DoubleFloat {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.is_nan().cmp(&other.is_nan()))
     }
 }
 
 impl Display for DoubleFloat {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let value = MultiPrecisionFloat::with_val(106, self.0.hi()) + self.0.lo();
-        Display::fmt(&value, f)
+        Display::fmt(&Float::from(*self), f)
     }
 }
 
 impl LowerExp for DoubleFloat {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let value = MultiPrecisionFloat::with_val(106, self.0.hi()) + self.0.lo();
-        LowerExp::fmt(&value, f)
+        LowerExp::fmt(&Float::from(*self), f)
     }
 }
 
@@ -715,6 +757,10 @@ impl Hash for DoubleFloat {
         }
 
         state.write_u64(self.0.hi().to_bits());
-        state.write_u64(self.0.lo().to_bits());
+        state.write_u64(if self.0.lo() == 0. {
+            0
+        } else {
+            self.0.lo().to_bits()
+        });
     }
 }

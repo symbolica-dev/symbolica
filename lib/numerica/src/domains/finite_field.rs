@@ -1,17 +1,27 @@
 //! Finite fields and modular rings.
 
+mod geometric_sequence_kernels;
+mod montgomery;
+mod polynomial_kernels;
+
+use crate::domains::integer::Complete;
 use rand::Rng;
-use rug::{Complete, Integer as MultiPrecisionInteger};
 use std::fmt::{Display, Error, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 
-use crate::domains::integer::Integer;
 use crate::domains::{RingOps, Set};
+use crate::domains::{
+    backend::integer::{BackendRandState, probably_prime as backend_probably_prime},
+    integer::{DoubleInteger, Integer, MultiPrecisionInteger, extended_gcd_i128},
+};
+use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 use super::integer::Z;
-use super::{EuclideanDomain, Field, InternalOrdering, Ring};
+use super::{
+    EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing, UniformlySampleableRing,
+};
 
 const HENSEL_LIFTING_MASK: [u8; 128] = [
     255, 85, 51, 73, 199, 93, 59, 17, 15, 229, 195, 89, 215, 237, 203, 33, 31, 117, 83, 105, 231,
@@ -27,6 +37,41 @@ const HENSEL_LIFTING_MASK: [u8; 128] = [
 pub type Zp = FiniteField<u32>;
 /// A 64-bit integer finite field.
 pub type Zp64 = FiniteField<u64>;
+
+/// Distribution over canonical representatives of a finite field.
+///
+/// Convert inclusive ranges (`start..=end`) or half-open ranges (`start..end`)
+/// with `.into()`. Half-open ranges exclude `end`.
+///
+/// ```
+/// use numerica::domains::{SampleableRing, finite_field::{FiniteFieldCore, Zp}};
+/// let field = Zp::new(17);
+/// let value = field.sample(&mut rand::rng(), &(3..7).into());
+/// assert!((3..7).contains(&field.from_element(&value)));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FiniteFieldSamplingPolicy {
+    /// Uniformly sample the entire field, including zero.
+    #[default]
+    Full,
+    /// Uniformly sample the intersection of this range with `[0, p)`.
+    ///
+    /// Sampling panics if the intersection is empty.
+    Range(std::ops::RangeInclusive<Integer>),
+}
+
+impl<T: Into<Integer>> From<std::ops::RangeInclusive<T>> for FiniteFieldSamplingPolicy {
+    fn from(range: std::ops::RangeInclusive<T>) -> Self {
+        let (lower, upper) = range.into_inner();
+        Self::Range(lower.into()..=upper.into())
+    }
+}
+
+impl<T: Into<Integer>> From<std::ops::Range<T>> for FiniteFieldSamplingPolicy {
+    fn from(range: std::ops::Range<T>) -> Self {
+        Self::Range(range.start.into()..=range.end.into() - Integer::one())
+    }
+}
 
 pub trait ToFiniteField<UField: FiniteFieldWorkspace>
 where
@@ -94,6 +139,8 @@ pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
     /// this number in `Self`.
     fn get_large_prime() -> Self;
 
+    /// Try to convert an integer to a finite field workspace number type.
+    /// Returns `None` if the integer is negative or too large.
     fn try_from_integer(n: Integer) -> Option<Self>;
 
     fn to_integer(&self) -> Integer;
@@ -109,6 +156,7 @@ pub trait FiniteFieldWorkspace: Clone + Display + Eq + Hash {
                 }
             }
             Integer::Double(s) => {
+                let s = s.get();
                 if s >= 0 && s <= u64::MAX as i128 {
                     Some(s as u64)
                 } else {
@@ -160,6 +208,47 @@ pub struct FiniteField<UField> {
     is_prime: bool,
 }
 
+impl<UField: FiniteFieldWorkspace> UniformlySampleableRing for FiniteField<UField>
+where
+    Self: Ring,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        FiniteFieldSamplingPolicy::Full
+    }
+}
+
+impl<UField: FiniteFieldWorkspace> SampleableRing for FiniteField<UField>
+where
+    Self: Ring,
+{
+    type SamplingPolicy = FiniteFieldSamplingPolicy;
+
+    #[inline]
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let max = self.characteristic() - Integer::one();
+        let (lower, upper) = match policy {
+            FiniteFieldSamplingPolicy::Full => (Integer::zero(), max),
+            FiniteFieldSamplingPolicy::Range(range) => (
+                range.start().clone().max(Integer::zero()),
+                range.end().clone().min(max),
+            ),
+        };
+        assert!(
+            lower <= upper,
+            "sampling policy has no field representatives"
+        );
+        if let (Some(lower), Some(upper)) = (lower.to_u64(), upper.to_u64()) {
+            self.nth(rng.random_range(lower..=upper).into())
+        } else {
+            self.nth(Z.sample(rng, &(lower..=upper)))
+        }
+    }
+}
+
 impl Zp {
     /// Create a new modular ring. `p` must be odd.
     pub fn new_non_prime(p: u32) -> Zp {
@@ -193,6 +282,21 @@ impl Zp {
             one: FiniteFieldElement(Self::get_one(p)),
             is_prime: true,
         }
+    }
+
+    /// Reduce an exact sum of products of raw Montgomery representatives.
+    ///
+    /// Dense multiplication kernels use this after proving that `accumulator` is smaller than
+    /// `p * 2^32`. The result is the corresponding field coefficient in Montgomery
+    /// representation.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn reduce_montgomery_product_sum(&self, accumulator: u64) -> FiniteFieldElement<u32> {
+        debug_assert!(
+            u128::from(accumulator) < (u128::from(self.p) << u32::BITS),
+            "a Montgomery product sum must be smaller than p * 2^32"
+        );
+        FiniteFieldElement(montgomery::montgomery_reduce_u32(self, accumulator))
     }
 
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^32 mod a.
@@ -329,10 +433,12 @@ impl RingOps<FiniteFieldElement<u32>> for Zp {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, self.mul(b, c));
     }
@@ -403,10 +509,12 @@ impl RingOps<&FiniteFieldElement<u32>> for Zp {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -442,6 +550,11 @@ impl Ring for Zp {
     /// Compute b^e % n.
     #[inline]
     fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
         if self.is_prime && e >= self.get_prime() as u64 - 1 {
             e %= self.get_prime() as u64 - 1;
         }
@@ -530,9 +643,11 @@ impl Ring for Zp {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p as i64));
-        FiniteFieldElement(r as u32)
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -600,6 +715,7 @@ impl FiniteFieldWorkspace for u64 {
                 }
             }
             Integer::Double(d) => {
+                let d = d.get();
                 if d >= 0 && d <= u64::MAX as i128 {
                     Some(d as u64)
                 } else {
@@ -616,6 +732,234 @@ impl FiniteFieldWorkspace for u64 {
     }
 }
 
+struct DiscreteLogPrimePower<UField> {
+    prime: u64,
+    exponent: u32,
+    cofactor: u64,
+    starting_exponent: u64,
+    beta_powers: Vec<FiniteFieldElement<UField>>,
+    gamma_powers: Vec<FiniteFieldElement<UField>>,
+    crt_idempotent: u64,
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a fixed-width prime field.
+struct FiniteFieldDiscreteLogContext<'a, UField>
+where
+    UField: FiniteFieldWorkspace,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+    FiniteFieldElement<UField>: Copy,
+{
+    field: &'a FiniteField<UField>,
+    base: FiniteFieldElement<UField>,
+    totient: u64,
+    factors: Vec<DiscreteLogPrimePower<UField>>,
+}
+
+impl<'a, UField> FiniteFieldDiscreteLogContext<'a, UField>
+where
+    UField: FiniteFieldWorkspace,
+    FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+    FiniteFieldElement<UField>: Copy,
+{
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a FiniteField<UField>,
+        base: &FiniteFieldElement<UField>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        assert!(totient > 1, "the discrete-log order must exceed one");
+        assert!(
+            !totient_primes.is_empty(),
+            "the discrete-log order factorization must not be empty"
+        );
+        let base_inverse = field.inv(base);
+        let mut factor_product = 1u64;
+        let mut factors = Vec::with_capacity(totient_primes.len());
+        for &(prime, exponent) in totient_primes {
+            assert!(prime > 1, "discrete-log factors must be prime");
+            assert!(
+                exponent > 0,
+                "discrete-log factor exponents must be positive"
+            );
+
+            let prime_power = prime
+                .checked_pow(exponent)
+                .expect("discrete-log prime power overflowed u64");
+            factor_product = factor_product
+                .checked_mul(prime_power)
+                .expect("discrete-log factorization overflowed u64");
+            assert!(
+                totient.is_multiple_of(prime_power),
+                "discrete-log prime power does not divide the order"
+            );
+
+            let cofactor = totient / prime_power;
+            let starting_exponent = prime_power / prime;
+            let gamma = field.pow(base, totient / prime);
+            assert!(
+                !field.is_one(&gamma),
+                "the discrete-log base does not have the requested order"
+            );
+
+            let table_len =
+                usize::try_from(prime).expect("discrete-log prime factor does not fit in usize");
+            let mut gamma_powers = Vec::with_capacity(table_len);
+            let mut gamma_power = field.one();
+            for _ in 0..prime {
+                gamma_powers.push(gamma_power);
+                field.mul_assign(&mut gamma_power, &gamma);
+            }
+
+            let (gcd, inverse, _) = extended_gcd_i128(cofactor as i128, prime_power as i128);
+            assert_eq!(gcd, 1, "discrete-log prime powers must be coprime");
+            let inverse = inverse.rem_euclid(prime_power as i128) as u64;
+            let crt_idempotent = ((cofactor as u128 * inverse as u128) % totient as u128) as u64;
+
+            let mut beta = field.pow(&base_inverse, cofactor);
+            let mut beta_powers = Vec::with_capacity(exponent as usize);
+            for _ in 0..exponent {
+                beta_powers.push(beta);
+                beta = field.pow(&beta, prime);
+            }
+
+            factors.push(DiscreteLogPrimePower {
+                prime,
+                exponent,
+                cofactor,
+                starting_exponent,
+                beta_powers,
+                gamma_powers,
+                crt_idempotent,
+            });
+        }
+
+        assert_eq!(
+            factor_product, totient,
+            "incomplete discrete-log order factorization"
+        );
+
+        Self {
+            field,
+            base: *base,
+            totient,
+            factors,
+        }
+    }
+
+    /// Computes `log_base(value)` using the data precomputed by [`Self::new`].
+    pub fn discrete_log(&self, value: &FiniteFieldElement<UField>) -> u64 {
+        assert!(
+            !self.field.is_zero(value),
+            "zero has no multiplicative discrete logarithm"
+        );
+
+        let mut result = 0u128;
+        for factor in &self.factors {
+            let mut z = self.field.pow(value, factor.cofactor);
+            let mut digit_exponent = factor.starting_exponent;
+            let mut prime_power = 1u64;
+            let mut residue = 0u64;
+
+            for beta in &factor.beta_powers {
+                let w = self.field.pow(&z, digit_exponent);
+                let digit = factor
+                    .gamma_powers
+                    .iter()
+                    .position(|power| *power == w)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
+                            self.base.0, value.0, factor.prime, factor.exponent
+                        )
+                    }) as u64;
+
+                if digit != 0 {
+                    self.field.mul_assign(&mut z, &self.field.pow(beta, digit));
+                }
+                residue += digit * prime_power;
+                prime_power *= factor.prime;
+                digit_exponent /= factor.prime;
+            }
+
+            result += (residue as u128 * factor.crt_idempotent as u128) % self.totient as u128;
+        }
+
+        let result = (result % self.totient as u128) as u64;
+        debug_assert!(value == &self.field.pow(&self.base, result));
+        result
+    }
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a 32-bit prime field.
+pub struct ZpDiscreteLogContext<'a> {
+    context: FiniteFieldDiscreteLogContext<'a, u32>,
+}
+
+impl<'a> ZpDiscreteLogContext<'a> {
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a Zp,
+        base: &FiniteFieldElement<u32>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        Self {
+            context: FiniteFieldDiscreteLogContext::new(field, base, totient, totient_primes),
+        }
+    }
+
+    /// Computes `log_base(value)` using the precomputed Pohlig–Hellman data.
+    ///
+    /// `value` must be nonzero and belong to the subgroup generated by `base`; otherwise this
+    /// method panics.
+    pub fn discrete_log(&self, value: &FiniteFieldElement<u32>) -> u64 {
+        self.context.discrete_log(value)
+    }
+}
+
+/// Precomputed Pohlig–Hellman data for repeated discrete logarithms with one
+/// base in a 64-bit prime field.
+pub struct Zp64DiscreteLogContext<'a> {
+    context: FiniteFieldDiscreteLogContext<'a, u64>,
+}
+
+impl<'a> Zp64DiscreteLogContext<'a> {
+    /// Precomputes the prime-power generators, digit tables, and CRT
+    /// idempotents for `base`.
+    ///
+    /// `totient_primes` must be the complete prime factorization of `totient`,
+    /// and `base` must have order `totient`.
+    pub fn new(
+        field: &'a Zp64,
+        base: &FiniteFieldElement<u64>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self {
+        Self {
+            context: FiniteFieldDiscreteLogContext::new(field, base, totient, totient_primes),
+        }
+    }
+
+    /// Computes `log_base(value)` using the precomputed Pohlig–Hellman data.
+    ///
+    /// `value` must be nonzero and belong to the subgroup generated by `base`; otherwise this
+    /// method panics.
+    pub fn discrete_log(&self, value: &FiniteFieldElement<u64>) -> u64 {
+        self.context.discrete_log(value)
+    }
+}
+
 impl Zp64 {
     /// Create a new modular ring. `n` must be odd.
     pub fn new_non_prime(p: u64) -> Zp64 {
@@ -623,13 +967,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: false,
         }
     }
@@ -640,13 +986,15 @@ impl Zp64 {
             panic!("Prime 2 is not supported: use Z2 instead.");
         }
 
+        let one = Self::get_one(p);
+        let r2 = (one as u128 * one as u128 % p as u128) as u64;
         FiniteField {
             p,
             m: Self::inv_2_64(p),
             r_mask: 0,
-            r2: 0,
+            r2,
             r_bits: 64,
-            one: FiniteFieldElement(Self::get_one(p)),
+            one: FiniteFieldElement(one),
             is_prime: true,
         }
     }
@@ -661,69 +1009,9 @@ impl Zp64 {
         totient: u64,
         totient_primes: &[(u64, u32)],
     ) -> FiniteFieldElement<u64> {
-        let mut crt = vec![];
-        for (p, e) in totient_primes {
-            let p_e = p.to_u64().unwrap().pow(*e);
-            let exp = totient.to_u64().unwrap() / p.to_u64().unwrap().pow(*e);
-
-            let g = self.pow(base, exp);
-            let g_inv = self.inv(&g);
-            let h = self.pow(res, exp);
-
-            let mut x = 0;
-            let gamma = self.pow(&g, p.pow(*e - 1));
-
-            'next: for k in 0..*e {
-                let hh = self.pow(&self.mul(&self.pow(&g_inv, x), &h), p.pow(*e - 1 - k));
-
-                if self.is_one(&hh) {
-                    continue;
-                }
-
-                // assume smooth prime with small factors
-                // TODO: switch to baby-step giant-step algorithm
-                let mut gamma_c = gamma;
-                for d in 1..*p {
-                    if gamma_c == hh {
-                        x += p.pow(k) * d;
-                        continue 'next;
-                    }
-
-                    self.mul_assign(&mut gamma_c, &gamma);
-                }
-
-                panic!(
-                    "No discrete logarithm found for base {} and res {} in field with prime {}^{}",
-                    base.0, res.0, p, e
-                );
-            }
-
-            crt.push((x, p_e));
-        }
-
-        if crt.len() == 1 {
-            return self.to_element(crt[0].0);
-        }
-
-        let mut cur = Integer::chinese_remainder(
-            crt[0].0.into(),
-            crt[1].0.into(),
-            crt[0].1.into(),
-            crt[1].1.into(),
-        );
-        let mut prime = Integer::from(crt[0].1) * crt[1].1;
-        for x in crt.iter().skip(2) {
-            cur = Integer::chinese_remainder(cur, x.0.into(), prime.clone(), x.1.into());
-            prime *= x.1;
-        }
-
-        if cur < 0 {
-            cur += prime;
-        }
-
-        let r = self.to_element(cur.to_u64().unwrap());
-        debug_assert_eq!(res, &self.pow(base, self.from_element(&r)));
-        r
+        self.to_element(
+            Zp64DiscreteLogContext::new(self, base, totient, totient_primes).discrete_log(res),
+        )
     }
 
     /// Returns the unit element in Montgomory form, ie.e 1 + 2^64 mod a.
@@ -760,8 +1048,8 @@ impl FiniteFieldCore<u64> for Zp64 {
     /// Convert a number in a prime field a % n to Montgomory form.
     #[inline(always)]
     fn to_element(&self, a: u64) -> FiniteFieldElement<u64> {
-        // TODO: slow, faster alternatives may need assembly
-        FiniteFieldElement((((a as u128) << 64) % self.p as u128) as u64)
+        // Montgomery multiplication removes one factor of R, so REDC(a R^2) stores a R mod p.
+        self.mul(FiniteFieldElement(a), FiniteFieldElement(self.r2))
     }
 
     /// Convert a number from Montgomory form to standard form.
@@ -843,10 +1131,12 @@ impl RingOps<FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -916,10 +1206,12 @@ impl RingOps<&FiniteFieldElement<u64>> for Zp64 {
         *a = self.mul(&*a, b);
     }
 
+    #[inline(always)]
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.add_assign(a, &self.mul(b, c));
     }
 
+    #[inline(always)]
     fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
         self.sub_assign(a, &self.mul(b, c));
     }
@@ -955,6 +1247,11 @@ impl Ring for Zp64 {
     /// Compute b^e % n.
     #[inline]
     fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
         if self.is_prime && e >= self.get_prime() - 1 {
             e %= self.get_prime() - 1;
         }
@@ -1043,9 +1340,11 @@ impl Ring for Zp64 {
         }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0.max(0)..range.1.min(self.p.min(i64::MAX as u64) as i64));
-        FiniteFieldElement(r as u64)
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+            .with_polynomial(self)
+            .with_geometric_sequences(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -1366,10 +1665,6 @@ impl Ring for FiniteField<Two> {
         if *b == 0 { None } else { Some(*a) }
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        rng.random_range(0..2)
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -1420,6 +1715,387 @@ impl Field for FiniteField<Two> {
     }
 }
 
+/// The 32-bit Mersenne prime 2^31 -1.
+///
+/// Can be used for faster finite field arithmetic
+/// w.r.t using Montgomery numbers.
+#[derive(Copy, Clone, Hash, Eq, PartialEq)]
+pub struct Mersenne32(u32);
+
+impl Default for Mersenne32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<u32> for Mersenne32 {
+    fn from(n: u32) -> Self {
+        Mersenne32(n)
+    }
+}
+
+impl Mersenne32 {
+    pub fn new() -> Self {
+        Mersenne32(Self::PRIME)
+    }
+
+    const SHIFT: u8 = 31;
+    pub const PRIME: u32 = (1 << Mersenne32::SHIFT) - 1;
+}
+
+impl std::fmt::Debug for Mersenne32 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl Display for Mersenne32 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FiniteFieldWorkspace for Mersenne32 {
+    fn get_large_prime() -> Mersenne32 {
+        Mersenne32(Self::PRIME)
+    }
+
+    fn try_from_integer(n: Integer) -> Option<Self> {
+        match n {
+            Integer::Single(s) => {
+                if s >= 0 && s <= Self::PRIME as i64 {
+                    Some(Mersenne32(s as u32))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn to_integer(&self) -> Integer {
+        self.0.into()
+    }
+}
+
+impl FiniteFieldCore<Mersenne32> for FiniteField<Mersenne32> {
+    fn new(p: Mersenne32) -> Self {
+        FiniteField {
+            p,
+            m: p,
+            r_mask: Mersenne32(0),
+            r2: Mersenne32(1),
+            r_bits: 31,
+            one: FiniteFieldElement(Mersenne32(1)),
+            is_prime: true,
+        }
+    }
+
+    fn get_prime(&self) -> Mersenne32 {
+        Mersenne32(Mersenne32::PRIME)
+    }
+
+    fn to_element(&self, a: Mersenne32) -> Self::Element {
+        if a.0 >= Mersenne32::PRIME {
+            a.0 - Mersenne32::PRIME
+        } else {
+            a.0
+        }
+    }
+
+    fn from_element(&self, a: &Self::Element) -> Mersenne32 {
+        Mersenne32(*a)
+    }
+
+    fn to_integer(&self, a: &Self::Element) -> Integer {
+        self.from_element(a).0.into()
+    }
+}
+
+impl Set for FiniteField<Mersenne32> {
+    type Element = u32;
+
+    fn size(&self) -> Option<Integer> {
+        Some(Mersenne32::PRIME.into())
+    }
+}
+
+impl RingOps<u32> for FiniteField<Mersenne32> {
+    #[inline(always)]
+    fn add(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        let mut sum = a + b; // cannot overflow
+        if sum >= Mersenne32::PRIME {
+            sum -= Mersenne32::PRIME;
+        }
+        sum
+    }
+
+    #[inline(always)]
+    fn sub(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        if a >= b {
+            a - b
+        } else {
+            a + (Mersenne32::PRIME - b)
+        }
+    }
+
+    #[inline(always)]
+    fn mul(&self, a: Self::Element, b: Self::Element) -> Self::Element {
+        let v = a as u64 * b as u64;
+        let q = (v >> Mersenne32::SHIFT) as u32;
+        let r = (v as u32 & Mersenne32::PRIME) + (q & Mersenne32::PRIME);
+
+        if r >= Mersenne32::PRIME {
+            r - Mersenne32::PRIME
+        } else {
+            r
+        }
+    }
+
+    #[inline]
+    fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.add(*a, b);
+    }
+
+    #[inline]
+    fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.sub(*a, b);
+    }
+
+    #[inline]
+    fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
+        *a = self.mul(*a, b);
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.add_assign(a, &self.mul(b, c));
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
+        self.sub_assign(a, &self.mul(b, c));
+    }
+
+    /// Computes -x mod n.
+    #[inline]
+    fn neg(&self, a: Self::Element) -> Self::Element {
+        if a == 0 { a } else { Mersenne32::PRIME - a }
+    }
+}
+
+impl RingOps<&u32> for FiniteField<Mersenne32> {
+    #[inline(always)]
+    fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        let mut sum = a + b; // cannot overflow
+        if sum >= Mersenne32::PRIME {
+            sum -= Mersenne32::PRIME;
+        }
+        sum
+    }
+
+    #[inline(always)]
+    fn sub(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        if *a >= *b {
+            *a - *b
+        } else {
+            *a + (Mersenne32::PRIME - *b)
+        }
+    }
+
+    #[inline(always)]
+    fn mul(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        let v = *a as u64 * *b as u64;
+        let q = (v >> Mersenne32::SHIFT) as u32;
+        let r = (v as u32 & Mersenne32::PRIME) + (q & Mersenne32::PRIME);
+
+        if r >= Mersenne32::PRIME {
+            r - Mersenne32::PRIME
+        } else {
+            r
+        }
+    }
+
+    #[inline]
+    fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.add(*a, *b);
+    }
+
+    #[inline]
+    fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.sub(*a, *b);
+    }
+
+    #[inline]
+    fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.mul(*a, *b);
+    }
+
+    fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.add_assign(a, self.mul(b, c));
+    }
+
+    fn sub_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
+        self.sub_assign(a, self.mul(b, c));
+    }
+
+    /// Computes -x mod n.
+    #[inline]
+    fn neg(&self, a: &Self::Element) -> Self::Element {
+        if *a == 0 { *a } else { Mersenne32::PRIME - a }
+    }
+}
+
+impl Ring for FiniteField<Mersenne32> {
+    #[inline]
+    fn zero(&self) -> Self::Element {
+        0
+    }
+
+    /// Return the unit element in Montgomory form.
+    #[inline]
+    fn one(&self) -> Self::Element {
+        1
+    }
+
+    #[inline]
+    fn nth(&self, n: Integer) -> Self::Element {
+        self.to_element(Mersenne32(n.to_finite_field(self)))
+    }
+
+    /// Compute b^e % n.
+    #[inline]
+    fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
+        let p_minus_1 = self.get_prime().0 as u64 - 1;
+        if e >= p_minus_1 {
+            e %= p_minus_1;
+        }
+
+        if e == 0 {
+            return self.one();
+        }
+
+        let mut x = *b;
+        let mut y = self.one();
+        while e != 1 {
+            if e % 2 == 1 {
+                y = self.mul(&y, &x);
+            }
+
+            x = self.mul(&x, &x);
+            e /= 2;
+        }
+
+        self.mul(&x, &y)
+    }
+
+    #[inline]
+    fn is_zero(&self, a: &Self::Element) -> bool {
+        *a == 0
+    }
+
+    #[inline]
+    fn is_one(&self, a: &Self::Element) -> bool {
+        *a == 1
+    }
+
+    fn one_is_gcd_unit() -> bool {
+        true
+    }
+
+    fn characteristic(&self) -> Integer {
+        Mersenne32::PRIME.into()
+    }
+
+    fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
+        if *a == 0 { None } else { Some(self.inv(a)) }
+    }
+
+    fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        if self.is_zero(b) {
+            None
+        } else {
+            Some(self.div(a, b))
+        }
+    }
+
+    fn format<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+    ) -> Result<bool, Error> {
+        if opts.symmetric_representation_for_finite_field {
+            Z.format(&self.to_symmetric_integer(element), opts, state, f)
+        } else {
+            Z.format(&self.from_element(element).0.into(), opts, state, f)
+        }
+    }
+}
+
+impl EuclideanDomain for FiniteField<Mersenne32> {
+    #[inline]
+    fn rem(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
+        0
+    }
+
+    #[inline]
+    fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element) {
+        (self.mul(a, &self.inv(b)), 0)
+    }
+
+    #[inline]
+    fn gcd(&self, _: &Self::Element, _: &Self::Element) -> Self::Element {
+        1
+    }
+}
+
+impl Field for FiniteField<Mersenne32> {
+    #[inline]
+    fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
+        self.mul(a, &self.inv(b))
+    }
+
+    #[inline]
+    fn div_assign(&self, a: &mut Self::Element, b: &Self::Element) {
+        *a = self.mul(*a, self.inv(b));
+    }
+
+    /// Computes x^-1 mod n.
+    fn inv(&self, a: &Self::Element) -> Self::Element {
+        assert!(*a != 0, "0 is not invertible");
+
+        // extended Euclidean algorithm: a x + b p = gcd(x, p) = 1 or a x = 1 (mod p)
+        let mut u1 = 1;
+        let mut u3 = *a;
+        let mut v1 = 0;
+        let mut v3 = Mersenne32::PRIME;
+        let mut even_iter: bool = true;
+
+        while v3 != 0 {
+            let q = u3 / v3;
+            let t3 = u3 - q * v3;
+            let t1 = u1 + q * v1;
+            u1 = v1;
+            v1 = t1;
+            u3 = v3;
+            v3 = t3;
+            even_iter = !even_iter;
+        }
+
+        debug_assert!(u3 == 1);
+        if even_iter {
+            u1 as u32
+        } else {
+            Mersenne32::PRIME - u1 as u32
+        }
+    }
+}
+
 /// The 64-bit Mersenne prime 2^61 -1.
 ///
 /// Can be used for faster finite field arithmetic
@@ -1430,6 +2106,12 @@ pub struct Mersenne64(u64);
 impl Default for Mersenne64 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<u64> for Mersenne64 {
+    fn from(n: u64) -> Self {
+        Mersenne64(n)
     }
 }
 
@@ -1460,26 +2142,15 @@ impl FiniteFieldWorkspace for Mersenne64 {
     }
 
     fn try_from_integer(n: Integer) -> Option<Self> {
-        if n <= Self::PRIME {
-            match n {
-                Integer::Single(s) => {
-                    if s >= 0 {
-                        Some(Mersenne64(s as u64))
-                    } else {
-                        None
-                    }
+        match n {
+            Integer::Single(s) => {
+                if s >= 0 && s <= Self::PRIME as i64 {
+                    Some(Mersenne64(s as u64))
+                } else {
+                    None
                 }
-                Integer::Double(d) => {
-                    if d >= 0 && d <= Self::PRIME as i128 {
-                        Some(Mersenne64(d as u64))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
             }
-        } else {
-            None
+            _ => None,
         }
     }
 
@@ -1674,6 +2345,11 @@ impl Ring for FiniteField<Mersenne64> {
     /// Compute b^e % n.
     #[inline]
     fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
         if e >= self.get_prime().0 - 1 {
             e %= self.get_prime().0 - 1;
         }
@@ -1724,13 +2400,6 @@ impl Ring for FiniteField<Mersenne64> {
         } else {
             Some(self.div(a, b))
         }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(
-            range.0.max(0)..range.1.min(Mersenne64::PRIME.min(i64::MAX as u64) as i64),
-        );
-        r as u64
     }
 
     fn format<W: std::fmt::Write>(
@@ -1789,7 +2458,7 @@ impl Field for FiniteField<Mersenne64> {
 
         while v3 != 0 {
             let q = u3 / v3;
-            let t3 = u3 % v3;
+            let t3 = u3 - q * v3;
             let t1 = u1 + q * v1;
             u1 = v1;
             v1 = t1;
@@ -1809,7 +2478,7 @@ impl Field for FiniteField<Mersenne64> {
 
 impl FiniteFieldWorkspace for Integer {
     fn get_large_prime() -> Integer {
-        Integer::Double(85070591730234615865843651857942052871)
+        Integer::from(85070591730234615865843651857942052871i128)
     }
 
     fn try_from_integer(n: Integer) -> Option<Self> {
@@ -1846,9 +2515,9 @@ impl FiniteFieldCore<Integer> for FiniteField<Integer> {
     /// Create a new modular ring. `n` must be odd and prime.
     fn new(m: Integer) -> FiniteField<Integer> {
         let n = m.clone().to_multi_prec();
-        let r_bits = n.significant_bits().div_ceil(64) * 64;
+        let r_bits = (n.significant_bits().div_ceil(64) * 64) as u32;
         let r = MultiPrecisionInteger::from(1) << r_bits;
-        let r_mask = MultiPrecisionInteger::from(&r - 1);
+        let r_mask = (&r - &MultiPrecisionInteger::from(1)).complete();
         let n_inv = {
             let inv = n
                 .clone()
@@ -2015,6 +2684,11 @@ impl Ring for FiniteField<Integer> {
     }
 
     fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
         if e == 0 {
             return self.one();
         }
@@ -2086,8 +2760,9 @@ impl Ring for FiniteField<Integer> {
         self.try_inv(b).map(|r| self.mul(a, &r))
     }
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(Z.sample(rng, range))
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty().with_polynomial(self)
     }
 
     fn format<W: std::fmt::Write>(
@@ -2186,9 +2861,9 @@ impl FiniteField<MultiPrecisionInteger> {
 impl FiniteFieldCore<MultiPrecisionInteger> for FiniteField<MultiPrecisionInteger> {
     /// Create a new modular ring. `n` must be odd and prime.
     fn new(p: MultiPrecisionInteger) -> FiniteField<MultiPrecisionInteger> {
-        let r_bits = p.significant_bits().div_ceil(64) * 64;
+        let r_bits = (p.significant_bits().div_ceil(64) * 64) as u32;
         let r = MultiPrecisionInteger::from(1) << r_bits;
-        let r_mask = MultiPrecisionInteger::from(&r - 1);
+        let r_mask = (&r - &MultiPrecisionInteger::from(1)).complete();
         let m = {
             let inv = p
                 .clone()
@@ -2348,7 +3023,7 @@ impl RingOps<&FiniteFieldElement<MultiPrecisionInteger>> for FiniteField<MultiPr
 
 impl Ring for FiniteField<MultiPrecisionInteger> {
     fn zero(&self) -> Self::Element {
-        FiniteFieldElement(MultiPrecisionInteger::new())
+        FiniteFieldElement(MultiPrecisionInteger::default())
     }
 
     fn one(&self) -> Self::Element {
@@ -2360,6 +3035,11 @@ impl Ring for FiniteField<MultiPrecisionInteger> {
     }
 
     fn pow(&self, b: &Self::Element, mut e: u64) -> Self::Element {
+        // Fermat reduction only applies to nonzero bases. Keep 0^0 = 1.
+        if self.is_zero(b) {
+            return if e == 0 { self.one() } else { self.zero() };
+        }
+
         if e == 0 {
             return self.one();
         }
@@ -2407,12 +3087,6 @@ impl Ring for FiniteField<MultiPrecisionInteger> {
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         self.try_inv(b).map(|r| self.mul(a, &r))
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        self.to_element(MultiPrecisionInteger::from(
-            rng.random_range(range.0..range.1),
-        ))
     }
 
     fn format<W: std::fmt::Write>(
@@ -2479,13 +3153,17 @@ where
         }
 
         if n > u64::MAX {
-            let n = match &n {
-                Integer::Double(n) => MultiPrecisionInteger::from(*n),
+            let n_mp = match &n {
+                Integer::Double(n) => MultiPrecisionInteger::from(n.get()),
                 Integer::Large(n) => n.clone(),
                 Integer::Single(_) => unreachable!(),
             };
 
-            return n.is_probably_prime((k + 24) as u32) != rug::integer::IsPrime::No;
+            if let Some(is_prime) = backend_probably_prime(&n_mp, (k + 24) as u32) {
+                return is_prime;
+            }
+
+            return Self::is_prime_field_large_integer(&n, k);
         }
 
         let mut s = 0;
@@ -2495,24 +3173,29 @@ where
             s += 1;
         }
 
+        let witnesses_1;
+        let witnesses_2;
+        let witnesses_3;
+        let witnesses_4;
         let w = if n < 341531 {
-            [Integer::Double(9345883071009581737)].as_slice()
+            witnesses_1 = [Integer::Double(DoubleInteger::new(9345883071009581737))];
+            witnesses_1.as_slice()
         } else if n < 1050535501 {
-            [
+            witnesses_2 = [
                 Integer::Single(336781006125),
                 Integer::Single(9639812373923155),
-            ]
-            .as_slice()
+            ];
+            witnesses_2.as_slice()
         } else if n < 350269456337i64 {
-            [
+            witnesses_3 = [
                 Integer::Single(4230279247111683200),
-                Integer::Double(14694767155120705706),
-                Integer::Double(16641139526367750375),
-            ]
-            .as_slice()
+                Integer::Double(DoubleInteger::new(14694767155120705706)),
+                Integer::Double(DoubleInteger::new(16641139526367750375)),
+            ];
+            witnesses_3.as_slice()
         } else if n < u64::MAX {
             // shortest SPRP basis from Jim Sinclair for testing primality of u64
-            [
+            witnesses_4 = [
                 Integer::Single(2),
                 Integer::Single(325),
                 Integer::Single(9375),
@@ -2520,12 +3203,39 @@ where
                 Integer::Single(450775),
                 Integer::Single(9780504),
                 Integer::Single(1795265022),
-            ]
-            .as_slice()
+            ];
+            witnesses_4.as_slice()
         } else {
             unreachable!()
         };
 
+        self.is_prime_field_with_witnesses(&n, d, s, w)
+    }
+
+    fn is_prime_field_large_integer(n: &Integer, k: usize) -> bool {
+        let mut s = 0;
+        let mut d: Integer = n - 1;
+        while &d % 2 == 0 {
+            d /= 2;
+            s += 1;
+        }
+
+        let witnesses: Vec<Integer> = super::integer::SMALL_PRIMES
+            .iter()
+            .take(k.max(24))
+            .map(|p| Integer::from(*p))
+            .collect();
+        let field = FiniteField::<Integer>::new(n.clone());
+        field.is_prime_field_with_witnesses(n, d, s, &witnesses)
+    }
+
+    fn is_prime_field_with_witnesses(
+        &self,
+        _n: &Integer,
+        d: Integer,
+        s: usize,
+        w: &[Integer],
+    ) -> bool {
         let neg_one = self.neg(&self.one());
 
         'test: for a in w {
@@ -2569,29 +3279,41 @@ where
 
         true
     }
-
     /// Perform Pollard's rho algorithm with Brent's cycle detection that finds
     /// a factor of the modulus `p`, where `p` must be non-prime.
     /// Calling this method on a prime field will result in an infinite loop.
     pub fn pollard_brent_rho(&self) -> Integer {
+        self.pollard_brent_rho_impl(None).unwrap()
+    }
+
+    /// Try Pollard's rho algorithm with Brent's cycle detection for at most
+    /// `max_iterations` polynomial evaluations.
+    ///
+    /// Returns `None` if no factor is found within the work limit. In
+    /// particular, a prime modulus exhausts the limit and returns `None`.
+    pub fn try_pollard_brent_rho(&self, max_iterations: u64) -> Option<Integer> {
+        self.pollard_brent_rho_impl(Some(max_iterations))
+    }
+
+    fn pollard_brent_rho_impl(&self, max_iterations: Option<u64>) -> Option<Integer> {
         const M: u64 = 1000;
 
         let mut rng = rand::rng();
-        let mut rug_rng = rug::rand::RandState::new();
-        rug_rng.seed(&MultiPrecisionInteger::from(rng.random::<u128>()));
+        let mut backend_rng = BackendRandState::new(rng.random::<u128>());
+        let mut iterations = 0;
 
         let mut c = Integer::new(3);
         let n = self.get_prime().to_integer();
-        let n_rug = match &n {
+        let n_mp = match &n {
             Integer::Single(_) => None,
-            Integer::Double(n) => Some(MultiPrecisionInteger::from(*n)),
+            Integer::Double(n) => Some(MultiPrecisionInteger::from(n.get())),
             Integer::Large(n) => Some(n.clone()),
         };
 
         'restart: loop {
             let cf = c.to_finite_field(&self);
-            let mut y = if let Some(n_rug) = &n_rug {
-                Integer::from(n_rug.clone().random_below(&mut rug_rng)).to_finite_field(self)
+            let mut y = if let Some(n_mp) = &n_mp {
+                Integer::from(backend_rng.below(n_mp)).to_finite_field(self)
             } else {
                 Integer::from(rng.random_range(0..n.to_u64().unwrap())).to_finite_field(self)
             };
@@ -2601,11 +3323,21 @@ where
             let mut r = 1;
             let mut g = Integer::one();
 
+            macro_rules! iterate {
+                ($value:expr) => {{
+                    if max_iterations.is_some_and(|limit| iterations >= limit) {
+                        return None;
+                    }
+                    iterations += 1;
+                    self.add(&self.mul(&$value, &$value), &cf)
+                }};
+            }
+
             while g == 1 {
                 x = y.clone();
 
                 for _ in 0..r {
-                    y = self.add(&self.mul(&y, &y), &cf);
+                    y = iterate!(y);
                 }
 
                 let mut k = 0;
@@ -2613,7 +3345,7 @@ where
                     ys = y.clone();
                     let mut q = self.one();
                     for _ in 0..M.min(r - k) {
-                        y = self.add(&self.mul(&y, &y), &cf);
+                        y = iterate!(y);
                         self.mul_assign(&mut q, &self.sub(&x, &y));
                     }
 
@@ -2626,7 +3358,7 @@ where
 
             if g == n {
                 loop {
-                    ys = self.add(&self.mul(&ys, &ys), &cf);
+                    ys = iterate!(ys);
                     g = self.to_integer(&self.sub(&x, &ys)).gcd(&n);
                     if g > 1 {
                         if g == n {
@@ -2634,13 +3366,13 @@ where
                             c += 1;
                             continue 'restart;
                         }
-                        return g;
+                        return Some(g);
                     }
                 }
             }
 
             if g != n {
-                return g;
+                return Some(g);
             }
         }
     }
@@ -3208,15 +3940,829 @@ pub const SMOOTH_PRIMES: [(u64, u8, [u8; 4]); 323] = [
 
 #[cfg(test)]
 mod test {
-    use rug::Integer as MultiPrecisionInteger;
     use std::str::FromStr;
 
-    use super::{FiniteFieldCore, Zp};
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use super::{FiniteFieldCore, FiniteFieldElement, Zp};
     use crate::domains::{
-        Field, Ring, RingOps,
-        finite_field::{FiniteField, PrimitiveRootIterator, Zp64},
-        integer::Integer,
+        Field, Ring, RingOps, SampleableRing, UniformlySampleableRing,
+        finite_field::{
+            FiniteField, PrimitiveRootIterator, Z2, Zp64, Zp64DiscreteLogContext,
+            ZpDiscreteLogContext,
+        },
+        integer::{Integer, MultiPrecisionInteger},
     };
+    use crate::kernels::{
+        DensePolynomialMulRequest, GeometricSequenceStepRequest, PolynomialKernels,
+    };
+
+    #[test]
+    fn sampling_policy_uses_canonical_field_representatives() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut seen = [false; 3];
+
+        for _ in 0..1000 {
+            let sample = field.sample(&mut rng, &(1..=49_999).into());
+            let value = field.to_integer(&sample).to_i64().unwrap() as usize;
+            assert_ne!(value, 0);
+            seen[value] = true;
+        }
+
+        assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn sampling_policy_default_covers_the_whole_field() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(2);
+        let mut seen = [false; 3];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample(&mut rng, &Default::default()));
+            seen[value as usize] = true;
+        }
+        assert_eq!(seen, [true; 3]);
+    }
+
+    #[test]
+    fn sampling_nonzero_covers_all_nonzero_representatives() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut seen = [false; 3];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample_uniform_nonzero(&mut rng));
+            assert_ne!(value, 0);
+            seen[value as usize] = true;
+            assert!(Z2.is_one(&Z2.sample_uniform_nonzero(&mut rng)));
+        }
+        assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn sampling_policy_half_open_ranges_exclude_the_upper_bound() {
+        let field = Zp::new(17);
+        let mut rng = StdRng::seed_from_u64(8);
+        let policy = (3..7).into();
+        let mut seen = [false; 4];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample(&mut rng, &policy));
+            assert!((3..7).contains(&value));
+            seen[(value - 3) as usize] = true;
+        }
+        assert_eq!(seen, [true; 4]);
+        assert!(field.is_zero(&field.sample(&mut rng, &(i64::MIN..1).into())));
+        assert_eq!(
+            field.from_element(&field.sample(&mut rng, &(16..u64::MAX).into())),
+            16
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_rejects_empty_half_open_ranges() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(9), &(0u64..0).into());
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_half_open_minimum_bound_does_not_overflow() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(10), &(i64::MIN..i64::MIN).into());
+    }
+
+    #[test]
+    fn sampling_policy_supports_full_u64_representatives() {
+        let prime = 18_446_744_073_709_551_557;
+        let field = Zp64::new(prime);
+        let mut rng = StdRng::seed_from_u64(4);
+        for nonzero in [false, true] {
+            let mut seen_above_i64 = false;
+            for _ in 0..100 {
+                let sample = if nonzero {
+                    field.sample_uniform_nonzero(&mut rng)
+                } else {
+                    field.sample_uniform(&mut rng)
+                };
+                let value = field.from_element(&sample);
+                assert!(value < prime);
+                if nonzero {
+                    assert_ne!(value, 0);
+                }
+                seen_above_i64 |= value > i64::MAX as u64;
+            }
+            assert!(seen_above_i64);
+        }
+        for policy in [(prime - 1..=u64::MAX).into(), (prime - 1..prime).into()] {
+            assert_eq!(
+                field.from_element(&field.sample(&mut rng, &policy)),
+                prime - 1
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_policy_supports_arbitrary_precision_representatives() {
+        let prime = Integer::from(MultiPrecisionInteger::from(1) << 521u32) - Integer::one();
+        let field = FiniteField::<Integer>::new(prime.clone());
+        let mut rng = StdRng::seed_from_u64(5);
+        for nonzero in [false, true] {
+            let mut seen_above_u64 = false;
+            for _ in 0..100 {
+                let sample = if nonzero {
+                    field.sample_uniform_nonzero(&mut rng)
+                } else {
+                    field.sample_uniform(&mut rng)
+                };
+                let value = field.from_element(&sample);
+                assert!(value >= Integer::zero() && value < prime);
+                if nonzero {
+                    assert!(!value.is_zero());
+                }
+                seen_above_u64 |= value > Integer::from(u64::MAX);
+            }
+            assert!(seen_above_u64);
+        }
+        let last = &prime - Integer::one();
+        for policy in [
+            (last.clone()..=prime.clone()).into(),
+            (last.clone()..prime).into(),
+        ] {
+            assert_eq!(field.from_element(&field.sample(&mut rng, &policy)), last);
+        }
+    }
+
+    #[test]
+    fn sampling_policy_clips_negative_bounds() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(6);
+        assert!(field.is_zero(&field.sample(&mut rng, &(-10..=0).into())));
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_rejects_empty_intersections() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(7), &(3..=10).into());
+    }
+
+    #[test]
+    fn zp_montgomery_product_sum_matches_reduced_reference_at_bounds() {
+        for prime in [3, 17, 65_000_011, 4_294_967_291] {
+            let field = Zp::new(prime);
+            let limit = u64::from(prime) << u32::BITS;
+            let accumulators = [
+                0,
+                1,
+                u64::from(prime - 1),
+                u64::from(u32::MAX),
+                1u64 << u32::BITS,
+                limit / 2,
+                limit - 1,
+            ];
+
+            for accumulator in accumulators {
+                let residue = (accumulator % u64::from(prime)) as u32;
+                let expected = field.mul(
+                    FiniteFieldElement::from_inner(residue),
+                    FiniteFieldElement::from_inner(1),
+                );
+                assert_eq!(
+                    field.reduce_montgomery_product_sum(accumulator),
+                    expected,
+                    "prime {prime}, accumulator {accumulator}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zp64_montgomery_conversion_matches_direct_radix_remainder() {
+        let fields = [
+            Zp64::new(3),
+            Zp64::new(17),
+            Zp64::new(10_030_613_004_288_000_001),
+            Zp64::new(18_446_744_073_709_551_557),
+            Zp64::new_non_prime(9),
+            Zp64::new_non_prime((1u64 << 63) - 1),
+            Zp64::new_non_prime((1u64 << 63) + 1),
+            Zp64::new_non_prime(u64::MAX),
+        ];
+
+        for field in fields {
+            let modulus = field.get_prime();
+            let radix = ((1u128 << 64) % modulus as u128) as u64;
+            let expected_r2 = (radix as u128 * radix as u128 % modulus as u128) as u64;
+            assert_eq!(field.r2, expected_r2, "modulus {modulus}");
+
+            for value in [
+                0,
+                1,
+                2,
+                modulus / 2,
+                modulus - 1,
+                modulus,
+                modulus.saturating_add(1),
+                u64::MAX - 1,
+                u64::MAX,
+            ] {
+                let element = field.to_element(value);
+                let expected = (((value as u128) << 64) % modulus as u128) as u64;
+                assert_eq!(*element.inner(), expected, "value {value} mod {modulus}");
+                assert_eq!(field.from_element(&element), value % modulus);
+            }
+        }
+    }
+
+    fn assert_dense_polynomial_mul<R: Ring>(
+        field: &R,
+        left: &[R::Element],
+        left_indices: &[u32],
+        right: &[R::Element],
+        right_indices: &[u32],
+        output_len: usize,
+    ) {
+        let mut expected = vec![field.zero(); output_len];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let terms = field
+            .kernels()
+            .polynomial()
+            .expect("finite field should provide polynomial kernels")
+            .try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            })
+            .unwrap();
+        let mut actual = vec![field.zero(); output_len];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks2_zp_polynomial_mul(
+        field: &Zp,
+        left: &[super::FiniteFieldElement<u32>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u32>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks2().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks4_polynomial_mul(
+        field: &Zp64,
+        left: &[super::FiniteFieldElement<u64>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u64>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks4().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    fn assert_ks2_zp64_polynomial_mul(
+        field: &Zp64,
+        left: &[super::FiniteFieldElement<u64>],
+        left_indices: &[u32],
+        right: &[super::FiniteFieldElement<u64>],
+        right_indices: &[u32],
+    ) {
+        let output_len =
+            left_indices.iter().max().unwrap() + right_indices.iter().max().unwrap() + 1;
+        let mut expected = vec![field.zero(); output_len as usize];
+        for (left, &left_index) in left.iter().zip(left_indices) {
+            for (right, &right_index) in right.iter().zip(right_indices) {
+                field.add_mul_assign(
+                    &mut expected[left_index as usize + right_index as usize],
+                    left,
+                    right,
+                );
+            }
+        }
+
+        let operation = super::polynomial_kernels::DenseZp64Mul::new(
+            field,
+            DensePolynomialMulRequest {
+                output_len: output_len as usize,
+                left_coefficients: left,
+                left_indices,
+                right_coefficients: right,
+                right_indices,
+            },
+        )
+        .unwrap();
+        let terms = operation.try_ks2().unwrap();
+        let mut actual = vec![field.zero(); output_len as usize];
+        for (position, coefficient) in terms {
+            actual[position as usize] = coefficient;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn geometric_sequences_sum_and_advance() {
+        let field = Zp::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 7);
+        assert_eq!(current.map(|value| field.from_element(&value)), [12, 7]);
+
+        let before = current;
+        assert!(
+            field
+                .kernels()
+                .geometric_sequences()
+                .unwrap()
+                .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                    current: &mut current,
+                    ratios: &ratios[..1],
+                })
+                .is_none()
+        );
+        assert_eq!(current, before);
+
+        let field = Zp64::new(17);
+        let mut current = [field.to_element(3), field.to_element(5)];
+        let ratios = [field.to_element(2), field.to_element(7)];
+        let sum = field
+            .kernels()
+            .geometric_sequences()
+            .unwrap()
+            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                current: &mut current,
+                ratios: &ratios,
+            })
+            .unwrap();
+        assert_eq!(field.from_element(&sum), 8);
+        assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+    }
+
+    #[test]
+    fn four_way_zp64_product_row_handles_remainder() {
+        let left = u64::MAX - 2;
+        let right_terms = [
+            (u64::MAX - 4, 0),
+            (17, 3),
+            (u64::MAX / 3, 6),
+            (1, 9),
+            (u64::MAX - 10, 12),
+            (29, 15),
+            (u64::MAX / 7, 18),
+        ];
+        let mut actual = vec![0u64; right_terms.len() * 3];
+        unsafe {
+            super::polynomial_kernels::add_u64_product_row_unrolled4(
+                actual.as_mut_ptr(),
+                left,
+                &right_terms,
+            )
+        };
+
+        for (position, &(right, offset)) in right_terms.iter().enumerate() {
+            assert_eq!(offset, position * 3);
+            let product = left as u128 * right as u128;
+            assert_eq!(actual[offset], product as u64);
+            assert_eq!(actual[offset + 1], (product >> 64) as u64);
+            assert_eq!(actual[offset + 2], 0);
+        }
+    }
+
+    #[test]
+    fn dense_polynomial_multiplication() {
+        let field = Zp::new(17);
+        let left = [1, 16, 7, 13].map(|value| field.to_element(value));
+        let right = [15, 3, 16, 8].map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            operation.u64_accumulation_mode(),
+            Some(super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction)
+        );
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 100);
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+            assert_ks2_zp_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+        }
+
+        let total_degree = 79usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: usize| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            ((high * 11 + middle * 7 + low * 3 + offset) % 16 + 1) as u32,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
+                }
+            }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(40, 1);
+        let (right, right_indices) = simplex(39, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
+
+        let field = Zp::new(4_294_967_291);
+        let left = [4_294_967_290, 4_294_967_200, 2_345_678_901, 123_456_789]
+            .map(|value| field.to_element(value));
+        let right = [4_294_967_289, 4_294_967_100, 3_456_789_012, 987_654_321]
+            .map(|value| field.to_element(value));
+        let operation = super::polynomial_kernels::DenseZpMul::new(
+            &field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert_eq!(operation.u64_accumulation_mode(), None);
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+        #[cfg(feature = "integer-gmp")]
+        assert_ks2_zp_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+
+        for (prime, expected_mode) in [
+            (
+                65_000_011,
+                super::polynomial_kernels::U64AccumulationMode::DirectMontgomeryReduction,
+            ),
+            (
+                500_000_003,
+                super::polynomial_kernels::U64AccumulationMode::NativeRemainder,
+            ),
+        ] {
+            let field = Zp::new(prime);
+            let maximum_raw = super::FiniteFieldElement::from_inner(prime - 1);
+            let left = vec![maximum_raw; 129];
+            let right = vec![maximum_raw; 65];
+            let maximum_product = u128::from(prime - 1) * u128::from(prime - 1);
+            assert!(maximum_product * left.len() as u128 * right.len() as u128 > u64::MAX as u128);
+            assert!(maximum_product * right.len() as u128 <= u64::MAX as u128);
+            for stride in [1, 128] {
+                let left_indices = (0..left.len() as u32)
+                    .map(|index| 17 + stride * index)
+                    .collect::<Vec<_>>();
+                let right_indices = (0..right.len() as u32)
+                    .map(|index| 29 + stride * index)
+                    .collect::<Vec<_>>();
+                let output_len = *left_indices.last().unwrap() as usize
+                    + *right_indices.last().unwrap() as usize
+                    + 1;
+                let operation = super::polynomial_kernels::DenseZpMul::new(
+                    &field,
+                    DensePolynomialMulRequest {
+                        output_len,
+                        left_coefficients: &left,
+                        left_indices: &left_indices,
+                        right_coefficients: &right,
+                        right_indices: &right_indices,
+                    },
+                )
+                .unwrap();
+                assert_eq!(operation.u64_accumulation_mode(), Some(expected_mode));
+                assert_dense_polynomial_mul(
+                    &field,
+                    &left,
+                    &left_indices,
+                    &right,
+                    &right_indices,
+                    output_len,
+                );
+            }
+        }
+
+        let field = Zp64::new(18_446_744_073_709_551_557);
+        let left = [
+            18_446_744_073_709_551_556,
+            18_446_744_073_709_551_500,
+            9_223_372_036_854_775_807,
+            12_345_678_901_234_567_890,
+        ]
+        .map(|value| field.to_element(value));
+        let right = [
+            18_446_744_073_709_551_555,
+            18_446_744_073_709_551_499,
+            9_223_372_036_854_775_809,
+            17_654_321_098_765_432_109,
+        ]
+        .map(|value| field.to_element(value));
+        assert_dense_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7], 15);
+
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right, &[0, 1, 4, 7]);
+            assert_ks4_polynomial_mul(&field, &left, &[0, 2, 5, 7], &right[..3], &[0, 1, 4]);
+            assert_ks4_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+            assert_ks2_zp64_polynomial_mul(&field, &left, &[0, 7, 2, 5], &right, &[7, 1, 4, 0]);
+        }
+
+        let raw = vec![super::FiniteFieldElement::from_inner(18_446_744_073_709_551_556); 64];
+        let indices = (0..64).collect::<Vec<_>>();
+        assert_dense_polynomial_mul(&field, &raw, &indices, &raw, &indices, 127);
+
+        #[cfg(feature = "integer-gmp")]
+        {
+            assert_ks4_polynomial_mul(&field, &raw, &indices, &raw, &indices);
+            assert_ks4_polynomial_mul(&field, &raw, &indices, &raw[..63], &indices[..63]);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &raw, &indices);
+
+            let small = (0..64)
+                .map(|index| field.to_element(index % 16 + 1))
+                .collect::<Vec<_>>();
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &small, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &small, &indices, &raw, &indices);
+            assert_ks2_zp64_polynomial_mul(&field, &raw, &indices, &small, &indices);
+        }
+
+        let modulus = Integer::from((1u128 << 64) + 13);
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus);
+        let left = [1u64, 17, 123_456_789, 9_876_543_210]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let right = [11u64, 23, 987_654_321, 8_765_432_109]
+            .map(|value| integer_field.to_element(Integer::from(value)));
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 15,
+                left_coefficients: &left,
+                left_indices: &[0, 2, 5, 7],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 4, 7],
+            },
+        )
+        .unwrap();
+        assert!(operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 2, 5, 7],
+            &right,
+            &[0, 1, 4, 7],
+            15,
+        );
+
+        let cancellation_left =
+            [1u64, 1].map(|value| integer_field.to_element(Integer::from(value)));
+        let cancellation_right = [Integer::one(), &integer_field.p - &Integer::one()]
+            .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 3,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1],
+            },
+        )
+        .unwrap();
+        assert!(cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 3,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
+
+        // A modulus immediately below its binary Montgomery radix forces the exact convolution
+        // through the one-remainder-per-output path.
+        let modulus = Integer::from(2u64).pow(127) - &Integer::one();
+        let integer_field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+        let maximum = &modulus - &Integer::one();
+        let left = (0..4)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let right = (4..8)
+            .map(|offset| integer_field.to_element(&maximum - &Integer::from(offset as u64)))
+            .collect::<Vec<_>>();
+        let operation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!operation.direct_montgomery_reduction);
+        assert_dense_polynomial_mul(
+            &integer_field,
+            &left,
+            &[0, 1, 2, 3],
+            &right,
+            &[0, 1, 2, 3],
+            7,
+        );
+
+        let cancellation_left = (0..4)
+            .map(|_| integer_field.to_element(Integer::one()))
+            .collect::<Vec<_>>();
+        let cancellation_right = [
+            Integer::one(),
+            &modulus - &Integer::one(),
+            Integer::one(),
+            &modulus - &Integer::one(),
+        ]
+        .map(|value| integer_field.to_element(value));
+        let cancellation = super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+            &integer_field,
+            DensePolynomialMulRequest {
+                output_len: 7,
+                left_coefficients: &cancellation_left,
+                left_indices: &[0, 1, 2, 3],
+                right_coefficients: &cancellation_right,
+                right_indices: &[0, 1, 2, 3],
+            },
+        )
+        .unwrap();
+        assert!(!cancellation.direct_montgomery_reduction);
+        assert_eq!(
+            integer_field
+                .try_dense_mul(DensePolynomialMulRequest {
+                    output_len: 7,
+                    left_coefficients: &cancellation_left,
+                    left_indices: &[0, 1, 2, 3],
+                    right_coefficients: &cancellation_right,
+                    right_indices: &[0, 1, 2, 3],
+                })
+                .unwrap()
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            [0, 2, 4, 6]
+        );
+
+        let sparse_indices = [0, 5000];
+        assert!(
+            super::polynomial_kernels::DenseIntegerMontgomeryMul::new(
+                &integer_field,
+                DensePolynomialMulRequest {
+                    output_len: 10_001,
+                    left_coefficients: &left[..2],
+                    left_indices: &sparse_indices,
+                    right_coefficients: &right[..2],
+                    right_indices: &sparse_indices,
+                },
+            )
+            .is_none()
+        );
+
+        let total_degree = 47usize;
+        let radix = total_degree + 1;
+        let simplex = |degree: usize, offset: u64| {
+            let mut coefficients = Vec::new();
+            let mut indices = Vec::new();
+            for high in 0..=degree {
+                for middle in 0..=degree - high {
+                    for low in 0..=degree - high - middle {
+                        coefficients.push(field.to_element(
+                            (high as u64 * 31 + middle as u64 * 17 + low as u64 * 7 + offset)
+                                % 10_000
+                                + 1,
+                        ));
+                        indices.push(((high * radix + middle) * radix + low) as u32);
+                    }
+                }
+            }
+            (coefficients, indices)
+        };
+        let (left, left_indices) = simplex(24, 1);
+        let (right, right_indices) = simplex(23, 3);
+        assert_dense_polynomial_mul(
+            &field,
+            &left,
+            &left_indices,
+            &right,
+            &right_indices,
+            radix.pow(3),
+        );
+    }
 
     #[test]
     fn primitive_root() {
@@ -3244,6 +4790,17 @@ mod test {
         let y = field.to_element(5);
         let r = field.mul(&x, &y);
         assert_eq!(field.from_element(&r), 11);
+    }
+
+    #[test]
+    fn bounded_pollard_brent_rho() {
+        let n = 166_659_413_u64;
+        let field = Zp64::new_non_prime(n);
+        assert_eq!(field.try_pollard_brent_rho(0), None);
+
+        let factor = field.try_pollard_brent_rho(50_000).unwrap();
+        assert!(factor > 1 && factor < n);
+        assert_eq!(Integer::from(n) % &factor, Integer::zero());
     }
 
     #[test]
@@ -3293,5 +4850,31 @@ mod test {
         let y = field.to_element(11);
         let log = field.discrete_log(&base, &y, 72, &[(2, 3), (3, 2)]);
         assert_eq!(field.from_element(&log), 55);
+    }
+
+    #[test]
+    fn reusable_discrete_log_context() {
+        let field = Zp::new(73);
+        let base = field.to_element(5);
+        let context = ZpDiscreteLogContext::new(&field, &base, 72, &[(2, 3), (3, 2)]);
+        for exponent in 0..72 {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
+
+        let field = Zp64::new(73);
+        let base = field.to_element(5);
+        let context = Zp64DiscreteLogContext::new(&field, &base, 72, &[(2, 3), (3, 2)]);
+        for exponent in 0..72 {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
+
+        let prime = 10_030_613_004_288_000_001;
+        let field = Zp64::new(prime);
+        let base = field.to_element(7);
+        let context =
+            Zp64DiscreteLogContext::new(&field, &base, prime - 1, &[(2, 27), (3, 14), (5, 6)]);
+        for exponent in [0, 1, 2, 55, 1_234_567_890, prime - 2] {
+            assert_eq!(context.discrete_log(&field.pow(&base, exponent)), exponent);
+        }
     }
 }

@@ -1,4 +1,25 @@
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+pub(crate) fn git_metadata_paths(directory: &Path) -> Vec<PathBuf> {
+    ["HEAD", "refs", "packed-refs"]
+        .into_iter()
+        .filter_map(|entry| {
+            let output = Command::new("git")
+                .current_dir(directory)
+                .args(["rev-parse", "--path-format=absolute", "--git-path", entry])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+            path.exists().then_some(path)
+        })
+        .collect()
+}
 
 fn get_git_version() -> Option<String> {
     let output = Command::new("git")
@@ -23,6 +44,8 @@ fn main() {
     };
 
     println!("cargo:rustc-env=SYMBOLICA_VERSION=symbolica-{}", version);
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    for path in git_metadata_paths(Path::new(".")) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }

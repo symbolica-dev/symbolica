@@ -1,5 +1,8 @@
 use super::*;
 
+static MERMAID_REPR_COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Represents a part of an edge that connects to one vertex. It can be directed or undirected.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "HalfEdge", module = "symbolica.core")]
@@ -54,13 +57,19 @@ pub struct PythonGraph {
     graph: Graph<Atom, Atom>,
 }
 
+impl From<Graph<Atom, Atom>> for PythonGraph {
+    fn from(graph: Graph<Atom, Atom>) -> Self {
+        Self { graph }
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonGraph {
     /// Create an empty graph.
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             graph: Graph::new(),
         }
@@ -74,6 +83,89 @@ impl PythonGraph {
     /// Print the graph in a human-readable format.
     fn __str__(&self) -> String {
         format!("{}", self.graph)
+    }
+
+    /// Convert the graph into an HTML Mermaid representation.
+    fn _repr_html_(&self) -> String {
+        let diagram = crate::printer::AnsiHtmlFormatter::escape_html(&self.graph.to_mermaid());
+        let id = MERMAID_REPR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id_attr = format!("symbolica-mermaid-{id}");
+
+        format!(
+            r##"<div id="{id_attr}-container" class="symbolica-mermaid-container">
+<style>
+#{id_attr}-container .mermaid {{
+  background: transparent;
+}}
+
+@media (prefers-color-scheme: dark) {{
+  #{id_attr}-container svg {{
+    background: transparent !important;
+  }}
+
+  #{id_attr}-container .node rect,
+  #{id_attr}-container .node circle,
+  #{id_attr}-container .node ellipse,
+  #{id_attr}-container .node polygon,
+  #{id_attr}-container .node path {{
+    fill: #f8fafc !important;
+    stroke: #a78bfa !important;
+    stroke-width: 1.5px !important;
+  }}
+
+  #{id_attr}-container .nodeLabel,
+  #{id_attr}-container .nodeLabel p,
+  #{id_attr}-container .node text {{
+    color: #111827 !important;
+    fill: #111827 !important;
+  }}
+
+  #{id_attr}-container .edgePath path,
+  #{id_attr}-container .flowchart-link {{
+    stroke: #cbd5e1 !important;
+    stroke-width: 1.8px !important;
+  }}
+
+  #{id_attr}-container marker path,
+  #{id_attr}-container .arrowheadPath {{
+    fill: #cbd5e1 !important;
+    stroke: #cbd5e1 !important;
+  }}
+
+  #{id_attr}-container .edgeLabel,
+  #{id_attr}-container .edgeLabel p {{
+    color: #f8fafc !important;
+    background-color: #111827 !important;
+  }}
+
+  #{id_attr}-container .edgeLabel rect,
+  #{id_attr}-container .labelBkg {{
+    fill: #111827 !important;
+    background-color: #111827 !important;
+  }}
+}}
+</style>
+<div id="{id_attr}" class="mermaid">
+{diagram}</div>
+</div>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+mermaid.initialize({{
+  startOnLoad: false,
+  theme: "base",
+  themeVariables: {{
+    background: "transparent",
+    mainBkg: "#f8fafc",
+    primaryColor: "#f8fafc",
+    primaryBorderColor: "#8b5cf6",
+    primaryTextColor: "#111827",
+    lineColor: "#64748b",
+    edgeLabelBackground: "#f8fafc"
+  }}
+}});
+mermaid.run({{ querySelector: "#{id_attr}" }}).catch(() => {{}});
+</script>"##
+        )
     }
 
     /// Hash the graph.
@@ -119,7 +211,7 @@ impl PythonGraph {
     /// >>> from symbolica import *
     /// >>> g, q, gh = HalfEdge(S("g")), HalfEdge(S("q"), True), HalfEdge(S("gh"), True)
     /// >>> graphs = Graph.generate(
-    /// >>>     external_nodes=[(1, g), (2, g)],
+    /// >>>     external_edges=[(1, g), (2, g)],
     /// >>>     vertex_signatures=[[g, g, g], [g, g, g, g],
     /// >>>                        [q.flip(), q, g], [gh.flip(), gh, g]],
     /// >>>     max_loops=2,
@@ -132,7 +224,7 @@ impl PythonGraph {
     ///
     /// Parameters
     /// ----------
-    /// external_nodes: Sequence[tuple[Expression | int, HalfEdge]]
+    /// external_edges: Sequence[tuple[Expression | int, HalfEdge]]
     ///     The external edges, consisting of a tuple of the node data and a tuple of the edge direction and edge data.
     ///     If the node data is the same, flip symmetries will be recognized.
     /// vertex_signatures: Sequence[Sequence[HalfEdge]]
@@ -176,6 +268,7 @@ impl PythonGraph {
         filter_fn: Option<Py<PyAny>>,
         #[gen_stub(override_type(type_repr = "typing.Optional[typing.Callable[[Graph], bool]]"))]
         progress_fn: Option<Py<PyAny>>,
+        py: Python<'_>,
     ) -> PyResult<HashMap<PythonGraph, PythonExpression>> {
         if max_vertices.is_none() && max_loops.is_none() {
             return Err(exceptions::PyValueError::new_err(
@@ -260,13 +353,13 @@ impl PythonGraph {
             }
         }));
 
-        Ok(
+        Ok(py.detach(move || {
             Graph::generate(&external_edges, &vertex_signatures, settings)
                 .unwrap_or_else(|e| e)
                 .into_iter()
                 .map(|(k, v)| (Self { graph: k }, Atom::num(v).into()))
-                .collect(),
-        )
+                .collect()
+        }))
     }
 
     /// Convert the graph to a graphviz dot string.
@@ -304,7 +397,7 @@ impl PythonGraph {
                 directed,
                 data.map(|x| x.to_expression().expr).unwrap_or_default(),
             )
-            .map_err(exceptions::PyValueError::new_err)
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Set the data of the node at index `index`, returning the old data.

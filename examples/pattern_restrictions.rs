@@ -1,10 +1,5 @@
 use numerica::domains::integer::Integer;
-use symbolica::{
-    atom::{AtomCore, AtomView},
-    coefficient::CoefficientView,
-    id::{Match, MatchSettings, WildcardRestriction},
-    parse, symbol,
-};
+use symbolica::prelude::*;
 fn main() {
     let expr = parse!("f(1,2,3,4,5,6,7)");
     let pat_expr = parse!("f(x__,y__,z__,w__)");

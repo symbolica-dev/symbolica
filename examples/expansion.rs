@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, parse};
+use symbolica::prelude::*;
 
 fn main() {
     let input = parse!("(1+x)^3");

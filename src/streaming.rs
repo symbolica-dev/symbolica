@@ -13,7 +13,6 @@ use rayon::{ThreadPool, prelude::*};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
-    LicenseManager,
     alias::{
         AliasHandle, collect_alias_handles_in, collect_alias_handles_with_dependencies,
         register_alias_atom,
@@ -22,6 +21,7 @@ use crate::{
         Atom, AtomView,
         representation::{ALIAS_EXPORT_SECTION_MAGIC, read_raw_atom, remap_aliases_in_raw_atom},
     },
+    license::LicenseManager,
     state::{RecycledAtom, State, Workspace},
 };
 
@@ -29,6 +29,8 @@ static TEMP_FILES_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// A stream that can be read from by using `name`.
 pub trait ReadableNamedStream: Read + Send {
+    /// Open the named stream for reading. The supplied file implementations
+    /// panic if the file cannot be opened.
     fn open(name: &str) -> Self;
 }
 
@@ -46,8 +48,11 @@ impl ReadableNamedStream for Decompressor<BufReader<File>> {
 
 /// A stream that can be written to by using `name`.
 pub trait WriteableNamedStream: Write + Send {
+    /// The reader that decodes streams produced by this writer.
     type Reader: ReadableNamedStream;
 
+    /// Create the named stream for writing. The supplied file implementations
+    /// truncate an existing file and panic if it cannot be opened.
     fn create(name: &str) -> Self;
 }
 
@@ -71,11 +76,11 @@ impl WriteableNamedStream for CompressorWriter<BufWriter<File>> {
 #[derive(Clone)]
 pub struct TermStreamerConfig {
     /// The number of cores to use.
-    pub n_cores: usize,
+    pub(crate) n_cores: usize,
     /// The path where expressions are written.
-    pub path: String,
+    pub(crate) path: String,
     /// The maximum size of the memory buffer.
-    pub max_mem_bytes: usize,
+    pub(crate) max_mem_bytes: usize,
 }
 
 impl Default for TermStreamerConfig {
@@ -85,6 +90,31 @@ impl Default for TermStreamerConfig {
             path: ".".to_owned(),
             max_mem_bytes: 1073741824, // 1 GB
         }
+    }
+}
+
+impl TermStreamerConfig {
+    /// Create term streamer configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of cores to use.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.n_cores = n_cores;
+        self
+    }
+
+    /// Set the path where expressions are written.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Set the maximum size of the memory buffer.
+    pub fn max_mem_bytes(mut self, max_mem_bytes: usize) -> Self {
+        self.max_mem_bytes = max_mem_bytes;
+        self
     }
 }
 
@@ -133,8 +163,7 @@ impl<R: ReadableNamedStream> Iterator for TermInputStream<'_, R> {
 /// ```
 /// # use std::io::BufWriter;
 /// # use std::fs::File;
-/// use symbolica::{atom::AtomCore, parse};
-/// use symbolica::streaming::TermStreamer;
+/// use symbolica::prelude::*;
 /// let input = parse!("(x+1)*y + (y+1)^2*z");
 ///
 /// let mut stream = TermStreamer::<BufWriter<File>>::new(Default::default());
@@ -230,11 +259,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             filename,
             thread_pool: Arc::new(
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(if LicenseManager::is_licensed() {
-                        config.n_cores
-                    } else {
-                        1
-                    })
+                    .num_threads(LicenseManager::max_threads(config.n_cores))
                     .build()
                     .unwrap(),
             ),
@@ -276,14 +301,14 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     pub fn push(&mut self, a: Atom) {
         if let AtomView::Add(aa) = a.as_view() {
             for arg in aa.iter() {
-                self.push_sorted_impl(arg.to_owned());
+                self.push_sorted_impl(arg.to_owned()).unwrap();
             }
         } else {
-            self.push_sorted_impl(a);
+            self.push_sorted_impl(a).unwrap();
         }
     }
 
-    fn push_sorted_impl(&mut self, a: Atom) {
+    fn push_sorted_impl(&mut self, a: Atom) -> Result<(), std::io::Error> {
         let size = a.as_view().get_byte_size();
         self.mem_buf.push(a);
         self.mem_size += size;
@@ -294,24 +319,30 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             self.sort();
 
             if self.mem_size * 2 > self.config.max_mem_bytes {
-                self.flush();
+                self.flush()?;
             }
         }
+
+        Ok(())
     }
 
     /// Write the memory buffer to a new file.
-    fn flush(&mut self) {
+    fn flush(&mut self) -> Result<(), std::io::Error> {
         self.file_buf
             .push(W::create(&self.get_filename(self.file_buf.len())));
 
-        let f = self.file_buf.last_mut().unwrap();
+        let f = self.file_buf.last_mut().ok_or(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "no file buffer",
+        ))?;
         let mut file_aliases = Vec::new();
         for x in self.mem_buf.drain(..) {
             merge_alias_handles(&mut file_aliases, &collect_alias_handles_in(x.as_view()));
-            x.as_view().write(&mut *f).unwrap();
+            x.as_view().write(&mut *f)?;
         }
         self.file_aliases.push(file_aliases);
         self.mem_size = 0;
+        Ok(())
     }
 
     fn collect_aliases(&self) -> Vec<Arc<AliasHandle>> {
@@ -414,7 +445,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         }
 
         for x in &mut self.file_buf {
-            x.flush().unwrap();
+            x.flush()?;
         }
 
         let mut tmp = Atom::new();
@@ -552,10 +583,10 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             if !last.merge_terms(c.as_view(), &mut helper) {
                 if let AtomView::Num(n) = last.as_view() {
                     if !n.is_zero() {
-                        new_stream.push_sorted_impl(last.clone());
+                        new_stream.push_sorted_impl(last.clone()).unwrap();
                     }
                 } else {
-                    new_stream.push_sorted_impl(last.clone());
+                    new_stream.push_sorted_impl(last.clone()).unwrap();
                 }
 
                 last.set_from_view(&c.as_view());
@@ -564,16 +595,16 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
 
         if let AtomView::Num(n) = last.as_view() {
             if !n.is_zero() {
-                new_stream.push_sorted_impl(last.clone());
+                new_stream.push_sorted_impl(last.clone()).unwrap();
             }
         } else {
-            new_stream.push_sorted_impl(last.clone());
+            new_stream.push_sorted_impl(last.clone()).unwrap();
         }
 
         if !new_stream.file_buf.is_empty() {
             // the memory buffer has the larger elements than the
             // file streams, so write the elements to a file
-            new_stream.flush();
+            new_stream.flush().unwrap();
         }
 
         *self = new_stream;
@@ -641,14 +672,18 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         let reader = self.reader();
 
         let out_wrap = Mutex::new(new_out);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         t.install(
             #[inline(always)]
             || {
-                reader.par_bridge().for_each(|x| {
-                    let r = f(x);
-                    out_wrap.lock().unwrap().push(r);
-                });
+                reader.par_bridge().for_each_init(
+                    || inherited_unlock.activate(),
+                    |_, x| {
+                        let r = f(x);
+                        out_wrap.lock().unwrap().push(r);
+                    },
+                );
             },
         );
 
@@ -733,7 +768,8 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         n_cores: usize,
     ) -> Atom {
-        if n_cores < 2 || !LicenseManager::is_licensed() {
+        let n_cores = LicenseManager::max_threads(n_cores);
+        if n_cores < 2 {
             return self.map_terms_single_core(f);
         }
 
@@ -755,21 +791,25 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         p: &ThreadPool,
     ) -> Atom {
-        if !LicenseManager::is_licensed() {
+        if LicenseManager::max_threads(p.current_num_threads()) < 2 {
             return self.map_terms_single_core(f);
         }
 
         if let AtomView::Add(aa) = self {
             let out_wrap = Mutex::new(vec![]);
             let args = aa.iter().collect::<Vec<_>>();
+            let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
             p.install(
                 #[inline(always)]
                 || {
-                    args.par_iter().for_each(|x| {
-                        let r = f(*x);
-                        out_wrap.lock().unwrap().push(r);
-                    });
+                    args.par_iter().for_each_init(
+                        || inherited_unlock.activate(),
+                        |_, x| {
+                            let r = f(*x);
+                            out_wrap.lock().unwrap().push(r);
+                        },
+                    );
                 },
             );
 

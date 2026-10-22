@@ -1,7 +1,4 @@
-use symbolica::{
-    atom::{Atom, AtomCore},
-    function, parse, symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let input = parse!("x*(1+a)+x*5*y+f(5,x)+2+y^2+x^2 + x^3");

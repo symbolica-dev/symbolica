@@ -27,6 +27,7 @@ impl std::fmt::Display for Slot {
 }
 
 impl Slot {
+    /// Return a slot in the same storage area, offset by `index` entries.
     pub fn index(&self, index: usize) -> Slot {
         match self {
             Slot::Param(i) => Slot::Param(*i + index),
@@ -133,12 +134,169 @@ impl std::fmt::Display for Instruction {
     }
 }
 
+/// Instructions and data exported from an [`ExpressionEvaluator`].
+///
+/// This is the portable representation used when an evaluator is translated to another runtime.
+/// Parameters are referenced by [`Slot::Param`], constants by [`Slot::Const`], temporaries by
+/// [`Slot::Temp`], and outputs by [`Slot::Out`]. Calls to functions defined as non-inlined in a
+/// [`FunctionMap`] can be resolved through [`ExportedInstructions::sub_evaluators`].
+#[derive(Debug, Clone)]
+pub struct ExportedInstructions<T> {
+    /// The number of values expected in the parameter list.
+    pub input_count: usize,
+    /// The number of values produced in the output list.
+    pub output_count: usize,
+    /// The linear instruction stream.
+    pub instructions: Vec<Instruction>,
+    /// The number of temporary storage slots required to execute `instructions`.
+    pub temporary_count: usize,
+    /// Constant values referenced by [`Slot::Const`]. Slots listed in
+    /// [`Self::constant_functions`] may contain rational placeholders in an exact
+    /// evaluator; resolve their definitions at the target precision before use.
+    pub constants: Vec<T>,
+    /// Symbolic definitions of constant slots evaluated by registered functions.
+    ///
+    /// In exact evaluators these slots may contain placeholders, not
+    /// the value of the registered constant. A consumer must resolve these
+    /// definitions at its target precision before using the constant slots.
+    pub constant_functions: Vec<ExportedConstantFunction>,
+    /// Locally defined evaluators called by [`Instruction::Fun`] instructions in this stream.
+    ///
+    /// A call resolves to a sub-evaluator when its symbol and tags match the corresponding fields
+    /// of an entry in this list. Calls without a matching entry remain ordinary external function
+    /// calls. Sub-evaluators may recursively contain their own sub-evaluators.
+    pub sub_evaluators: Vec<ExportedSubEvaluator<T>>,
+}
+
+/// An exact registered constant or fixed-argument function in a constant slot.
+#[derive(Debug, Clone)]
+pub struct ExportedConstantFunction {
+    /// Index in [`ExportedInstructions::constants`], not in temporary storage.
+    pub index: usize,
+    /// Registered function or constant symbol.
+    pub symbol: Symbol,
+    /// Canonical function tags, in their original order.
+    pub tags: Vec<String>,
+    /// Exact numerical arguments; empty for a registered constant such as pi.
+    pub fixed_args: Vec<Complex<Rational>>,
+}
+
+/// A non-inlined function body exported alongside an instruction stream.
+///
+/// The `symbol` and `tags` fields form the call signature and match the corresponding values in an
+/// [`Instruction::Fun`] instruction. Parameters are passed in the order of that instruction's
+/// argument slots.
+#[derive(Debug, Clone)]
+pub struct ExportedSubEvaluator<T> {
+    /// The function symbol used by the calling [`Instruction::Fun`].
+    pub symbol: Symbol,
+    /// The function tags used by the calling [`Instruction::Fun`].
+    pub tags: Vec<String>,
+    /// The number of parameter values expected by this evaluator.
+    pub input_count: usize,
+    /// The number of values produced by this evaluator.
+    pub output_count: usize,
+    /// The exported function body.
+    pub instructions: Arc<ExportedInstructions<T>>,
+}
+
 impl<T: Clone> ExpressionEvaluator<T> {
-    /// Export the instructions, the size of the temporary storage, and the list of constants.
+    /// Export the instruction stream, temporary storage size, constants, and sub-evaluators.
+    ///
+    /// The returned [`ExportedInstructions`] value contains all data needed to execute the evaluator
+    /// outside Symbolica:
+    /// - [`ExportedInstructions::input_count`] is the number of input parameters.
+    /// - [`ExportedInstructions::output_count`] is the number of output values.
+    /// - [`ExportedInstructions::instructions`] is the linear instruction list.
+    /// - [`ExportedInstructions::temporary_count`] is the number of temporary slots required.
+    /// - [`ExportedInstructions::constants`] contains the values addressed by [`Slot::Const`].
+    /// - [`ExportedInstructions::constant_functions`] identifies registered constants and
+    ///   fixed-argument functions whose slots must be resolved at the target precision.
+    /// - [`ExportedInstructions::sub_evaluators`] contains bodies for non-inlined functions. A
+    ///   function instruction without a matching sub-evaluator is an ordinary external call.
+    ///
     /// This function can be used to create an evaluator in a different language.
-    pub fn export_instructions(&self) -> (Vec<Instruction>, usize, Vec<T>) {
+    pub fn export_instructions(&self) -> ExportedInstructions<T> {
+        // Callees precede callers, so each body can reuse already-exported bodies.
+        let mut bodies = Vec::with_capacity(self.external_fns.len());
+        for external in &self.external_fns {
+            let body = external.body.as_ref().map(|body| {
+                let instructions = Arc::new(
+                    body.program()
+                        .export_instructions(&self.external_fns, &bodies),
+                );
+                ExportedSubEvaluator {
+                    symbol: external.symbol,
+                    tags: external
+                        .tags
+                        .iter()
+                        .map(|tag| tag.to_canonical_string())
+                        .collect(),
+                    input_count: instructions.input_count,
+                    output_count: instructions.output_count,
+                    instructions,
+                }
+            });
+            bodies.push(body);
+        }
+        self.export_instructions_impl(&self.external_fns, &bodies)
+    }
+
+    pub(super) fn export_instructions_impl(
+        &self,
+        external_fns: &[ExternalFunctionContainer<T>],
+        bodies: &[Option<ExportedSubEvaluator<T>>],
+    ) -> ExportedInstructions<T> {
+        let mut exported = self.program().export_instructions(external_fns, bodies);
+        exported.constant_functions = self
+            .external_fns
+            .iter()
+            .filter_map(|external| {
+                external
+                    .constant_index
+                    .map(|index| ExportedConstantFunction {
+                        index,
+                        symbol: external.symbol,
+                        tags: external
+                            .tags
+                            .iter()
+                            .map(|tag| tag.to_canonical_string())
+                            .collect(),
+                        fixed_args: external.fixed_args.clone(),
+                    })
+            })
+            .collect();
+        exported
+    }
+}
+
+impl<T: Clone> ProgramView<'_, T> {
+    pub(super) fn export_instructions(
+        &self,
+        external_fns: &[ExternalFunctionContainer<T>],
+        bodies: &[Option<ExportedSubEvaluator<T>>],
+    ) -> ExportedInstructions<T> {
         let mut instr = vec![];
-        let constants: Vec<_> = self.stack[self.param_count..self.reserved_indices].to_vec();
+        let constants: Vec<_> = self.constants.to_vec();
+        let mut calls = self
+            .instructions
+            .iter()
+            .filter_map(|(instruction, _)| {
+                if !bodies.is_empty()
+                    && let Instr::ExternalFun(_, index, _) = instruction
+                {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        calls.sort_unstable();
+        calls.dedup();
+        let sub_evaluators = calls
+            .into_iter()
+            .filter_map(|key| bodies[key].clone())
+            .collect();
 
         macro_rules! get_slot {
             ($i:expr) => {
@@ -156,7 +314,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
             };
         }
 
-        for (i, sc) in &self.instructions {
+        for (i, sc) in self.instructions {
             match i {
                 Instr::Add(o, a) => {
                     let n_real_args = match sc {
@@ -211,8 +369,8 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     instr.push(Instruction::Fun(
                         get_slot!(*o),
                         Box::new((
-                            self.external_fns[*f].symbol,
-                            self.external_fns[*f]
+                            external_fns[*f].symbol,
+                            external_fns[*f]
                                 .tags
                                 .iter()
                                 .map(|x| x.to_canonical_string())
@@ -248,25 +406,48 @@ impl<T: Clone> ExpressionEvaluator<T> {
             }
         }
 
-        (instr, self.stack.len() - self.reserved_indices, constants)
+        ExportedInstructions {
+            input_count: self.param_count,
+            output_count: self.result_indices.len(),
+            instructions: instr,
+            temporary_count: self.stack_size - self.reserved_indices,
+            constants,
+            constant_functions: Vec::new(),
+            sub_evaluators,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// An operation on vector-valued slots. Its position in an instruction list
+/// identifies the temporary slot that receives its result.
 pub enum VectorInstruction {
+    /// Add the two input slots componentwise.
     Add(Slot, Slot),
+    /// Copy the input slot.
     Assign(Slot),
+    /// Multiply the two input slots componentwise.
     Mul(Slot, Slot),
+    /// Raise the input to an integer power.
     Pow(Slot, i64),
+    /// Raise the first input to the power given by the second input.
     Powf(Slot, Slot),
+    /// Apply the named built-in function to the input.
     BuiltinFun(Symbol, Slot),
+    /// Call an external function by its index with the given argument slots.
     ExternalFun(usize, Vec<Slot>),
+    /// Jump to the label when the condition is zero.
     IfElse(Slot, Label),
+    /// Jump unconditionally to the label.
     Goto(Label),
+    /// Mark a jump destination.
     Label(Label),
+    /// Select the second or third slot according to whether the first is nonzero.
     Join(Slot, Slot, Slot),
 }
 
+/// A sequence of vector operations with shared constant storage.
+/// Each constant occupies a fixed number of components determined by the list.
 pub struct InstructionList<T> {
     pub(super) instructions: Vec<VectorInstruction>,
     pub(super) constants: Vec<T>,
@@ -275,6 +456,7 @@ pub struct InstructionList<T> {
 }
 
 impl<T> InstructionList<T> {
+    /// Append an instruction and return the temporary slot containing its result.
     pub fn add(&mut self, instr: VectorInstruction) -> Slot {
         self.instructions.push(instr);
         Slot::Temp(self.instructions.len() - 1)
@@ -282,13 +464,18 @@ impl<T> InstructionList<T> {
 }
 
 impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
+    /// Store a constant vector, reusing an equal existing constant when possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vector length differs from the list's component count.
     pub fn add_constant(&mut self, value: Vec<T>) -> Slot {
         assert_eq!(value.len(), self.dim);
         if let Some(c) = self
             .constants
             .chunks(self.dim)
             .zip(&self.unknown_constants)
-            .position(|(x, u)| x == &value && !u)
+            .position(|(x, u)| x == value && !u)
         {
             Slot::Const(c * self.dim)
         } else {
@@ -298,6 +485,8 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
         }
     }
 
+    /// Store a vector with `value` in every component, reusing existing storage
+    /// when an equal constant is already present.
     pub fn add_repeated_constant(&mut self, value: T) -> Slot {
         if let Some(c) = self
             .constants
@@ -317,6 +506,7 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
 }
 
 impl<T: SingleFloat> InstructionList<T> {
+    /// Return whether `slot` refers to a known constant component equal to zero.
     pub fn is_zero(&self, slot: &Slot) -> bool {
         match slot {
             Slot::Const(c) => {
@@ -326,6 +516,7 @@ impl<T: SingleFloat> InstructionList<T> {
         }
     }
 
+    /// Return whether `slot` refers to a known constant component equal to one.
     pub fn is_one(&self, slot: &Slot) -> bool {
         match slot {
             Slot::Const(c) => self.constants[*c].is_one() && !self.unknown_constants[*c / self.dim],
@@ -333,6 +524,8 @@ impl<T: SingleFloat> InstructionList<T> {
         }
     }
 
+    /// Store a constant vector with `value` in its first component and zeros
+    /// in all remaining components.
     pub fn add_constant_in_first_component(&mut self, value: T) -> Slot {
         let mut v = vec![value.clone()];
         v.extend((1..self.dim).map(|_| value.zero()));
@@ -368,9 +561,13 @@ pub(super) enum Instr {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Copy, Clone, PartialEq, Default, Hash)]
 pub enum ComplexPhase {
+    /// The result is real.
     Real,
+    /// The result is purely imaginary.
     Imag,
+    /// The first `usize` inputs are real; remaining inputs may be complex.
     PartialReal(usize),
     #[default]
+    /// No real or imaginary restriction is known.
     Any,
 }

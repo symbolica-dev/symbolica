@@ -13,7 +13,7 @@ fn fibonacci() {
     let rhs_one = Atom::num(1).to_pattern();
 
     // prepare the pattern restriction `x_ > 1`
-    let restrictions = symbol!("x_").filter_single(|n| !n.is_one() && !n.is_zero());
+    let restrictions = symbol!("x_").filter(|n| !n.is_one() && !n.is_zero());
 
     let mut target = parse!("f(10)");
 
@@ -54,4 +54,19 @@ fn replace_once() {
     let res = res.iter().map(|x| parse!(x)).collect::<Vec<_>>();
 
     assert_eq!(r, res);
+}
+
+#[test]
+fn failed_nested_power_match_restores_wildcards() {
+    let pattern = parse!("r(F_^(b__*(c__+d__*ivar_)^2), ivar_)")
+        .to_pattern()
+        .set_optional(symbol!("c__"))
+        .set_optional(symbol!("d__"));
+
+    let target = parse!("r(e^((b-2*c*x)^2*d^5), x)");
+    let replaced = target
+        .replace(&pattern)
+        .with(parse!("hit(F_,b__,c__,d__,ivar_)").to_pattern());
+
+    assert_eq!(replaced, parse!("hit(e,d^5,b,-2*c,x)"));
 }

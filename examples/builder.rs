@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, function, symbol};
+use symbolica::prelude::*;
 
 fn main() {
     let (x, y, f) = symbol!("x", "y", "f");

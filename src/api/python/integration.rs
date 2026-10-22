@@ -255,12 +255,17 @@ impl_stub_type!(&mut PythonRandomNumberGenerator = PythonRandomNumberGenerator);
 #[pymethods]
 impl PythonNumericalIntegrator {
     /// Create a new continuous grid for the numerical integrator.
+    ///
+    /// `min_probability_density` mixes the adaptive density with a uniform density
+    /// on the unit hypercube and bounds the joint continuous inverse density by its
+    /// reciprocal. A value of zero disables this safeguard.
     #[classmethod]
     #[pyo3(signature =
         (n_dims, n_bins = 128,
         min_samples_for_update = 100,
         bin_number_evolution = None,
-        train_on_avg = false)
+        train_on_avg = false,
+        min_probability_density = 0.)
     )]
     pub fn continuous(
         _cls: &Bound<'_, PyType>,
@@ -269,16 +274,21 @@ impl PythonNumericalIntegrator {
         min_samples_for_update: usize,
         bin_number_evolution: Option<Vec<usize>>,
         train_on_avg: bool,
-    ) -> PythonNumericalIntegrator {
-        PythonNumericalIntegrator {
-            grid: Grid::Continuous(ContinuousGrid::new(
-                n_dims,
-                n_bins,
-                min_samples_for_update,
-                bin_number_evolution,
-                train_on_avg,
-            )),
-        }
+        min_probability_density: f64,
+    ) -> PyResult<PythonNumericalIntegrator> {
+        Ok(PythonNumericalIntegrator {
+            grid: Grid::Continuous(
+                ContinuousGrid::new_with_min_probability_density(
+                    n_dims,
+                    n_bins,
+                    min_samples_for_update,
+                    bin_number_evolution,
+                    train_on_avg,
+                    min_probability_density,
+                )
+                .map_err(exceptions::PyValueError::new_err)?,
+            ),
+        })
     }
 
     /// Create a new discrete grid for the numerical integrator.
@@ -309,12 +319,15 @@ impl PythonNumericalIntegrator {
         bins: Vec<Option<PythonNumericalIntegrator>>,
         max_prob_ratio: f64,
         train_on_avg: bool,
-    ) -> PythonNumericalIntegrator {
+    ) -> PyResult<PythonNumericalIntegrator> {
         let bins = bins.into_iter().map(|b| b.map(|bb| bb.grid)).collect();
 
-        PythonNumericalIntegrator {
-            grid: Grid::Discrete(DiscreteGrid::new(bins, max_prob_ratio, train_on_avg)),
-        }
+        Ok(PythonNumericalIntegrator {
+            grid: Grid::Discrete(
+                DiscreteGrid::new(bins, max_prob_ratio, train_on_avg)
+                    .map_err(exceptions::PyValueError::new_err)?,
+            ),
+        })
     }
 
     /// Create a new uniform layered grid for the numerical integrator.
@@ -342,6 +355,11 @@ impl PythonNumericalIntegrator {
         bins: Vec<usize>,
         continuous_grid: PythonNumericalIntegrator,
     ) -> PyResult<PythonNumericalIntegrator> {
+        if bins.contains(&0) {
+            return Err(exceptions::PyValueError::new_err(
+                "Uniform grid layers must contain at least one bin",
+            ));
+        }
         if let Grid::Continuous(g) = continuous_grid.grid {
             Ok(PythonNumericalIntegrator {
                 grid: Grid::Uniform(bins, g),
@@ -376,11 +394,18 @@ impl PythonNumericalIntegrator {
     pub fn probe(&self, probe: PythonProbe) -> PyResult<f64> {
         self.grid
             .probe(&probe.into_probe())
-            .map_err(|e| exceptions::PyValueError::new_err(e))
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))
     }
 
     /// Sample `num_samples` points from the grid using the random number generator
     /// `rng`. See `rng()` for how to create a random number generator.
+    ///
+    /// Parameters
+    /// ----------
+    /// num_samples: int
+    ///     The number of samples to draw.
+    /// rng: RandomNumberGenerator
+    ///     The random number generator used to draw the samples.
     pub fn sample(
         &mut self,
         num_samples: usize,
@@ -399,6 +424,13 @@ impl PythonNumericalIntegrator {
 
     /// Add the samples and their corresponding function evaluations to the grid.
     /// Call `update` after to update the grid and to obtain the new expected value for the integral.
+    ///
+    /// Parameters
+    /// ----------
+    /// samples: Sequence[Sample]
+    ///     The samples to add or process.
+    /// evals: Sequence[float]
+    ///     The function evaluations associated with the samples.
     fn add_training_samples(
         &mut self,
         samples: Vec<PythonSample>,
@@ -421,6 +453,11 @@ impl PythonNumericalIntegrator {
 
     /// Import an exported grid from another thread or machine.
     /// Use `export_grid` to export the grid.
+    ///
+    /// Parameters
+    /// ----------
+    /// grid: bytes
+    ///     The serialized integration grid to import.
     #[classmethod]
     fn import_grid(_cls: &Bound<'_, PyType>, grid: Bound<'_, PyBytes>) -> PyResult<Self> {
         let grid = bincode::decode_from_slice(grid.extract()?, bincode::config::standard())
@@ -434,6 +471,11 @@ impl PythonNumericalIntegrator {
     /// If you are exporting your main grid, make sure to set `export_samples` to `False` to avoid copying unprocessed samples.
     ///
     /// Use `import_grid` to load the grid.
+    ///
+    /// Parameters
+    /// ----------
+    /// export_samples: bool
+    ///     Whether pending samples should be included in the exported grid.
     #[pyo3(signature = (export_samples = true))]
     fn export_grid<'p>(
         &self,
@@ -485,6 +527,11 @@ impl PythonNumericalIntegrator {
 
     /// Add the accumulated training samples from the grid `other` to the current grid.
     /// The grid structure of `self` and `other` must be equivalent.
+    ///
+    /// Parameters
+    /// ----------
+    /// other: NumericalIntegrator
+    ///     The other operand to combine or compare with.
     fn merge(&mut self, other: &PythonNumericalIntegrator) -> PyResult<()> {
         self.grid
             .merge(&other.grid)
@@ -509,6 +556,13 @@ impl PythonNumericalIntegrator {
     /// >>>     integrator.add_training_samples(samples, res)
     /// >>>     avg, err, chi_sq = integrator.update(1.5, 1.5)
     /// >>>     print('Iteration {}: {:.6} +- {:.6}, chi={:.6}'.format(i+1, avg, err, chi_sq))
+    ///
+    /// Parameters
+    /// ----------
+    /// discrete_learning_rate: float
+    ///     The learning rate for discrete layers.
+    /// continuous_learning_rate: float
+    ///     The learning rate for continuous layers.
     fn update(
         &mut self,
         discrete_learning_rate: f64,
@@ -542,6 +596,21 @@ impl PythonNumericalIntegrator {
     /// >>>
     /// >>> avg, err = NumericalIntegrator.continuous(2).integrate(integrand, True, 10, 100000)
     /// >>> print('Result: {} +- {}'.format(avg, err))
+    ///
+    /// Parameters
+    /// ----------
+    /// integrand: Callable[[Sequence[Sample]], list[float]]
+    ///     The function to integrate.
+    /// max_n_iter: int
+    ///     The maximum number of integration iterations.
+    /// min_error: float
+    ///     The target statistical error.
+    /// n_samples_per_iter: int
+    ///     The number of samples drawn per integration iteration.
+    /// seed: int
+    ///     The seed used to initialize the random number generator.
+    /// show_stats: bool
+    ///     Whether intermediate integration statistics should be shown.
     #[pyo3(signature =
         (integrand,
         max_n_iter = 10_000_000,

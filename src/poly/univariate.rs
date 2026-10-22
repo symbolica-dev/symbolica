@@ -1,24 +1,38 @@
 //! Univariate polynomials and their ring.
 
+#![warn(missing_docs)]
+
 use std::{
     cmp::Ordering,
-    ops::{Add, Div, Mul, Neg, Sub},
-    sync::Arc,
+    collections::HashMap,
+    ops::{Add, Div, Mul, Neg, RangeInclusive, Sub},
+    sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
+use numerica::domains::float::{ComplexBall, Float, RealBall};
+use rand::Rng;
+
 use crate::{
+    atom::Atom,
     domains::{
-        EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SelfRing, Set,
-        float::{Complex, FloatField, FloatLike, Real, SingleFloat},
+        EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, SelfRing, Set,
+        algebraic::{AlgebraicExtension, AlgebraicNumber},
+        finite_field::{FiniteFieldCore, Zp, Zp64},
+        float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
+        rational_polynomial::{
+            FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
+        },
     },
     printer::{PrintOptions, PrintState},
+    transcendental::{root, root_var},
 };
 
 use super::{
     PolyVariable, PositiveExponent,
     factor::Factorize,
+    gcd::PolynomialGCD,
     polynomial::{MultivariatePolynomial, PolynomialRing},
 };
 
@@ -29,7 +43,400 @@ pub struct UnivariatePolynomialRing<R: Ring> {
     variable: Arc<PolyVariable>,
 }
 
+/// Sampling policy for a univariate polynomial ring.
+///
+/// A degree is sampled from `degree`, then every coefficient through that
+/// degree is sampled using `coefficient`. A zero leading coefficient can make
+/// the resulting polynomial's actual degree smaller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnivariatePolynomialSamplingPolicy<P> {
+    /// Inclusive range from which the degree bound is sampled.
+    pub degree: RangeInclusive<usize>,
+    /// Policy used to sample every coefficient.
+    pub coefficient: P,
+}
+
+/// Fixed-width prime fields supported by dense Hu-Monagan root recovery.
+pub(crate) trait DenseRootPrimeField: Field {
+    /// Return the field modulus as a `u64`.
+    fn prime_u64(&self) -> u64;
+
+    /// Convert a canonical `u64` representative into a field element.
+    fn to_element_u64(&self, value: u64) -> Self::Element;
+}
+
+impl DenseRootPrimeField for Zp {
+    fn prime_u64(&self) -> u64 {
+        self.get_prime() as u64
+    }
+
+    fn to_element_u64(&self, value: u64) -> Self::Element {
+        self.to_element(value as u32)
+    }
+}
+
+impl DenseRootPrimeField for Zp64 {
+    fn prime_u64(&self) -> u64 {
+        self.get_prime()
+    }
+
+    fn to_element_u64(&self, value: u64) -> Self::Element {
+        self.to_element(value)
+    }
+}
+
+/// Dense polynomial operations used to recover the distinct nonzero roots of
+/// Hu-Monagan recurrence polynomials over a fixed-width prime field.
+pub(crate) struct DenseFiniteFieldRootContext<'a, F = Zp64>
+where
+    F: DenseRootPrimeField,
+    F::Element: Copy + PartialEq,
+{
+    field: &'a F,
+    rng: rand::rngs::ThreadRng,
+}
+
+impl<'a, F> DenseFiniteFieldRootContext<'a, F>
+where
+    F: DenseRootPrimeField,
+    F::Element: Copy + PartialEq,
+{
+    /// Creates a root-recovery context for `field`.
+    pub(crate) fn new(field: &'a F) -> Self {
+        let prime = field.prime_u64();
+        assert!(
+            prime > 2 && !prime.is_multiple_of(2),
+            "dense root recovery requires an odd prime field"
+        );
+        Self {
+            field,
+            rng: rand::rng(),
+        }
+    }
+
+    #[inline]
+    fn truncate(&self, polynomial: &mut Vec<F::Element>) {
+        while polynomial
+            .last()
+            .is_some_and(|coefficient| self.field.is_zero(coefficient))
+        {
+            polynomial.pop();
+        }
+    }
+
+    fn make_monic(&self, polynomial: &mut Vec<F::Element>) {
+        let Some(leading_coefficient) = polynomial.last().copied() else {
+            return;
+        };
+        if self.field.is_one(&leading_coefficient) {
+            return;
+        }
+
+        let inverse = self.field.inv(&leading_coefficient);
+        for coefficient in polynomial {
+            self.field.mul_assign(coefficient, &inverse);
+        }
+    }
+
+    /// Replaces `polynomial` by its remainder modulo the monic `modulus`.
+    fn rem_monic(&self, polynomial: &mut Vec<F::Element>, modulus: &[F::Element]) {
+        debug_assert!(modulus.len() >= 2);
+        debug_assert!(self.field.is_one(modulus.last().unwrap()));
+
+        while polynomial.len() >= modulus.len() {
+            let leading_coefficient = *polynomial.last().unwrap();
+            let shift = polynomial.len() - modulus.len();
+            if !self.field.is_zero(&leading_coefficient) {
+                for (coefficient, modulus_coefficient) in polynomial[shift..]
+                    .iter_mut()
+                    .zip(modulus)
+                    .take(modulus.len() - 1)
+                {
+                    self.field.sub_mul_assign(
+                        coefficient,
+                        modulus_coefficient,
+                        &leading_coefficient,
+                    );
+                }
+            }
+
+            // The leading term cancels because the modulus is monic.
+            polynomial.pop();
+            self.truncate(polynomial);
+        }
+    }
+
+    fn mul_mod(
+        &self,
+        left: &[F::Element],
+        right: &[F::Element],
+        modulus: &[F::Element],
+    ) -> Vec<F::Element> {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+
+        let mut product = vec![self.field.zero(); left.len() + right.len() - 1];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if self.field.is_zero(left_coefficient) {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if !self.field.is_zero(right_coefficient) {
+                    self.field.add_mul_assign(
+                        &mut product[left_degree + right_degree],
+                        left_coefficient,
+                        right_coefficient,
+                    );
+                }
+            }
+        }
+        self.rem_monic(&mut product, modulus);
+        product
+    }
+
+    fn square_mod(&self, polynomial: &[F::Element], modulus: &[F::Element]) -> Vec<F::Element> {
+        if polynomial.is_empty() {
+            return Vec::new();
+        }
+
+        let mut square = vec![self.field.zero(); 2 * polynomial.len() - 1];
+        for (degree, coefficient) in polynomial.iter().enumerate() {
+            if self.field.is_zero(coefficient) {
+                continue;
+            }
+            self.field
+                .add_mul_assign(&mut square[2 * degree], coefficient, coefficient);
+            for (other_degree, other_coefficient) in polynomial.iter().enumerate().skip(degree + 1)
+            {
+                if !self.field.is_zero(other_coefficient) {
+                    let product = self.field.mul(coefficient, other_coefficient);
+                    self.field
+                        .add_assign(&mut square[degree + other_degree], &product);
+                    self.field
+                        .add_assign(&mut square[degree + other_degree], &product);
+                }
+            }
+        }
+        self.rem_monic(&mut square, modulus);
+        square
+    }
+
+    fn pow_mod(
+        &self,
+        base: &[F::Element],
+        mut exponent: u64,
+        modulus: &[F::Element],
+    ) -> Vec<F::Element> {
+        let mut power = base.to_vec();
+        self.rem_monic(&mut power, modulus);
+        let mut result = vec![self.field.one()];
+
+        while exponent != 0 {
+            if exponent & 1 == 1 {
+                result = self.mul_mod(&result, &power, modulus);
+            }
+            exponent >>= 1;
+            if exponent != 0 {
+                power = self.square_mod(&power, modulus);
+            }
+        }
+        result
+    }
+
+    fn gcd_monic(&self, mut left: Vec<F::Element>, mut right: Vec<F::Element>) -> Vec<F::Element> {
+        self.truncate(&mut left);
+        self.truncate(&mut right);
+        self.make_monic(&mut left);
+        self.make_monic(&mut right);
+
+        while !right.is_empty() {
+            if right.len() == 1 {
+                return vec![self.field.one()];
+            }
+            self.rem_monic(&mut left, &right);
+            std::mem::swap(&mut left, &mut right);
+            self.make_monic(&mut right);
+        }
+        left
+    }
+
+    fn div_exact_monic(
+        &self,
+        dividend: &[F::Element],
+        divisor: &[F::Element],
+    ) -> Option<Vec<F::Element>> {
+        debug_assert!(divisor.len() >= 2);
+        debug_assert!(self.field.is_one(divisor.last().unwrap()));
+        if dividend.len() < divisor.len() {
+            return None;
+        }
+
+        let mut remainder = dividend.to_vec();
+        let mut quotient =
+            vec![self.field.zero(); dividend.len().saturating_sub(divisor.len()) + 1];
+        while remainder.len() >= divisor.len() {
+            let leading_coefficient = *remainder.last().unwrap();
+            let shift = remainder.len() - divisor.len();
+            quotient[shift] = leading_coefficient;
+            if !self.field.is_zero(&leading_coefficient) {
+                for (coefficient, divisor_coefficient) in remainder[shift..]
+                    .iter_mut()
+                    .zip(divisor)
+                    .take(divisor.len() - 1)
+                {
+                    self.field.sub_mul_assign(
+                        coefficient,
+                        divisor_coefficient,
+                        &leading_coefficient,
+                    );
+                }
+            }
+            remainder.pop();
+            self.truncate(&mut remainder);
+        }
+
+        if remainder.is_empty() {
+            self.truncate(&mut quotient);
+            Some(quotient)
+        } else {
+            None
+        }
+    }
+
+    /// Adds one to the constant coefficient when `add` is true and subtracts
+    /// one otherwise.
+    fn offset_by_one(&self, polynomial: &mut Vec<F::Element>, add: bool) {
+        if polynomial.is_empty() {
+            polynomial.push(if add {
+                self.field.one()
+            } else {
+                self.field.neg(&self.field.one())
+            });
+        } else if add {
+            self.field.add_assign(&mut polynomial[0], &self.field.one());
+        } else {
+            self.field.sub_assign(&mut polynomial[0], &self.field.one());
+            self.truncate(polynomial);
+        }
+    }
+
+    fn evaluate(&self, polynomial: &[F::Element], value: &F::Element) -> F::Element {
+        let Some(mut result) = polynomial.last().copied() else {
+            return self.field.zero();
+        };
+        for coefficient in polynomial.iter().rev().skip(1) {
+            result = self.field.add(&self.field.mul(&result, value), coefficient);
+        }
+        result
+    }
+
+    /// Finds every root when `coefficients` defines a square-free polynomial
+    /// that splits into distinct nonzero linear factors over the context field.
+    /// Returns `None` when any of these conditions is not satisfied.
+    pub(crate) fn find_distinct_nonzero_roots(
+        &mut self,
+        coefficients: &[F::Element],
+    ) -> Option<Vec<F::Element>> {
+        let mut polynomial = coefficients.to_vec();
+        self.truncate(&mut polynomial);
+        if polynomial.is_empty() {
+            return None;
+        }
+
+        let degree = polynomial.len() - 1;
+        if degree == 0 {
+            return Some(Vec::new());
+        }
+        if self.field.is_zero(&polynomial[0]) {
+            return None;
+        }
+        self.make_monic(&mut polynomial);
+
+        if degree == 1 {
+            let root = self.field.neg(&polynomial[0]);
+            return self
+                .field
+                .is_zero(&self.evaluate(&polynomial, &root))
+                .then_some(vec![root]);
+        }
+
+        let split_exponent = (self.field.prime_u64() - 1) / 2;
+        let mut character = self.pow_mod(
+            &[self.field.zero(), self.field.one()],
+            split_exponent,
+            &polynomial,
+        );
+        let mut nonresidue_factor = character.clone();
+        self.offset_by_one(&mut character, false);
+        self.offset_by_one(&mut nonresidue_factor, true);
+        let residue_factor = self.gcd_monic(polynomial.clone(), character);
+        let nonresidue_factor = self.gcd_monic(polynomial.clone(), nonresidue_factor);
+
+        // x^(p-1)-1 has every nonzero field element as a simple root. The two
+        // gcd degrees cover the input degree exactly only when all input roots
+        // are distinct, nonzero, and contained in the prime field.
+        if residue_factor.len().saturating_sub(1) + nonresidue_factor.len().saturating_sub(1)
+            != degree
+        {
+            return None;
+        }
+
+        let mut stack = Vec::with_capacity(degree);
+        if residue_factor.len() > 1 {
+            stack.push(residue_factor);
+        }
+        if nonresidue_factor.len() > 1 {
+            stack.push(nonresidue_factor);
+        }
+
+        let mut roots = Vec::with_capacity(degree);
+        while let Some(factor) = stack.pop() {
+            if factor.len() == 2 {
+                let root = self.field.neg(&factor[0]);
+                if self.field.is_zero(&root) || roots.contains(&root) {
+                    return None;
+                }
+                roots.push(root);
+                continue;
+            }
+
+            let mut split = None;
+            for _ in 0..64 {
+                let shift = self
+                    .field
+                    .to_element_u64(self.rng.random_range(0..self.field.prime_u64()));
+                let mut character =
+                    self.pow_mod(&[shift, self.field.one()], split_exponent, &factor);
+                self.offset_by_one(&mut character, false);
+                let left = self.gcd_monic(factor.clone(), character);
+                if left.len() <= 1 || left.len() == factor.len() {
+                    continue;
+                }
+                let right = self.div_exact_monic(&factor, &left)?;
+                split = Some((left, right));
+                break;
+            }
+
+            let (left, right) = split?;
+            stack.push(left);
+            stack.push(right);
+        }
+
+        if roots.len() != degree
+            || roots
+                .iter()
+                .any(|root| !self.field.is_zero(&self.evaluate(&polynomial, root)))
+        {
+            return None;
+        }
+
+        Some(roots)
+    }
+}
+
 impl<R: Ring> UnivariatePolynomialRing<R> {
+    /// Construct a polynomial ring over `coeff_ring` in the supplied variable.
     pub fn new(coeff_ring: R, var_map: Arc<PolyVariable>) -> UnivariatePolynomialRing<R> {
         UnivariatePolynomialRing {
             ring: coeff_ring,
@@ -37,7 +444,8 @@ impl<R: Ring> UnivariatePolynomialRing<R> {
         }
     }
 
-    pub fn new_from_poly(poly: &UnivariatePolynomial<R>) -> UnivariatePolynomialRing<R> {
+    /// Construct the ring containing `poly`.
+    pub fn from_polynomial(poly: &UnivariatePolynomial<R>) -> UnivariatePolynomialRing<R> {
         UnivariatePolynomialRing {
             ring: poly.ring.clone(),
             variable: poly.variable.clone(),
@@ -181,10 +589,6 @@ impl<R: Ring> Ring for UnivariatePolynomialRing<R> {
         a.try_div(b)
     }
 
-    fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        todo!("Sampling a polynomial is not possible yet")
-    }
-
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -197,6 +601,23 @@ impl<R: Ring> Ring for UnivariatePolynomialRing<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R: SampleableRing> SampleableRing for UnivariatePolynomialRing<R> {
+    type SamplingPolicy = UnivariatePolynomialSamplingPolicy<R::SamplingPolicy>;
+
+    fn sample<G: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut G,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        let degree = rng.random_range(policy.degree.clone());
+        let coefficients = (0..=degree)
+            .map(|_| self.ring.sample(rng, &policy.coefficient))
+            .collect();
+
+        UnivariatePolynomial::from_coefficients(&self.ring, coefficients, self.variable.clone())
     }
 }
 
@@ -217,9 +638,12 @@ impl<R: EuclideanDomain> EuclideanDomain for UnivariatePolynomialRing<R> {
 /// A dense univariate polynomial.
 #[derive(Clone)]
 pub struct UnivariatePolynomial<F: Ring> {
-    pub coefficients: Vec<F::Element>,
-    pub variable: Arc<PolyVariable>,
-    pub ring: F,
+    /// Coefficients in ascending degree order. The empty vector represents zero.
+    pub(crate) coefficients: Vec<F::Element>,
+    /// Variable used by this polynomial.
+    pub(crate) variable: Arc<PolyVariable>,
+    /// Ring containing the coefficients.
+    pub(crate) ring: F,
 }
 
 impl<R: Ring> InternalOrdering for UnivariatePolynomial<R> {
@@ -256,6 +680,24 @@ impl<F: Ring + std::fmt::Display> std::fmt::Display for UnivariatePolynomial<F> 
 }
 
 impl<F: Ring> UnivariatePolynomial<F> {
+    /// Construct a polynomial from coefficients in ascending degree order.
+    ///
+    /// Trailing zero coefficients are removed to preserve the canonical dense
+    /// representation.
+    pub fn from_coefficients(
+        field: &F,
+        coefficients: Vec<F::Element>,
+        variable: Arc<PolyVariable>,
+    ) -> Self {
+        let mut polynomial = Self {
+            coefficients,
+            ring: field.clone(),
+            variable,
+        };
+        polynomial.truncate();
+        polynomial
+    }
+
     /// Constructs a zero polynomial. Instead of using this constructor,
     /// prefer to create new polynomials from existing ones, so that the
     /// variable map and field are inherited.
@@ -331,11 +773,23 @@ impl<F: Ring> UnivariatePolynomial<F> {
         }
     }
 
+    /// Return the coefficients in ascending degree order.
+    pub fn coefficients(&self) -> &[F::Element] {
+        &self.coefficients
+    }
+
+    /// Return the coefficient ring.
+    pub fn coefficient_ring(&self) -> &F {
+        &self.ring
+    }
+
+    /// Return whether this is the zero polynomial.
     #[inline]
     pub fn is_zero(&self) -> bool {
         self.coefficients.is_empty()
     }
 
+    /// Return whether this is the constant polynomial one.
     #[inline]
     pub fn is_one(&self) -> bool {
         self.coefficients.len() == 1 && self.ring.is_one(&self.coefficients[0])
@@ -357,12 +811,12 @@ impl<F: Ring> UnivariatePolynomial<F> {
         self.coefficients[0].clone()
     }
 
-    /// Get a copy of the variable/
+    /// Get a shared pointer to the variable.
     pub fn get_vars(&self) -> Arc<PolyVariable> {
         self.variable.clone()
     }
 
-    /// Get a reference to the variables
+    /// Get a reference to the variable.
     pub fn get_vars_ref(&self) -> &PolyVariable {
         self.variable.as_ref()
     }
@@ -408,7 +862,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
 
     /// Multiply by a variable to the power of `exp`.
     pub fn mul_exp(&self, exp: usize) -> Self {
-        if exp == 0 {
+        if exp == 0 || self.is_zero() {
             return self.clone();
         }
 
@@ -422,8 +876,9 @@ impl<F: Ring> UnivariatePolynomial<F> {
         a
     }
 
-    /// Divide by a variable to the power of `exp`.
-    pub fn div_exp(&self, exp: usize) -> Self {
+    /// Remove the lowest `exp` coefficient slots, corresponding to exact
+    /// division by the variable to that power when those coefficients are zero.
+    fn remove_variable_power(&self, exp: usize) -> Self {
         if exp == 0 {
             return self.clone();
         }
@@ -458,6 +913,55 @@ impl<F: Ring> UnivariatePolynomial<F> {
         self
     }
 
+    /// Compute a pseudo-remainder without dividing coefficients.
+    ///
+    /// The result is a scalar multiple of the remainder over the fraction
+    /// field of the coefficient ring. In particular, over an integral domain
+    /// it is zero exactly when `divisor` divides `self` over that fraction
+    /// field.
+    pub fn pseudo_remainder(&self, divisor: &Self) -> Self {
+        assert_eq!(self.ring, divisor.ring);
+        assert_eq!(self.variable, divisor.variable);
+        assert!(!divisor.is_zero(), "pseudo-division by zero");
+
+        if self.is_zero() || self.degree() < divisor.degree() {
+            return self.clone();
+        }
+
+        let divisor_degree = divisor.degree();
+        let divisor_leading_coefficient = divisor.lcoeff();
+        let divisor_is_monic = self.ring.is_one(&divisor_leading_coefficient);
+        let mut remainder = self.clone();
+
+        while !remainder.is_zero() && remainder.degree() >= divisor_degree {
+            let shift = remainder.degree() - divisor_degree;
+            let remainder_leading_coefficient = remainder.lcoeff();
+
+            if !divisor_is_monic {
+                for coefficient in &mut remainder.coefficients {
+                    self.ring
+                        .mul_assign(coefficient, &divisor_leading_coefficient);
+                }
+            }
+
+            for (coefficient, divisor_coefficient) in remainder
+                .coefficients
+                .iter_mut()
+                .skip(shift)
+                .zip(&divisor.coefficients)
+            {
+                self.ring.sub_mul_assign(
+                    coefficient,
+                    divisor_coefficient,
+                    &remainder_leading_coefficient,
+                );
+            }
+            remainder.truncate();
+        }
+
+        remainder
+    }
+
     /// Map a coefficient using the function `f`.
     pub fn map_coeff<U: Ring, T: Fn(&F::Element) -> U::Element>(
         &self,
@@ -470,7 +974,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
         r
     }
 
-    fn truncate(&mut self) {
+    pub(crate) fn truncate(&mut self) {
         let d = self
             .coefficients
             .iter_mut()
@@ -554,6 +1058,8 @@ impl<F: Ring> UnivariatePolynomial<F> {
         poly
     }
 
+    /// Divide exactly by `div`, returning `None` when the division is not exact
+    /// or the polynomials use different variables.
     pub fn try_div(&self, div: &UnivariatePolynomial<F>) -> Option<UnivariatePolynomial<F>> {
         if div.is_zero() {
             return None;
@@ -579,7 +1085,7 @@ impl<F: Ring> UnivariatePolynomial<F> {
             let c = div.get_constant();
             if !self.ring.is_zero(&c)
                 && !self.ring.is_one(&c)
-                && self.ring.try_div(&self.get_constant(), &c).is_some()
+                && self.ring.try_div(&self.get_constant(), &c).is_none()
             {
                 return None;
             }
@@ -761,165 +1267,11 @@ impl<F: Ring> SelfRing for UnivariatePolynomial<F> {
     }
 }
 
-impl UnivariatePolynomial<RationalField> {
-    /// Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-    /// and the multiplicity of that root.
-    /// Optionally, the intervals can be refined to a given precision.
-    pub fn isolate_roots(&self, refine: Option<Rational>) -> Vec<(Rational, Rational, usize)> {
-        let c = self.content();
+mod roots;
+#[cfg(test)]
+mod tests;
 
-        let stripped = self.map_coeff(
-            |coeff| {
-                let coeff = self.ring.div(coeff, &c);
-                debug_assert!(coeff.is_integer());
-                coeff.numerator()
-            },
-            Z,
-        );
-
-        stripped.isolate_roots(refine)
-    }
-
-    /// Approximate the single root of the polynomial in the interval (lower, higher) with a given tolerance
-    /// using bisection.
-    pub fn refine_root_interval(
-        &self,
-        mut interval: (Rational, Rational),
-        tolerance: &Rational,
-    ) -> (Rational, Rational) {
-        if interval.0 == interval.1 {
-            return interval;
-        }
-
-        // make the input square free, so that the derivative is non-zero at the roots
-        let mut u = self.one();
-        for (f, _pow) in self
-            .clone()
-            .to_multivariate::<u16>()
-            .square_free_factorization()
-        {
-            if !f.is_constant() {
-                u = u * &f.to_univariate_from_univariate(0);
-            }
-        }
-
-        let left_bound_neg = match u.evaluate(&interval.0).cmp(&(0, 1).into()) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => u.derivative().evaluate(&interval.0).is_negative(),
-        };
-        debug_assert!(u.evaluate(&interval.1).is_negative() != left_bound_neg);
-
-        while (&interval.1 - &interval.0) / (&interval.0 + &interval.1).abs() > *tolerance {
-            let mid = (&interval.0 + &interval.1) / &(2, 1).into();
-            let mid_val = u.evaluate(&mid);
-
-            if mid_val.is_negative() == left_bound_neg {
-                interval.0 = mid;
-            } else {
-                interval.1 = mid;
-            }
-        }
-
-        interval
-    }
-
-    /// Refine the intervals of two polynomials until they are disjoint.
-    /// The polynomials must be square free.
-    fn refine_root_interval_until_disjoint(
-        &self,
-        mut interval: (Rational, Rational),
-        other: &Self,
-        mut other_interval: (Rational, Rational),
-    ) -> ((Rational, Rational), (Rational, Rational)) {
-        if !(interval.0 >= other_interval.0 && interval.0 < other_interval.1
-            || interval.1 > other_interval.0 && interval.1 <= other_interval.1)
-        {
-            return (interval, other_interval);
-        }
-
-        let left_bound_neg = match self.evaluate(&interval.0).cmp(&(0, 1).into()) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => self.derivative().evaluate(&interval.0).is_negative(),
-        };
-        let other_left_bound_neg = match other.evaluate(&other_interval.0).cmp(&(0, 1).into()) {
-            Ordering::Less => true,
-            Ordering::Greater => false,
-            Ordering::Equal => other.derivative().evaluate(&other_interval.0).is_negative(),
-        };
-
-        while interval.0 >= other_interval.0 && interval.0 < other_interval.1
-            || interval.1 > other_interval.0 && interval.1 <= other_interval.1
-        {
-            if interval.0 != interval.1 {
-                let mid = (&interval.0 + &interval.1) / &(2, 1).into();
-                let mid_val = self.evaluate(&mid);
-
-                if mid_val.is_negative() == left_bound_neg {
-                    interval.0 = mid;
-                } else {
-                    interval.1 = mid;
-                }
-            }
-
-            if other_interval.0 != other_interval.1 {
-                let mid = (&other_interval.0 + &other_interval.1) / &(2, 1).into();
-                let mid_val = other.evaluate(&mid);
-
-                if mid_val.is_negative() == other_left_bound_neg {
-                    other_interval.0 = mid;
-                } else {
-                    other_interval.1 = mid;
-                }
-            }
-        }
-
-        (interval, other_interval)
-    }
-
-    /// Approximate all complex roots of the polynomial.
-    /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
-    /// In that case, the current-best estimate for each root is returned.
-    pub fn approximate_roots<
-        F: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
-    >(
-        &self,
-        max_iterations: usize,
-        tolerance: &F,
-    ) -> Result<Vec<(Complex<F>, usize)>, Vec<(Complex<F>, usize)>> {
-        let mut roots = vec![];
-        let mut iter_bound = false;
-        for (f, pow) in self
-            .clone()
-            .to_multivariate::<u16>()
-            .square_free_factorization()
-        {
-            if f.is_constant() {
-                continue;
-            }
-
-            // make monic to prevent casting large integers that may overflow the float
-            let f = f.to_univariate_from_univariate(0).make_monic();
-
-            match f
-                .map_coeff(
-                    |c| tolerance.from_rational(c).into(),
-                    FloatField::from_rep(tolerance.clone().into()),
-                )
-                .roots(max_iterations, tolerance)
-            {
-                Ok(r) => roots.extend(r.into_iter().map(|r| (r, pow))),
-                Err(r) => {
-                    roots.extend(r.into_iter().map(|r| (r, pow)));
-                    iter_bound = true;
-                }
-            }
-        }
-
-        if iter_bound { Err(roots) } else { Ok(roots) }
-    }
-}
+pub use roots::{ComplexDisk, ExactComplexPolynomial, IsolatedRoot, RootLocation};
 
 impl UnivariatePolynomial<IntegerRing> {
     /// Approximate all complex roots of the polynomial.
@@ -970,10 +1322,9 @@ impl UnivariatePolynomial<IntegerRing> {
         sign_changes
     }
 
-    /// Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-    /// and the multiplicity of that root.
-    /// Optionally, the intervals can be refined to a given precision.
-    pub fn isolate_roots(&self, refine: Option<Rational>) -> Vec<(Rational, Rational, usize)> {
+    /// Isolate the distinct real roots as rational intervals, together with
+    /// their multiplicities.
+    pub fn isolate_real_root_intervals(&self) -> Vec<(Rational, Rational, usize)> {
         let fs = self.clone().to_multivariate::<u16>();
         let mut intervals = vec![];
 
@@ -991,7 +1342,7 @@ impl UnivariatePolynomial<IntegerRing> {
             let f_rat = f.map_coeff(|c| c.to_rational(), Q);
 
             for (i, p) in [neg_f, f].into_iter().enumerate() {
-                for mut x in p.isolate_roots_square_free() {
+                for mut x in p.isolate_real_roots_square_free() {
                     if i == 0 {
                         std::mem::swap(&mut x.0, &mut x.1);
                         x.0 = -x.0;
@@ -1022,12 +1373,6 @@ impl UnivariatePolynomial<IntegerRing> {
 
         intervals.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if let Some(threshold) = refine {
-            for (int, p, _) in &mut intervals {
-                *int = p.refine_root_interval(int.clone(), &threshold);
-            }
-        }
-
         intervals
             .into_iter()
             .map(|(x, _, pow)| (x.0, x.1, pow))
@@ -1050,11 +1395,20 @@ impl UnivariatePolynomial<IntegerRing> {
         let mut bound = Rational::zero();
         for i in (0..self.coefficients.len()).rev() {
             if !sign_flip && self.coefficients[i] < 0 || sign_flip && self.coefficients[i] > 0 {
-                // TODO: what if precision is not enough?
-                let tmp: f64 = (-2f64.powf(t as f64) * self.coefficients[i].to_rational().to_f64()
-                    / self.coefficients[j].to_rational().to_f64())
-                .powf(1. / (j - i) as f64);
-                let tmp = Rational::try_from(tmp).unwrap();
+                // Round the local-max bound (2^t |a_i/a_j|)^(1/(j-i))
+                // upward to a dyadic rational. If an integer has b significant
+                // bits, its magnitude lies in [2^(b-1), 2^b).
+                let log_bound = self.coefficients[i].significant_bits() as i128
+                    - self.coefficients[j].significant_bits() as i128
+                    + t as i128
+                    + 1;
+                let degree = (j - i) as i128;
+                let exponent = (log_bound + degree - 1).div_euclid(degree);
+                let tmp: Rational = if exponent >= 0 {
+                    Integer::from(2).pow(exponent as u64).into()
+                } else {
+                    (Integer::one(), Integer::from(2).pow((-exponent) as u64)).into()
+                };
                 if tmp > bound {
                     bound = tmp;
                 }
@@ -1072,14 +1426,14 @@ impl UnivariatePolynomial<IntegerRing> {
     }
 
     /// Isolate the roots of the polynomial using VAS-CF.
-    pub fn isolate_roots_square_free(&self) -> Vec<(Rational, Rational)> {
+    fn isolate_real_roots_square_free(&self) -> Vec<(Rational, Rational)> {
         let mut roots = vec![];
 
         let mut p = self.clone();
         if p.coefficients[0] == 0 {
             roots.push((Rational::zero(), Rational::zero()));
 
-            p = p.div_exp(1);
+            p = p.remove_variable_power(1);
         }
 
         let max_root = p.max_real_root_bound().ceil();
@@ -1096,7 +1450,7 @@ impl UnivariatePolynomial<IntegerRing> {
                 (max_root.clone(), Integer::one()).into(),
                 (max_root.clone(), Integer::one()).into(),
             ));
-            p = p.div_exp(1);
+            p = p.remove_variable_power(1);
         }
 
         let s = p.sign_changes();
@@ -1163,7 +1517,7 @@ impl UnivariatePolynomial<IntegerRing> {
 
                 if p.coefficients[0] == 0 {
                     roots.push(((b.clone(), d.clone()).into(), (b.clone(), d.clone()).into()));
-                    p = p.div_exp(1);
+                    p = p.remove_variable_power(1);
                 }
 
                 s = p.sign_changes();
@@ -1192,7 +1546,7 @@ impl UnivariatePolynomial<IntegerRing> {
                     (n1.b.clone(), n1.d.clone()).into(),
                 ));
 
-                n1.p = n1.p.div_exp(1);
+                n1.p = n1.p.remove_variable_power(1);
                 r = 1;
             }
             n1.s = n1.p.sign_changes();
@@ -1212,7 +1566,7 @@ impl UnivariatePolynomial<IntegerRing> {
                 n2.p = n2.p.shift_var(&Integer::from(1));
 
                 if n2.p.coefficients[0] == 0 {
-                    n2.p = n2.p.div_exp(1);
+                    n2.p = n2.p.remove_variable_power(1);
                 }
 
                 n2.s = n2.p.sign_changes();
@@ -1282,6 +1636,12 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     ///
+    /// The tolerance bounds the Newton step of every root `z`, relative to `max(1, |z|)`
+    /// and independent of the scale of the coefficients. Every returned root is also an exact
+    /// root of a polynomial whose coefficients are relatively perturbed by at most the tolerance,
+    /// or by the roundoff level if that is larger. Neither condition certifies the error of a
+    /// root, and the tracked precision of a multi-precision root is not an error bound either.
+    ///
     /// For better performance, square-free factor the polynomial first.
     pub fn roots(
         &self,
@@ -1289,7 +1649,10 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
         tolerance: &R,
     ) -> Result<Vec<Complex<R>>, Vec<Complex<R>>> {
         if self.get_constant().is_zero() {
-            match self.div_exp(1).roots(max_iterations, tolerance) {
+            match self
+                .remove_variable_power(1)
+                .roots(max_iterations, tolerance)
+            {
                 Ok(mut roots) => {
                     roots.push(self.ring.zero());
                     return Ok(roots);
@@ -1301,36 +1664,196 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
             }
         }
 
-        let upper = self.get_root_upper_bound();
-        let lower = self.get_root_lower_bound();
+        self.roots_hot_start(max_iterations, tolerance, self.aberth_initial_guesses())
+    }
+
+    /// Initial approximations for Aberth's method from the Newton polygon of the coefficient
+    /// magnitudes (Bini, 1996, section 5, https://doi.org/10.1007/BF02207694).
+    ///
+    /// Every edge of the upper convex hull of the points `(k, log|a_k|)`, going from exponent
+    /// `k1` to `k2`, accounts for `k2 - k1` roots of modulus close to `|a_k1 / a_k2|^(1/(k2 - k1))`.
+    /// That many approximations are spread over the corresponding circle, with a rotation per
+    /// circle that keeps them off the real axis and away from the points on other circles.
+    /// The constant coefficient must be nonzero.
+    fn aberth_initial_guesses(&self) -> Vec<Complex<R>> {
+        let representative = self.ring.one().re;
+        let points = self
+            .coefficients
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_zero())
+            .map(|(k, c)| (k, c.norm().re.log()))
+            .collect::<Vec<_>>();
+
+        // Monotone chain over increasing exponents: drop the middle point whenever the
+        // three last points do not make a clockwise turn.
+        let mut hull: Vec<&(usize, R)> = Vec::with_capacity(points.len());
+        for point in &points {
+            while let [.., a, b] = hull[..] {
+                let cross = representative.from_usize(b.0 - a.0) * (point.1.clone() - &a.1)
+                    - (b.1.clone() - &a.1) * representative.from_usize(point.0 - a.0);
+                if cross >= representative.zero() {
+                    hull.pop();
+                } else {
+                    break;
+                }
+            }
+            hull.push(point);
+        }
+
+        let golden_angle = representative.pi()
+            * (representative.from_usize(3) - representative.from_usize(5).sqrt());
+        let two_pi = representative.pi() * representative.from_usize(2);
+
+        let mut guesses = Vec::with_capacity(self.degree());
+        for (circle, edge) in hull.windows(2).enumerate() {
+            let (k1, log1) = (edge[0].0, &edge[0].1);
+            let (k2, log2) = (edge[1].0, &edge[1].1);
+            let count = k2 - k1;
+            let radius = ((log1.clone() - log2) / representative.from_usize(count)).exp();
+            let rotation = golden_angle.clone() * representative.from_usize(circle + 1);
+            for j in 0..count {
+                let phi = two_pi.clone() * representative.from_usize(j)
+                    / representative.from_usize(count)
+                    + &rotation;
+                guesses.push(Complex::from_polar_coordinates(radius.clone(), phi));
+            }
+        }
+        guesses
+    }
+
+    /// Compute all complex roots of the polynomial using Aberth's method with an initial guess for each root.
+    /// See [`Self::roots`] for the meaning of the tolerance.
+    pub fn roots_hot_start(
+        &self,
+        max_iterations: usize,
+        tolerance: &R,
+        initial_guesses: Vec<Complex<R>>,
+    ) -> Result<Vec<Complex<R>>, Vec<Complex<R>>> {
+        if self.get_constant().is_zero() {
+            match self
+                .remove_variable_power(1)
+                .roots(max_iterations, tolerance)
+            {
+                Ok(mut roots) => {
+                    roots.push(self.ring.zero());
+                    return Ok(roots);
+                }
+                Err(mut roots) => {
+                    roots.push(self.ring.zero());
+                    return Err(roots);
+                }
+            }
+        }
 
         let df = self.derivative();
 
-        let mut rng = rand::rng();
-        let mut n: Vec<_> = (0..self.degree())
-            .map(|_| {
-                let r = upper.sample_unit(&mut rng) * (upper.clone() - &lower) + &lower;
-                let phi = upper.sample_unit(&mut rng) * upper.pi() * upper.from_usize(2);
-                Complex::from_polar_coordinates(r, phi)
-            })
-            .collect();
+        let mut n = initial_guesses;
+        let finite_error = |roots: &[Complex<R>]| {
+            let mut roots = roots.to_vec();
+            roots.sort_unstable_by(|a, b| {
+                a.re.partial_cmp(&b.re)
+                    .unwrap_or(Ordering::Equal)
+                    .then(a.im.partial_cmp(&b.im).unwrap_or(Ordering::Equal))
+            });
+            Err(roots)
+        };
 
-        let t_sq = tolerance.clone() * tolerance;
+        // Allowance for roundoff in the complex Horner evaluation of p(z)
+        // (Bini, 1996, section 4, https://doi.org/10.1007/BF02207694).
+        // It only relaxes the backward error test, not the correction tolerance.
+        let representative = self.ring.one().re;
+        let working_precision = representative.get_precision();
+        let roundoff = representative
+            .from_usize(2)
+            .inv()
+            .pow(working_precision as u64)
+            * representative.from_usize(8 * self.coefficients.len());
+        let backward_tolerance = if *tolerance > roundoff {
+            tolerance.clone()
+        } else {
+            roundoff
+        };
+        let coefficient_magnitudes = self
+            .coefficients
+            .iter()
+            .map(|c| c.norm().re)
+            .collect::<Vec<_>>();
+
         for _ in 0..max_iterations {
+            let mut converged = true;
             for i in 0..n.len() {
-                let e = self.evaluate(&n[i]) / df.evaluate(&n[i]);
+                let p_at_i = self.evaluate(&n[i]);
+                let df_at_i = df.evaluate(&n[i]);
+                if !p_at_i.is_finite() || !df_at_i.is_finite() || df_at_i.is_zero() {
+                    return finite_error(&n);
+                }
+
+                let e = p_at_i / df_at_i;
+                if !e.is_finite() {
+                    return finite_error(&n);
+                }
+                // The Newton correction is independent of the coefficient scale.
+                // Check it as well as the Aberth step, which the repulsion between
+                // approximations can make artificially small. Both are measured
+                // relative to max(1, |z|), as an absolute bound is not attainable
+                // for roots much larger than one.
+                let magnitude = n[i].norm().re;
+                let step_tolerance = if magnitude > representative.one() {
+                    tolerance.clone() * &magnitude
+                } else {
+                    tolerance.clone()
+                };
+                converged &= e.norm().re < step_tolerance;
 
                 let mut rep = e.zero();
                 for j in 0..n.len() {
                     if i != j && n[i] != n[j] {
-                        rep += (n[i].clone() - &n[j]).inv();
+                        let diff = n[i].clone() - &n[j];
+                        if !diff.is_finite() || diff.is_zero() {
+                            return finite_error(&n);
+                        }
+
+                        let diff_inv = diff.inv();
+                        if !diff_inv.is_finite() {
+                            return finite_error(&n);
+                        }
+
+                        rep += diff_inv;
                     }
                 }
+                if !rep.is_finite() {
+                    return finite_error(&n);
+                }
 
-                n[i] -= &e / (rep.one() - &e * rep); // immediately use the new value
+                let denom = rep.one() - &e * rep;
+                if !denom.is_finite() || denom.is_zero() {
+                    return finite_error(&n);
+                }
+
+                let correction = e / denom;
+                if !correction.is_finite() {
+                    return finite_error(&n);
+                }
+                converged &= correction.norm().re < step_tolerance;
+
+                let updated = n[i].clone() - correction;
+                if !updated.is_finite() {
+                    return finite_error(&n);
+                }
+                n[i] = updated;
+                // Only the value of an iterate matters, as the iteration corrects
+                // earlier roundoff. Discard the precision loss tracked by the update,
+                // which would otherwise accumulate over the iterations.
+                n[i].set_precision(working_precision);
             }
 
-            if n.iter().all(|x| self.evaluate(x).norm_squared() < t_sq) {
+            if converged
+                && n.iter().all(|z| {
+                    self.relative_backward_error(z, &coefficient_magnitudes)
+                        .is_some_and(|error| error <= backward_tolerance)
+                })
+            {
                 n.sort_unstable_by(|a, b| {
                     a.re.partial_cmp(&b.re)
                         .unwrap_or(Ordering::Equal)
@@ -1346,6 +1869,60 @@ impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrderin
                 .then(a.im.partial_cmp(&b.im).unwrap_or(Ordering::Equal))
         });
         Err(n)
+    }
+
+    /// The relative coefficient backward error `|p(z)| / sum_k |a_k| |z|^k` of an approximate
+    /// root `z`, which is the smallest relative perturbation of the coefficients that makes `z`
+    /// an exact root. Returns `None` when it cannot be evaluated in finite arithmetic.
+    fn relative_backward_error(&self, z: &Complex<R>, coefficient_magnitudes: &[R]) -> Option<R> {
+        let representative = self.ring.one().re;
+
+        // Prefer the original coefficients: normalizing them can underflow tiny
+        // coefficients in polynomials with a large dynamic range.
+        let residual = self.evaluate(z).norm().re;
+        let radius = z.norm().re;
+        let scale = coefficient_magnitudes
+            .iter()
+            .rev()
+            .fold(representative.zero(), |sum, c| sum * &radius + c);
+        if residual.is_finite() && scale.is_finite() && !scale.is_zero() {
+            return Some(residual / scale);
+        }
+
+        // On overflow, normalize the coefficients by their largest component and, for
+        // |z| > 1, evaluate the reversed polynomial `z^-degree p(z)` at `1/z` instead.
+        // Both Horner recurrences then only multiply by numbers of norm at most one.
+        let coefficient_scale = self
+            .coefficients
+            .iter()
+            .flat_map(|c| [c.re.norm(), c.im.norm()])
+            .fold(representative.zero(), |a, b| if a > b { a } else { b });
+        if !coefficient_scale.is_finite() || coefficient_scale.is_zero() {
+            return None;
+        }
+
+        let reverse = radius > representative.one();
+        let argument = if reverse { z.inv() } else { z.clone() };
+        let radius = argument.norm().re;
+        let mut value = argument.zero();
+        let mut scale = representative.zero();
+        for i in 0..self.coefficients.len() {
+            let index = if reverse {
+                i
+            } else {
+                self.coefficients.len() - 1 - i
+            };
+            let c = &self.coefficients[index];
+            let c = Complex::new(
+                c.re.clone() / &coefficient_scale,
+                c.im.clone() / &coefficient_scale,
+            );
+            scale = scale * &radius + c.norm().re;
+            value = value * &argument + c;
+        }
+
+        let residual = value.norm().re;
+        (residual.is_finite() && scale.is_finite() && !scale.is_zero()).then(|| residual / scale)
     }
 }
 
@@ -1584,6 +2161,7 @@ impl<F: EuclideanDomain> UnivariatePolynomial<F> {
         self.quot_rem(div).1
     }
 
+    /// Return the quotient and remainder of division by `div`.
     pub fn quot_rem(&self, div: &Self) -> (Self, Self) {
         self.quot_rem_impl(div, false)
     }
@@ -1674,7 +2252,7 @@ impl<F: Field> UnivariatePolynomial<F> {
 
     /// Compute `(g, s, t)` where `self * s + other * t = g`
     /// by means of the extended Euclidean algorithm.
-    pub fn eea(&self, other: &Self) -> (Self, Self, Self) {
+    pub fn extended_gcd(&self, other: &Self) -> (Self, Self, Self) {
         if self.variable != other.variable {
             panic!("Cannot apply EEA with different variables");
         }
@@ -1722,7 +2300,7 @@ impl<F: Field> UnivariatePolynomial<F> {
         let mut ss = vec![];
         let mut cur_s = b.clone();
         for (p, aa) in polys.iter_mut().zip(&mut a) {
-            let (g, s, t) = p.eea(aa);
+            let (g, s, t) = p.extended_gcd(aa);
             debug_assert!(g.is_one());
             let new_s = (t * &cur_s).rem(p);
             ss.push(new_s);
@@ -1733,8 +2311,11 @@ impl<F: Field> UnivariatePolynomial<F> {
         ss
     }
 
-    /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
-    pub fn gcd(&self, b: &Self) -> Self {
+    /// Compute the univariate GCD using Euclid's algorithm. The result is made monic.
+    ///
+    /// Prefer [`Self::gcd`] when the coefficient ring implements [`PolynomialGCD`]. Exact
+    /// Euclidean division can cause severe coefficient swell over fields such as the rationals.
+    pub fn gcd_euclidean(&self, b: &Self) -> Self {
         if self.is_zero() {
             return b.clone();
         }
@@ -1807,6 +2388,20 @@ impl<F: Field> UnivariatePolynomial<F> {
     }
 }
 
+impl<F: Field + PolynomialGCD<u16>> UnivariatePolynomial<F> {
+    /// Compute the GCD using the coefficient ring's preferred polynomial GCD algorithm.
+    pub fn gcd(&self, b: &Self) -> Self {
+        if self.variable != b.variable {
+            panic!("Cannot compute GCD of polynomials with different variables");
+        }
+
+        self.clone()
+            .to_multivariate::<u16>()
+            .gcd(&b.clone().to_multivariate::<u16>())
+            .to_univariate_from_univariate(0)
+    }
+}
+
 impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
     /// Convert a univariate polynomial of multivariate polynomials to a multivariate polynomial.
     pub fn flatten(self) -> MultivariatePolynomial<R, E> {
@@ -1815,7 +2410,7 @@ impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
         }
 
         let Some(pos) = self.coefficients[0]
-            .variables
+            .variables()
             .iter()
             .position(|x| x == self.variable.as_ref())
         else {
@@ -1837,110 +2432,5 @@ impl<R: Ring, E: PositiveExponent> UnivariatePolynomial<PolynomialRing<R, E>> {
         }
 
         res
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{
-        atom::AtomCore,
-        domains::{float::F64, integer::Z, rational::Q},
-        parse,
-    };
-
-    #[test]
-    fn derivative_integrate() {
-        let a = parse!("x^2+5x+x^7+3")
-            .to_polynomial::<_, u8>(&Q, None)
-            .to_univariate_from_univariate(0);
-
-        let r = a.integrate().derivative();
-
-        assert_eq!(a, r);
-    }
-
-    #[test]
-    fn test_uni() {
-        let a = parse!("x^2+5x+x^7+3")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-        let b = parse!("x^2 + 6")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-
-        let a_plus_b = parse!("9+5*x+2*x^2+x^7")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-
-        let a_mul_b = parse!("18+30*x+9*x^2+5*x^3+x^4+6*x^7+x^9")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-
-        let a_quot_b = parse!("1+36*x+-6*x^3+x^5")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-
-        let a_rem_b = parse!("-3+-211*x")
-            .to_polynomial::<_, u8>(&Z, None)
-            .to_univariate_from_univariate(0);
-
-        assert_eq!(&a + &b, a_plus_b);
-        assert_eq!(&a * &b, a_mul_b);
-        assert_eq!(a.quot_rem(&b), (a_quot_b, a_rem_b));
-
-        let c = a.evaluate(&5.into());
-        assert_eq!(c, 78178);
-    }
-
-    #[test]
-    fn isolate() {
-        let p =
-        parse!("-13559717115*x^6+624134407779*x^7+-13046815434285*x^8+163110612017313*x^9+-1347733455544188*x^10+7635969738026784*x^11+-29444295941654904*x^12+71604709665043392*x^13+-77045857071990336*x^14+-99619711608972096*x^15+375578692434494208*x^16+66256662107418624*x^17+-1548072112541055488*x^18+800263217632600064*x^19+4816054475648851968*x^20+-4271696436901249024*x^21+-12066471810013724672*x^22+10894783995791278080*x^23+28270081588804452352*x^24+-17402041731641245696*x^25+-56047633173904883712*x^26+8535267319469834240*x^27+82086860869945262080*x^28+30788799964221800448*x^29+-66898313364436418560*x^30+-66318040948916879360*x^31+44159548067414016*x^32+31084367995645984768*x^33+20957883496015069184*x^34+6860635897973440512*x^35+1254041389990150144*x^36+123004564822556672*x^37+5066549580791808*x^38")
-        .to_polynomial::<_, u32>(&Q, None)
-        .to_univariate_from_univariate(0);
-
-        let roots = p.isolate_roots(None);
-
-        assert_eq!(
-            roots,
-            vec![
-                ((-7, 1).into(), (-7, 2).into(), 6),
-                ((-1, 1).into(), (-1, 1).into(), 3),
-                ((0, 1).into(), (0, 1).into(), 6),
-                ((1, 8).into(), (3, 16).into(), 3),
-                ((15, 64).into(), (9, 32).into(), 1),
-                ((3, 4).into(), (1, 1).into(), 1),
-            ],
-        );
-
-        let ref_roots: Vec<_> = roots
-            .into_iter()
-            .map(|x| {
-                let r = p.refine_root_interval((x.0, x.1), &(1, 1000).into());
-                (r.0, r.1, x.2)
-            })
-            .collect();
-
-        assert_eq!(
-            ref_roots,
-            vec![
-                ((-3955, 1024).into(), (-987, 256).into(), 6),
-                ((-1, 1).into(), (-1, 1).into(), 3),
-                ((0, 1).into(), (0, 1).into(), 6),
-                ((723, 4096).into(), (181, 1024).into(), 3),
-                ((1023, 4096).into(), (2049, 8192).into(), 1),
-                ((995, 1024).into(), (249, 256).into(), 1),
-            ],
-        );
-    }
-
-    #[test]
-    fn complex_roots() {
-        let p = parse!("x^10+9x^7+4x^3+2x+1")
-            .to_polynomial::<_, u16>(&Q, None)
-            .to_univariate_from_univariate(0);
-        let pc = p.approximate_roots::<F64>(10000, &1e-8.into()).unwrap();
-        assert!(pc[0].0.re < 2f64.into());
-        assert!(pc[9].0.re > 1f64.into());
     }
 }

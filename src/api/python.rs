@@ -3,29 +3,39 @@
 //! All Symbolica community extensions must implement the [SymbolicaCommunityModule] trait.
 
 use std::{
+    borrow::Cow,
+    cell::RefCell,
     fs::File,
     hash::{Hash, Hasher},
     io::{BufReader, BufWriter},
     ops::{Deref, Neg},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{
+            AtomicBool, AtomicU32,
+            Ordering::{Acquire, Relaxed, Release},
+        },
+    },
 };
 
 use ahash::{HashMap, HashSet};
 use brotli::CompressorWriter;
 use numpy::{
-    AllowTypeChange, Complex64, IntoPyArray, PyArrayDyn, PyArrayLike1, PyArrayLikeDyn,
-    ndarray::{ArrayD, Axis, CowArray, IxDyn},
+    Complex64,
+    ndarray::{ArrayD, Axis, CowArray, Ix1, IxDyn},
 };
 use pyo3::{
     Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyErr, PyRef,
     PyResult, PyTypeInfo, Python,
     exceptions::{self, PyIndexError},
+    intern,
     pybacked::PyBackedStr,
     pyclass::CompareOp,
     pyfunction, pymethods,
+    sync::PyOnceLock,
     types::{
-        PyAnyMethods, PyBytes, PyBytesMethods, PyComplex, PyDict, PyDictMethods, PyInt, PyIterator,
-        PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
+        PyAnyMethods, PyBytes, PyBytesMethods, PyCode, PyComplex, PyDict, PyDictMethods, PyInt,
+        PyIterator, PyModule, PyNone, PyTuple, PyTupleMethods, PyType, PyTypeMethods,
     },
     wrap_pyfunction,
 };
@@ -49,28 +59,30 @@ use pyo3_stub_gen::{
 use pyo3_stub_gen_derive::remove_gen_stub;
 
 use rand::{Rng, RngCore};
-use rug::Complete;
 use self_cell::self_cell;
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
 
-#[cfg(not(feature = "python_export"))]
+#[cfg(feature = "python_api")]
 use pyo3::pymodule;
 
 use crate::{
-    LicenseManager,
     atom::{
         Atom, AtomCore, AtomType, AtomView, DefaultNamespace, EvaluationInfo, Indeterminate,
-        ListIterator, Symbol, SymbolAttribute, UserData, UserDataKey,
+        ListIterator, Symbol, SymbolAttribute, SymbolBuilder, UserData, UserDataKey,
     },
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         Ring, RingOps, SelfRing,
-        algebraic_number::AlgebraicExtension,
+        algebraic::{AlgebraicContext, AlgebraicExtension},
         atom::AtomField,
         dual::HyperDual,
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
-        float::{Complex, DoubleFloat, F64, Float, PythonMultiPrecisionFloat, RealLike},
+        float::{
+            Complex, DoubleFloat, F64, Float, PythonComplexFloat, PythonFloat,
+            PythonMultiPrecisionComplex, PythonMultiPrecisionFloat, RealLike,
+            register_python_floats,
+        },
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -79,12 +91,8 @@ use crate::{
     },
     error,
     evaluate::{
-        BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
-        CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator,
-        CompiledSimdComplexEvaluator, CompiledSimdRealEvaluator, ComplexEvaluatorSettings,
-        CudaComplexf64, CudaLoadSettings, CudaRealf64, Dualizer, EvaluationFn, EvaluatorLoader,
-        ExportSettings, ExpressionEvaluator, FunctionMap, InlineASM, Instruction,
-        JITCompiledEvaluator, OptimizationSettings, Slot,
+        ComplexEvaluatorSettings, Dualizer, ExportedInstructions, ExportedSubEvaluator,
+        ExpressionEvaluator, FunctionMap, Instruction, OptimizationSettings, Slot,
     },
     graph::{GenerationSettings, Graph, HalfEdge},
     id::{
@@ -92,6 +100,7 @@ use crate::{
         PatternAtomTreeIterator, PatternRestriction, Relation, ReplaceIterator, ReplaceSettings,
         ReplaceWith, Replacement, WildcardRestriction,
     },
+    license::{LicenseManager, UnlockClaims, bypass_license_check_internal},
     numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Probe, Sample},
     parser::{ParseMode, ParseSettings, Token},
     poly::{
@@ -99,44 +108,67 @@ use crate::{
         gcd::PolynomialGCD, groebner::GroebnerBasis, polynomial::MultivariatePolynomial,
         series::Series,
     },
-    printer::{AliasPrintMode, AtomPrinter, PrintMode, PrintOptions, PrintState},
-    solve::SolveError,
+    printer::{
+        AliasPrintMode, AtomPrinter, ColorMode, PrintMode, PrintOptions, PrintState, PrintUserData,
+        PrintUserDataKey,
+    },
+    solve::{Solution, SolutionCondition, SolveDomain},
     state::{RecycledAtom, State, Workspace},
     streaming::{TermStreamer, TermStreamerConfig},
     tensors::matrix::Matrix,
+    transcendental::TranscendentalFunctions,
     transformer::{StatsOptions, Transformer, TransformerError, TransformerState},
-    try_parse, warn,
+    try_parse,
+};
+
+#[cfg(feature = "native_code_generation")]
+use crate::evaluate::{
+    BatchEvaluator, CompileOptions, CompiledComplexEvaluator, CompiledCudaComplexEvaluator,
+    CompiledCudaRealEvaluator, CompiledNumber, CompiledRealEvaluator, CompiledSimdComplexEvaluator,
+    CompiledSimdRealEvaluator, CudaComplexf64, CudaLoadSettings, CudaRealf64, EvaluatorLoader,
+    ExportSettings, InlineASM, JITCompilationSettings, JITCompiledEvaluator,
 };
 
 #[cfg(feature = "python_stubgen")]
 static NONE_ARG: fn() -> String = || "None".into();
 
-const DEFAULT_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::new()
-};
+static DEFAULT_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::new()
+    });
 
-const PLAIN_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::file()
-};
+static PLAIN_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::file()
+    });
 
-const LATEX_PRINT_OPTIONS: PrintOptions = PrintOptions {
-    hide_namespace: Some("python"),
-    ..PrintOptions::latex()
-};
+static LATEX_PRINT_OPTIONS: std::sync::LazyLock<PrintOptions> =
+    std::sync::LazyLock::new(|| PrintOptions {
+        hide_namespace: Some(Cow::Borrowed("python")),
+        ..PrintOptions::latex()
+    });
 
+mod array;
 mod atom;
+mod citation;
+mod condition;
 mod evaluator;
 mod expression;
 mod graph;
 mod integer;
+#[cfg(feature = "python_stubgen")]
+pub use integer::stub_info;
 mod integration;
 mod matrix;
 mod polynomial;
 mod series;
+mod symbolic_integration;
 
+use array::EvaluationInput;
 pub use atom::*;
+pub use citation::Citation;
 pub use evaluator::*;
 pub use expression::*;
 pub use graph::*;
@@ -145,6 +177,7 @@ pub use integration::*;
 pub use matrix::*;
 pub use polynomial::*;
 pub use series::*;
+pub use symbolic_integration::*;
 
 /// Trait for registering Python submodules for Symbolica, which enables
 /// multiple crates to use the same Symbolica kernel.
@@ -189,6 +222,12 @@ pub trait SymbolicaCommunityModule {
     fn initialize(_py: Python) -> PyResult<()> {
         Ok(())
     }
+
+    /// Get the citations to scientific literature used by this community
+    /// package.
+    fn get_citations() -> Vec<Citation> {
+        vec![]
+    }
 }
 
 /// Specifies the print mode.
@@ -207,6 +246,66 @@ pub enum PythonParseMode {
     /// Parse using Mathematica notation.
     Mathematica,
 }
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonParseMode {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
+/// A domain supported by the exact equation solver.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "SolveDomain",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PythonSolveDomain {
+    Integers,
+    Rationals,
+    Reals,
+    Complexes,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonSolveDomain {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
+impl From<PythonSolveDomain> for crate::solve::SolveDomain {
+    fn from(domain: PythonSolveDomain) -> Self {
+        match domain {
+            PythonSolveDomain::Integers => Self::Integers,
+            PythonSolveDomain::Rationals => Self::Rationals,
+            PythonSolveDomain::Reals => Self::Reals,
+            PythonSolveDomain::Complexes => Self::Complexes,
+        }
+    }
+}
+
+impl From<SolveDomain> for PythonSolveDomain {
+    fn from(domain: SolveDomain) -> Self {
+        match domain {
+            SolveDomain::Integers => Self::Integers,
+            SolveDomain::Rationals => Self::Rationals,
+            SolveDomain::Reals => Self::Reals,
+            SolveDomain::Complexes => Self::Complexes,
+        }
+    }
+}
+
+mod solution;
+pub use solution::*;
 
 impl From<PythonParseMode> for ParseMode {
     fn from(mode: PythonParseMode) -> Self {
@@ -240,6 +339,15 @@ pub enum PythonPrintMode {
     Typst,
 }
 
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonPrintMode {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because PrintMode supports integer equality.
+        *self as usize
+    }
+}
+
 impl From<PrintMode> for PythonPrintMode {
     fn from(mode: PrintMode) -> Self {
         match mode {
@@ -265,6 +373,256 @@ impl From<PythonPrintMode> for PrintMode {
             PythonPrintMode::Sympy => PrintMode::Sympy,
             PythonPrintMode::Typst => PrintMode::Typst,
         }
+    }
+}
+
+/// A representation produced by [`PythonFormattedOutput::lazy`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormattedOutputBackend {
+    Text,
+    Html,
+    Latex,
+}
+
+impl FormattedOutputBackend {
+    fn index(self) -> usize {
+        match self {
+            Self::Text => 0,
+            Self::Html => 1,
+            Self::Latex => 2,
+        }
+    }
+}
+
+type FormattedOutputRenderer =
+    dyn Fn(Python<'_>, FormattedOutputBackend) -> PyResult<Option<String>> + Send + Sync;
+
+struct NotebookOutput {
+    create: Box<dyn Fn(Python<'_>) -> PyResult<Py<PyAny>> + Send + Sync>,
+    value: PyOnceLock<Py<PyAny>>,
+}
+
+enum FormattedOutputContent {
+    Ready([Option<String>; 3]),
+    Lazy {
+        renderer: Box<FormattedOutputRenderer>,
+        outputs: [PyOnceLock<Option<String>>; 3],
+    },
+}
+
+thread_local! {
+    // PyOnceLock handles concurrent requests, but recursive initialization would
+    // deadlock. Track active callbacks without holding a borrow across user code.
+    static FORMATTED_OUTPUT_RENDERING: RefCell<Vec<(usize, FormattedOutputBackend)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+struct FormattedOutputRenderGuard;
+
+impl Drop for FormattedOutputRenderGuard {
+    fn drop(&mut self) {
+        FORMATTED_OUTPUT_RENDERING.with(|active| {
+            active.borrow_mut().pop();
+        });
+    }
+}
+
+/// A formatted string with rich notebook display representations.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    name = "FormattedOutput",
+    skip_from_py_object,
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonFormattedOutput {
+    content: Arc<FormattedOutputContent>,
+    notebook: Option<Arc<NotebookOutput>>,
+}
+
+impl PythonFormattedOutput {
+    /// Defer formatting until a representation is requested.
+    ///
+    /// The renderer runs attached to Python and must return text for `Text`;
+    /// `Html` and `Latex` may return `None` when unsupported. Successful results,
+    /// including `None`, are cached independently and shared by clones. Errors
+    /// propagate to the caller and may be retried on the next request.
+    /// Recursively requesting a backend currently rendering on the same thread
+    /// raises `RuntimeError` instead of blocking.
+    pub fn lazy(
+        renderer: impl Fn(Python<'_>, FormattedOutputBackend) -> PyResult<Option<String>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            notebook: None,
+            content: Arc::new(FormattedOutputContent::Lazy {
+                renderer: Box::new(renderer),
+                outputs: std::array::from_fn(|_| PyOnceLock::new()),
+            }),
+        }
+    }
+
+    /// Attach an optional live notebook representation, without eagerly rendering it.
+    pub fn with_notebook(
+        mut self,
+        create: impl Fn(Python<'_>) -> PyResult<Py<PyAny>> + Send + Sync + 'static,
+    ) -> Self {
+        self.notebook = Some(Arc::new(NotebookOutput {
+            create: Box::new(create),
+            value: PyOnceLock::new(),
+        }));
+        self
+    }
+
+    fn notebook_value(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.notebook
+            .as_ref()
+            .map(|provider| {
+                provider
+                    .value
+                    .get_or_try_init(py, || (provider.create)(py))
+                    .map(|value| value.clone_ref(py))
+            })
+            .transpose()
+    }
+
+    /// Obtain one representation, rendering and caching it if necessary.
+    pub fn render(
+        &self,
+        py: Python<'_>,
+        backend: FormattedOutputBackend,
+    ) -> PyResult<Option<String>> {
+        match self.content.as_ref() {
+            FormattedOutputContent::Ready(outputs) => Ok(outputs[backend.index()].clone()),
+            FormattedOutputContent::Lazy { renderer, outputs } => {
+                let output = &outputs[backend.index()];
+                if let Some(value) = output.get(py) {
+                    return Ok(value.clone());
+                }
+                let key = (Arc::as_ptr(&self.content) as usize, backend);
+                if FORMATTED_OUTPUT_RENDERING.with(|active| active.borrow().contains(&key)) {
+                    return Err(exceptions::PyRuntimeError::new_err(format!(
+                        "recursive {backend:?} rendering of FormattedOutput"
+                    )));
+                }
+                output
+                    .get_or_try_init(py, || {
+                        FORMATTED_OUTPUT_RENDERING.with(|active| active.borrow_mut().push(key));
+                        let _guard = FormattedOutputRenderGuard;
+                        let value = renderer(py, backend)?;
+                        if backend == FormattedOutputBackend::Text && value.is_none() {
+                            return Err(exceptions::PyRuntimeError::new_err(
+                                "FormattedOutput renderer must provide plain text",
+                            ));
+                        }
+                        Ok(value)
+                    })
+                    .cloned()
+            }
+        }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonFormattedOutput {
+    /// Create a formatted output object.
+    #[new]
+    #[pyo3(signature = (text, html = None, latex = None))]
+    pub fn new(text: String, html: Option<String>, latex: Option<String>) -> Self {
+        Self {
+            notebook: None,
+            content: Arc::new(FormattedOutputContent::Ready([Some(text), html, latex])),
+        }
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.format_plain(py)
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.format_plain(py)
+    }
+
+    /// Convert the formatted output into plain text.
+    pub fn format_plain(&self, py: Python<'_>) -> PyResult<String> {
+        // Both constructors and lazy rendering enforce the mandatory text backend.
+        Ok(self.render(py, FormattedOutputBackend::Text)?.unwrap())
+    }
+
+    /// Supply a live display to marimo, or the existing static representation.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.notebook_value(py)? {
+            return Ok(value.call_method0(py, "_display_")?);
+        }
+        let html = match self.render(py, FormattedOutputBackend::Html)? {
+            Some(html) => html,
+            None => crate::printer::AnsiHtmlFormatter::escape_html(&self.format_plain(py)?),
+        };
+        Ok(py
+            .import("marimo")?
+            .getattr("Html")?
+            .call1((html,))?
+            .unbind())
+    }
+
+    /// Supply a live Jupyter representation when the producer supports it.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(value) = self.notebook_value(py)? {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("include", include)?;
+            kwargs.set_item("exclude", exclude)?;
+            return value.call_method(py, "_repr_mimebundle_", (), Some(&kwargs));
+        }
+        let bundle = PyDict::new(py);
+        for (mime, backend) in [
+            ("text/plain", FormattedOutputBackend::Text),
+            ("text/html", FormattedOutputBackend::Html),
+            ("text/latex", FormattedOutputBackend::Latex),
+        ] {
+            if include.as_ref().is_none_or(|v| v.iter().any(|s| s == mime))
+                && !exclude
+                    .as_ref()
+                    .is_some_and(|v| v.iter().any(|s| s == mime))
+            {
+                if let Some(value) = self.render(py, backend)? {
+                    bundle.set_item(mime, value)?;
+                }
+            }
+        }
+        Ok(bundle.into_any().unbind())
+    }
+
+    /// Convert the formatted output into an HTML representation.
+    pub fn _repr_html_(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.render(py, FormattedOutputBackend::Html)
+    }
+
+    /// Convert the formatted output into a LaTeX representation.
+    pub fn _repr_latex_(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.render(py, FormattedOutputBackend::Latex)
+    }
+
+    /// Convert the formatted output into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".into()
+        } else {
+            self.format_plain(pretty.py())?
+        };
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 }
 
@@ -315,9 +673,21 @@ impl From<PythonAliasPrintMode> for AliasPrintMode {
 pub fn create_symbolica_module<'a, 'b>(
     m: &'b Bound<'a, PyModule>,
 ) -> PyResult<&'b Bound<'a, PyModule>> {
+    // Registering the Python API initializes some built-in Symbolica objects. Defer the first real
+    // license check until user code invokes an operation, so a library can register its unlock
+    // after the extension has been imported.
+    let _license_guard = bypass_license_check_internal();
+
+    register_python_floats(m)?;
+    m.add_class::<Citation>()?;
+    m.add_class::<PythonFormattedOutput>()?;
+    m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
+    m.add_class::<PythonIntegrationStep>()?;
     m.add_class::<PythonHeldExpression>()?;
     m.add_class::<PythonTransformer>()?;
+    m.add_class::<PythonRootLocation>()?;
+    m.add_class::<PythonIsolatedRoot>()?;
     m.add_class::<PythonPolynomial>()?;
     m.add_class::<PythonFiniteFieldPolynomial>()?;
     m.add_class::<PythonNumberFieldPolynomial>()?;
@@ -331,17 +701,39 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonAtomTree>()?;
     m.add_class::<PythonSymbolAttribute>()?;
     m.add_class::<PythonParseMode>()?;
+    m.add_class::<PythonSolveDomain>()?;
+    m.add_class::<PythonSolutionCondition>()?;
+    m.add_class::<PythonSolution>()?;
+    m.add_class::<PythonSolutionSet>()?;
+    m.add(
+        "SolveError",
+        m.py().get_type::<solution::errors::SolveError>(),
+    )?;
+    m.add(
+        "UnsupportedProblem",
+        m.py().get_type::<solution::errors::UnsupportedProblem>(),
+    )?;
+    m.add(
+        "IncompleteCoverage",
+        m.py().get_type::<solution::errors::IncompleteCoverage>(),
+    )?;
     m.add_class::<PythonPrintMode>()?;
     m.add_class::<PythonAliasPrintMode>()?;
     m.add_class::<PythonCondition>()?;
     m.add_class::<PythonReplacement>()?;
+    m.add_class::<PythonFunctionDefinition>()?;
+    m.add_class::<PythonEvaluatorInstructions>()?;
+    m.add_class::<PythonEvaluatorFunction>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledComplexExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledSimdRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledSimdComplexExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledCudaRealExpressionEvaluator>()?;
-    m.add_class::<PythonCompiledCudaComplexExpressionEvaluator>()?;
+    #[cfg(feature = "native_code_generation")]
+    {
+        m.add_class::<PythonCompiledRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledComplexExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledSimdRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledSimdComplexExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledCudaRealExpressionEvaluator>()?;
+        m.add_class::<PythonCompiledCudaComplexExpressionEvaluator>()?;
+    }
     m.add_class::<PythonRandomNumberGenerator>()?;
     m.add_class::<PythonPatternRestriction>()?;
     m.add_class::<PythonTermStreamer>()?;
@@ -350,11 +742,17 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonGraph>()?;
     m.add_class::<PythonInteger>()?;
 
+    m.add("Integers", PythonSolveDomain::Integers)?;
+    m.add("Rationals", PythonSolveDomain::Rationals)?;
+    m.add("Reals", PythonSolveDomain::Reals)?;
+    m.add("Complexes", PythonSolveDomain::Complexes)?;
+
     m.add_function(wrap_pyfunction!(symbol_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(number_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(expression_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(transformer_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(poly_shorthand, m)?)?;
+    m.add_function(wrap_pyfunction!(_reconstruct_expression, m)?)?;
 
     m.add_function(wrap_pyfunction!(get_version, m)?)?;
     m.add_function(wrap_pyfunction!(is_licensed, m)?)?;
@@ -366,6 +764,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(use_custom_logger, m)?)?;
     m.add_function(wrap_pyfunction!(get_namespace, m)?)?;
     m.add_function(wrap_pyfunction!(set_namespace, m)?)?;
+    m.add_function(wrap_pyfunction!(set_library_key, m)?)?;
 
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
@@ -404,16 +803,11 @@ fn print_options_to_dict<'py>(
         "double_star_for_exponentiation",
         options.double_star_for_exponentiation,
     )?;
-    #[allow(deprecated)]
-    dict.set_item(
-        "square_brackets_for_function",
-        options.square_brackets_for_function,
-    )?;
     dict.set_item("function_brackets", options.function_brackets)?;
     dict.set_item("num_exp_as_superscript", options.num_exp_as_superscript)?;
     dict.set_item("precision", options.precision)?;
     dict.set_item("pretty_matrix", options.pretty_matrix)?;
-    dict.set_item("hide_namespace", options.hide_namespace)?;
+    dict.set_item("hide_namespace", options.hide_namespace.as_deref())?;
     dict.set_item("hide_all_namespaces", options.hide_all_namespaces)?;
     dict.set_item("color_namespace", options.color_namespace)?;
     dict.set_item("max_terms", options.max_terms)?;
@@ -421,7 +815,11 @@ fn print_options_to_dict<'py>(
         "alias_print_mode",
         PythonAliasPrintMode::from(options.alias_print_mode),
     )?;
-    dict.set_item("custom_print_mode", options.custom_print_mode.map(|x| x.1))?;
+    let custom_print_mode = PyDict::new(py);
+    for (name, value) in &options.custom_print_mode {
+        custom_print_mode.set_item(name, PythonBorrowedPrintUserData(value))?;
+    }
+    dict.set_item("custom_print_mode", custom_print_mode)?;
 
     dict.set_item("level", state.level)?;
     dict.set_item("bracket_level", state.bracket_level)?;
@@ -430,10 +828,103 @@ fn print_options_to_dict<'py>(
     Ok(dict)
 }
 
+/// Represents user-defined data that can be used as a key in [PythonPrintUserData].
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PythonPrintUserDataKey(pub PrintUserDataKey);
+
+impl<'py> FromPyObject<'_, 'py> for PythonPrintUserDataKey {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonPrintUserDataKey(PrintUserDataKey::Integer(num)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonPrintUserDataKey(PrintUserDataKey::String(
+                s.to_string(),
+            )))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to PrintUserDataKey",
+            ))
+        }
+    }
+}
+
+/// Represents user-defined data that can be attached to [PrintOptions] in Python.
+#[derive(Clone)]
+pub struct PythonPrintUserData(pub PrintUserData);
+
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(PythonPrintUserData = i64 | PyBackedStr | PyDict | PyList);
+
+impl<'py> FromPyObject<'_, 'py> for PythonPrintUserData {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, pyo3::PyAny>) -> PyResult<Self> {
+        if let Ok(num) = ob.extract::<i64>() {
+            Ok(PythonPrintUserData(PrintUserData::Integer(num)))
+        } else if let Ok(s) = ob.extract::<PyBackedStr>() {
+            Ok(PythonPrintUserData(PrintUserData::String(s.to_string())))
+        } else if let Ok(list) = ob.extract::<Vec<PythonPrintUserData>>() {
+            Ok(PythonPrintUserData(PrintUserData::List(
+                list.into_iter().map(|x| x.0).collect(),
+            )))
+        } else if let Ok(map) = ob.extract::<HashMap<PythonPrintUserDataKey, PythonPrintUserData>>()
+        {
+            Ok(PythonPrintUserData(PrintUserData::Map(
+                map.into_iter().map(|(k, v)| (k.0, v.0)).collect(),
+            )))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "Cannot convert to PrintUserData",
+            ))
+        }
+    }
+}
+
+pub(super) struct PythonBorrowedPrintUserData<'a>(pub(super) &'a PrintUserData);
+
+impl<'a, 'py> IntoPyObject<'py> for PythonBorrowedPrintUserData<'a> {
+    type Target = PyAny;
+    type Output = Bound<'py, Self::Target>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self.0 {
+            PrintUserData::Integer(i) => i.into_bound_py_any(py),
+            PrintUserData::String(s) => s.into_bound_py_any(py),
+            PrintUserData::List(l) => {
+                let pl: Vec<PythonBorrowedPrintUserData> =
+                    l.iter().map(PythonBorrowedPrintUserData).collect();
+                pl.into_bound_py_any(py)
+            }
+            PrintUserData::Map(m) => {
+                let dict = PyDict::new(py);
+                for (key, value) in m {
+                    match key {
+                        PrintUserDataKey::Integer(i) => {
+                            dict.set_item(i, PythonBorrowedPrintUserData(value))?
+                        }
+                        PrintUserDataKey::String(s) => {
+                            dict.set_item(s, PythonBorrowedPrintUserData(value))?
+                        }
+                    }
+                }
+                dict.into_bound_py_any(py)
+            }
+        }
+    }
+}
+
 /// Set the Symbolica namespace for the calling module.
 /// All subsequently created symbols in the calling module will be defined within this namespace.
 ///
 /// This function sets the `SYMBOLICA_NAMESPACE` variable in the global scope of the calling module.
+///
+/// Parameters
+/// ----------
+/// namespace: str
+///     The namespace to set for subsequently created symbols.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -494,6 +985,231 @@ pub fn get_namespace(py: Python) -> PyResult<&'static str> {
     )
 }
 
+struct RegisteredLibraryUnlock {
+    claims: UnlockClaims,
+    module_globals: Vec<Py<PyDict>>,
+    checked_pid: AtomicU32,
+    enabled: RwLock<Arc<AtomicBool>>,
+}
+
+impl RegisteredLibraryUnlock {
+    fn ensure_license_checked(&self) -> PyResult<bool> {
+        let pid = std::process::id();
+        if self.checked_pid.load(Acquire) != pid {
+            let enabled = crate::license::start_license_check(&self.claims)
+                .map_err(exceptions::PyPermissionError::new_err)?;
+            *self.enabled.write().unwrap() = enabled;
+            self.checked_pid.store(pid, Release);
+        }
+        Ok(self.enabled.read().unwrap().load(Relaxed))
+    }
+}
+
+static REGISTERED_LIBRARY_UNLOCKS: LazyLock<RwLock<Vec<RegisteredLibraryUnlock>>> =
+    LazyLock::new(|| RwLock::new(Vec::new()));
+
+fn is_loaded_module_globals(
+    py: Python,
+    module_name: &str,
+    globals: &Bound<'_, PyDict>,
+) -> PyResult<bool> {
+    let modules = PyModule::import(py, "sys")?
+        .getattr("modules")?
+        .cast_into::<PyDict>()?;
+    let Some(module) = modules.get_item(module_name)? else {
+        return Ok(false);
+    };
+    Ok(module.getattr("__dict__")?.is(globals))
+}
+
+fn register_library_unlock_module(
+    claims: UnlockClaims,
+    globals: &Bound<'_, PyDict>,
+    enabled: Arc<AtomicBool>,
+) -> PyResult<()> {
+    let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
+    if let Some(registered) = packages
+        .iter_mut()
+        .find(|registered| registered.claims.package == claims.package)
+    {
+        if registered.claims != claims {
+            return Err(exceptions::PyPermissionError::new_err(format!(
+                "Conflicting Symbolica library unlock token registered for package '{}'",
+                claims.package
+            )));
+        }
+        if !registered
+            .module_globals
+            .iter()
+            .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+        {
+            registered.module_globals.push(globals.clone().unbind());
+        }
+    } else {
+        packages.push(RegisteredLibraryUnlock {
+            claims,
+            module_globals: vec![globals.clone().unbind()],
+            checked_pid: AtomicU32::new(std::process::id()),
+            enabled: RwLock::new(enabled),
+        });
+    }
+    Ok(())
+}
+
+fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyResult<bool> {
+    {
+        let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+        if let Some(registered) = packages.iter().find(|registered| {
+            registered
+                .module_globals
+                .iter()
+                .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+        }) {
+            return registered.ensure_license_checked();
+        }
+    }
+
+    let Some(module_name) = globals.get_item(intern!(py, "__name__"))? else {
+        return Ok(false);
+    };
+    let module_name = module_name.extract::<PyBackedStr>()?;
+    let module_name_str: &str = &module_name;
+    let matching_package = {
+        let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+        packages.iter().position(|registered| {
+            module_name_str == registered.claims.package
+                || module_name_str
+                    .strip_prefix(&registered.claims.package)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+    };
+    let Some(matching_package) = matching_package else {
+        return Ok(false);
+    };
+
+    // Do not trust a frame's mutable `__name__` alone. Require its globals to be the dictionary of
+    // the correspondingly named loaded module before caching the pointer-identity fast path.
+    if !is_loaded_module_globals(py, module_name_str, globals)? {
+        return Ok(false);
+    }
+
+    let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
+    let Some(registered) = packages.get_mut(matching_package) else {
+        return Ok(false);
+    };
+    let enabled = registered.ensure_license_checked()?;
+    if !registered
+        .module_globals
+        .iter()
+        .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
+    {
+        registered.module_globals.push(globals.clone().unbind());
+    }
+    Ok(enabled)
+}
+
+fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
+    let frame = unsafe { pyo3::ffi::PyEval_GetFrame() };
+    if frame.is_null() {
+        return Ok(false);
+    }
+
+    let mut frame = unsafe {
+        Bound::<PyAny>::from_borrowed_ptr(py, frame.cast())
+            .clone()
+            .unbind()
+    };
+    loop {
+        let frame_bound = frame.bind(py);
+        let globals = frame_bound
+            .getattr(intern!(py, "f_globals"))?
+            .cast_into::<PyDict>()?;
+        if is_registered_module_globals(py, &globals)? {
+            return Ok(true);
+        }
+
+        let back = frame_bound.getattr(intern!(py, "f_back"))?;
+        if back.is_none() {
+            return Ok(false);
+        }
+        frame = back.unbind();
+    }
+}
+
+/// Return whether the current Python call stack contains a library unlock frame.
+pub(crate) fn has_library_unlock_frame() -> bool {
+    if REGISTERED_LIBRARY_UNLOCKS.read().unwrap().is_empty() {
+        return false;
+    }
+    Python::try_attach(|py| has_library_unlock_frame_attached(py).unwrap_or(false)).unwrap_or(false)
+}
+
+fn validated_library_unlock_caller_globals<'py>(
+    py: Python<'py>,
+    claims: &UnlockClaims,
+) -> PyResult<Bound<'py, PyDict>> {
+    let ptr = unsafe { pyo3::ffi::PyEval_GetGlobals() };
+    if ptr.is_null() {
+        return Err(exceptions::PyRuntimeError::new_err(
+            "No active Python frame found for library unlock validation",
+        ));
+    }
+
+    let globals = unsafe { Bound::from_borrowed_ptr(py, ptr) }.cast_into::<PyDict>()?;
+    let module = globals
+        .get_item("__name__")?
+        .ok_or_else(|| exceptions::PyRuntimeError::new_err("Calling module has no __name__"))?
+        .extract::<PyBackedStr>()?;
+    let package_prefix = format!("{}.", claims.package);
+    if module.as_ref() != claims.package && !module.starts_with(&package_prefix) {
+        return Err(exceptions::PyPermissionError::new_err(format!(
+            "Library unlock token for package '{}' cannot be activated from module '{}'",
+            claims.package, module
+        )));
+    }
+    if !is_loaded_module_globals(py, &module, &globals)? {
+        return Err(exceptions::PyPermissionError::new_err(format!(
+            "Library unlock token for package '{}' cannot be activated from globals that do not belong to loaded module '{}'",
+            claims.package, module
+        )));
+    }
+
+    Ok(globals)
+}
+
+/// Set the Symbolica library key for this Python package.
+///
+/// Obtaining and using a library key requires a separate agreement with Symbolica.
+/// Contact license@symbolica.io to arrange one. Possessing a copied or stolen key
+/// does not authorize its use, even if Symbolica accepts it.
+///
+/// Call this from your package during import, before using Symbolica. It lets users run
+/// your library without their own Symbolica license; it does not license their other code.
+/// The key must be issued for your package.
+///
+/// Expired keys synchronously check for an online extension. If renewal cannot
+/// be confirmed, registration succeeds with a warning and leaves the library
+/// restricted to one core unless the user has another valid license. Explicit
+/// revocation also warns and falls back. Renew the key to keep using it offline.
+///
+/// Parameters
+/// ----------
+/// key: str
+///     The Symbolica library key issued for your package.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+pub fn set_library_key(py: Python, key: &str) -> PyResult<()> {
+    let claims = crate::license::verify_token(key).map_err(exceptions::PyValueError::new_err)?;
+    let globals = validated_library_unlock_caller_globals(py, &claims)?;
+    let enabled = crate::license::start_license_check(&claims)
+        .map_err(exceptions::PyPermissionError::new_err)?;
+    register_library_unlock_module(claims, &globals, enabled)?;
+    Ok(())
+}
+
 /// Symbolica is a blazing fast computer algebra system.
 ///
 /// It can be used to perform mathematical operations,
@@ -548,6 +1264,11 @@ fn is_licensed() -> bool {
 
 /// Set the Symbolica license key for this computer. Can only be called before calling any other Symbolica functions
 /// and before importing any community modules.
+///
+/// Parameters
+/// ----------
+/// key: str
+///     The license key to register for this machine.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -557,8 +1278,14 @@ fn set_license_key(key: String) -> PyResult<()> {
     LicenseManager::set_license_key(&key).map_err(exceptions::PyException::new_err)
 }
 
-/// Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address
-/// `email`.
+/// Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address `email`.
+///
+/// Parameters
+/// ----------
+/// name: str
+///     The name of the user.
+/// email: str
+///     The email address that should receive the license.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -570,8 +1297,16 @@ fn request_hobbyist_license(name: String, email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-/// Request a key for a trial license for the user `name` working at `company`, that will be sent to the e-mail address
-/// `email`.
+/// Request a key for a trial license for the user `name` working at `company`, that will be sent to the e-mail address `email`.
+///
+/// Parameters
+/// ----------
+/// name: str
+///     The name of the user.
+/// email: str
+///     The email address that should receive the license.
+/// company: str
+///     The company of the user.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -585,6 +1320,17 @@ fn request_trial_license(name: String, email: String, company: String) -> PyResu
 
 /// Request a sublicense key for the user `name` working at `company` that has the site-wide license `super_license`.
 /// The key will be sent to the e-mail address `email`.
+///
+/// Parameters
+/// ----------
+/// name: str
+///     The name of the sublicense user.
+/// email: str
+///     The email address that should receive the sublicense.
+/// company: str
+///     The company of the sublicense user.
+/// super_license: str
+///     The parent site-wide license key.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -602,6 +1348,11 @@ fn request_sublicense(
 }
 
 /// Get the license key for the account registered with the provided email address.
+///
+/// Parameters
+/// ----------
+/// email: str
+///     The email address of the licensed account.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -613,21 +1364,478 @@ fn get_license_key(email: String) -> PyResult<()> {
         .map_err(exceptions::PyConnectionError::new_err)
 }
 
-#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
-/// Shorthand notation for :func:`Expression.symbol`.
+fn append_fingerprint_part(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn append_python_identity(value: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    out.push(b'I');
+    let type_name = value
+        .get_type()
+        .fully_qualified_name()?
+        .extract::<String>()?;
+    append_fingerprint_part(out, type_name.as_bytes());
+    out.extend_from_slice(&(value.as_ptr() as usize as u64).to_le_bytes());
+    Ok(())
+}
+
+fn marshal_python_value(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    PyModule::import(value.py(), "marshal")?
+        .getattr("dumps")?
+        .call1((value,))?
+        .cast_into::<PyBytes>()
+        .map(|bytes| bytes.as_bytes().to_vec())
+        .map_err(Into::into)
+}
+
+fn normalize_python_code<'py>(code: &Bound<'py, PyCode>) -> PyResult<Option<Bound<'py, PyCode>>> {
+    if !code.hasattr("replace")? {
+        // CodeType.replace was added in Python 3.8. On Python 3.7 we retain
+        // identity-only matching rather than making callback registration fail.
+        return Ok(None);
+    }
+
+    let constants = code.getattr("co_consts")?.cast_into::<PyTuple>()?;
+    let mut normalized_constants = Vec::with_capacity(constants.len());
+    for constant in constants {
+        if let Ok(nested_code) = constant.cast::<PyCode>() {
+            let Some(normalized) = normalize_python_code(nested_code)? else {
+                return Ok(None);
+            };
+            normalized_constants.push(normalized.into_any().unbind());
+        } else {
+            normalized_constants.push(constant.unbind());
+        }
+    }
+
+    let kwargs = PyDict::new(code.py());
+    kwargs.set_item("co_consts", PyTuple::new(code.py(), normalized_constants)?)?;
+    kwargs.set_item("co_filename", "")?;
+    kwargs.set_item("co_firstlineno", 1)?;
+    if code.hasattr("co_linetable")? {
+        kwargs.set_item("co_linetable", PyBytes::new(code.py(), &[]))?;
+    } else if code.hasattr("co_lnotab")? {
+        kwargs.set_item("co_lnotab", PyBytes::new(code.py(), &[]))?;
+    }
+    Ok(Some(
+        code.call_method("replace", (), Some(&kwargs))?
+            .cast_into::<PyCode>()?,
+    ))
+}
+
+fn append_python_code_fingerprint(code: &Bound<'_, PyCode>, out: &mut Vec<u8>) -> PyResult<()> {
+    if let Some(normalized) = normalize_python_code(code)? {
+        out.push(b'C');
+        append_fingerprint_part(out, &marshal_python_value(normalized.as_any())?);
+    } else {
+        append_python_identity(code.as_any(), out)?;
+    }
+    Ok(())
+}
+
+fn append_python_value_fingerprint(value: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    if let Ok(code) = value.cast_exact::<PyCode>() {
+        return append_python_code_fingerprint(code, out);
+    }
+
+    match marshal_python_value(value) {
+        Ok(marshaled) => {
+            out.push(b'V');
+            append_fingerprint_part(out, &marshaled);
+            return Ok(());
+        }
+        Err(error) if error.is_instance_of::<exceptions::PyValueError>(value.py()) => {}
+        Err(error) => return Err(error),
+    }
+
+    // marshal deliberately supports only simple Python values. User-defined
+    // values fall back to identity instead of relying on potentially misleading
+    // pickle implementations.
+    append_python_identity(value, out)
+}
+
+fn append_optional_python_value(
+    callable: &Bound<'_, PyAny>,
+    attribute: &str,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    append_fingerprint_part(out, attribute.as_bytes());
+    if let Some(value) = callable.getattr_opt(attribute)? {
+        out.push(1);
+        let mut value_fingerprint = Vec::new();
+        append_python_value_fingerprint(&value, &mut value_fingerprint)?;
+        append_fingerprint_part(out, &value_fingerprint);
+    } else {
+        out.push(0);
+    }
+    Ok(())
+}
+
+fn append_closure_fingerprint(callable: &Bound<'_, PyAny>, out: &mut Vec<u8>) -> PyResult<()> {
+    append_fingerprint_part(out, b"__closure__");
+    let Some(closure) = callable.getattr_opt("__closure__")? else {
+        out.push(0);
+        return Ok(());
+    };
+    if closure.is_none() {
+        out.push(0);
+        return Ok(());
+    }
+
+    let closure = closure.cast::<PyTuple>()?;
+    out.push(1);
+    out.extend_from_slice(&(closure.len() as u64).to_le_bytes());
+    for cell in closure {
+        match cell.getattr("cell_contents") {
+            Ok(value) => {
+                out.push(1);
+                let mut value_fingerprint = Vec::new();
+                append_python_value_fingerprint(&value, &mut value_fingerprint)?;
+                append_fingerprint_part(out, &value_fingerprint);
+            }
+            Err(error) if error.is_instance_of::<exceptions::PyValueError>(cell.py()) => {
+                out.push(0)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn append_python_callable_fingerprint(
+    callable: &Bound<'_, PyAny>,
+    out: &mut Vec<u8>,
+    depth: usize,
+) -> PyResult<()> {
+    if depth > 16 {
+        return append_python_identity(callable, out);
+    }
+
+    if let Some(code) = callable.getattr_opt("__code__")? {
+        let code = code.cast::<PyCode>()?;
+        out.push(b'P');
+        append_python_code_fingerprint(code, out)?;
+
+        append_fingerprint_part(out, b"__globals__");
+        if let Some(globals) = callable.getattr_opt("__globals__")? {
+            out.push(1);
+            append_python_identity(&globals, out)?;
+        } else {
+            out.push(0);
+        }
+
+        append_optional_python_value(callable, "__defaults__", out)?;
+        append_optional_python_value(callable, "__kwdefaults__", out)?;
+        append_closure_fingerprint(callable, out)?;
+        return Ok(());
+    }
+
+    if let (Some(function), Some(instance)) = (
+        callable.getattr_opt("__func__")?,
+        callable.getattr_opt("__self__")?,
+    ) {
+        out.push(b'M');
+        let mut function_fingerprint = Vec::new();
+        append_python_callable_fingerprint(&function, &mut function_fingerprint, depth + 1)?;
+        append_fingerprint_part(out, &function_fingerprint);
+        append_python_identity(&instance, out)?;
+        return Ok(());
+    }
+
+    // Builtins and arbitrary callable instances have no generally useful
+    // structural definition. Exact identity is the conservative fallback.
+    append_python_identity(callable, out)
+}
+
+fn python_callable_fingerprint(callable: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let mut out = Vec::new();
+    append_python_callable_fingerprint(callable, &mut out, 0)?;
+    Ok(out)
+}
+
+enum PythonPrintDefinition {
+    Callback(Py<PyAny>, Vec<u8>),
+    Formats(Vec<(PythonPrintMode, String)>, Vec<u8>),
+}
+
+impl PythonPrintDefinition {
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(dict) = value.cast::<PyDict>() {
+            let mut formats = Vec::with_capacity(dict.len());
+            for (key, value) in dict.iter() {
+                let mode = if let Ok(mode) = key.extract::<PythonPrintMode>() {
+                    mode
+                } else if let Ok(name) = key.extract::<String>() {
+                    match name.to_ascii_lowercase().as_str() {
+                        "symbolica" => PythonPrintMode::Symbolica,
+                        "latex" => PythonPrintMode::Latex,
+                        "mathematica" => PythonPrintMode::Mathematica,
+                        "sympy" => PythonPrintMode::Sympy,
+                        "typst" => PythonPrintMode::Typst,
+                        _ => {
+                            return Err(exceptions::PyValueError::new_err(format!(
+                                "Unknown print mode {name:?}; expected symbolica, latex, mathematica, sympy, or typst"
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(exceptions::PyTypeError::new_err(
+                        "print dictionary keys must be strings or PrintMode values",
+                    ));
+                };
+                let text = value.extract::<String>().map_err(|_| {
+                    exceptions::PyTypeError::new_err("print dictionary values must be strings")
+                })?;
+                if formats.iter().any(|(existing, _)| *existing == mode) {
+                    return Err(exceptions::PyValueError::new_err(
+                        "print dictionary contains duplicate entries for the same mode",
+                    ));
+                }
+                formats.push((mode, text));
+            }
+
+            // Normalize aliases and insertion order for symbol redefinition checks.
+            formats.sort_by_key(|(mode, _)| *mode as usize);
+            let mut fingerprint = b"python-print-dict".to_vec();
+            for (mode, text) in &formats {
+                fingerprint.push(*mode as u8);
+                append_fingerprint_part(&mut fingerprint, text.as_bytes());
+            }
+            Ok(Self::Formats(formats, fingerprint))
+        } else if value.is_callable() {
+            Ok(Self::Callback(
+                value.clone().unbind(),
+                python_callable_fingerprint(value)?,
+            ))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "print must be a callable or a dictionary",
+            ))
+        }
+    }
+
+    fn apply_to(&self, py: Python<'_>, symbol: SymbolBuilder) -> SymbolBuilder {
+        match self {
+            Self::Formats(formats, key) => {
+                let formats = formats.clone();
+                symbol.with_keyed_print_function(
+                    move |_, opts, _| {
+                        formats.iter().find_map(|(mode, text)| {
+                            (PrintMode::from(*mode) == opts.mode).then(|| text.clone())
+                        })
+                    },
+                    key.clone(),
+                )
+            }
+            Self::Callback(function, key) => {
+                let function = function.clone_ref(py);
+                symbol.with_keyed_print_function(
+                    move |input, opts, state| match Python::attach(|py| {
+                        let kwargs = print_options_to_dict(opts, state, py)?;
+                        function
+                            .call(
+                                py,
+                                (PythonExpression::from(input.to_owned()),),
+                                Some(&kwargs),
+                            )?
+                            .extract::<Option<String>>(py)
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python custom print callback failed: {err}");
+                            None
+                        }
+                    },
+                    key.clone(),
+                )
+            }
+        }
+    }
+}
+
+fn python_evaluation_fingerprint(eval: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let dict = eval
+        .cast::<PyDict>()
+        .map_err(|_| exceptions::PyTypeError::new_err("eval must be a dictionary"))?;
+    let mut out = Vec::new();
+    for key in PythonEvalSpec::ALLOWED_KEYS {
+        append_fingerprint_part(&mut out, key.as_bytes());
+        if let Some(value) = dict.get_item(*key)? {
+            out.push(1);
+            let value_fingerprint = if matches!(
+                *key,
+                "float" | "complex" | "decimal" | "decimal_complex" | "constant"
+            ) {
+                python_callable_fingerprint(&value)?
+            } else {
+                let mut fingerprint = Vec::new();
+                append_python_value_fingerprint(&value, &mut fingerprint)?;
+                fingerprint
+            };
+            append_fingerprint_part(&mut out, &value_fingerprint);
+        } else {
+            out.push(0);
+        }
+    }
+    Ok(out)
+}
+
+#[pyfunction(name = "S", signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None,print=None,derivative=None,series=None,eval=None,data=None))]
+/// Create new symbols from `names`. Symbols can have attributes,
+/// such as symmetries. If no attributes
+/// are specified and the symbol was previously defined, the attributes are inherited.
+/// Once attributes are defined on a symbol, they cannot be redefined later.
+///
+/// Examples
+/// --------
+/// Define a regular symbol and use it as a variable:
+/// >>> x = S('x')
+/// >>> e = x**2 + 5
+/// >>> print(e)  # x**2 + 5
+///
+/// Define a regular symbol and use it as a function:
+/// >>> f = S('f')
+/// >>> e = f(1,2)
+/// >>> print(e)  # f(1,2)
+///
+///
+/// Define a symmetric function:
+/// >>> f = S('f', is_symmetric=True)
+/// >>> e = f(2,1)
+/// >>> print(e)  # f(1,2)
+///
+///
+/// Define a linear and symmetric function:
+/// >>> p1, p2, p3, p4 = S('p1', 'p2', 'p3', 'p4')
+/// >>> dot = S('dot', is_symmetric=True, is_linear=True)
+/// >>> e = dot(p2+2*p3,p1+3*p2-p3)
+/// dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
+///
+/// Define a custom normalization function:
+/// >>> e = S('real_log', normalization=T().replace(E("x_(exp(x1_))"), E("x1_")))
+/// >>> E("real_log(exp(x)) + real_log(5)")
+///
+/// Define a custom print function:
+/// >>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+/// >>>     if mode == PrintMode.Latex:
+/// >>>         if mu.get_type() == AtomType.Fn:
+/// >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
+/// >>>         else:
+/// >>>             return "\\mu"
+/// >>> mu = S("mu", print=print_mu)
+/// >>> expr = E("mu + mu(1,2)")
+/// >>> print(expr.to_latex())
+///
+/// If the function returns `None`, the default print function is used.
+///
+/// Define a custom derivative function:
+/// >>> tag = S('tag', derivative=lambda f, index: f)
+/// >>> x = S('x')
+/// >>> tag(3, x).derivative(x)
+///
+/// Define a custom series function that returns the principal part and the regular part,
+/// or `None` if a standard construction through the derivative can be used:
+/// >>> def inv_series(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+/// >>>     return (N(0), args[0].pow(-1).to_expression())
+/// >>>
+/// >>> t = S('t')
+/// >>> inv = S('inv', series=inv_series)
+///
+/// Define a function with a custom evaluation:
+/// >>> cosh = S(
+/// >>>     "my_cosh",
+/// >>>     eval={
+/// >>>         "float": lambda args: math.cosh(args[0]),
+/// >>>         "complex": lambda args: cmath.cosh(args[0]),
+/// >>>         "cpp": "template<typename T> T python_my_cosh(T a) { return std::cosh(a); }",
+/// >>>     },
+/// >>> )
+///
+/// Add custom data to a symbol:
+/// >>> x = S('x', data={'my_tag': 'my_value'})
+/// >>> r = x.get_symbol_data('my_tag')
+///
+/// Parameters
+/// ----------
+/// *names : str
+///     The name of the symbol
+/// is_symmetric : bool | None
+///     Set to true if the symbol is symmetric.
+/// is_antisymmetric : bool | None
+///     Set to true if the symbol is antisymmetric.
+/// is_cyclesymmetric : bool | None
+///     Set to true if the symbol is cyclesymmetric.
+/// is_linear : bool | None
+///     Set to true if the symbol is linear.
+/// is_flat : bool | None
+///     Set to true if the symbol is flat (associative).
+/// is_scalar : bool | None
+///     Set to true if the symbol is a scalar. It will be moved out of linear functions.
+/// is_real : bool | None
+///     Set to true if the symbol is a real number.
+/// is_integer : bool | None
+///     Set to true if the symbol is an integer.
+/// is_positive : bool | None
+///     Set to true if the symbol is a positive number.
+/// tags: Sequence[str] | None = None
+///     A list of tags to associate with the symbol.
+/// aliases: Sequence[str] | None = None
+///     A list of aliases to associate with the symbol.
+/// normalization : Transformer | Callable[[Expression], Expression] | None
+///     A transformer or callable that is applied after every normalization. A callable
+///     receives the normalized function and returns its replacement. The symbol name
+///     cannot be used in a transformer, as this would define the symbol recursively;
+///     use a wildcard with the same attributes instead.
+/// print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
+///     A function that is called when printing the variable/function, which is provided as its first argument.
+///     This function should return a string, or `None` if the default print function should be used.
+///     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+///     Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+///     or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+///     Values replace the entire variable or function call verbatim. Missing modes use default printing.
+///     The dictionary is copied when the symbol is defined; duplicate modes are rejected.
+/// derivative: Callable[[Expression, int], Expression] | None:
+///     A function that is called when computing the derivative of a function in a given argument.
+/// series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
+///     A function that is called for custom series expansion. It receives the argument series and can return
+///     the singular factor and regularized expression, or `None` to use the default series expansion.
+/// eval: dict[str, Any] | None:
+///     Numeric evaluation function(s). The dictionary may contain:
+///     - `tag_count: int`: the number of leading symbolic tag arguments.
+///     - `cpp: str`: a C++ function definition inserted into exported C++ code for this symbol.
+///
+///     For arbitrary precision evaluation of constant functions, register a function that
+///     maps the tags and the requested decimal precision to a number:
+///     - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
+///
+///     Evaluators for non-constant functions when `tag_count = 0`:
+///     - `float`: Sequence[float] -> float
+///     - `complex`: Sequence[complex] -> complex
+///     - `decimal`: Sequence[Float] -> Float
+///     - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
+///
+///     Evaluators for non-constant functions when `tag_count > 0` are generators:
+///     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
+///     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
+///     - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+///     - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
+/// data: str | int | Expression | bytes | list | dict | None = None
+///     Custom user data to associate with the symbol.
 fn symbol_shorthand(
     names: &Bound<'_, PyTuple>,
     is_symmetric: Option<bool>,
     is_antisymmetric: Option<bool>,
     is_cyclesymmetric: Option<bool>,
     is_linear: Option<bool>,
+    is_flat: Option<bool>,
     is_scalar: Option<bool>,
     is_real: Option<bool>,
     is_integer: Option<bool>,
     is_positive: Option<bool>,
     tags: Option<Vec<String>>,
     aliases: Option<Vec<String>>,
-    normalization: Option<PythonTransformer>,
+    normalization: Option<PythonNormalization>,
     print: Option<Py<PyAny>>,
     derivative: Option<Py<PyAny>>,
     series: Option<Py<PyAny>>,
@@ -643,6 +1851,7 @@ fn symbol_shorthand(
         is_antisymmetric,
         is_cyclesymmetric,
         is_linear,
+        is_flat,
         is_scalar,
         is_real,
         is_integer,
@@ -749,7 +1958,7 @@ impl PythonEvalSpec {
                 Python::attach(|py| {
                     let f = Self::python_eval_callable(py, &f, tags, tag_count)?;
                     let decimal_prec = Self::decimal_digits_from_binary_prec(prec);
-                    let args = Vec::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>::new();
+                    let args = Vec::<PythonMultiPrecisionComplex>::new();
                     let value = f.call1(py, (args.into_py_any(py)?, decimal_prec))?;
                     Self::extract_python_constant(py, value)
                 })
@@ -763,23 +1972,39 @@ impl PythonEvalSpec {
         if let Some(f) = self.float {
             if tag_count == 0 {
                 info = info.register(move |args: &[f64]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         f.call1(py, (args.to_vec().into_py_any(py)?,))?
                             .extract::<f64>(py)
-                    })
-                    .expect("Python eval callback for f64 failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for f64 failed: {err}");
+                            f64::NAN
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for f64 failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for f64 failed: {err}");
+                            return Box::new(|_: &[f64]| f64::NAN);
+                        }
+                    };
                     Box::new(move |args: &[f64]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             f.call1(py, (args.to_vec().into_py_any(py)?,))?
                                 .extract::<f64>(py)
-                        })
-                        .expect("Python eval callback for f64 failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for f64 failed: {err}");
+                                f64::NAN
+                            }
+                        }
                     })
                 });
             }
@@ -788,31 +2013,47 @@ impl PythonEvalSpec {
         if let Some(f) = self.complex {
             if tag_count == 0 {
                 info = info.register(move |args: &[Complex<f64>]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
                             .map(|x| PyComplex::from_doubles(py, x.re, x.im))
                             .collect::<Vec<_>>();
                         f.call1(py, (args.into_py_any(py)?,))?
                             .extract::<Complex<f64>>(py)
-                    })
-                    .expect("Python eval callback for complex f64 failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for complex f64 failed: {err}");
+                            Complex::new(f64::NAN, f64::NAN)
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for complex f64 failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for complex f64 failed: {err}");
+                            return Box::new(|_: &[Complex<f64>]| Complex::new(f64::NAN, f64::NAN));
+                        }
+                    };
                     Box::new(move |args: &[Complex<f64>]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
                                 .map(|x| PyComplex::from_doubles(py, x.re, x.im))
                                 .collect::<Vec<_>>();
                             f.call1(py, (args.into_py_any(py)?,))?
                                 .extract::<Complex<f64>>(py)
-                        })
-                        .expect("Python eval callback for complex f64 failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for complex f64 failed: {err}");
+                                Complex::new(f64::NAN, f64::NAN)
+                            }
+                        }
                     })
                 });
             }
@@ -821,7 +2062,7 @@ impl PythonEvalSpec {
         if let Some(f) = self.decimal {
             if tag_count == 0 {
                 info = info.register(move |args: &[Float]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
                             .cloned()
@@ -830,16 +2071,27 @@ impl PythonEvalSpec {
                         f.call1(py, (args.into_py_any(py)?,))?
                             .extract::<PythonMultiPrecisionFloat>(py)
                             .map(|x| x.0)
-                    })
-                    .expect("Python eval callback for decimal failed")
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for decimal failed: {err}");
+                            Float::with_val(53, f64::NAN)
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for decimal failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for decimal failed: {err}");
+                            return Box::new(|_: &[Float]| Float::with_val(53, f64::NAN));
+                        }
+                    };
                     Box::new(move |args: &[Float]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
                                 .cloned()
@@ -848,8 +2100,13 @@ impl PythonEvalSpec {
                             f.call1(py, (args.into_py_any(py)?,))?
                                 .extract::<PythonMultiPrecisionFloat>(py)
                                 .map(|x| x.0)
-                        })
-                        .expect("Python eval callback for decimal failed")
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for decimal failed: {err}");
+                                Float::with_val(53, f64::NAN)
+                            }
+                        }
                     })
                 });
             }
@@ -858,45 +2115,62 @@ impl PythonEvalSpec {
         if let Some(f) = self.decimal_complex {
             if tag_count == 0 {
                 info = info.register(move |args: &[Complex<Float>]| {
-                    Python::attach(|py| {
+                    match Python::attach(|py| {
                         let args = args
                             .iter()
-                            .map(|x| (x.re.clone().into(), x.im.clone().into()))
-                            .collect::<Vec<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>>(
-                            );
-                        let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
-                            PythonMultiPrecisionFloat,
-                            PythonMultiPrecisionFloat,
-                        )>(
-                            py
-                        )?;
-                        Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
-                    })
-                    .expect("Python eval callback for decimal complex failed")
+                            .cloned()
+                            .map(PythonMultiPrecisionComplex)
+                            .collect::<Vec<_>>();
+                        f.call1(py, (args.into_py_any(py)?,))?
+                            .extract::<PythonMultiPrecisionComplex>(py)
+                            .map(|x| x.0)
+                    }) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python eval callback for decimal complex failed: {err}");
+                            Complex::new(
+                                Float::with_val(53, f64::NAN),
+                                Float::with_val(53, f64::NAN),
+                            )
+                        }
+                    }
                 });
             } else {
                 info = info.register_tagged(move |tags| {
-                    let f =
-                        Python::attach(|py| Self::python_eval_callable(py, &f, tags, tag_count))
-                            .expect("Python tagged eval callback for decimal complex failed");
+                    let f = match Python::attach(|py| {
+                        Self::python_eval_callable(py, &f, tags, tag_count)
+                    }) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            error!("Python tagged eval callback for decimal complex failed: {err}");
+                            return Box::new(|_: &[Complex<Float>]| {
+                                Complex::new(
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
+                                )
+                            });
+                        }
+                    };
                     Box::new(move |args: &[Complex<Float>]| {
-                        Python::attach(|py| {
+                        match Python::attach(|py| {
                             let args = args
                                 .iter()
-                                .map(|x| (x.re.clone().into(), x.im.clone().into()))
-                                .collect::<Vec<(
-                                    PythonMultiPrecisionFloat,
-                                    PythonMultiPrecisionFloat,
-                                )>>();
-                            let (re, im) = f.call1(py, (args.into_py_any(py)?,))?.extract::<(
-                                PythonMultiPrecisionFloat,
-                                PythonMultiPrecisionFloat,
-                            )>(
-                                py
-                            )?;
-                            Ok::<Complex<Float>, PyErr>(Complex::new(re.0, im.0))
-                        })
-                        .expect("Python eval callback for decimal complex failed")
+                                .cloned()
+                                .map(PythonMultiPrecisionComplex)
+                                .collect::<Vec<_>>();
+                            f.call1(py, (args.into_py_any(py)?,))?
+                                .extract::<PythonMultiPrecisionComplex>(py)
+                                .map(|x| x.0)
+                        }) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                error!("Python eval callback for decimal complex failed: {err}");
+                                Complex::new(
+                                    Float::with_val(53, f64::NAN),
+                                    Float::with_val(53, f64::NAN),
+                                )
+                            }
+                        }
                     })
                 });
             }
@@ -947,14 +2221,8 @@ impl PythonEvalSpec {
             && let Ok(re_f) = Float::try_from(&re.expr)
         {
             Ok(re_f.into())
-        } else if let Ok((re, im)) =
-            value.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>(py)
-        {
-            Ok(Complex::new(re.0, im.0))
-        } else if let Ok(re) = value.extract::<PythonMultiPrecisionFloat>(py) {
-            Ok(re.0.into())
-        } else if let Ok(value) = value.extract::<Complex<f64>>(py) {
-            Ok(Complex::new(value.re.into(), value.im.into()))
+        } else if let Ok(value) = value.extract::<PythonMultiPrecisionComplex>(py) {
+            Ok(value.0)
         } else {
             Err(exceptions::PyTypeError::new_err(
                 "eval['constant'] must return a number or a (real, imag) tuple",
@@ -1003,6 +2271,18 @@ PyFunctionInfo {
             name: "S",
             parameters: &[
                 ParameterInfo {
+                    name: "name0",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
+                    name: "name1",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
                     name: "names",
                     kind: ParameterKind::VarPositional,
                     type_info: || <&str>::type_input(),
@@ -1010,115 +2290,147 @@ PyFunctionInfo {
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
+                },
+                ParameterInfo {
+                    name: "aliases",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<Vec<String>>::type_input(),
+                },
+                ParameterInfo {
+                    name: "normalization",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<PythonNormalization>::type_input(),
+                },
+                ParameterInfo {
+                    name: "print",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
+                },
+                ParameterInfo {
+                    name: "derivative",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
+                },
+                ParameterInfo {
+                    name: "series",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
+                },
+                ParameterInfo {
+                    name: "eval",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[dict[str, typing.Any]]"),
+                },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
             ],
             r#return: || Vec::<PythonExpression>::type_output(),
             doc:
-r#"Create new symbols from `names`. Symbols can have attributes,
+            r#"Create new symbols from `names`. Symbols can have attributes,
 such as symmetries. If no attributes
 are specified and the symbol was previously defined, the attributes are inherited.
 Once attributes are defined on a symbol, they cannot be redefined later.
 
 Examples
 --------
-Define a regular symbol and use it as a variable:
->>> x = S('x')
->>> e = x**2 + 5
->>> print(e)
-x**2 + 5
+Define two regular symbols:
+>>> x, y = S('x', 'y')
 
-Define a regular symbol and use it as a function:
->>> f = S('f')
->>> e = f(1,2)
->>> print(e)
-f(1,2)
-
-
-Define a symmetric function:
->>> f = S('f', is_symmetric=True)
+Define two symmetric functions:
+>>> f, g = S('f', 'g', is_symmetric=True)
 >>> e = f(2,1)
->>> print(e)
-f(1,2)
-
-
-Define a linear and symmetric function:
->>> p1, p2, p3, p4 = S('p1', 'p2', 'p3', 'p4')
->>> dot = S('dot', is_symmetric=True, is_linear=True)
->>> e = dot(p2+2*p3,p1+3*p2-p3)
-dot(p1,p2)+2*dot(p1,p3)+3*dot(p2,p2)-dot(p2,p3)+6*dot(p2,p3)-2*dot(p3,p3)
+>>> print(e)  # f(1,2)
 
 Parameters
 ----------
-names : str
-    The name(s) of the symbol(s)
-is_symmetric : Optional[bool]
+*names : str
+    The name of the symbol
+is_symmetric : bool | None
     Set to true if the symbol is symmetric.
-is_antisymmetric : Optional[bool]
+is_antisymmetric : bool | None
     Set to true if the symbol is antisymmetric.
-is_cyclesymmetric : Optional[bool]
+is_cyclesymmetric : bool | None
     Set to true if the symbol is cyclesymmetric.
-is_linear : Optional[bool]
-    Set to true if the symbol is linear.
-is_scalar : Optional[bool]
+is_linear : bool | None
+    Set to true if the symbol is multilinear.
+is_flat : bool | None
+    Set to true if the symbol is flat (associative).
+is_scalar : bool | None
     Set to true if the symbol is a scalar. It will be moved out of linear functions.
-is_real : Optional[bool]
+is_real : bool | None
     Set to true if the symbol is a real number.
-is_integer : Optional[bool]
+is_integer : bool | None
     Set to true if the symbol is an integer.
-is_positive : Optional[bool]
+is_positive : bool | None
     Set to true if the symbol is a positive number.
-tags: Optional[Sequence[str]]
+tags: Sequence[str] | None = None
     A list of tags to associate with the symbol."#,
             module: Some("symbolica.core"),
             is_async: false,
@@ -1132,6 +2444,343 @@ tags: Optional[Sequence[str]]
         }
 }
 
+#[cfg(test)]
+mod formatted_output_tests {
+    use std::sync::{Barrier, OnceLock, atomic::AtomicUsize};
+
+    use pyo3::types::PyStringMethods;
+
+    use super::*;
+
+    #[test]
+    fn notebook_provider_is_lazy_and_shared_by_clones() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let output =
+            PythonFormattedOutput::lazy(|_, _| Ok(Some("plain".into()))).with_notebook(move |py| {
+                observed.fetch_add(1, Relaxed);
+                Ok(py
+                    .import("types")?
+                    .getattr("SimpleNamespace")?
+                    .call0()?
+                    .unbind())
+            });
+        Python::initialize();
+        Python::attach(|py| {
+            assert_eq!(output.format_plain(py).unwrap(), "plain");
+            assert_eq!(calls.load(Relaxed), 0);
+            let first = output.notebook_value(py).unwrap().unwrap();
+            let second = output.clone().notebook_value(py).unwrap().unwrap();
+            assert!(first.is(&second));
+            assert_eq!(calls.load(Relaxed), 1);
+        });
+    }
+
+    #[test]
+    fn ready_formatted_output_preserves_python_protocols() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let class = py.get_type::<PythonFormattedOutput>();
+            let output = class.call1(("plain", "<b>rich</b>"))?;
+            assert_eq!(output.str()?.to_str()?, "plain");
+            assert_eq!(output.repr()?.to_str()?, "plain");
+            assert_eq!(
+                output.call_method0("format_plain")?.extract::<String>()?,
+                "plain"
+            );
+            assert_eq!(
+                output.call_method0("_repr_html_")?.extract::<String>()?,
+                "<b>rich</b>"
+            );
+            assert!(output.call_method0("_repr_latex_")?.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn lazy_backends_are_requested_independently_and_shared_by_clones() {
+        let calls = Arc::new(std::array::from_fn::<_, 3, _>(|_| AtomicUsize::new(0)));
+        let observed = calls.clone();
+        let output = PythonFormattedOutput::lazy(move |_, backend| {
+            observed[backend.index()].fetch_add(1, Relaxed);
+            Ok(match backend {
+                FormattedOutputBackend::Text => Some("plain".into()),
+                FormattedOutputBackend::Html => Some("<b>rich</b>".into()),
+                FormattedOutputBackend::Latex => None,
+            })
+        });
+        let cloned = output.clone();
+        assert!(Arc::ptr_eq(&output.content, &cloned.content));
+        assert!(calls.iter().all(|count| count.load(Relaxed) == 0));
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let pretty = py.import("types")?.getattr("SimpleNamespace")?.call0()?;
+            let recorded = pyo3::types::PyList::empty(py);
+            pretty.setattr("text", recorded.getattr("append")?)?;
+            output._repr_pretty_(&pretty, true)?;
+            assert!(calls.iter().all(|count| count.load(Relaxed) == 0));
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("<b>rich</b>"));
+            assert_eq!(cloned._repr_html_(py)?.as_deref(), Some("<b>rich</b>"));
+            assert_eq!(calls[0].load(Relaxed), 0);
+            assert_eq!(calls[2].load(Relaxed), 0);
+            assert_eq!(output.__str__(py)?, "plain");
+            assert_eq!(output.__repr__(py)?, "plain");
+            assert_eq!(cloned.format_plain(py)?, "plain");
+            output._repr_pretty_(&pretty, false)?;
+            assert_eq!(recorded.extract::<Vec<String>>()?, ["...", "plain"]);
+            assert_eq!(output._repr_latex_(py)?, None);
+            assert_eq!(cloned._repr_latex_(py)?, None);
+            Ok(())
+        })
+        .unwrap();
+        assert!(calls.iter().all(|count| count.load(Relaxed) == 1));
+    }
+
+    #[test]
+    fn failed_backends_retry_without_invalidating_other_backends() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let output = PythonFormattedOutput::lazy(move |_, backend| {
+            if backend == FormattedOutputBackend::Html && observed.fetch_add(1, Relaxed) == 0 {
+                return Err(exceptions::PyValueError::new_err(
+                    "temporary renderer failure",
+                ));
+            }
+            Ok(Some("rendered".into()))
+        });
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            assert_eq!(output.format_plain(py)?, "rendered");
+            let error = output._repr_html_(py).unwrap_err();
+            assert!(error.is_instance_of::<exceptions::PyValueError>(py));
+            assert_eq!(output.format_plain(py)?, "rendered");
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("rendered"));
+            assert_eq!(output._repr_html_(py)?.as_deref(), Some("rendered"));
+            assert_eq!(attempts.load(Relaxed), 2);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_text_is_an_error_but_optional_backends_can_be_absent() {
+        let output = PythonFormattedOutput::lazy(|_, _| Ok(None));
+        Python::initialize();
+        Python::attach(|py| {
+            assert!(
+                output
+                    .format_plain(py)
+                    .unwrap_err()
+                    .is_instance_of::<exceptions::PyRuntimeError>(py)
+            );
+            assert_eq!(output._repr_html_(py).unwrap(), None);
+            assert_eq!(output._repr_latex_(py).unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn recursive_rendering_raises_and_leaves_the_backend_retryable() {
+        let slot = Arc::new(OnceLock::<PythonFormattedOutput>::new());
+        let weak = Arc::downgrade(&slot);
+        let first = AtomicBool::new(true);
+        let output = PythonFormattedOutput::lazy(move |py, backend| {
+            if first.swap(false, Relaxed) {
+                return weak.upgrade().unwrap().get().unwrap().render(py, backend);
+            }
+            Ok(Some("recovered".into()))
+        });
+        assert!(slot.set(output.clone()).is_ok());
+        Python::initialize();
+        Python::attach(|py| {
+            let error = output._repr_html_(py).unwrap_err();
+            assert!(error.is_instance_of::<exceptions::PyRuntimeError>(py));
+            assert!(error.to_string().contains("recursive Html rendering"));
+            assert_eq!(
+                output._repr_html_(py).unwrap().as_deref(),
+                Some("recovered")
+            );
+        });
+    }
+
+    #[test]
+    fn concurrent_requests_render_once_while_releasing_python() {
+        Python::initialize();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let output = PythonFormattedOutput::lazy(move |py, _| {
+            observed.fetch_add(1, Relaxed);
+            // Other attached threads must wait for the cache without retaining
+            // the GIL, since this callback needs to reattach before completing.
+            py.detach(|| std::thread::sleep(std::time::Duration::from_millis(25)));
+            let rendered = py
+                .import("builtins")?
+                .getattr("str")?
+                .call1(("rendered",))?;
+            Ok(Some(rendered.extract()?))
+        });
+        let barrier = Arc::new(Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let output = output.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Python::attach(|py| {
+                        assert_eq!(output._repr_html_(py).unwrap().as_deref(), Some("rendered"));
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(calls.load(Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod library_registration_tests {
+    use super::*;
+
+    #[test]
+    fn expired_library_frames_do_not_grant_unlocks() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let mut claims =
+                crate::license::verify_token(crate::license::TEST_UNLOCK_TOKEN).unwrap();
+            claims.package = "symbolica_expiry_registration_test".into();
+            let package = claims.package.clone();
+            let globals = PyDict::new(py);
+            let enabled = Arc::new(AtomicBool::new(false));
+            register_library_unlock_module(claims, &globals, enabled.clone())?;
+            assert!(!is_registered_module_globals(py, &globals)?);
+
+            // A submodule must also retain the disabled outcome after its
+            // globals dictionary is cached by the pointer-identity fast path.
+            let submodule = format!("{package}.child");
+            let module = PyModule::new(py, &submodule)?;
+            let modules = PyModule::import(py, "sys")?
+                .getattr("modules")?
+                .cast_into::<PyDict>()?;
+            modules.set_item(&submodule, &module)?;
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            enabled.store(true, Relaxed);
+            assert!(is_registered_module_globals(py, &globals)?);
+            assert!(is_registered_module_globals(py, &module.dict())?);
+            enabled.store(false, Relaxed);
+            assert!(!is_registered_module_globals(py, &globals)?);
+            assert!(!is_registered_module_globals(py, &module.dict())?);
+            {
+                let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
+                let registered = packages
+                    .iter()
+                    .find(|r| r.claims.package == package)
+                    .unwrap();
+                // Simulate a fork: the development fixture rechecks as valid.
+                registered.checked_pid.store(0, Release);
+                assert!(registered.ensure_license_checked()?);
+            }
+            assert!(is_registered_module_globals(py, &globals)?);
+            assert!(is_registered_module_globals(py, &module.dict())?);
+            REGISTERED_LIBRARY_UNLOCKS
+                .write()
+                .unwrap()
+                .retain(|r| r.claims.package != package);
+            modules.del_item(&submodule)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod callback_fingerprint_tests {
+    use pyo3::types::{PyCode, PyCodeInput, PyCodeMethods};
+
+    use super::*;
+
+    #[test]
+    fn ignores_notebook_source_locations() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let first = PyCode::compile(
+                py,
+                c"lambda x, _mode, **kwargs: f'a = {x}'",
+                c"<ipython-input-1>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            let repeated = PyCode::compile(
+                py,
+                c"\n\n(       lambda x, _mode, **kwargs: f'a = {x}')",
+                c"<ipython-input-2>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+
+            assert_eq!(
+                python_callable_fingerprint(&first)?,
+                python_callable_fingerprint(&repeated)?
+            );
+
+            // Nested code objects, such as comprehensions, carry their own
+            // filename and line metadata and must be normalized recursively.
+            let nested = PyCode::compile(
+                py,
+                c"lambda values: [value + 1 for value in values]",
+                c"<ipython-input-3>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            let nested_repeated = PyCode::compile(
+                py,
+                c"\n\nlambda values: [value + 1 for value in values]",
+                c"<ipython-input-4>",
+                PyCodeInput::Eval,
+            )?
+            .run(Some(&globals), None)?;
+            assert_eq!(
+                python_callable_fingerprint(&nested)?,
+                python_callable_fingerprint(&nested_repeated)?
+            );
+            Ok::<_, PyErr>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn detects_code_and_closure_changes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            let first = py.eval(c"lambda x: x + 1", Some(&globals), None)?;
+            let changed = py.eval(c"lambda x: x + 2", Some(&globals), None)?;
+            assert_ne!(
+                python_callable_fingerprint(&first)?,
+                python_callable_fingerprint(&changed)?
+            );
+
+            let factory = py.eval(c"lambda value: (lambda x: x + value)", Some(&globals), None)?;
+            let closure_one = factory.call1((1,))?;
+            let closure_one_again = factory.call1((1,))?;
+            let closure_two = factory.call1((2,))?;
+            assert_eq!(
+                python_callable_fingerprint(&closure_one)?,
+                python_callable_fingerprint(&closure_one_again)?
+            );
+            assert_ne!(
+                python_callable_fingerprint(&closure_one)?,
+                python_callable_fingerprint(&closure_two)?
+            );
+            Ok::<_, PyErr>(())
+        })
+        .unwrap();
+    }
+}
+
 #[cfg(feature = "python_stubgen")]
 submit! {
 PyFunctionInfo {
@@ -1139,110 +2788,116 @@ PyFunctionInfo {
             parameters: &[
                 ParameterInfo {
                     name: "name",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::PositionalOnly,
                     default: ParameterDefault::None,
                     type_info: || <&str>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "aliases",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "normalization",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || Option::<PythonTransformer>::type_input(),
+                    type_info: || Option::<PythonNormalization>::type_input(),
                 },
                 ParameterInfo {
                     name: "print",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
                 ParameterInfo {
                     name: "series",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
                 },
                 ParameterInfo {
                     name: "eval",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[dict[str, typing.Any]]"),
                 },
                 ParameterInfo {
                     name: "data",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
             ],
             r#return: || PythonExpression::type_output(),
             doc:
-r#"Create new symbols from a `name`. Symbols can have attributes,
+            r#"Create new symbols from `names`. Symbols can have attributes,
 such as symmetries. If no attributes
 are specified and the symbol was previously defined, the attributes are inherited.
 Once attributes are defined on a symbol, they cannot be redefined later.
@@ -1252,21 +2907,18 @@ Examples
 Define a regular symbol and use it as a variable:
 >>> x = S('x')
 >>> e = x**2 + 5
->>> print(e)
-x**2 + 5
+>>> print(e)  # x**2 + 5
 
 Define a regular symbol and use it as a function:
 >>> f = S('f')
 >>> e = f(1,2)
->>> print(e)
-f(1,2)
+>>> print(e)  # f(1,2)
 
 
 Define a symmetric function:
 >>> f = S('f', is_symmetric=True)
 >>> e = f(2,1)
->>> print(e)
-f(1,2)
+>>> print(e)  # f(1,2)
 
 
 Define a linear and symmetric function:
@@ -1297,52 +2949,68 @@ Define a custom derivative function:
 >>> x = S('x')
 >>> tag(3, x).derivative(x)
 
-Define a custom series function:
->>> def expand_tag(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
->>>     return E("1/x"), args[0].to_expression()
->>> tag = S("tag", series=expand_tag)
+Define a custom series function that returns the principal part and the regular part,
+or `None` if a standard construction through the derivative can be used:
+>>> def inv_series(args: Sequence[Series]) -> tuple[Expression, Expression] | None:
+>>>     return (N(0), args[0].pow(-1).to_expression())
+>>>
+>>> t = S('t')
+>>> inv = S('inv', series=inv_series)
 
-Define a numeric evaluation function:
->>> sq = S("sq", eval={"complex": lambda args: args[0] * args[0]})
->>> x = S("x")
->>> ev = sq(x).evaluator({}, {}, [x])
->>> ev.evaluate_complex([2+0j])
+Define a function with a custom evaluation:
+>>> cosh = S(
+>>>     "my_cosh",
+>>>     eval={
+>>>         "float": lambda args: math.cosh(args[0]),
+>>>         "complex": lambda args: cmath.cosh(args[0]),
+>>>         "cpp": "template<typename T> T python_my_cosh(T a) { return std::cosh(a); }",
+>>>     },
+>>> )
+
+Add custom data to a symbol:
+>>> x = S('x', data={'my_tag': 'my_value'})
+>>> r = x.get_symbol_data('my_tag')
 
 Parameters
 ----------
 name : str
     The name of the symbol
-is_symmetric : Optional[bool]
+is_symmetric : bool | None
     Set to true if the symbol is symmetric.
-is_antisymmetric : Optional[bool]
+is_antisymmetric : bool | None
     Set to true if the symbol is antisymmetric.
-is_cyclesymmetric : Optional[bool]
+is_cyclesymmetric : bool | None
     Set to true if the symbol is cyclesymmetric.
-is_linear : Optional[bool]
+is_linear : bool | None
     Set to true if the symbol is linear.
-is_scalar : Optional[bool]
+is_scalar : bool | None
     Set to true if the symbol is a scalar. It will be moved out of linear functions.
-is_real : Optional[bool]
+is_real : bool | None
     Set to true if the symbol is a real number.
-is_integer : Optional[bool]
+is_integer : bool | None
     Set to true if the symbol is an integer.
-is_positive : Optional[bool]
+is_positive : bool | None
     Set to true if the symbol is a positive number.
-tags: Optional[Sequence[str]]
+tags: Sequence[str] | None = None
     A list of tags to associate with the symbol.
-aliases: Optional[Sequence[str]]
-    A list of aliases for the symbol.
-normalization : Optional[Transformer]
-    A transformer that is called after every normalization. Note that the symbol
-    name cannot be used in the transformer as this will lead to a definition of the
-    symbol. Use a wildcard with the same attributes instead.
-print : Optional[Callable[..., Optional[str]]]:
+aliases: Sequence[str] | None = None
+    A list of aliases to associate with the symbol.
+normalization : Transformer | Callable[[Expression], Expression] | None
+    A transformer or callable that is applied after every normalization. A callable
+    receives the normalized function and returns its replacement. The symbol name
+    cannot be used in a transformer, as this would define the symbol recursively;
+    use a wildcard with the same attributes instead.
+print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
-derivative: Optional[Callable[[Expression, int], Expression]]:
+    Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    Values replace the entire variable or function call verbatim. Missing modes use default printing.
+    The dictionary is copied when the symbol is defined; duplicate modes are rejected.
+derivative: Callable[[Expression, int], Expression] | None:
     A function that is called when computing the derivative of a function in a given argument.
-series: Optional[Callable[[Sequence[Series]], Optional[tuple[Expression, Expression]]]]:
+series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
     A function that is called for custom series expansion. It receives the argument series and can return
     the singular factor and regularized expression, or `None` to use the default series expansion.
 eval: dict[str, Any] | None:
@@ -1352,19 +3020,19 @@ eval: dict[str, Any] | None:
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
-    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
     Evaluators for non-constant functions when `tag_count = 0`:
     - `float`: Sequence[float] -> float
     - `complex`: Sequence[complex] -> complex
-    - `decimal`: Sequence[Decimal] -> Decimal
-    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    - `decimal`: Sequence[Float] -> Float
+    - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
     Evaluators for non-constant functions when `tag_count > 0` are generators:
     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
 data: str | int | Expression | bytes | list | dict | None = None
     Custom user data to associate with the symbol."#,
             module: Some("symbolica.core"),
@@ -1386,8 +3054,7 @@ data: str | int | Expression | bytes | list | dict | None = None
 /// Examples
 /// --------
 /// >>> e = N(1) / 2
-/// >>> print(e)
-/// 1/2
+/// >>> print(e)  # 1/2
 ///
 /// >>> print(N(1/3))
 /// >>> print(N(0.33, 0.1))
@@ -1397,6 +3064,13 @@ data: str | int | Expression | bytes | list | dict | None = None
 /// 1/3
 /// 3.33e-1
 /// 1.2340e-1
+///
+/// Parameters
+/// ----------
+/// num: int | float | complex | str | Float | ComplexFloat | Decimal
+///     The value to convert into a Symbolica number.
+/// relative_error: float | None
+///     The maximum relative error used when converting floating-point input to a rational number.
 #[cfg_attr(
     feature = "python_stubgen",
     gen_stub_pyfunction(module = "symbolica.core")
@@ -1404,7 +3078,7 @@ data: str | int | Expression | bytes | list | dict | None = None
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pyfunction(name = "N", signature = (num,relative_error=None))]
 fn number_shorthand(
-    #[gen_stub(override_type(type_repr = "int | float | complex | str | decimal.Decimal", imports = ("decimal")))]
+    #[gen_stub(override_type(type_repr = "int | float | complex | str | Float | ComplexFloat | decimal.Decimal", imports = ("decimal")))]
     num: Py<PyAny>,
     relative_error: Option<f64>,
     py: Python,
@@ -1416,7 +3090,7 @@ fn number_shorthand(
 ///
 /// Parameters
 /// ----------
-/// input: str
+/// expr: str
 ///     An input string. UTF-8 characters are allowed.
 /// mode: ParseMode
 ///     The parsing mode to use. Use `ParseMode.Mathematica` to parse Mathematica expressions.
@@ -1458,6 +3132,11 @@ fn expression_shorthand(
     )
 }
 
+#[pyfunction]
+fn _reconstruct_expression(state: Vec<u8>) -> PythonExpression {
+    unsafe { Atom::from_raw(crate::atom::representation::RawAtom::from_data(state)).into() }
+}
+
 /// Create a new transformer that maps an expression.
 #[cfg_attr(
     feature = "python_stubgen",
@@ -1469,6 +3148,29 @@ fn transformer_shorthand() -> PythonTransformer {
 }
 
 #[pyfunction(name = "P", signature = (expr, default_namespace=None, modulus = None, power = None, minimal_poly = None, vars = None))]
+/// Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
+/// All non-polynomial elements will be converted to new independent variables.
+///
+/// The coefficients will be converted to finite field elements modulo `modulus`.
+/// If on top a `power` is provided, for example `(2, a)`, the polynomial will be converted to the Galois field
+/// `GF(modulus^2)` where `a` is the variable of the minimal polynomial of the field.
+///
+/// If a `minimal_poly` is provided, the Galois field will be created with `minimal_poly` as the minimal polynomial.
+///
+/// Parameters
+/// ----------
+/// expr: str
+///     The polynomial expression to parse.
+/// modulus: int
+///     The modulus that defines the finite field.
+/// default_namespace: str | None
+///     The namespace assumed for unqualified symbols during parsing.
+/// power: tuple[int, Expression] | None
+///     The extension degree and generator that define the finite field.
+/// minimal_poly: Polynomial | None
+///     The minimal polynomial that defines the algebraic extension.
+/// vars: Sequence[Expression] | None
+///     The variables to treat as polynomial variables, in the given order.
 fn poly_shorthand(
     expr: &str,
     default_namespace: Option<String>,
@@ -1485,7 +3187,7 @@ fn poly_shorthand(
         PythonParseMode::Symbolica,
         default_namespace,
     )?
-    .to_polynomial(modulus, power, minimal_poly, vars, py)
+    .to_polynomial(modulus, power, minimal_poly, vars, None, py)
 }
 
 #[cfg(feature = "python_stubgen")]
@@ -1513,9 +3215,18 @@ PyFunctionInfo {
             },
         ],
         r#return: || PythonPolynomial::type_output(),
-        doc:"
-Parse a string to a polynomial, optionally, with the variable ordering specified in `vars`.
-All non-polynomial parts will be converted to new, independent variables.",
+        doc:
+        r#"Parse a string to a polynomial, optionally, with the variable ordering specified in `vars`.
+All non-polynomial parts will be converted to new, independent variables.
+
+Parameters
+----------
+poly: str
+    The polynomial expression to parse.
+default_namespace: str | None
+    The namespace assumed for unqualified symbols during parsing.
+vars: Sequence[Expression] | None
+    The variables to treat as polynomial variables, in the given order."#,
         module: Some("symbolica.core"),
         is_async: false,
         deprecated: None,
@@ -1559,12 +3270,23 @@ submit! {
             },
         ],
         r#return: || PythonNumberFieldPolynomial::type_output(),
-        doc: "
-Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
+        doc:
+        r#"Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
 All non-polynomial elements will be converted to new independent variables.
 
 The coefficients will be converted to a number field with the minimal polynomial `minimal_poly`.
-The minimal polynomial must be a monic, irreducible univariate polynomial.",
+The minimal polynomial must be a monic, irreducible univariate polynomial.
+
+Parameters
+----------
+poly: str
+    The polynomial expression to parse.
+minimal_poly: Polynomial
+    The minimal polynomial that defines the algebraic extension.
+default_namespace: str | None
+    The namespace assumed for unqualified symbols during parsing.
+vars: Sequence[Expression] | None
+    The variables to treat as polynomial variables, in the given order."#,
         module: Some("symbolica.core"),
         is_async: false,
         deprecated: None,
@@ -1620,15 +3342,30 @@ submit! {
             },
         ],
         r#return: || PythonFiniteFieldPolynomial::type_output(),
-        doc: "
-Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
+        doc:
+        r#"Parse a string to a polynomial, optionally, with the variables and the ordering specified in `vars`.
 All non-polynomial elements will be converted to new independent variables.
 
 The coefficients will be converted to finite field elements modulo `modulus`.
 If on top a `power` is provided, for example `(2, a)`, the polynomial will be converted to the Galois field
 `GF(modulus^2)` where `a` is the variable of the minimal polynomial of the field.
 
-If a `minimal_poly` is provided, the Galois field will be created with `minimal_poly` as the minimal polynomial.",
+If a `minimal_poly` is provided, the Galois field will be created with `minimal_poly` as the minimal polynomial.
+
+Parameters
+----------
+poly: str
+    The polynomial expression to parse.
+modulus: int
+    The modulus that defines the finite field.
+default_namespace: str | None
+    The namespace assumed for unqualified symbols during parsing.
+power: tuple[int, Expression] | None
+    The extension degree and generator that define the finite field.
+minimal_poly: Polynomial | None
+    The minimal polynomial that defines the algebraic extension.
+vars: Sequence[Expression] | None
+    The variables to treat as polynomial variables, in the given order."#,
         module: Some("symbolica.core"),
         is_async: false,
         deprecated: None,

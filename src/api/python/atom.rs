@@ -27,6 +27,15 @@ pub enum PythonAtomType {
     Pow,
 }
 
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonAtomType {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
 #[pyclass(
     from_py_object,
@@ -54,6 +63,17 @@ pub enum PythonSymbolAttribute {
     Integer,
     /// The symbol represents a positive number.
     Positive,
+    /// The function is flat (associative).
+    Flat,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonSymbolAttribute {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
 }
 
 impl From<SymbolAttribute> for PythonSymbolAttribute {
@@ -63,6 +83,7 @@ impl From<SymbolAttribute> for PythonSymbolAttribute {
             SymbolAttribute::Antisymmetric => PythonSymbolAttribute::Antisymmetric,
             SymbolAttribute::Cyclesymmetric => PythonSymbolAttribute::Cyclesymmetric,
             SymbolAttribute::Linear => PythonSymbolAttribute::Linear,
+            SymbolAttribute::Flat => PythonSymbolAttribute::Flat,
             SymbolAttribute::Scalar => PythonSymbolAttribute::Scalar,
             SymbolAttribute::Real => PythonSymbolAttribute::Real,
             SymbolAttribute::Integer => PythonSymbolAttribute::Integer,
@@ -355,7 +376,7 @@ pub struct ReplaceFunction;
 impl PyStubType for ReplaceFunction {
     fn type_output() -> TypeInfo {
         TypeInfo {
-            name: "typing.Callable[[dict[Expression, Expression]], Expression] | int | float | complex | decimal.Decimal".into(),
+            name: "typing.Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Float | ComplexFloat | decimal.Decimal".into(),
             import: {
                 let mut h = std::collections::HashSet::default();
                 h.insert("decimal".into());
@@ -381,11 +402,17 @@ impl ConvertibleToReplaceWith {
 
                 Python::attach(|py| {
                     m.call(py, (match_stack,), None)
-                        .expect("Bad callback function")
-                        .extract::<PythonExpression>(py)
-                        .expect("Match map does not return an expression")
+                        .map_err(|e| {
+                            error!("Python match map callback failed: {}", e);
+                        })
+                        .and_then(|x| {
+                            x.extract::<PythonExpression>(py).map_err(|e| {
+                                error!("Python match map callback failed: {}", e);
+                            })
+                        })
+                        .map(|x| x.expr)
+                        .unwrap_or_else(|_| Atom::num(Coefficient::Indeterminate))
                 })
-                .expr
             }))),
         }
     }

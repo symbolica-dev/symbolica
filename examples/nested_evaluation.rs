@@ -1,9 +1,4 @@
-use symbolica::{
-    atom::{Atom, AtomCore},
-    domains::{float::Complex, rational::Rational},
-    evaluate::{CompileOptions, ExportSettings, FunctionMap, InlineASM, OptimizationSettings},
-    parse, symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     let e1 = parse!("x + pi + cos(x) + f(g(x+1),h(x*2)) + p(1,x)");
@@ -34,13 +29,10 @@ fn main() {
 
     let params = vec![parse!("x")];
 
-    let evaluator = Atom::evaluator_multiple(
-        &[e1.as_view(), e2.as_view()],
-        &fn_map,
-        &params,
-        OptimizationSettings::default(),
-    )
-    .unwrap();
+    let evaluator = Atom::evaluator_multiple(&[e1.as_view(), e2.as_view()], &params)
+        .function_map(fn_map)
+        .build()
+        .unwrap();
 
     let mut e_f64 = evaluator.map_coeff(&|x| x.to_real().unwrap().into());
     let mut out = vec![0., 0.];
@@ -51,11 +43,9 @@ fn main() {
         .export_cpp::<f64>(
             "nested_evaluate.cpp",
             "nested",
-            ExportSettings {
-                include_header: true,
-                inline_asm: InlineASM::default(),
-                ..Default::default()
-            },
+            ExportSettings::new()
+                .include_header(true)
+                .inline_asm(InlineASM::default()),
         )
         .unwrap()
         .compile("nested", CompileOptions::default())

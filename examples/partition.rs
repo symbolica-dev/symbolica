@@ -1,4 +1,4 @@
-use symbolica::{atom::AtomCore, id::Pattern, parse, symbol, transformer::Transformer};
+use symbolica::prelude::*;
 
 fn main() {
     let input = parse!("f(1,3,2,3,1)");

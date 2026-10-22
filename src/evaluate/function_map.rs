@@ -1,5 +1,8 @@
 use super::*;
 
+/// A numerical function callback receiving, in order, evaluated arguments,
+/// constant values, registered function evaluators, and a mutable cache of
+/// previously evaluated expressions.
 pub type EvalFnType<A, T> = Box<
     dyn Fn(
         &[T],
@@ -13,6 +16,7 @@ pub type EvalFnType<A, T> = Box<
 pub struct EvaluationFn<A, T>(EvalFnType<A, T>);
 
 impl<A, T> EvaluationFn<A, T> {
+    /// Wrap a numerical callback for registration in an evaluation function map.
     pub fn new(f: EvalFnType<A, T>) -> EvaluationFn<A, T> {
         EvaluationFn(f)
     }
@@ -23,20 +27,60 @@ impl<A, T> EvaluationFn<A, T> {
     }
 }
 
+/// Policy controlling whether a registered function is expanded at its call sites.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum InliningPolicy {
+    /// Always inline the function body.
+    #[default]
+    Always,
+    /// Keep the function body in a separate sub-evaluator.
+    Never,
+    /// Select an inlining strategy automatically.
+    ///
+    /// Currently this has the same behavior as [`Self::Always`].
+    Auto,
+}
+
+/// Settings used when registering a function with an evaluator.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FunctionRegistrationOptions {
+    inlining: InliningPolicy,
+}
+
+impl FunctionRegistrationOptions {
+    /// Create function registration options with their default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the function inlining policy.
+    pub fn inlining(mut self, inlining: InliningPolicy) -> Self {
+        self.inlining = inlining;
+        self
+    }
+
+    pub(crate) fn should_inline(&self) -> bool {
+        !matches!(self.inlining, InliningPolicy::Never)
+    }
+}
+
 /// A map of functions and constants used for evaluating expressions.
 ///
 /// Examples
 /// --------
 /// ```rust
-/// use symbolica::{atom::AtomCore, parse, symbol};
-/// use symbolica::evaluate::{FunctionMap, OptimizationSettings};
-/// let mut fn_map = FunctionMap::new();
-/// fn_map.add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap();
-///
-/// let optimization_settings = OptimizationSettings::default();
+/// use symbolica::prelude::*;
+/// let params = vec![parse!("x")];
 /// let mut evaluator = parse!("f(x)")
-///     .evaluator(&fn_map, &vec![parse!("x")], optimization_settings)
-///     .unwrap().map_coeff(&|x| x.re.to_f64());
+///     .evaluator(&params)
+///     .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1")).unwrap()
+///     .build()
+///     .unwrap()
+///     .map_coeff(&|x| x.re.to_f64());
 /// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
 /// ```
 #[cfg_attr(
@@ -48,7 +92,6 @@ impl<A, T> EvaluationFn<A, T> {
 )]
 #[derive(Clone, Debug)]
 pub struct FunctionMap {
-    pub(super) map: HashMap<Atom, Expr>,
     pub(super) tagged_fn_map: HashMap<(Symbol, Vec<Atom>), Expr>,
     pub(super) tag: HashMap<Symbol, usize>,
 }
@@ -63,19 +106,32 @@ impl FunctionMap {
     /// Create a new, empty function map.
     pub fn new() -> Self {
         FunctionMap {
-            map: HashMap::default(),
             tagged_fn_map: HashMap::default(),
             tag: HashMap::default(),
         }
     }
 
     /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
+    /// Bodies see global evaluator inputs and their own arguments, which shadow matching
+    /// global names, regardless of inlining policy. Use [`Self::add_aliases`] for definitions
+    /// that expand in the caller's local scope.
     pub fn add_function<S: Into<Indeterminate>, A: Into<Indeterminate>>(
         &mut self,
         name: S,
         args: Vec<A>,
         body: Atom,
-    ) -> Result<(), String> {
+    ) -> Result<(), EvaluationError> {
+        self.add_function_with_options(name, args, body, FunctionRegistrationOptions::default())
+    }
+
+    /// Register a function using explicit registration options.
+    pub fn add_function_with_options<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        &mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<(), EvaluationError> {
         let name = name.into();
 
         let (name, tags) = match name {
@@ -91,7 +147,33 @@ impl FunctionMap {
             }
         };
 
-        self.add_tagged_function(name, tags, args, body)
+        self.add_tagged_function_with_options(name, tags, args, body, options)
+    }
+
+    /// Register argument-free aliases (e.g. `s1 -> x^2+y`).
+    /// Aliases always inline in the scope where they are used, including local arguments.
+    /// Function-shaped aliases match their full argument list as fixed tags.
+    pub fn add_aliases(
+        &mut self,
+        aliases: impl IntoIterator<Item = (Atom, Atom)>,
+    ) -> Result<(), EvaluationError> {
+        for (from, to) in aliases {
+            let (name, tags) = match &from {
+                Atom::Var(v) => (v.get_symbol(), vec![]),
+                Atom::Fun(f) => (
+                    f.get_symbol(),
+                    from.as_fun_view()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.to_owned())
+                        .collect(),
+                ),
+                _ => return Err(EvaluationError::NotIndeterminate { atom: from }),
+            };
+            self.add_tagged_function::<Indeterminate>(name, tags.clone(), vec![], to)?;
+            self.tagged_fn_map.get_mut(&(name, tags)).unwrap().is_alias = true;
+        }
+        Ok(())
     }
 
     /// Register a function, where the first arguments are `tags` instead of arguments.
@@ -101,14 +183,44 @@ impl FunctionMap {
         tags: Vec<Atom>,
         args: Vec<A>,
         body: Atom,
-    ) -> Result<(), String> {
-        if let Some(t) = self.tag.insert(name, tags.len())
-            && t != tags.len()
-        {
-            return Err(format!(
-                "Cannot add the same function {} with a different number of tags",
-                name.get_name()
-            ));
+    ) -> Result<(), EvaluationError> {
+        self.add_tagged_function_with_options(
+            name,
+            tags,
+            args,
+            body,
+            FunctionRegistrationOptions::default(),
+        )
+    }
+
+    /// Register a tagged function using explicit registration options.
+    pub fn add_tagged_function_with_options<A: Into<Indeterminate>>(
+        &mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<(), EvaluationError> {
+        match self.tag.get(&name) {
+            Some(&t) if t != tags.len() => {
+                return Err(EvaluationError::InconsistentFunctionTagCount {
+                    function: name,
+                    expected: t,
+                    actual: tags.len(),
+                });
+            }
+            None => {
+                self.tag.insert(name, tags.len());
+            }
+            _ => {}
+        }
+
+        let key = (name, tags.clone());
+        if self.tagged_fn_map.contains_key(&key) {
+            return Err(EvaluationError::FunctionRedefined {
+                function: name.call(&tags),
+            });
         }
 
         let id = self.tagged_fn_map.len();
@@ -118,8 +230,10 @@ impl FunctionMap {
             .or_insert_with(|| Expr {
                 id,
                 tag_len,
+                is_alias: false,
                 args: args.into_iter().map(|x| x.into()).collect(),
                 body,
+                options,
             });
 
         Ok(())
@@ -130,11 +244,9 @@ impl FunctionMap {
     }
 
     pub(super) fn get(&self, a: AtomView) -> Option<&Expr> {
-        if let Some(c) = self.map.get(a.get_data()) {
-            return Some(c);
-        }
-
-        if let AtomView::Fun(aa) = a {
+        if let AtomView::Var(s) = a {
+            return self.tagged_fn_map.get(&(s.get_symbol(), vec![]));
+        } else if let AtomView::Fun(aa) = a {
             let s = aa.get_symbol();
             let tag_len = self.get_tag_len(&s);
 
@@ -147,16 +259,231 @@ impl FunctionMap {
         None
     }
 
-    pub(super) fn bodies(&self) -> impl Iterator<Item = AtomView<'_>> {
-        self.map
+    pub(super) fn has_non_inlined_functions(&self) -> bool {
+        self.tagged_fn_map
             .values()
-            .chain(self.tagged_fn_map.values())
-            .map(|e| e.body.as_view())
+            .any(|expr| !expr.options.should_inline())
+    }
+
+    pub(super) fn bodies(&self) -> impl Iterator<Item = AtomView<'_>> {
+        self.tagged_fn_map.values().map(|expr| expr.body.as_view())
     }
 
     pub(super) fn apply_horner_scheme(&mut self, scheme: &[Indeterminate]) {
-        for Expr { body, .. } in self.map.values_mut().chain(self.tagged_fn_map.values_mut()) {
-            *body = body.as_view().horner_scheme(Some(scheme), true);
+        for Expr { body, .. } in self.tagged_fn_map.values_mut() {
+            *body = body.as_view().horner_scheme(Some(scheme), true, true);
+        }
+    }
+}
+
+/// Builder for creating an [`ExpressionEvaluator`]. Constructed using
+/// [`AtomCore::evaluator_multiple`] or [`AtomCore::evaluator`].
+///
+/// Nested functions can be registerd using [`Self::add_function`] or [`Self::add_tagged_function`].
+/// The [`Self::build`] method finalizes the builder and returns an [`ExpressionEvaluator`].
+///
+/// # Examples
+///
+/// ```
+/// use symbolica::prelude::*;
+/// let params = vec![parse!("x")];
+/// let mut evaluator = parse!("f(x)")
+///     .evaluator(&params)
+///     .add_function(symbol!("f"), vec![symbol!("x")], parse!("x^2 + 1"))?
+///     .build()?
+///     .map_coeff(&|x| x.re.to_f64());
+/// assert_eq!(evaluator.evaluate_single(&[2.0]), 5.0);
+/// # Ok::<(), EvaluationError>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct EvaluatorBuilder<'a> {
+    exprs: Vec<AtomView<'a>>,
+    fn_map: FunctionMap,
+    params: Vec<Atom>,
+    optimization_settings: OptimizationSettings,
+}
+
+impl<'a> EvaluatorBuilder<'a> {
+    pub(crate) fn new<A: AtomCore>(expr: AtomView<'a>, params: &[A]) -> Self {
+        Self {
+            exprs: vec![expr],
+            fn_map: FunctionMap::new(),
+            params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
+            optimization_settings: OptimizationSettings::default(),
+        }
+    }
+
+    pub(crate) fn new_multiple_views<A: AtomCore>(exprs: &[AtomView<'a>], params: &[A]) -> Self {
+        Self {
+            exprs: exprs.to_vec(),
+            fn_map: FunctionMap::new(),
+            params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
+            optimization_settings: OptimizationSettings::default(),
+        }
+    }
+
+    pub(crate) fn new_multiple<E: AtomCore, A: AtomCore>(exprs: &'a [E], params: &[A]) -> Self {
+        Self {
+            exprs: exprs.iter().map(|e| e.as_atom_view()).collect(),
+            fn_map: FunctionMap::new(),
+            params: params.iter().map(|p| p.as_atom_view().to_owned()).collect(),
+            optimization_settings: OptimizationSettings::default(),
+        }
+    }
+
+    /// Set the function map.
+    pub fn function_map(mut self, fn_map: FunctionMap) -> Self {
+        self.fn_map = fn_map;
+        self
+    }
+
+    /// Register a function. If `name` is a symbol, it will be treated as a regular function; if it is a function, its arguments will be treated as tags.
+    pub fn add_function<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_function(name, args, body)?;
+        Ok(self)
+    }
+
+    /// Register a function using explicit registration options.
+    pub fn add_function_with_options<S: Into<Indeterminate>, A: Into<Indeterminate>>(
+        mut self,
+        name: S,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map
+            .add_function_with_options(name, args, body, options)?;
+        Ok(self)
+    }
+
+    /// Register a function, where the first arguments are `tags` instead of arguments.
+    pub fn add_tagged_function<A: Into<Indeterminate>>(
+        mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_tagged_function(name, tags, args, body)?;
+        Ok(self)
+    }
+
+    /// Register a tagged function using explicit registration options.
+    pub fn add_tagged_function_with_options<A: Into<Indeterminate>>(
+        mut self,
+        name: Symbol,
+        tags: Vec<Atom>,
+        args: Vec<A>,
+        body: Atom,
+        options: FunctionRegistrationOptions,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map
+            .add_tagged_function_with_options(name, tags, args, body, options)?;
+        Ok(self)
+    }
+
+    /// Register argument-free aliases that always inline in the caller's local scope.
+    /// See [`FunctionMap::add_aliases`].
+    pub fn add_aliases(
+        mut self,
+        aliases: impl IntoIterator<Item = (Atom, Atom)>,
+    ) -> Result<Self, EvaluationError> {
+        self.fn_map.add_aliases(aliases)?;
+        Ok(self)
+    }
+
+    /// Set all optimization settings at once.
+    pub fn optimization_settings(mut self, optimization_settings: OptimizationSettings) -> Self {
+        self.optimization_settings = optimization_settings;
+        self
+    }
+
+    /// Set the number of Horner scheme optimization iterations.
+    pub fn horner_iterations(mut self, horner_iterations: usize) -> Self {
+        self.optimization_settings.horner_iterations = horner_iterations;
+        self
+    }
+
+    /// Set the number of CPU cores to use during optimization.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.optimization_settings.n_cores = n_cores;
+        self
+    }
+
+    /// Set the number of common pair elimination iterations.
+    pub fn cpe_iterations(mut self, cpe_iterations: Option<usize>) -> Self {
+        self.optimization_settings.cpe_iterations = cpe_iterations;
+        self
+    }
+
+    /// Set a hot-start expression list for optimization.
+    pub fn hot_start(mut self, hot_start: Option<Vec<Expression<Complex<Rational>>>>) -> Self {
+        self.optimization_settings.hot_start = hot_start;
+        self
+    }
+
+    /// Set the abort check used during optimization.
+    pub fn abort_check(mut self, abort_check: Option<Box<dyn AbortCheck>>) -> Self {
+        self.optimization_settings.abort_check = abort_check;
+        self
+    }
+
+    /// Set the abort polling level.
+    pub fn abort_level(mut self, abort_level: usize) -> Self {
+        self.optimization_settings.abort_level = abort_level;
+        self
+    }
+
+    /// Set the maximum number of variables considered for a Horner scheme.
+    pub fn max_horner_scheme_variables(mut self, max_horner_scheme_variables: usize) -> Self {
+        self.optimization_settings.max_horner_scheme_variables = max_horner_scheme_variables;
+        self
+    }
+
+    /// Set the maximum number of common-pair cache entries.
+    pub fn max_common_pair_cache_entries(mut self, max_common_pair_cache_entries: usize) -> Self {
+        self.optimization_settings.max_common_pair_cache_entries = max_common_pair_cache_entries;
+        self
+    }
+
+    /// Set the maximum distance considered for common-pair elimination.
+    pub fn max_common_pair_distance(mut self, max_common_pair_distance: usize) -> Self {
+        self.optimization_settings.max_common_pair_distance = max_common_pair_distance;
+        self
+    }
+
+    /// Enable or disable verbose optimization output.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.optimization_settings.verbose = verbose;
+        self
+    }
+
+    /// Enable or disable direct translation.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.optimization_settings.direct_translation = direct_translation;
+        self
+    }
+
+    /// Build the evaluator.
+    pub fn build(self) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
+        // EvalTree::linearize expands every function call, so preserving an explicit call boundary
+        // requires the direct translator even when the legacy tree optimizer was requested.
+        if self.optimization_settings.direct_translation || self.fn_map.has_non_inlined_functions()
+        {
+            AtomView::to_evaluator(
+                &self.exprs,
+                &self.fn_map,
+                &self.params,
+                self.optimization_settings,
+            )
+        } else {
+            let tree = AtomView::to_eval_tree_multiple(&self.exprs, &self.fn_map, &self.params)?;
+            Ok(tree.optimize(&self.optimization_settings))
         }
     }
 }
@@ -172,26 +499,28 @@ impl FunctionMap {
 pub(super) struct Expr {
     pub(super) id: usize,
     pub(super) tag_len: usize,
+    pub(super) is_alias: bool,
     pub(super) args: Vec<Indeterminate>,
     pub(super) body: Atom,
+    pub(super) options: FunctionRegistrationOptions,
 }
 
 /// Settings for optimizing the evaluation of expressions.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct OptimizationSettings {
-    pub horner_iterations: usize,
-    pub n_cores: usize,
-    pub cpe_iterations: Option<usize>,
-    pub hot_start: Option<Vec<Expression<Complex<Rational>>>>,
+    pub(crate) horner_iterations: usize,
+    pub(crate) n_cores: usize,
+    pub(crate) cpe_iterations: Option<usize>,
+    pub(crate) hot_start: Option<Vec<Expression<Complex<Rational>>>>,
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub abort_check: Option<Box<dyn AbortCheck>>,
-    pub abort_level: usize,
-    pub max_horner_scheme_variables: usize,
-    pub max_common_pair_cache_entries: usize,
-    pub max_common_pair_distance: usize,
-    pub verbose: bool,
-    pub direct_translation: bool,
+    pub(crate) abort_check: Option<Box<dyn AbortCheck>>,
+    pub(crate) abort_level: usize,
+    pub(crate) max_horner_scheme_variables: usize,
+    pub(crate) max_common_pair_cache_entries: usize,
+    pub(crate) max_common_pair_distance: usize,
+    pub(crate) verbose: bool,
+    pub(crate) direct_translation: bool,
 }
 
 #[cfg(feature = "bincode")]
@@ -266,5 +595,78 @@ impl Default for OptimizationSettings {
             verbose: false,
             direct_translation: true,
         }
+    }
+}
+
+impl OptimizationSettings {
+    /// Create optimization settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of Horner scheme optimization iterations.
+    pub fn horner_iterations(mut self, horner_iterations: usize) -> Self {
+        self.horner_iterations = horner_iterations;
+        self
+    }
+
+    /// Set the number of CPU cores to use during optimization.
+    pub fn cores(mut self, n_cores: usize) -> Self {
+        self.n_cores = n_cores;
+        self
+    }
+
+    /// Set the number of common pair elimination iterations.
+    pub fn cpe_iterations(mut self, cpe_iterations: Option<usize>) -> Self {
+        self.cpe_iterations = cpe_iterations;
+        self
+    }
+
+    /// Set a hot-start expression list for optimization.
+    pub fn hot_start(mut self, hot_start: Option<Vec<Expression<Complex<Rational>>>>) -> Self {
+        self.hot_start = hot_start;
+        self
+    }
+
+    /// Set the abort check used during optimization.
+    pub fn abort_check(mut self, abort_check: Option<Box<dyn AbortCheck>>) -> Self {
+        self.abort_check = abort_check;
+        self
+    }
+
+    /// Set the abort polling level.
+    pub fn abort_level(mut self, abort_level: usize) -> Self {
+        self.abort_level = abort_level;
+        self
+    }
+
+    /// Set the maximum number of variables considered for a Horner scheme.
+    pub fn max_horner_scheme_variables(mut self, max_horner_scheme_variables: usize) -> Self {
+        self.max_horner_scheme_variables = max_horner_scheme_variables;
+        self
+    }
+
+    /// Set the maximum number of common-pair cache entries.
+    pub fn max_common_pair_cache_entries(mut self, max_common_pair_cache_entries: usize) -> Self {
+        self.max_common_pair_cache_entries = max_common_pair_cache_entries;
+        self
+    }
+
+    /// Set the maximum distance considered for common-pair elimination.
+    pub fn max_common_pair_distance(mut self, max_common_pair_distance: usize) -> Self {
+        self.max_common_pair_distance = max_common_pair_distance;
+        self
+    }
+
+    /// Enable or disable verbose optimization output.
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Enable or disable direct translation.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.direct_translation = direct_translation;
+        self
     }
 }

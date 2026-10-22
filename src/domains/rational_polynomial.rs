@@ -14,7 +14,7 @@ use ahash::HashMap;
 use crate::{
     domains::{
         RingOps, Set,
-        algebraic_number::AlgebraicExtension,
+        algebraic::AlgebraicExtension,
         float::{FloatField, SingleFloat},
     },
     poly::{
@@ -37,12 +37,13 @@ use super::{
 
 /// A rational polynomial field.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RationalPolynomialField<R: Ring, E: PositiveExponent> {
+pub struct RationalPolynomialField<R: Ring, E: PositiveExponent = u16> {
     ring: R,
     _phantom_exp: PhantomData<E>,
 }
 
 impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
+    /// Create a rational-function field over `coeff_ring` with exponent type `E`.
     pub fn new(coeff_ring: R) -> RationalPolynomialField<R, E> {
         RationalPolynomialField {
             ring: coeff_ring,
@@ -50,15 +51,21 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomialField<R, E> {
         }
     }
 
+    /// Create a rational-function field with the coefficient ring of `poly`.
     pub fn from_poly(poly: &MultivariatePolynomial<R, E>) -> RationalPolynomialField<R, E> {
         RationalPolynomialField {
-            ring: poly.ring.clone(),
+            ring: poly.ring().clone(),
             _phantom_exp: PhantomData,
         }
     }
 }
 
+/// Construct a rational polynomial from numerator and denominator polynomials,
+/// converting coefficients from `R` to `OR` as supported by the implementation.
 pub trait FromNumeratorAndDenominator<R: Ring, OR: Ring, E: PositiveExponent> {
+    /// Construct `num / den` over `field`. The denominator must be nonzero.
+    /// Set `do_gcd` to cancel common polynomial factors; when false, the caller
+    /// must ensure the numerator and denominator are already coprime.
     fn from_num_den(
         num: MultivariatePolynomial<R, E>,
         den: MultivariatePolynomial<R, E>,
@@ -87,10 +94,40 @@ where
     }
 }
 
+/// A polynomial quotient of two multivariate polynomials over a ring.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RationalPolynomial<R: Ring, E: PositiveExponent> {
+pub struct RationalPolynomial<R: Ring, E: PositiveExponent = u16> {
+    /// The numerator polynomial. It must share a variable order with the denominator.
     pub numerator: MultivariatePolynomial<R, E>,
+    /// The nonzero denominator polynomial, normalized and coprime to the numerator.
     pub denominator: MultivariatePolynomial<R, E>,
+}
+
+/// The result of rational-function integration.
+///
+/// The integral is represented as the sum of all [`rational_parts`](Self::rational_parts) and all
+/// [`logarithmic_parts`](Self::logarithmic_parts). Logarithmic parts may represent ordinary logs or
+/// algebraic root sums; see [`LogarithmicIntegralTerm`] for the exact interpretation.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct RationalIntegral<R: Ring, E: PositiveExponent = u16> {
+    /// Rational terms in the antiderivative.
+    pub rational_parts: Vec<RationalPolynomial<R, E>>,
+    /// Logarithmic terms in the antiderivative.
+    pub logarithmic_parts: Vec<LogarithmicIntegralTerm<R, E>>,
+}
+
+/// A logarithmic term produced by rational-function integration.
+///
+/// If `coefficient` depends on the temporary root-sum variable `z`, this represents
+/// `sum_(coefficient(z) = 0) z*log(argument(var, z))`. If it does not depend on `z`, it represents
+/// the ordinary term `coefficient*log(argument)`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct LogarithmicIntegralTerm<R: Ring, E: PositiveExponent = u16> {
+    /// The logarithmic coefficient, or the defining polynomial for an algebraic root-sum
+    /// coefficient.
+    pub coefficient: RationalPolynomial<R, E>,
+    /// The argument of the logarithm.
+    pub argument: RationalPolynomial<R, E>,
 }
 
 impl<R: Ring, E: PositiveExponent> InternalOrdering for RationalPolynomial<R, E> {
@@ -119,7 +156,7 @@ where
 {
     fn from(poly: MultivariatePolynomial<R, E>) -> Self {
         let d = poly.one();
-        let field = poly.ring.clone();
+        let field = poly.ring().clone();
         Self::from_num_den(poly, d, &field, false)
     }
 }
@@ -128,11 +165,13 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E>
 where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
+    /// Unify the variable order of both rational functions in place, remapping
+    /// the numerator and denominator exponents without changing their values.
     pub fn unify_variables(&mut self, other: &mut Self) {
-        assert_eq!(self.numerator.variables, self.denominator.variables);
-        assert_eq!(other.numerator.variables, other.denominator.variables);
+        assert_eq!(self.numerator.variables(), self.denominator.variables());
+        assert_eq!(other.numerator.variables(), other.denominator.variables());
 
-        if self.numerator.variables == other.numerator.variables {
+        if self.numerator.variables() == other.numerator.variables() {
             return;
         }
 
@@ -143,20 +182,21 @@ where
         *self = Self::from_num_den(
             self.numerator.clone(),
             self.denominator.clone(),
-            &self.numerator.ring,
+            &self.numerator.ring(),
             false,
         );
 
         *other = Self::from_num_den(
             other.numerator.clone(),
             other.denominator.clone(),
-            &other.numerator.ring,
+            &other.numerator.ring(),
             false,
         );
     }
 }
 
 impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
+    /// Create the zero rational function over `field` with the supplied variable order.
     pub fn new(field: &R, var_map: Arc<Vec<PolyVariable>>) -> RationalPolynomial<R, E> {
         let num = MultivariatePolynomial::new(field, None, var_map);
         let den = num.one();
@@ -167,14 +207,17 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         }
     }
 
+    /// Borrow the shared ordered variable list of the numerator and denominator.
     pub fn get_variables(&self) -> &Arc<Vec<PolyVariable>> {
-        &self.numerator.variables
+        &self.numerator.variables()
     }
 
+    /// Return whether the numerator is zero.
     pub fn is_zero(&self) -> bool {
         self.numerator.is_zero()
     }
 
+    /// Return whether both numerator and denominator are constant polynomials.
     pub fn is_constant(&self) -> bool {
         self.numerator.is_constant() && self.denominator.is_constant()
     }
@@ -335,15 +378,17 @@ impl<E: PositiveExponent> FromNumeratorAndDenominator<RationalField, IntegerRing
         field: &IntegerRing,
         do_gcd: bool,
     ) -> RationalPolynomial<IntegerRing, E> {
-        let content = num.ring.gcd(&num.content(), &den.content());
+        let ring = num.ring().clone();
+        let content = ring.gcd(&num.content(), &den.content());
 
-        let mut num_int = MultivariatePolynomial::new(&Z, None, num.variables);
+        let mut num_int = MultivariatePolynomial::new(&Z, None, num.variables().clone());
         num_int.exponents = num.exponents;
 
-        let mut den_int = MultivariatePolynomial::new(&Z, Some(den.nterms()), den.variables);
+        let mut den_int =
+            MultivariatePolynomial::new(&Z, Some(den.nterms()), den.variables().clone());
         den_int.exponents = den.exponents;
 
-        if num.ring.is_one(&content) {
+        if ring.is_one(&content) {
             num_int.coefficients = num
                 .coefficients
                 .into_iter()
@@ -358,12 +403,12 @@ impl<E: PositiveExponent> FromNumeratorAndDenominator<RationalField, IntegerRing
             num_int.coefficients = num
                 .coefficients
                 .into_iter()
-                .map(|c| num.ring.div(&c, &content).numerator())
+                .map(|c| ring.div(&c, &content).numerator())
                 .collect();
             den_int.coefficients = den
                 .coefficients
                 .into_iter()
-                .map(|c| den.ring.div(&c, &content).numerator())
+                .map(|c| ring.div(&c, &content).numerator())
                 .collect();
         }
 
@@ -498,41 +543,61 @@ where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
     #[inline]
+    /// Return the reciprocal, exchanging numerator and denominator and normalizing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rational function is zero.
     pub fn inv(self) -> Self {
         if self.numerator.is_zero() {
             panic!("Cannot invert 0");
         }
 
-        let field = self.numerator.ring.clone();
+        let field = self.numerator.ring().clone();
         Self::from_num_den(self.denominator, self.numerator, &field, false)
     }
 
+    /// Raise this rational function to a nonnegative integer power. Exponent zero
+    /// returns one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `e` exceeds `u32::MAX`.
     pub fn pow(&self, e: u64) -> Self {
         if e > u32::MAX as u64 {
             panic!("Power of exponentiation is larger than 2^32: {e}");
         }
-        let e = e as u32;
 
-        // TODO: do binary exponentiation
-        let mut poly = RationalPolynomial {
+        let mut exponent = e as u32;
+        let mut result = RationalPolynomial {
             numerator: self.numerator.one(),
             denominator: self.denominator.one(),
         };
-
-        for _ in 0..e {
-            poly = &poly * self;
+        if exponent == 0 {
+            return result;
         }
-        poly
+
+        let mut base = self.clone();
+        while exponent > 0 {
+            if exponent & 1 == 1 {
+                result = &result * &base;
+            }
+            exponent >>= 1;
+            if exponent > 0 {
+                base = &base * &base;
+            }
+        }
+        result
     }
 
+    /// Return the GCD of the numerators divided by the LCM of the denominators.
+    /// Both operands must use compatible coefficient rings and variable lists.
     pub fn gcd(&self, other: &Self) -> Self {
         let gcd_num = self.numerator.gcd(&other.numerator);
         let gcd_den = self.denominator.gcd(&other.denominator);
-
-        RationalPolynomial {
-            numerator: gcd_num,
-            denominator: (&other.denominator / &gcd_den) * &self.denominator,
-        }
+        let denominator = (&other.denominator / &gcd_den) * &self.denominator;
+        let field = gcd_num.ring().clone();
+        Self::from_num_den(gcd_num, denominator, &field, false)
     }
 
     /// Convert the rational polynomial to a polynomial in the specified
@@ -548,14 +613,14 @@ where
     ) -> Result<MultivariatePolynomial<RationalPolynomialField<R, E>, E>, &'static str> {
         let index_mask: Vec<_> = self
             .numerator
-            .variables
+            .variables()
             .iter()
             .map(|v| variables.iter().position(|vv| vv == v))
             .collect();
 
         let coefficient_vars = Arc::new(
             self.numerator
-                .variables
+                .variables()
                 .iter()
                 .zip(&index_mask)
                 .filter_map(|(var, mask)| {
@@ -602,8 +667,10 @@ where
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
             } else {
-                let mut r =
-                    RationalPolynomial::new(&self.numerator.ring.clone(), coefficient_vars.clone());
+                let mut r = RationalPolynomial::new(
+                    &self.numerator.ring().clone(),
+                    coefficient_vars.clone(),
+                );
                 r.numerator
                     .append_monomial(e.coefficient.clone(), &e_list_coeff);
                 hm.insert(e_list.clone(), r);
@@ -611,14 +678,14 @@ where
         }
 
         let v = Arc::new(variables.to_vec());
-        let field = RationalPolynomialField::new(self.numerator.ring.clone());
+        let field = RationalPolynomialField::new(self.numerator.ring().clone());
         let mut poly = MultivariatePolynomial::new(&field, Some(hm.len()), v);
 
         if !ignore_denominator {
             let denom = RationalPolynomial::from_num_den(
                 self.denominator.one(),
                 self.denominator.clone(),
-                &self.denominator.ring,
+                &self.denominator.ring(),
                 false,
             );
 
@@ -636,6 +703,9 @@ where
     }
 
     // Convert from a univariate polynomial with rational polynomial coefficients to a rational polynomial.
+    /// Flatten a univariate polynomial with rational-function coefficients into
+    /// a single rational function. Its variable is merged with the coefficient
+    /// variables as needed.
     pub fn from_univariate(
         mut f: UnivariatePolynomial<RationalPolynomialField<R, E>>,
     ) -> RationalPolynomial<R, E> {
@@ -652,7 +722,7 @@ where
             .position(|x| x == f.variable.as_ref())
             .unwrap_or_else(|| {
                 let mut r = RationalPolynomial::new(
-                    &f.coefficients[0].numerator.ring,
+                    f.coefficients[0].numerator.ring(),
                     Arc::new(vec![f.variable.as_ref().clone()]),
                 );
                 for c in &mut f.coefficients {
@@ -667,8 +737,10 @@ where
 
         let mut exp = vec![E::zero(); f.coefficients[0].get_variables().len()];
         exp[pos] = E::one();
-        let v: RationalPolynomial<R, E> =
-            res.numerator.monomial(res.numerator.ring.one(), exp).into();
+        let v: RationalPolynomial<R, E> = res
+            .numerator
+            .monomial(res.numerator.ring().one(), exp)
+            .into();
 
         for (p, c) in f.coefficients.into_iter().enumerate() {
             res = &res + &(&v.pow(p as u64) * &c);
@@ -683,7 +755,7 @@ impl<R: Field, E: PositiveExponent> RationalPolynomial<R, E> {
     pub fn evaluate(&self, x: &[R::Element]) -> R::Element {
         let num = self.numerator.replace_all(x);
         let den = self.denominator.replace_all(x);
-        self.numerator.ring.div(&num, &den)
+        self.numerator.ring().div(&num, &den)
     }
 }
 
@@ -844,23 +916,7 @@ where
     }
 
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
-        if e > u32::MAX as u64 {
-            panic!("Power of exponentiation is larger than 2^32: {e}");
-        }
-        let e = e as u32;
-
-        // TODO: do binary exponentiation
-        let mut poly = RationalPolynomial {
-            numerator: b.numerator.zero(),
-            denominator: b.denominator.zero(),
-        };
-        poly.numerator = poly.numerator.add_constant(self.ring.one());
-        poly.denominator = poly.denominator.add_constant(self.ring.one());
-
-        for _ in 0..e {
-            poly = self.mul(&poly, b);
-        }
-        poly
+        b.pow(e)
     }
 
     fn is_zero(&self, a: &Self::Element) -> bool {
@@ -889,10 +945,6 @@ where
         } else {
             Some(self.div(a, b))
         }
-    }
-
-    fn sample(&self, _rng: &mut impl rand::RngCore, _range: (i64, i64)) -> Self::Element {
-        todo!("Sampling a polynomial is not possible yet")
     }
 
     fn format<W: std::fmt::Write>(
@@ -949,6 +1001,77 @@ where
     }
 }
 
+/// Polynomial GCD support needed when `Q(parameters)` is itself used as the
+/// coefficient field of a simple algebraic quotient.
+///
+/// The current implementation is intentionally limited to univariate
+/// polynomials, which is the case used by primitive-element adjoining.
+impl<R: EuclideanDomain + PolynomialGCD<PE>, PE: PositiveExponent, E: PositiveExponent>
+    PolynomialGCD<E> for RationalPolynomialField<R, PE>
+where
+    RationalPolynomial<R, PE>: FromNumeratorAndDenominator<R, R, PE>,
+{
+    fn heuristic_gcd(
+        _a: &MultivariatePolynomial<Self, E>,
+        _b: &MultivariatePolynomial<Self, E>,
+    ) -> Option<(
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+        MultivariatePolynomial<Self, E>,
+    )> {
+        None
+    }
+
+    fn gcd_multiple(
+        polynomials: Vec<MultivariatePolynomial<Self, E>>,
+    ) -> MultivariatePolynomial<Self, E> {
+        MultivariatePolynomial::repeated_gcd(polynomials)
+    }
+
+    fn gcd(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+        bounds: &mut [E],
+    ) -> MultivariatePolynomial<Self, E> {
+        let active_variables = vars
+            .iter()
+            .filter(|variable| {
+                a.degree(**variable) != E::zero() || b.degree(**variable) != E::zero()
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            active_variables.len() <= 1,
+            "Multivariate polynomial GCDs over rational-function fields are not implemented"
+        );
+
+        let result = a.univariate_gcd(b);
+        if let Some(variable) = active_variables.first() {
+            bounds[*variable] = result.degree(*variable);
+        }
+        result
+    }
+
+    fn get_gcd_var_bounds(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+    ) -> smallvec::SmallVec<[E; crate::poly::INLINED_EXPONENTS]> {
+        let mut bounds = (0..a.nvars())
+            .map(|_| E::zero())
+            .collect::<smallvec::SmallVec<[E; crate::poly::INLINED_EXPONENTS]>>();
+        for variable in vars {
+            bounds[*variable] = a.degree(*variable).min(b.degree(*variable));
+        }
+        bounds
+    }
+
+    fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
+        a.make_monic()
+    }
+}
+
 impl<'a, R: EuclideanDomain + PolynomialGCD<E> + PolynomialGCD<E>, E: PositiveExponent>
     Add<&'a RationalPolynomial<R, E>> for &RationalPolynomial<R, E>
 where
@@ -962,6 +1085,15 @@ where
             let mut b = other.clone();
             a.unify_variables(&mut b);
             return &a + &b;
+        }
+
+        if self.denominator == other.denominator {
+            return RationalPolynomial::from_num_den(
+                &self.numerator + &other.numerator,
+                self.denominator.clone(),
+                self.numerator.ring(),
+                true,
+            );
         }
 
         let denom_gcd = self.denominator.gcd(&other.denominator);
@@ -1105,19 +1237,25 @@ where
         }
 
         let dn = self.numerator.derivative(var);
-        let dd = self.denominator.derivative(var);
-
         let a = RationalPolynomial::from_num_den(
             dn,
             self.denominator.clone(),
-            &self.numerator.ring,
-            false,
+            self.numerator.ring(),
+            true, // derivative may expose scalar content
         );
+        if self.denominator.degree(var) == E::zero() {
+            // A parameter-only denominator contributes no quotient-rule
+            // term. Keep the normalization above: differentiation can
+            // expose scalar or polynomial factors in the numerator.
+            return a;
+        }
+
+        let dd = self.denominator.derivative(var);
         let b = RationalPolynomial::from_num_den(
             &self.numerator * &dd,
             &self.denominator * &self.denominator,
-            &self.numerator.ring,
-            false,
+            self.numerator.ring(),
+            true,
         );
 
         &a - &b
@@ -1151,8 +1289,24 @@ where
 {
     /// Compute the partial fraction decomposition of the rational polynomial in `var`.
     pub fn apart(&self, var: usize) -> Vec<Self> {
+        self.apart_factored_denominators(var)
+            .into_iter()
+            .map(|(numerator, denominator, exponent)| {
+                &numerator / &denominator.pow(exponent as u64)
+            })
+            .collect()
+    }
+
+    /// Compute the partial fraction decomposition of the rational polynomial in `var`,
+    /// returning tuples `(numerator, denominator, exponent)` representing terms of the form
+    /// `numerator / denominator^exponent`.
+    ///
+    /// The denominator in every proper fraction is one of the irreducible factors found while
+    /// decomposing the original denominator. It is not expanded to its indicated power or
+    /// recovered by factoring the resulting rational polynomial again.
+    pub fn apart_factored_denominators(&self, var: usize) -> Vec<(Self, Self, usize)> {
         if self.denominator.degree(var) == E::zero() {
-            return vec![self.clone()];
+            return vec![(self.clone(), self.numerator.one().into(), 1)];
         }
 
         let rat_field = RationalPolynomialField::from_poly(&self.numerator);
@@ -1170,14 +1324,13 @@ where
                 .map_coeff(|c| c.clone().into(), rat_field.clone());
             let (q, r) = n.quot_rem(&d);
             if !q.is_zero() {
-                hs.push(Self::from_univariate(q));
+                hs.push((Self::from_univariate(q), self.numerator.one().into(), 1));
             }
             r
         } else {
             n
         };
 
-        // partial fraction the denominator
         let mut fs = self
             .denominator
             .factor()
@@ -1222,10 +1375,14 @@ where
             let exp = d.p_adic_expansion(&p);
             let p_rat = Self::from_univariate(p);
             for (pow, d_exp) in exp.into_iter().enumerate() {
-                hs.push(
-                    &(&Self::from_univariate(d_exp) / &p_rat.pow(p_pow as u64 - pow as u64))
-                        * &constant,
-                );
+                if d_exp.is_zero() {
+                    continue;
+                }
+                hs.push((
+                    &Self::from_univariate(d_exp) * &constant,
+                    p_rat.clone(),
+                    p_pow - pow,
+                ));
             }
         }
 
@@ -1244,8 +1401,31 @@ where
     /// Compute the multivariate partial fraction decomposition.
     /// Based on [MultivariateApart](https://arxiv.org/abs/2101.08283v1) by Heller and von Manteuffel.
     pub fn apart_multivariate(&self) -> Vec<Self> {
-        let mut fs = self.denominator.factor();
+        self.apart_multivariate_with_factors(self.denominator.factor())
+            .into_iter()
+            .map(|part| {
+                Self::from_num_den(
+                    part.numerator,
+                    part.denominator,
+                    self.numerator.ring(),
+                    false,
+                )
+            })
+            .collect()
+    }
+}
 
+impl<R: EuclideanDomain + UpgradeToField + PolynomialGCD<E>, E: PositiveExponent>
+    RationalPolynomial<R, E>
+where
+    <R as UpgradeToField>::Upgraded: Echelonize,
+{
+    /// Compute the multivariate partial fraction decomposition using a known
+    /// factorization of the denominator.
+    pub(crate) fn apart_multivariate_with_factors(
+        &self,
+        mut fs: Vec<(MultivariatePolynomial<R, E>, usize)>,
+    ) -> Vec<RationalPolynomial<<R as UpgradeToField>::Upgraded, E>> {
         // sort by number of variables
         // TODO: block sort
         fs.sort_by_key(|(f, _)| {
@@ -1271,11 +1451,11 @@ where
                 .rearrange_with_growth(&vars)
                 .unwrap()
                 .mul_exp(&exp)
-                .add_constant(f.ring.neg(&f.ring.one()));
+                .add_constant(f.ring().neg(&f.ring().one()));
 
             system.push(f.reorder::<GrevLexOrder>().map_coeff(
-                |c| f.ring.upgrade_element(c.clone()),
-                f.ring.clone().upgrade(),
+                |c| f.ring().upgrade_element(c.clone()),
+                f.ring().clone().upgrade(),
             ));
             exp[var] = E::zero();
         }
@@ -1283,8 +1463,8 @@ where
         let g = GroebnerBasis::new(&system, false);
         let res = r
             .map_coeff(
-                |c| r.ring.upgrade_element(c.clone()),
-                r.ring.clone().upgrade(),
+                |c| r.ring().upgrade_element(c.clone()),
+                r.ring().clone().upgrade(),
             )
             .reorder::<GrevLexOrder>()
             .reduce(&g.system)
@@ -1294,8 +1474,8 @@ where
             .iter()
             .map(|(f, _)| {
                 f.map_coeff(
-                    |c| r.ring.upgrade_element(c.clone()),
-                    r.ring.clone().upgrade(),
+                    |c| r.ring().upgrade_element(c.clone()),
+                    r.ring().clone().upgrade(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1306,8 +1486,8 @@ where
             let mut num = self
                 .numerator
                 .map_coeff(
-                    |c| r.ring.upgrade_element(c.clone()),
-                    r.ring.clone().upgrade(),
+                    |c| r.ring().upgrade_element(c.clone()),
+                    r.ring().clone().upgrade(),
                 )
                 .constant(term.coefficient.clone());
             let mut den = num.one();
@@ -1326,7 +1506,10 @@ where
                     }
                 }
             }
-            parts.push(Self::from_num_den(num, den, &self.numerator.ring, false));
+            parts.push(RationalPolynomial {
+                numerator: num,
+                denominator: den,
+            });
         }
 
         parts
@@ -1338,12 +1521,13 @@ where
     RationalPolynomial<R, E>: FromNumeratorAndDenominator<R, R, E>,
     MultivariatePolynomial<R, E>: Factorize,
 {
-    /// Integrate the rational function in `var`. It returns a tuple
-    /// `(ps, ls)` where `ps` should be interpreted as the sum of the rational parts
-    /// and `ls` as a sum of logarithmic parts. Each logarithmic part is a tuple `(r, a)`
-    /// that represents `sum_(r(z) = 0) z*log(a(var, z))` if `r` is dependent on `z`,
-    /// else it is `r*log(a)`.
-    pub fn integrate(&self, var: usize) -> (Vec<Self>, Vec<(Self, Self)>) {
+    /// Integrate the rational function in `var`.
+    ///
+    /// The returned [`RationalIntegral`] stores rational terms separately from logarithmic terms.
+    /// The antiderivative is the sum of all rational parts and all logarithmic parts. A logarithmic
+    /// term with coefficient `r` and argument `a` represents `sum_(r(z) = 0) z*log(a(var, z))` if
+    /// `r` depends on the temporary root-sum variable `z`; otherwise it represents `r*log(a)`.
+    pub fn integrate(&self, var: usize) -> RationalIntegral<R, E> {
         let rat_field = RationalPolynomialField::from_poly(&self.numerator);
         let n = self
             .numerator
@@ -1357,7 +1541,10 @@ where
 
         if d.is_constant() {
             let r = &Self::from_univariate(n.integrate()) / &Self::from_univariate(d);
-            return (vec![r], vec![]);
+            return RationalIntegral {
+                rational_parts: vec![r],
+                logarithmic_parts: vec![],
+            };
         }
 
         let (q, r) = n.quot_rem(&d);
@@ -1415,7 +1602,7 @@ where
         let mut hs = vec![];
         for (d, (p, p_pow)) in deltas.into_iter().zip(&fs) {
             let p_diff = p.derivative();
-            let (_, s, t) = p.eea(&p_diff);
+            let (_, s, t) = p.extended_gcd(&p_diff);
 
             let p_full = Self::from_univariate(p.clone());
 
@@ -1443,7 +1630,7 @@ where
 
                 let r = -(&t_full / &(&rat_field.nth(i.into()) * &p_full.pow(i as u64)));
                 if !r.is_zero() {
-                    v.push(r);
+                    v.push(&r * &constant);
                 }
             }
 
@@ -1454,11 +1641,11 @@ where
 
         // create new temporary variable
         let mut t = MultivariatePolynomial::new(
-            &self.numerator.ring,
+            self.numerator.ring(),
             None,
             Arc::new(vec![PolyVariable::Temporary(0)]),
         )
-        .monomial(self.numerator.ring.one(), vec![E::one()])
+        .monomial(self.numerator.ring().one(), vec![E::one()])
         .into();
 
         let mut w = vec![];
@@ -1477,12 +1664,12 @@ where
 
             let b = h.clone() - p.derivative().mul_coeff(&t);
 
-            // TODO: use resultant_prs instead?
-            let r = p.resultant(&b);
+            // TODO: use resultant_brown instead?
+            let r = p.resultant_euclidean(&b);
 
             // drop the denominator as it is constant in x
             let mut sqf = r.numerator.square_free_factorization();
-            sqf.retain(|(x, _)| !x.is_constant());
+            sqf.retain(|(x, _)| x.degree(new_var) > E::zero());
 
             let factors: Vec<(Vec<_>, _, _)> = sqf
                 .into_iter()
@@ -1537,7 +1724,7 @@ where
                 // all other variables and solve a diophantine equation
                 let lcoeff = bivar_poly.to_univariate(var).lcoeff();
                 let aa = lcoeff.to_univariate_from_univariate(new_var);
-                let (_, s, _) = aa.eea(&def_uni);
+                let (_, s, _) = aa.extended_gcd(&def_uni);
 
                 // convert the s to a multivariate polynomial and multiply with the bivariate polynomial
                 // and mod with the defining polynomial
@@ -1567,7 +1754,7 @@ where
                     exp.copy_from_slice(t.exponents);
                     let mm = p.coefficients[0]
                         .numerator
-                        .monomial(self.numerator.ring.one(), exp);
+                        .monomial(self.numerator.ring().one(), exp);
                     res = &res + &(t.coefficient * &mm.into());
                 }
 
@@ -1578,7 +1765,7 @@ where
                         let sol = RationalPolynomial::from_num_den(
                             -a.coefficients[0].clone(),
                             a.coefficients[1].clone(),
-                            &a.coefficients[0].ring,
+                            &a.coefficients[0].ring(),
                             true,
                         );
 
@@ -1590,22 +1777,28 @@ where
                             exp.copy_from_slice(t.exponents);
                             let mm = p.coefficients[0]
                                 .numerator
-                                .monomial(self.numerator.ring.one(), exp);
+                                .monomial(self.numerator.ring().one(), exp);
                             res = &res + &(t.coefficient * &mm.into());
                         }
 
-                        w.push((&sol * &constant, res));
+                        w.push(LogarithmicIntegralTerm {
+                            coefficient: &sol * &constant,
+                            argument: res,
+                        });
                     } else {
-                        w.push((
-                            &RationalPolynomial::from(ff.clone()) * &constant,
-                            res.clone(),
-                        ));
+                        w.push(LogarithmicIntegralTerm {
+                            coefficient: &RationalPolynomial::from(ff.clone()) * &constant,
+                            argument: res.clone(),
+                        });
                     }
                 }
             }
         }
 
-        (v, w)
+        RationalIntegral {
+            rational_parts: v,
+            logarithmic_parts: w,
+        }
     }
 }
 
@@ -1616,16 +1809,63 @@ mod test {
     use crate::{
         atom::AtomCore,
         domains::{
-            InternalOrdering, Ring,
+            InternalOrdering, Ring, SelfRing,
             finite_field::{ToFiniteField, Zp},
-            integer::Z,
+            integer::{Integer, Z},
             rational::Q,
             rational_polynomial::RationalPolynomial,
         },
-        parse, symbol,
+        parse,
+        poly::factor::Factorize,
+        symbol,
     };
 
-    use super::RationalPolynomialField;
+    use super::{FromNumeratorAndDenominator, RationalPolynomialField};
+
+    #[test]
+    fn sparse_partial_fractions_preserve_maps_and_skip_zero_terms() {
+        let variables = Arc::new(vec![symbol!("x").into(), symbol!("unused").into()]);
+        let input: RationalPolynomial<_, u16> = parse!("1+1/(x+1)^3+1/(x+1)+1/(x+2)")
+            .to_rational_polynomial(&Q, &Z, Some(variables.clone()));
+        let terms = input.apart_factored_denominators(0);
+        assert_eq!(terms.len(), 4);
+        let mut sum: RationalPolynomial<_, u16> = input.numerator.zero().into();
+        for (num, den, power) in terms {
+            assert!(!num.is_zero());
+            for term in [&num, &den] {
+                assert!(variables.iter().all(|v| term.get_variables().contains(v)));
+            }
+            sum = &sum + &(&num / &den.pow(power as u64));
+        }
+        let mut expected = input;
+        sum.unify_variables(&mut expected);
+        assert_eq!(sum, expected);
+    }
+
+    #[test]
+    fn integer_content_is_removed_from_disjoint_variables() {
+        let variables = Arc::new(vec![
+            crate::poly::PolyVariable::Symbol(symbol!("content_x")),
+            crate::poly::PolyVariable::Symbol(symbol!("content_y")),
+        ]);
+        let numerator = parse!("21+63*content_x^2+21*content_x^20")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let denominator =
+            parse!("21+21*content_y").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+
+        assert_eq!(
+            numerator.gcd(&denominator),
+            numerator.constant(Integer::from(21))
+        );
+
+        let normalized = RationalPolynomial::from_num_den(numerator, denominator, &Z, true);
+        let expected: RationalPolynomial<_> = parse!(
+            "(1+3*content_x^2+content_x^20)/(1+content_y)"
+        )
+        .to_rational_polynomial(&Z, &Z, Some(variables));
+
+        assert_eq!(normalized, expected);
+    }
 
     #[test]
     fn eval_map() {
@@ -1644,11 +1884,26 @@ mod test {
     }
 
     #[test]
+    fn gcd_unifies_numerator_and_denominator_variables() {
+        let field = RationalPolynomialField::<_, u8>::new(Z);
+        let one = field.one();
+        let parameter: RationalPolynomial<_, u8> =
+            parse!("a/b").to_rational_polynomial(&Q, &Z, None);
+
+        let gcd = one.gcd(&parameter);
+
+        assert_eq!(gcd.numerator.variables(), gcd.denominator.variables());
+        assert!((&gcd * &gcd.clone().inv()).is_one());
+    }
+
+    #[test]
     fn hermite_reduction() {
         let p: RationalPolynomial<_, _> =
             parse!("1/(v1 + 1)^5").to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
 
-        let (r, l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let l = integral.logarithmic_parts;
 
         assert_eq!(
             r,
@@ -1672,7 +1927,9 @@ mod test {
                 Some(Arc::new(vec![symbol!("v1").into(), symbol!("v2").into()])),
             );
 
-        let (r, l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let l = integral.logarithmic_parts;
         assert_eq!(
             r,
             vec![
@@ -1692,7 +1949,13 @@ mod test {
                 Some(Arc::new(vec![symbol!("v1").into(), symbol!("v2").into()])),
             );
 
-        let (r, l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let l = integral
+            .logarithmic_parts
+            .into_iter()
+            .map(|x| (x.coefficient, x.argument))
+            .collect::<Vec<_>>();
 
         let v = l[0].0.get_variables().clone();
 
@@ -1721,7 +1984,13 @@ mod test {
             parse!("(36v1^2+1167v1+3549/2)/(v1^3+23/30v1^2-2/15v1-2/15)")
                 .to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
 
-        let (r, mut l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let mut l = integral
+            .logarithmic_parts
+            .into_iter()
+            .map(|x| (x.coefficient, x.argument))
+            .collect::<Vec<_>>();
         l.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.internal_cmp(&b.1)));
 
         let v = l[0].0.get_variables().clone();
@@ -1753,7 +2022,13 @@ mod test {
         )
         .to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
 
-        let (r, mut l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let mut l = integral
+            .logarithmic_parts
+            .into_iter()
+            .map(|x| (x.coefficient, x.argument))
+            .collect::<Vec<_>>();
         let new_var = symbol!("v2");
 
         // root sum in the answer, rename the temporary variable
@@ -1762,10 +2037,10 @@ mod test {
         *v.last_mut().unwrap() = new_var.into();
         let new_map = Arc::new(v);
 
-        l[0].0.numerator.variables = new_map.clone();
-        l[0].0.denominator.variables = new_map.clone();
-        l[0].1.numerator.variables = new_map.clone();
-        l[0].1.denominator.variables = new_map.clone();
+        l[0].0.numerator.set_variables(new_map.clone());
+        l[0].0.denominator.set_variables(new_map.clone());
+        l[0].1.numerator.set_variables(new_map.clone());
+        l[0].1.denominator.set_variables(new_map.clone());
 
         assert!(r.is_empty());
         assert_eq!(
@@ -1790,7 +2065,13 @@ mod test {
         let p: RationalPolynomial<_, _> =
             parse!("1/(v1^3+v1)").to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
 
-        let (r, mut l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let mut l = integral
+            .logarithmic_parts
+            .into_iter()
+            .map(|x| (x.coefficient, x.argument))
+            .collect::<Vec<_>>();
         l.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.internal_cmp(&b.1)));
 
         let v = l[0].0.get_variables().clone();
@@ -1816,7 +2097,13 @@ mod test {
         let p: RationalPolynomial<_, _> = parse!("(v1^4+v2+v1*v2+2*v1)/((v1-v2)(v1-2)(v1-4))")
             .to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
 
-        let (r, mut l) = p.integrate(0);
+        let integral = p.integrate(0);
+        let r = integral.rational_parts;
+        let mut l = integral
+            .logarithmic_parts
+            .into_iter()
+            .map(|x| (x.coefficient, x.argument))
+            .collect::<Vec<_>>();
         l.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.internal_cmp(&b.1)));
 
         let v = l[0].0.get_variables().clone();
@@ -1860,5 +2147,40 @@ mod test {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn apart_preserves_factored_denominators() {
+        let p: RationalPolynomial<_, _> =
+            parse!("(v1^7+v1^3*v2+2*v1+3)/(6*(v1+1)^3*(v1^2+v2+1)^2)")
+                .to_rational_polynomial::<_, _, u8>(&Q, &Z, None);
+
+        let terms = p.apart_factored_denominators(0);
+        let mut reconstructed: RationalPolynomial<_, _> = p.numerator.zero().into();
+        for (numerator, denominator, exponent) in &terms {
+            reconstructed = &reconstructed + &(numerator / &denominator.pow(*exponent as u64));
+        }
+
+        assert_eq!(reconstructed, p);
+
+        let denominator_factors = p
+            .denominator
+            .factor()
+            .into_iter()
+            .filter(|(factor, _)| !factor.is_constant())
+            .collect::<Vec<_>>();
+
+        for (_, denominator, exponent) in terms {
+            if denominator.is_one() {
+                continue;
+            }
+
+            let (_, multiplicity) = denominator_factors
+                .iter()
+                .find(|(factor, _)| denominator.numerator == *factor)
+                .expect("partial-fraction denominator should be an original factor");
+            assert!(exponent <= *multiplicity);
+            assert!(denominator.denominator.is_one());
+        }
     }
 }

@@ -1,10 +1,4 @@
-use symbolica::{
-    atom::AtomCore,
-    domains::finite_field::Zp,
-    parse,
-    poly::{GrevLexOrder, groebner::GroebnerBasis, polynomial::MultivariatePolynomial},
-    symbol,
-};
+use symbolica::prelude::*;
 
 fn main() {
     for x in 'a'..='z' {

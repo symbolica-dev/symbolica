@@ -1,5 +1,6 @@
 use super::*;
 
+/// Represents the exported code for a compiled function.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
@@ -24,17 +25,27 @@ pub(crate) const CUDA_ERRMSG_LEN: usize = 256;
 /// Struct representing the data created for the CUDA evaluation.
 #[repr(C)]
 pub struct CudaEvaluationData {
+    /// Device-side input buffer allocated by the generated CUDA entry point.
     pub params: *mut c_void,
+    /// Device-side output buffer allocated by the generated CUDA entry point.
     pub out: *mut c_void,
-    pub n: usize,             // Number of evaluations
-    pub block_size: usize,    // Number of threads per block
-    pub in_dimension: usize,  // Number of input parameters
+    /// The number of independent evaluations in the batch.
+    pub n: usize, // Number of evaluations
+    /// The number of CUDA threads per block.
+    pub block_size: usize, // Number of threads per block
+    /// The number of scalar input parameters per evaluation.
+    pub in_dimension: usize, // Number of input parameters
+    /// The number of scalar outputs per evaluation.
     pub out_dimension: usize, // Number of output parameters
+    /// The last CUDA error code; zero indicates success.
     pub last_error: i32,
+    /// A null-terminated error message supplied by the generated CUDA code.
     pub errmsg: [std::os::raw::c_char; CUDA_ERRMSG_LEN],
 }
 
 impl CudaEvaluationData {
+    /// Return the stored CUDA error message when `last_error` is nonzero.
+    /// The error buffer must contain a null terminator when an error is set.
     pub fn check_for_error(&self) -> Result<(), String> {
         unsafe {
             if self.last_error != 0 {
@@ -53,9 +64,9 @@ impl CudaEvaluationData {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
 pub struct CudaLoadSettings {
-    pub number_of_evaluations: usize,
+    pub(crate) number_of_evaluations: usize,
     /// The number of threads per block for CUDA evaluation.
-    pub block_size: usize,
+    pub(crate) block_size: usize,
 }
 
 impl Default for CudaLoadSettings {
@@ -64,6 +75,25 @@ impl Default for CudaLoadSettings {
             number_of_evaluations: 1,
             block_size: 256, // default CUDA block size
         }
+    }
+}
+
+impl CudaLoadSettings {
+    /// Create CUDA load settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of evaluations.
+    pub fn number_of_evaluations(mut self, number_of_evaluations: usize) -> Self {
+        self.number_of_evaluations = number_of_evaluations;
+        self
+    }
+
+    /// Set the number of threads per CUDA block.
+    pub fn block_size(mut self, block_size: usize) -> Self {
+        self.block_size = block_size;
+        self
     }
 }
 
@@ -93,7 +123,55 @@ type CudaDestroyDataType<'a> =
     libloading::Symbol<'a, unsafe extern "C" fn(data: *const CudaEvaluationData) -> i32>;
 type GetBufferLenType<'a> = libloading::Symbol<'a, unsafe extern "C" fn() -> c_ulong>;
 
+/// Dimensions of one evaluation, read once from the compiled entry point.
+struct CompiledDimensions {
+    input_len: usize,
+    output_len: usize,
+}
+
+impl CompiledDimensions {
+    fn load(lib: &libloading::Library, function_name: &str) -> Result<Self, String> {
+        let get_len = |suffix: &str| -> Result<usize, String> {
+            let name = format!("{function_name}_get_{suffix}_len");
+            unsafe {
+                let get: libloading::Symbol<'_, unsafe extern "C" fn() -> usize> =
+                    lib.get(name.as_bytes()).map_err(|e| {
+                        format!("Cannot load evaluator dimensions ({name}): {e}. Re-export and recompile the evaluator with this version of Symbolica.")
+                    })?;
+                Ok(get())
+            }
+        };
+        Ok(Self {
+            input_len: get_len("input")?,
+            output_len: get_len("output")?,
+        })
+    }
+
+    #[inline]
+    fn check_batch(
+        &self,
+        batch_size: usize,
+        input_len: usize,
+        output_len: usize,
+    ) -> Result<(), String> {
+        if self.input_len.checked_mul(batch_size) != Some(input_len) {
+            return Err(format!(
+                "Expected {} inputs per evaluation for {batch_size} evaluations, got {input_len} inputs",
+                self.input_len
+            ));
+        }
+        if self.output_len.checked_mul(batch_size) != Some(output_len) {
+            return Err(format!(
+                "Expected {} outputs per evaluation for {batch_size} evaluations, got {output_len} outputs",
+                self.output_len
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct EvaluatorFunctionsRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, f64>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -109,6 +187,7 @@ impl<'lib> EvaluatorFunctionsRealf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -117,6 +196,33 @@ impl<'lib> EvaluatorFunctionsRealf64<'lib> {
 }
 
 type L = std::sync::Arc<libloading::Library>;
+
+/// Dynamic loaders may reuse an old handle even after the file has changed.
+fn warn_if_library_changed(path: &Path) {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::SystemTime;
+
+    static LOADED: LazyLock<Mutex<std::collections::HashMap<PathBuf, (SystemTime, u64)>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let fingerprint = (modified, metadata.len());
+    let previous = LOADED.lock().unwrap().insert(path.clone(), fingerprint);
+    if previous.is_some_and(|previous| previous != fingerprint) {
+        crate::warn!(
+            "Library '{}' was previously loaded and may have changed. Reloading may reuse the old code; use a different library filename or restart the process.",
+            path.display()
+        );
+    }
+}
 
 self_cell!(
     struct LibraryRealf64 {
@@ -128,6 +234,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsSimdRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, wide::f64x4>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -143,6 +250,7 @@ impl<'lib> EvaluatorFunctionsSimdRealf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsSimdRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -160,6 +268,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsSimdComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, Complex<wide::f64x4>>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -175,6 +284,7 @@ impl<'lib> EvaluatorFunctionsSimdComplexf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsSimdComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -192,6 +302,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: EvalTypeWithBuffer<'lib, Complex<f64>>,
     get_buffer_len: GetBufferLenType<'lib>,
 }
@@ -207,6 +318,7 @@ impl<'lib> EvaluatorFunctionsComplexf64<'lib> {
                 .get(format!("{}_get_buffer_len", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 get_buffer_len,
             })
@@ -224,6 +336,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsCudaRealf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: CudaEvalType<'lib, f64>,
     init_data: CudaInitDataType<'lib>,
     destroy_data: CudaDestroyDataType<'lib>,
@@ -243,6 +356,7 @@ impl<'lib> EvaluatorFunctionsCudaRealf64<'lib> {
                 .get(format!("{}_destroy_data", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsCudaRealf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 init_data,
                 destroy_data,
@@ -261,6 +375,7 @@ self_cell!(
 );
 
 struct EvaluatorFunctionsCudaComplexf64<'lib> {
+    dimensions: CompiledDimensions,
     eval: CudaEvalType<'lib, Complex<f64>>,
     init_data: CudaInitDataType<'lib>,
     destroy_data: CudaDestroyDataType<'lib>,
@@ -280,6 +395,7 @@ impl<'lib> EvaluatorFunctionsCudaComplexf64<'lib> {
                 .get(format!("{}_destroy_data", function_name).as_bytes())
                 .map_err(|e| e.to_string())?;
             Ok(EvaluatorFunctionsCudaComplexf64 {
+                dimensions: CompiledDimensions::load(lib, &function_name)?,
                 eval,
                 init_data,
                 destroy_data,
@@ -297,6 +413,63 @@ self_cell!(
     }
 );
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Clone)]
+/// The settings for JIT compilation.
+pub struct JITCompilationSettings {
+    /// Directly translate the Symbolica instructions to SymJIT IR, without performing any tree-based analysis.
+    direct_translation: bool,
+    /// The optimization level to use for JIT compilation.
+    optimization_level: u8,
+    /// Additional options to pass to the SymJIT compiler.
+    options: HashMap<String, String>,
+}
+
+impl Default for JITCompilationSettings {
+    fn default() -> Self {
+        Self {
+            direct_translation: false,
+            optimization_level: 3,
+            options: HashMap::default(),
+        }
+    }
+}
+
+impl JITCompilationSettings {
+    /// Create JIT compilation settings with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Directly translate the Symbolica instructions to SymJIT IR, without performing any tree-based analysis.
+    pub fn direct_translation(mut self, direct_translation: bool) -> Self {
+        self.direct_translation = direct_translation;
+        self
+    }
+
+    /// The optimization level to use for JIT compilation.
+    pub fn optimization_level(mut self, optimization_level: u8) -> Self {
+        self.optimization_level = optimization_level;
+        self
+    }
+
+    /// Add an additional option to pass to the SymJIT compiler.
+    pub fn with_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.insert(key.into(), value.into());
+        self
+    }
+
+    fn apply_to_config(&self, config: &mut Config) -> Result<(), String> {
+        config.set_dicect(self.direct_translation);
+        config.set_opt_level(self.optimization_level);
+        for (key, value) in &self.options {
+            config.set_option(key, value).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 impl ExpressionEvaluator<Complex<Rational>> {
     /// JIT-compiles the evaluator using SymJIT.
     ///
@@ -306,13 +479,13 @@ impl ExpressionEvaluator<Complex<Rational>> {
     ///
     /// Compile and evaluate the function `x + y` for `f64` inputs:
     /// ```rust
-    /// # use symbolica::{atom::AtomCore, parse};
-    /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
+    /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
-    ///     .jit_compile::<f64>()
+    ///     .jit_compile::<f64>(JITCompilationSettings::default())
     ///     .unwrap();
     ///
     /// let mut res = [0.];
@@ -320,19 +493,33 @@ impl ExpressionEvaluator<Complex<Rational>> {
     /// assert_eq!(res, [3.]);
     pub fn jit_compile<T: JITCompiledNumber + EvaluationDomain>(
         &self,
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<T>, String> {
-        let (instructions, _, constants) = self.export_instructions();
-        let constants = constants
+        let exported = self.export_instructions_impl(&self.external_fns, &[]);
+        let mut constants = exported
+            .constants
             .into_iter()
             .map(|c| symjit::Complex::new(c.re.to_f64(), c.im.to_f64()))
             .collect::<Vec<_>>();
+
+        // Exact evaluators contain placeholders for registered constants and constant function
+        // calls. Resolve them just as coefficient mapping does before exporting numeric code.
+        let binary_prec = T::FIXED_PRECISION.unwrap_or(53);
+        for external in &self.external_fns {
+            let Some(index) = external.constant_index else {
+                continue;
+            };
+            let value = external.evaluate_constant::<T>(binary_prec)?;
+            constants[index] = value.to_complex_f64()?;
+        }
 
         let external_fns = self
             .external_fns
             .iter()
             .map(|f| {
                 let mapped = f.map::<T>();
-                if mapped.constant_index.is_none() && mapped.imp.is_none() {
+                if mapped.constant_index.is_none() && mapped.imp.is_none() && mapped.body.is_none()
+                {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -342,7 +529,13 @@ impl ExpressionEvaluator<Complex<Rational>> {
                 Ok(mapped)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(instructions, constants, &external_fns)
+        T::jit_compile(
+            exported.instructions,
+            constants,
+            self.param_count,
+            &external_fns,
+            settings,
+        )
     }
 }
 
@@ -353,21 +546,26 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
     ///
     /// Compile and evaluate the function `x + y` for `f64` inputs:
     /// ```rust
-    /// # use symbolica::{atom::AtomCore, parse};
-    /// # use symbolica::evaluate::{FunctionMap, OptimizationSettings};
+    /// # use symbolica::prelude::*;
     /// let params = vec![parse!("x"), parse!("y")];
     /// let mut evaluator = parse!("x + y")
-    ///     .evaluator(&FunctionMap::new(), &params, OptimizationSettings::default())
+    ///     .evaluator(&params)
+    ///     .build()
     ///     .unwrap()
-    ///     .jit_compile::<f64>()
+    ///     .map_coeff(&|x| x.re.to_f64())
+    ///     .jit_compile(JITCompilationSettings::default())
     ///     .unwrap();
     ///
     /// let mut res = [0.];
     /// evaluator.evaluate(&[1., 2.], &mut res);
     /// assert_eq!(res, [3.]);
-    pub fn jit_compile(&self) -> Result<JITCompiledEvaluator<T>, String> {
-        let (instructions, _, constants) = self.export_instructions();
-        let constants = constants
+    pub fn jit_compile(
+        &self,
+        settings: JITCompilationSettings,
+    ) -> Result<JITCompiledEvaluator<T>, String> {
+        let exported = self.export_instructions_impl(&self.external_fns, &[]);
+        let constants = exported
+            .constants
             .into_iter()
             .map(|c| c.to_complex_f64())
             .collect::<Result<Vec<_>, _>>()?;
@@ -376,7 +574,7 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
             .external_fns
             .iter()
             .map(|f| {
-                if f.constant_index.is_none() && f.imp.is_none() {
+                if f.constant_index.is_none() && f.imp.is_none() && f.body.is_none() {
                     return Err(format!(
                         "External function '{}' does not have an implementation",
                         f
@@ -386,16 +584,24 @@ impl<T: JITCompiledNumber + Clone> ExpressionEvaluator<T> {
                 Ok(f.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        T::jit_compile(instructions, constants, &external_fns)
+        T::jit_compile(
+            exported.instructions,
+            constants,
+            self.param_count,
+            &external_fns,
+            settings,
+        )
     }
 }
 
 fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
+    param_count: usize,
     config: Config,
 ) -> Result<Translator, String> {
     let mut translator = Translator::new(config);
+    translator.set_num_params(param_count);
 
     for z in constants {
         translator.append_constant(z).unwrap();
@@ -434,15 +640,11 @@ fn translate_to_symjit(
             Instruction::Fun(lhs, fun, is_real) => {
                 let (name, tags, args) = *fun;
 
-                let mut name = name.get_ascii_name().ok_or_else(|| {
+                let name = function_export_name(name, &tags).ok_or_else(|| {
                     format!(
                         "No ASCII name for symbol {name} available, which is needed for exporting"
                     )
                 })?;
-
-                for t in tags {
-                    name += &format!("_{}", t);
-                }
 
                 translator
                     .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
@@ -460,21 +662,91 @@ fn translate_to_symjit(
     Ok(translator)
 }
 
+fn function_export_name(symbol: crate::atom::Symbol, tags: &[String]) -> Option<String> {
+    let mut name = symbol.get_ascii_name()?;
+    for tag in tags {
+        name.push('_');
+        name.push_str(tag);
+    }
+    Some(name)
+}
+
+/// Numerical types supported by the JIT evaluator, including conversion of
+/// constants, registration of external functions, and evaluation dispatch.
 pub trait JITCompiledNumber: Sized {
+    /// Convert a constant to the JIT compiler's double-precision complex type,
+    /// returning an error if the conversion is unsupported.
     fn to_complex_f64(&self) -> Result<symjit::Complex<f64>, String>;
 
+    /// Register external numerical functions with the JIT compiler according
+    /// to `settings`, returning an error for an unsupported implementation.
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String>;
 
     /// Create a JIT-compiled evaluator for this number type.
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String>;
 
+    /// Evaluate one set of input values. The input and output slices must
+    /// match the evaluator's dimensions and numerical representation.
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]);
+
+    #[doc(hidden)]
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>>;
+
+    /// Evaluate `rows` scalar evaluations in a batch. Scalar values use row-major
+    /// input and output matrices; SIMD values must already use the backend's
+    /// packed layout. The buffers must match the evaluator's dimensions.
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    );
+}
+
+fn register_function_body<T: JITCompiledNumber + Clone>(
+    defuns: &mut Defuns,
+    external: &ExternalFunctionContainer<T>,
+    external_functions: &[ExternalFunctionContainer<T>],
+    settings: &JITCompilationSettings,
+    complex: bool,
+    simd: bool,
+) -> Result<bool, String> {
+    let Some(body) = external.body.as_ref() else {
+        return Ok(false);
+    };
+    // The registry is topological: every callee has already been compiled into defuns.
+    let exported = body.program().export_instructions(external_functions, &[]);
+    let mut config = Config::default();
+    config.set_complex(complex);
+    // Match the main evaluator: scalar compilation keeps the backend's SIMD default.
+    if simd {
+        config.set_simd(true);
+    }
+    settings.apply_to_config(&mut config)?;
+    // Move callback ownership into the compiled body's configuration. Defuns::clone
+    // also clones owning raw pointers, so it cannot safely snapshot callbacks.
+    config.set_defuns(std::mem::take(defuns));
+    let mut translator =
+        translate_to_symjit(exported.instructions, vec![], body.param_count, config)?;
+    let compiled = translator
+        .compile()
+        .map_err(|e| format!("Could not JIT-compile sub-evaluator '{external}': {e}"))?
+        .seal()
+        .map_err(|e| e.to_string())?;
+    // The new applet retains the previous table. Copy only the function references;
+    // callback allocations remain owned by that table for the applet's lifetime.
+    defuns.funcs = compiled.config.df.as_ref().unwrap().funcs.clone();
+    defuns.add_applet(external.export_name(), compiled);
+    Ok(true)
 }
 
 impl JITCompiledNumber for f64 {
@@ -484,6 +756,7 @@ impl JITCompiledNumber for f64 {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
@@ -492,7 +765,11 @@ impl JITCompiledNumber for f64 {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_function_body(&mut defuns, f, external_functions, settings, false, false)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -512,18 +789,25 @@ impl JITCompiledNumber for f64 {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<f64>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
         if constants.iter().any(|x| x.im != 0.) {
             return Err("complex constants are not supported for f64 JIT export".to_string());
         }
 
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(false);
-        config.set_simd(false);
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        settings.apply_to_config(&mut config)?;
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -531,8 +815,9 @@ impl JITCompiledNumber for f64 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -542,9 +827,27 @@ impl JITCompiledNumber for f64 {
     fn evaluate(eval: &mut JITCompiledEvaluator<Self>, args: &[Self], out: &mut [Self]) {
         eval.code.evaluate(args, out);
     }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        eval.code.evaluate_matrix(args, out, rows);
+    }
 }
 
 /// A JIT-compiled evaluator for expressions, using the SymJIT compiler.
+///
+/// Serialization retains the compilation settings for rebuilding
+/// non-inlined evaluators. Serialized JIT payloads are revision-dependent;
+/// payloads written before settings were included must be regenerated.
 #[derive(Clone)]
 pub struct JITCompiledEvaluator<T> {
     code: Applet,
@@ -552,56 +855,80 @@ pub struct JITCompiledEvaluator<T> {
     external_functions: Vec<ExternalFunctionContainer<T>>,
     #[allow(dead_code)]
     compressed_ir: Vec<u8>,
+    #[allow(dead_code)] // Used when serialization support is enabled.
+    settings: JITCompilationSettings,
     batch_input_buffer: Vec<T>,
     batch_output_buffer: Vec<T>,
 }
 
-#[cfg(feature = "serde")]
-impl<T> serde::Serialize for JITCompiledEvaluator<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (&self.external_functions, &self.compressed_ir).serialize(serializer)
+impl<T> JITCompiledEvaluator<T> {
+    /// Return the serialized SymJIT application used by this evaluator.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.compressed_ir
+    }
+
+    /// Return whether this evaluator depends on external function definitions.
+    pub fn has_external_functions(&self) -> bool {
+        !self.external_functions.is_empty()
     }
 }
 
 #[cfg(feature = "serde")]
-impl<'de, T: JITCompiledNumber + EvaluationDomain + symjit::Element + Copy> serde::Deserialize<'de>
-    for JITCompiledEvaluator<T>
+impl<T: serde::Serialize> serde::Serialize for JITCompiledEvaluator<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (
+            &self.external_functions,
+            &self.compressed_ir,
+            &self.settings,
+        )
+            .serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de, T: JITCompiledNumber + EvaluationDomain + Clone + serde::Deserialize<'de>>
+    serde::Deserialize<'de> for JITCompiledEvaluator<T>
 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (fs, compressed_ir): (Vec<ExternalFunctionContainer<T>>, Vec<u8>) =
-            serde::Deserialize::deserialize(deserializer)?;
-        Self::load(compressed_ir, fs).map_err(serde::de::Error::custom)
+        let (fs, compressed_ir, settings): (
+            Vec<ExternalFunctionContainer<T>>,
+            Vec<u8>,
+            JITCompilationSettings,
+        ) = serde::Deserialize::deserialize(deserializer)?;
+        Self::load(compressed_ir, fs, settings).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(feature = "bincode")]
-impl<T> bincode::Encode for JITCompiledEvaluator<T> {
+impl<T: bincode::Encode> bincode::Encode for JITCompiledEvaluator<T> {
     fn encode<E: bincode::enc::Encoder>(
         &self,
         encoder: &mut E,
     ) -> core::result::Result<(), bincode::error::EncodeError> {
         bincode::Encode::encode(&self.external_functions, encoder)?;
         bincode::Encode::encode(&self.compressed_ir, encoder)?;
+        bincode::Encode::encode(&self.settings, encoder)?;
         Ok(())
     }
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: JITCompiledNumber + EvaluationDomain> bincode::Decode<Context>
-    for JITCompiledEvaluator<T>
+impl<Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::Decode<Context> for JITCompiledEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let fs: Vec<ExternalFunctionContainer<T>> = bincode::Decode::decode(decoder)?;
         let compressed_ir: Vec<u8> = bincode::Decode::decode(decoder)?;
-        Self::load(compressed_ir, fs).map_err(|e| bincode::error::DecodeError::OtherString(e))
+        let settings: JITCompilationSettings = bincode::Decode::decode(decoder)?;
+        Self::load(compressed_ir, fs, settings).map_err(bincode::error::DecodeError::OtherString)
     }
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecode<'de, Context>
-    for JITCompiledEvaluator<T>
+impl<'de, Context, T: JITCompiledNumber + EvaluationDomain + Clone + bincode::Decode<Context>>
+    bincode::BorrowDecode<'de, Context> for JITCompiledEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -611,21 +938,34 @@ impl<'de, Context, T: JITCompiledNumber + EvaluationDomain> bincode::BorrowDecod
 }
 
 impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
-    /// Evaluate the JIT compiled code.
+    /// Evaluate the JIT-compiled code.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[T], out: &mut [T]) {
         T::evaluate(self, args, out);
     }
+
+    #[inline(always)]
+    /// Evaluate `rows` scalar evaluations in a batch. Scalar inputs and outputs
+    /// are row-major matrices; SIMD types require prepacked buffers.
+    /// Use [`BatchEvaluator::evaluate_batch`] to pack scalar buffers automatically.
+    pub fn batch_evaluate(&mut self, args: &[T], out: &mut [T], rows: usize) {
+        T::batch_evaluate(self, args, out, rows);
+    }
 }
 
-impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
+impl<T: JITCompiledNumber + Clone> JITCompiledEvaluator<T> {
     #[allow(dead_code)]
     fn load(
         compressed_ir: Vec<u8>,
         external_functions: Vec<ExternalFunctionContainer<T>>,
+        settings: JITCompilationSettings,
     ) -> Result<Self, String> {
         let mut config = Config::default();
-        config.set_defuns(T::convert_external_functions(&external_functions)?);
+        settings.apply_to_config(&mut config)?;
+        config.set_defuns(T::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
         let app = symjit::Application::load(&mut compressed_ir.as_slice(), &config)
             .map_err(|e| e.to_string())?
@@ -635,6 +975,7 @@ impl<T: JITCompiledNumber> JITCompiledEvaluator<T> {
             code: app,
             external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -663,12 +1004,7 @@ impl BatchEvaluator<f64> for JITCompiledEvaluator<f64> {
             ));
         }
 
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
-        }
-
+        self.batch_evaluate(params, out, batch_size);
         Ok(())
     }
 }
@@ -685,16 +1021,23 @@ impl JITCompiledNumber for wide::f64x4 {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.body.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_function_body(&mut defuns, f, external_functions, settings, false, true)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -713,14 +1056,22 @@ impl JITCompiledNumber for wide::f64x4 {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(false);
         config.set_simd(true);
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        settings.apply_to_config(&mut config)?;
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -728,8 +1079,9 @@ impl JITCompiledNumber for wide::f64x4 {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -742,6 +1094,20 @@ impl JITCompiledNumber for wide::f64x4 {
         out: &mut [wide::f64x4],
     ) {
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| eval.code.evaluate_single(args))
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 
@@ -842,17 +1208,24 @@ impl JITCompiledNumber for Complex<f64> {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.body.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_function_body(&mut defuns, f, external_functions, settings, true, false)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -877,14 +1250,21 @@ impl JITCompiledNumber for Complex<f64> {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Complex<f64>>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(true);
-        config.set_simd(false);
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        settings.apply_to_config(&mut config)?;
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -892,8 +1272,9 @@ impl JITCompiledNumber for Complex<f64> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -909,6 +1290,26 @@ impl JITCompiledNumber for Complex<f64> {
         let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        let args: &[symjit::Complex<f64>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<f64>] = unsafe { std::mem::transmute(out) };
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 
@@ -934,12 +1335,7 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<f64>> {
             ));
         }
 
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
-        }
-
+        self.batch_evaluate(params, out, batch_size);
         Ok(())
     }
 }
@@ -961,17 +1357,24 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
     fn convert_external_functions(
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: &JITCompilationSettings,
     ) -> Result<symjit::Defuns, String> {
         let mut defuns = Defuns::new();
 
         for f in external_functions {
             if f.constant_index.is_some()
-                || f.symbol.is_builtin() && f.symbol.get_evaluation_info().is_none()
+                || f.body.is_none()
+                    && f.symbol.is_builtin()
+                    && f.symbol.get_evaluation_info().is_none()
             {
                 continue;
             }
 
-            let Some(imp) = f.imp.clone() else {
+            if register_function_body(&mut defuns, f, external_functions, settings, true, true)? {
+                continue;
+            }
+
+            let Some(imp) = f.callable() else {
                 return Err(format!(
                     "External function '{}' does not have an implementation",
                     f
@@ -997,14 +1400,22 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     fn jit_compile(
         instructions: Vec<Instruction>,
         constants: Vec<symjit::Complex<f64>>,
+        param_count: usize,
         external_functions: &[ExternalFunctionContainer<Self>],
+        settings: JITCompilationSettings,
     ) -> Result<JITCompiledEvaluator<Self>, String> {
+        let external_functions = external_functions.to_vec();
+
         let mut config = Config::default();
         config.set_complex(true);
         config.set_simd(true);
-        config.set_defuns(Self::convert_external_functions(external_functions)?);
+        settings.apply_to_config(&mut config)?;
+        config.set_defuns(Self::convert_external_functions(
+            &external_functions,
+            &settings,
+        )?);
 
-        let mut translator = translate_to_symjit(instructions, constants, config)?;
+        let mut translator = translate_to_symjit(instructions, constants, param_count, config)?;
 
         let app = translator.compile().map_err(|e| e.to_string())?;
         let mut compressed_ir = Vec::new();
@@ -1012,8 +1423,9 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
 
         Ok(JITCompiledEvaluator {
             code: app.seal().map_err(|e| e.to_string())?,
-            external_functions: external_functions.to_vec(),
+            external_functions,
             compressed_ir,
+            settings,
             batch_input_buffer: Vec::new(),
             batch_output_buffer: Vec::new(),
         })
@@ -1027,8 +1439,27 @@ impl JITCompiledNumber for Complex<wide::f64x4> {
     ) {
         let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
         let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
-
         eval.code.evaluate(args, out);
+    }
+
+    fn into_external_function(eval: JITCompiledEvaluator<Self>) -> Box<dyn ExternalFunction<Self>> {
+        Box::new(move |args: &[Self]| {
+            let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+            let result = eval.code.evaluate_single(args);
+            Complex::new(result.re, result.im)
+        })
+    }
+
+    #[inline(always)]
+    fn batch_evaluate(
+        eval: &mut JITCompiledEvaluator<Self>,
+        args: &[Self],
+        out: &mut [Self],
+        rows: usize,
+    ) {
+        let args: &[symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(args) };
+        let out: &mut [symjit::Complex<wide::f64x4>] = unsafe { std::mem::transmute(out) };
+        eval.code.evaluate_matrix(args, out, rows);
     }
 }
 
@@ -1155,7 +1586,9 @@ impl BatchEvaluator<Complex<f64>> for JITCompiledEvaluator<Complex<wide::f64x4>>
 
 /// A number type that can be used to call a compiled evaluator.
 pub trait CompiledNumber: Sized {
+    /// The loader and runtime evaluator for this numerical type.
     type Evaluator: EvaluatorLoader<Self>;
+    /// Settings used when loading compiled code for this numerical type.
     type Settings: Default;
     /// A unique suffix for the evaluation function for this particular number type.
     // NOTE: a rename of any suffix will prevent loading older libraries.
@@ -1168,6 +1601,7 @@ pub trait CompiledNumber: Sized {
         settings: ExportSettings,
     ) -> Result<String, String>;
 
+    /// Append the numerical type's ABI suffix to an exported function's base name.
     fn construct_function_name(function_name: &str) -> String {
         format!("{}_{}", function_name, Self::SUFFIX)
     }
@@ -1183,6 +1617,9 @@ pub trait EvaluatorLoader<T: CompiledNumber>: Sized {
     fn load(file: impl AsRef<Path>, function_name: &str) -> Result<Self, String> {
         Self::load_with_settings(file, function_name, T::Settings::default())
     }
+    /// Load the base `function_name` from a compatible generated shared library
+    /// using type-specific settings. Returns an error if loading or entry-point
+    /// initialization fails. Only load trusted libraries with the expected ABI.
     fn load_with_settings(
         file: impl AsRef<Path>,
         function_name: &str,
@@ -1243,25 +1680,18 @@ impl BatchEvaluator<f64> for CompiledRealEvaluator {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
+        for row in 0..batch_size {
+            self.evaluate(
+                &params[row * n_params..(row + 1) * n_params],
+                &mut out[row * n_out..(row + 1) * n_out],
+            );
         }
 
         Ok(())
@@ -1304,25 +1734,18 @@ impl BatchEvaluator<Complex<f64>> for CompiledComplexEvaluator {
         params: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
-        for (o, i) in out.chunks_mut(n_out).zip(params.chunks(n_params)) {
-            self.evaluate(i, o);
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
+        for row in 0..batch_size {
+            self.evaluate(
+                &params[row * n_params..(row + 1) * n_params],
+                &mut out[row * n_out..(row + 1) * n_out],
+            );
         }
 
         Ok(())
@@ -1348,6 +1771,19 @@ impl EvaluatorLoader<f64> for CompiledRealEvaluator {
 }
 
 impl CompiledRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
+    /// Load another base function name from the same shared library, allocating
+    /// independent evaluation storage. Returns an error if its entry points
+    /// are missing or incompatible.
     pub fn load_new_function(&self, function_name: &str) -> Result<CompiledRealEvaluator, String> {
         let library = LibraryRealf64::try_new(self.library.borrow_owner().clone(), |lib| {
             EvaluatorFunctionsRealf64::new(lib, function_name)
@@ -1362,6 +1798,10 @@ impl CompiledRealEvaluator {
             library,
         })
     }
+    /// Load a real double-precision evaluator from a generated shared library.
+    /// `function_name` is the base name before the numerical-type suffix.
+    /// The library must be trusted and have the generated Symbolica ABI.
+    /// Returns an error if it cannot be loaded or required entry points are missing.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -1372,6 +1812,7 @@ impl CompiledRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsRealf64::new(lib, function_name)
             })?;
@@ -1387,8 +1828,21 @@ impl CompiledRealEvaluator {
         }
     }
     /// Evaluate the compiled code with double-precision floating point numbers.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[f64], out: &mut [f64]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -1512,6 +1966,16 @@ impl<Context> bincode::Decode<Context> for CompiledComplexEvaluator {
 }
 
 impl CompiledComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
     /// Load a new function from the same library.
     pub fn load_new_function(
         &self,
@@ -1543,6 +2007,7 @@ impl CompiledComplexEvaluator {
                     .map_err(|e| e.to_string())?,
             };
 
+            warn_if_library_changed(path.as_ref());
             let library = LibraryComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsComplexf64::new(lib, function_name)
             })?;
@@ -1558,8 +2023,21 @@ impl CompiledComplexEvaluator {
         }
     }
     /// Evaluate the compiled code.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<f64>], out: &mut [Complex<f64>]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -1630,32 +2108,23 @@ impl BatchEvaluator<f64> for CompiledSimdRealEvaluator {
         params: &[f64],
         out: &mut [f64],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
 
         self.batch_input_buffer
             .resize(batch_size.div_ceil(4) * n_params, wide::f64x4::ZERO);
 
-        for (dest, i) in self
-            .batch_input_buffer
-            .chunks_mut(n_params)
-            .zip(params.chunks(4 * n_params))
-        {
+        for batch in 0..batch_size.div_ceil(4) {
+            let dest = &mut self.batch_input_buffer[batch * n_params..(batch + 1) * n_params];
+            let i = &params[batch * 4 * n_params..((batch + 1) * 4).min(batch_size) * n_params];
+            if n_params == 0 {
+                continue;
+            }
             if i.len() / n_params == 4 {
                 for (j, d) in dest.iter_mut().enumerate() {
                     *d = wide::f64x4::from([
@@ -1695,15 +2164,18 @@ impl BatchEvaluator<f64> for CompiledSimdRealEvaluator {
         let param_buffer = std::mem::take(&mut self.batch_input_buffer);
         let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
 
-        for (o, i) in output_buffer
-            .chunks_mut(n_out)
-            .zip(param_buffer.chunks(n_params))
-        {
-            self.evaluate(i, o);
+        for batch in 0..batch_size.div_ceil(4) {
+            self.evaluate(
+                &param_buffer[batch * n_params..(batch + 1) * n_params],
+                &mut output_buffer[batch * n_out..(batch + 1) * n_out],
+            );
         }
 
-        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
-            o.copy_from_slice(&i.as_array()[..o.len()]);
+        for row in 0..batch_size {
+            for column in 0..n_out {
+                out[row * n_out + column] =
+                    output_buffer[(row / 4) * n_out + column].as_array()[row % 4];
+            }
         }
 
         self.batch_input_buffer = param_buffer;
@@ -1738,6 +2210,18 @@ impl EvaluatorLoader<wide::f64x4> for CompiledSimdRealEvaluator {
 }
 
 impl CompiledSimdRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
+    /// Load another real SIMD function from the same shared library with
+    /// independent working buffers. Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -1759,6 +2243,10 @@ impl CompiledSimdRealEvaluator {
         })
     }
 
+    /// Load a real SIMD evaluator from a compatible generated shared library.
+    /// Supply the base function name without its ABI suffix. The library must
+    /// be trusted and support the target CPU; missing entry points or loading
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -1769,6 +2257,7 @@ impl CompiledSimdRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibrarySimdRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsSimdRealf64::new(lib, function_name)
             })?;
@@ -1788,11 +2277,23 @@ impl CompiledSimdRealEvaluator {
     }
 
     /// Evaluate the compiled code with 4 double-precision floating point numbers.
-    /// The `args` must be of length `number_of_evaluations * input`, where `input` is the number of inputs to the function.
-    /// The `out` must be of length `number_of_evaluations * output`,
-    /// where `output` is the number of outputs of the function.
+    /// Each input/output slot contains four independent values. The slice lengths must
+    /// equal `get_input_len()` and `get_output_len()`, respectively.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[wide::f64x4], out: &mut [wide::f64x4]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -1873,12 +2374,6 @@ impl CompiledNumber for Complex<wide::f64x4> {
         function_name: &str,
         settings: ExportSettings,
     ) -> Result<String, String> {
-        if !eval.stack.iter().all(|x| x.is_real()) {
-            return Err(
-                "Cannot create real evaluator with complex coefficients. Use Complex<f64>".into(),
-            );
-        }
-
         Ok(match settings.inline_asm {
             // assume AVX2 for X64
             InlineASM::X64 => eval.export_simd_str(function_name, settings, true, InlineASM::AVX2),
@@ -1903,34 +2398,25 @@ impl BatchEvaluator<Complex<f64>> for CompiledSimdComplexEvaluator {
         params: &[Complex<f64>],
         out: &mut [Complex<f64>],
     ) -> Result<(), String> {
-        if !params.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Parameter length {} not divisible by batch size {}",
-                params.len(),
-                batch_size
-            ));
-        }
-        if !out.len().is_multiple_of(batch_size) {
-            return Err(format!(
-                "Output length {} not divisible by batch size {}",
-                out.len(),
-                batch_size
-            ));
-        }
-
-        let n_params = params.len() / batch_size;
-        let n_out = out.len() / batch_size;
+        self.library.borrow_dependent().dimensions.check_batch(
+            batch_size,
+            params.len(),
+            out.len(),
+        )?;
+        let n_params = self.get_input_len();
+        let n_out = self.get_output_len();
 
         self.batch_input_buffer.resize(
             batch_size.div_ceil(4) * n_params,
             Complex::new(wide::f64x4::ZERO, wide::f64x4::ZERO),
         );
 
-        for (dest, i) in self
-            .batch_input_buffer
-            .chunks_mut(n_params)
-            .zip(params.chunks(4 * n_params))
-        {
+        for batch in 0..batch_size.div_ceil(4) {
+            let dest = &mut self.batch_input_buffer[batch * n_params..(batch + 1) * n_params];
+            let i = &params[batch * 4 * n_params..((batch + 1) * 4).min(batch_size) * n_params];
+            if n_params == 0 {
+                continue;
+            }
             if i.len() / n_params == 4 {
                 for (j, d) in dest.iter_mut().enumerate() {
                     d.re = wide::f64x4::from([
@@ -1996,17 +2482,18 @@ impl BatchEvaluator<Complex<f64>> for CompiledSimdComplexEvaluator {
         let param_buffer = std::mem::take(&mut self.batch_input_buffer);
         let mut output_buffer = std::mem::take(&mut self.batch_output_buffer);
 
-        for (o, i) in output_buffer
-            .chunks_mut(n_out)
-            .zip(param_buffer.chunks(n_params))
-        {
-            self.evaluate(i, o);
+        for batch in 0..batch_size.div_ceil(4) {
+            self.evaluate(
+                &param_buffer[batch * n_params..(batch + 1) * n_params],
+                &mut output_buffer[batch * n_out..(batch + 1) * n_out],
+            );
         }
 
-        for (o, i) in out.chunks_mut(4 * n_out).zip(&output_buffer) {
-            for (j, d) in o.iter_mut().enumerate() {
-                d.re = i.re.as_array()[j];
-                d.im = i.im.as_array()[j];
+        for row in 0..batch_size {
+            for column in 0..n_out {
+                let value = &output_buffer[(row / 4) * n_out + column];
+                out[row * n_out + column] =
+                    Complex::new(value.re.as_array()[row % 4], value.im.as_array()[row % 4]);
             }
         }
 
@@ -2042,6 +2529,18 @@ impl EvaluatorLoader<Complex<wide::f64x4>> for CompiledSimdComplexEvaluator {
 }
 
 impl CompiledSimdComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
+    /// Load another complex SIMD function from the same shared library with
+    /// independent working buffers. Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2063,6 +2562,10 @@ impl CompiledSimdComplexEvaluator {
         })
     }
 
+    /// Load a complex SIMD evaluator from a compatible generated shared library.
+    /// Supply the base function name without its ABI suffix. The library must
+    /// be trusted and support the target CPU; missing entry points or loading
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2073,6 +2576,7 @@ impl CompiledSimdComplexEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibrarySimdComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsSimdComplexf64::new(lib, function_name)
             })?;
@@ -2092,11 +2596,23 @@ impl CompiledSimdComplexEvaluator {
     }
 
     /// Evaluate the compiled code with 4 double-precision floating point numbers.
-    /// The `args` must be of length `number_of_evaluations * input`, where `input` is the number of inputs to the function.
-    /// The `out` must be of length `number_of_evaluations * output`,
-    /// where `output` is the number of outputs of the function.
+    /// Each input/output slot contains four independent values. The slice lengths must
+    /// equal `get_input_len()` and `get_output_len()`, respectively.
+    ///
+    /// # Panics
+    /// Panics if either slice length differs from the compiled input/output dimension.
     #[inline(always)]
     pub fn evaluate(&mut self, args: &[Complex<wide::f64x4>], out: &mut [Complex<wide::f64x4>]) {
+        assert_eq!(
+            args.len(),
+            self.get_input_len(),
+            "Incorrect compiled evaluator input length"
+        );
+        assert_eq!(
+            out.len(),
+            self.get_output_len(),
+            "Incorrect compiled evaluator output length"
+        );
         unsafe {
             (self.library.borrow_dependent().eval)(
                 args.as_ptr(),
@@ -2343,6 +2859,19 @@ impl BatchEvaluator<f64> for CompiledCudaRealEvaluator {
 }
 
 impl CompiledCudaRealEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
+    /// Load another real CUDA function from the same library, using the current
+    /// batch and block settings and allocating its own device buffers.
+    /// Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2368,6 +2897,10 @@ impl CompiledCudaRealEvaluator {
         })
     }
 
+    /// Load a real CUDA evaluator and allocate device buffers according to
+    /// `settings`. Supply a trusted generated library and the base function name
+    /// without its ABI suffix. Loading, missing entry points, and CUDA allocation
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2379,6 +2912,7 @@ impl CompiledCudaRealEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryCudaRealf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsCudaRealf64::new(lib, function_name)
             })?;
@@ -2475,6 +3009,19 @@ impl BatchEvaluator<Complex<f64>> for CompiledCudaComplexEvaluator {
 }
 
 impl CompiledCudaComplexEvaluator {
+    /// Number of scalar inputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_input_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.input_len
+    }
+
+    /// Number of scalar outputs per evaluation (independent of SIMD width or CUDA batch size).
+    pub fn get_output_len(&self) -> usize {
+        self.library.borrow_dependent().dimensions.output_len
+    }
+
+    /// Load another complex CUDA function from the same library, using the current
+    /// batch and block settings and allocating its own device buffers.
+    /// Supply the base name without its ABI suffix.
     pub fn load_new_function(
         &self,
         function_name: &str,
@@ -2500,6 +3047,10 @@ impl CompiledCudaComplexEvaluator {
         })
     }
 
+    /// Load a complex CUDA evaluator and allocate device buffers according to
+    /// `settings`. Supply a trusted generated library and the base function name
+    /// without its ABI suffix. Loading, missing entry points, and CUDA allocation
+    /// failures return an error.
     pub fn load(
         path: impl AsRef<Path>,
         function_name: &str,
@@ -2511,6 +3062,7 @@ impl CompiledCudaComplexEvaluator {
                 Err(_) => libloading::Library::new(PathBuf::new().join("./").join(&path))
                     .map_err(|e| e.to_string())?,
             };
+            warn_if_library_changed(path.as_ref());
             let library = LibraryCudaComplexf64::try_new(std::sync::Arc::new(lib), |lib| {
                 EvaluatorFunctionsCudaComplexf64::new(lib, function_name)
             })?;
@@ -2621,17 +3173,17 @@ impl Clone for CompiledCudaComplexEvaluator {
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Clone)]
 pub struct CompileOptions {
-    pub optimization_level: usize,
-    pub fast_math: bool,
-    pub unsafe_math: bool,
+    pub(crate) optimization_level: usize,
+    pub(crate) fast_math: bool,
+    pub(crate) unsafe_math: bool,
     /// Compile for the native architecture.
-    pub native: bool,
-    pub compiler: String,
+    pub(crate) native: bool,
+    pub(crate) compiler: String,
     /// Arguments for the compiler call. Arguments with spaces
     /// must be split into a separate strings.
     ///
     /// For CUDA, the argument `-x cu` is required.
-    pub args: Vec<String>,
+    pub(crate) args: Vec<String>,
 }
 
 impl Default for CompileOptions {
@@ -2649,6 +3201,11 @@ impl Default for CompileOptions {
 }
 
 impl CompileOptions {
+    /// Create compile options with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Set the compiler to `nvcc`.
     pub fn cuda() -> Self {
         CompileOptions {
@@ -2659,6 +3216,48 @@ impl CompileOptions {
             compiler: "nvcc".to_string(),
             args: vec![],
         }
+    }
+
+    /// Set the compiler optimization level.
+    pub fn optimization_level(mut self, optimization_level: usize) -> Self {
+        self.optimization_level = optimization_level;
+        self
+    }
+
+    /// Enable or disable fast-math compiler flags.
+    pub fn fast_math(mut self, fast_math: bool) -> Self {
+        self.fast_math = fast_math;
+        self
+    }
+
+    /// Enable or disable unsafe-math compiler flags.
+    pub fn unsafe_math(mut self, unsafe_math: bool) -> Self {
+        self.unsafe_math = unsafe_math;
+        self
+    }
+
+    /// Enable or disable native architecture compiler flags.
+    pub fn native(mut self, native: bool) -> Self {
+        self.native = native;
+        self
+    }
+
+    /// Set the compiler executable.
+    pub fn compiler(mut self, compiler: impl Into<String>) -> Self {
+        self.compiler = compiler.into();
+        self
+    }
+
+    /// Replace the extra compiler arguments.
+    pub fn args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Append an extra compiler argument.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
     }
 }
 
@@ -2799,3 +3398,6 @@ impl Default for InlineASM {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

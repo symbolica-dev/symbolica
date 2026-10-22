@@ -17,30 +17,27 @@
 
 # Symbolica ⊆ Modern Computer Algebra
 
-Symbolica is a blazing fast computer algebra system for Python and Rust, born of a need to push the boundaries of computations in science and enterprise.
-Check out the live [Jupyter Notebook demo](https://colab.research.google.com/drive/1VAtND2kddgBwNt1Tjsai8vnbVIbgg-7D?usp=sharing)!
+Symbolica is a high-performance computer algebra library for Python and Rust. It
+is built for large expressions, symbolic rewrites, exact polynomial arithmetic,
+and optimized numerical evaluators.
 
-For documentation and more, see [symbolica.io](https://symbolica.io).
+Trusted by CERN and research groups at ETH Zurich, the University of Zurich, the
+University of Bern, and Karlsruhe Institute of Technology.
 
+Try the live [Jupyter Notebook demo](https://colab.research.google.com/drive/1VAtND2kddgBwNt1Tjsai8vnbVIbgg-7D?usp=sharing),
+read the [documentation](https://symbolica.io/docs/), or see
+[symbolica.io](https://symbolica.io) for licensing and support.
 
+## Why Symbolica?
 
-## Quick Example
-
-Symbolica allows you to build and manipulate mathematical expressions, for example from a Jupyter Notebook:
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://symbolica.io/resources/demo.dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="https://symbolica.io/resources/demo.light.svg">
-  <img width="600" alt="A demo of Symbolica" src="https://symbolica.io/resources/demo.light.svg">
-</picture>
-
-You are able to perform these operations from the comfort of a programming language that you (probably) already know, by using Symbolica's bindings to Python and Rust:
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://symbolica.io/resources/completion.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://symbolica.io/resources/completion_light.png">
-  <img width="600" alt="A demo of Symbolica" src="https://symbolica.io/resources/completion.png">
-</picture>
+- Native Python and Rust APIs for the same symbolic core
+- Optimized numerical evaluators, with JIT, C++, SIMD, ASM, and CUDA code generation
+- Fast multivariate polynomial arithmetic for large symbolic workloads
+- Exact solutions of polynomial and rational equation systems
+- Pattern matching and rewrites for domain-specific algebra
+- Mixed exact and numerical computation with error propagation
+- Streaming tools for expressions too large to keep in memory
+- Run symbolic computations directly in the browser with WebAssembly
 
 # Installation
 
@@ -48,7 +45,7 @@ Visit the [Get Started](https://symbolica.io/docs/get_started.html) page for det
 
 ## Python
 
-Symbolica can be installed for Python >3.5 using `pip`:
+Symbolica can be installed from PyPI using `pip`:
 
 ```sh
 pip install symbolica
@@ -56,69 +53,86 @@ pip install symbolica
 
 ## Rust
 
-If you want to use Symbolica as a library in Rust, simply include it in the `Cargo.toml`:
+Add Symbolica to a Rust project:
 
-```toml
-[dependencies]
-symbolica = "1.5"
+```sh
+cargo add symbolica
 ```
 
-# Examples
+# Example
 
-Below we list some examples of the features of Symbolica. Check the [guide](https://symbolica.io/docs/) for a complete overview.
+Go from a physical model to a calibrated result in a few steps.
+Explore more in the [guide](https://symbolica.io/docs/).
 
-### Pattern matching
+### Pendulum calibration
 
-Variables ending with a `_` are wildcards that match to any subexpression.
-In the following example we try to match the pattern `f(w1_,w2_)`:
-
-```python
-from symbolica import *
-x, y, w1_, w2_, f = S('x','y','w1_','w2_', 'f')
-e = f(3,x)*y**2+5
-r = e.replace_all(f(w1_,w2_), f(w1_ - 1, w2_**2))
-print(r)
-```
-which yields `y^2*f(2,x^2)+5`.
-
-### Solving a linear system
-
-Solve a linear system in `x` and `y` with a parameter `c`:
+Start with a pendulum whose restoring torque is controlled by the scale `κ`:
 
 ```python
 from symbolica import *
 
-x, y, c, f = S('x', 'y', 'c', 'f')
+θ, κ = S("θ", "κ")
 
-x_r, y_r = Expression.solve_linear_system(
-    [f(c)*x + y + c, y + c**2], [x, y])
-print('x =', x_r, ', y =', y_r)
+V = κ*(1 - θ.cos())
+τ = -V.derivative(θ)
+
+τ
 ```
-which yields `x = (-c+c^2)*f(c)^-1` and `y = -c^2`.
 
-### Series expansion
+```math
+-\kappa \sin\!\left(\theta\right)
+```
 
-Perform a series expansion in `x`:
+Expand the torque to get a small-angle model:
 
 ```python
-from symbolica import *
-e = E('exp(5+x)/(1-x)').series(S('x'), 0, 3)
-
-print(e)
+τ_small = τ.series(θ, 0, 3)
+τ_small
 ```
-which yields `(exp(5))+(2*exp(5))*x+(5/2*exp(5))*x^2+(8/3*exp(5))*x^3+𝒪(x^4)`.
 
-### Rational arithmetic
+```math
+-\kappa\theta+\frac{1}{6}\kappa\theta^3+\mathcal{O}\!\left(\theta^4\right)
+```
 
-Symbolica is world-class in rational arithmetic, outperforming Mathematica, Maple, Form, Fermat, and other computer algebra packages. Simply convert an expression to a rational polynomial:
+Suppose the scale `κ` and a sensor offset `τ_0` are unknown. Each pair
+`(θ_i, τ_i)` is one sensor reading: at angle `θ_i`, the measured torque is
+`τ_i`. Convert the truncated series back to an expression, evaluate it at two
+measurement angles using `replace`, and solve the resulting linear system:
+
 ```python
-from symbolica import *
-p = E('(x*y^2*5+5)^2/(2*x+5)+(x+4)/(6*x^2+1)').to_rational_polynomial()
-print(p)
-```
-which yields `(45+13*x+50*x*y^2+152*x^2+25*x^2*y^4+300*x^3*y^2+150*x^4*y^4)/(5+2*x+30*x^2+12*x^3)`.
+τ0, τ1, τ2, θ1, θ2 = S("τ_0", "τ_1", "τ_2", "θ_1", "θ_2")
 
+τ_model = τ_small.to_expression() + τ0
+
+solution = Expression.solve([
+    τ_model.replace(θ, θ1) - τ1,
+    τ_model.replace(θ, θ2) - τ2,
+], [κ, τ0])[0]
+
+κ_fit, τ0_fit = solution[κ], solution[τ0]
+
+κ_fit
+```
+
+```math
+\frac{6\tau_1-6\tau_2}{-6\theta_1+6\theta_2+\theta_1^3-\theta_2^3}
+```
+
+Finally, plug in measured values:
+
+```python
+κ_fit.evaluate({
+    θ1: 0.10,
+    θ2: 0.20,
+    τ1: -0.4697,
+    τ2: -0.9545,
+}).real
+```
+
+```text
+4.905227655986509
+```
 
 ## Development
 
-Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica) and [graphica](https://github.com/symbolica-dev/graphica) on [Zulip](https://reform.zulipchat.com)!
+Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica), [graphica](https://github.com/symbolica-dev/graphica), and [symbolica-integrate](https://github.com/symbolica-dev/symbolica-integrate) on [Zulip](https://zulip.symbolica.io)!

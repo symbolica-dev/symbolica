@@ -180,7 +180,14 @@ impl PythonMatrix {
         })
     }
 
-    /// Create a new row vector from a list of scalars.
+    /// Create a new zeroed matrix with `nrows` rows and `ncols` columns.
+    ///
+    /// Parameters
+    /// ----------
+    /// nrows: int
+    ///     The number of rows.
+    /// ncols: int
+    ///     The number of columns.
     #[classmethod]
     pub fn from_linear(
         _cls: &Bound<'_, PyType>,
@@ -216,6 +223,11 @@ impl PythonMatrix {
     }
 
     /// Create a new matrix from a 2-dimensional vector of scalars.
+    ///
+    /// Parameters
+    /// ----------
+    /// entries: Sequence[Sequence[RationalPolynomial | Polynomial | Expression | int]]
+    ///     The nested row entries of the matrix.
     #[classmethod]
     pub fn from_nested(
         cls: &Bound<'_, PyType>,
@@ -315,6 +327,11 @@ impl PythonMatrix {
     }
 
     /// Solve `A * x = b` for `x`, where `A` is the current matrix.
+    ///
+    /// Parameters
+    /// ----------
+    /// b: Matrix
+    ///     The right-hand-side matrix `b` in `A * x = b`.
     pub fn solve(&self, b: PythonMatrix) -> PyResult<PythonMatrix> {
         let (new_self, new_rhs) = self.unify(&b);
         Ok(PythonMatrix {
@@ -327,6 +344,11 @@ impl PythonMatrix {
 
     /// Solve `A * x = b` for `x`, where `A` is the current matrix and return any solution if the
     /// system is underdetermined.
+    ///
+    /// Parameters
+    /// ----------
+    /// b: Matrix
+    ///     The right-hand-side matrix `b` in `A * x = b`.
     pub fn solve_any(&self, b: PythonMatrix) -> PyResult<PythonMatrix> {
         let (new_self, new_rhs) = self.unify(&b);
         Ok(PythonMatrix {
@@ -337,14 +359,24 @@ impl PythonMatrix {
         })
     }
 
-    /// Augment the matrix with another matrix, e.g. create `[A B]` from matrix `A` and `B`.
+    /// Row-reduce the first `max_col` columns of the matrix in-place using Gaussian elimination and return the rank.
     ///
-    /// Returns an error when the matrices do not have the same number of rows.
+    /// Parameters
+    /// ----------
+    /// max_col: int
+    ///     The highest column index included in row reduction.
     pub fn row_reduce(&mut self, max_col: u32) -> usize {
         self.matrix.row_reduce(max_col)
     }
 
-    /// Solve `A * x = b` for `x`, where `A` is the current matrix.
+    /// Augment the matrix with another matrix, e.g. create `[A B]` from matrix `A` and `B`.
+    ///
+    /// Returns an error when the matrices do not have the same number of rows.
+    ///
+    /// Parameters
+    /// ----------
+    /// b: Matrix
+    ///     The matrix to append as additional columns.
     pub fn augment(&self, b: PythonMatrix) -> PyResult<PythonMatrix> {
         let (a, b) = self.unify(&b);
 
@@ -356,7 +388,12 @@ impl PythonMatrix {
         })
     }
 
-    /// Solve `A * x = b` for `x`, where `A` is the current matrix.
+    /// Split the matrix into two matrices at column `index`.
+    ///
+    /// Parameters
+    /// ----------
+    /// index: int
+    ///     The column index at which to split the matrix.
     pub fn split_col(&self, index: u32) -> PyResult<(PythonMatrix, PythonMatrix)> {
         let (a, b) = self
             .matrix
@@ -381,6 +418,11 @@ impl PythonMatrix {
     }
 
     /// Apply a function `f` to every entry of the matrix.
+    ///
+    /// Parameters
+    /// ----------
+    /// f: Callable[[RationalPolynomial], RationalPolynomial]
+    ///     The callback or function to apply.
     pub fn map(
         &self,
         #[gen_stub(override_type(
@@ -433,6 +475,41 @@ impl PythonMatrix {
     }
 
     /// Convert the matrix into a human-readable string, with tunable settings.
+    ///
+    /// Parameters
+    /// ----------
+    /// mode: PrintMode
+    ///     The mode that controls how the input is interpreted or formatted.
+    /// max_line_length: int | None
+    ///     The preferred maximum line length before wrapping.
+    /// indentation: int
+    ///     The number of spaces used for wrapped lines.
+    /// fill_indented_lines: bool
+    ///     Whether wrapped lines should be padded to the configured indentation.
+    /// pretty_matrix: bool
+    ///     Whether matrices should be printed in the pretty multi-line layout.
+    /// number_thousands_separator: str | None
+    ///     The separator inserted between groups of digits in printed integers.
+    /// multiplication_operator: str
+    ///     The string used to print multiplication.
+    /// double_star_for_exponentiation: bool
+    ///     Whether exponentiation should be printed as `**` instead of `^`.
+    /// function_brackets: tuple[str, str]
+    ///     The opening and closing brackets used when printing function arguments.
+    /// num_exp_as_superscript: bool
+    ///     Whether small integer exponents should be printed as superscripts.
+    /// precision: int | None
+    ///     The decimal precision used when printing numeric coefficients.
+    /// show_namespaces: bool
+    ///     Whether namespaces should be included in the formatted output.
+    /// hide_namespace: str | None
+    ///     A namespace prefix to omit from printed symbol names.
+    /// include_attributes: bool
+    ///     Whether symbol attributes should be included in the printed output.
+    /// max_terms: int | None
+    ///     The maximum number of terms to print before truncating the output.
+    /// custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+    ///     Custom print data passed through to custom print callbacks.
     #[pyo3(signature =
         (mode = PythonPrintMode::Symbolica,
             max_line_length = Some(80),
@@ -442,7 +519,6 @@ impl PythonMatrix {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -463,7 +539,6 @@ impl PythonMatrix {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -471,7 +546,7 @@ impl PythonMatrix {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.matrix.format_string(
@@ -480,6 +555,7 @@ impl PythonMatrix {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line: false,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum: false,
                 color_builtin_symbols: false,
                 bracket_level_colors: None,
@@ -489,8 +565,6 @@ impl PythonMatrix {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -499,14 +573,16 @@ impl PythonMatrix {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::default(),
         ))
@@ -517,7 +593,7 @@ impl PythonMatrix {
         Ok(format!(
             "$${}$$",
             self.matrix
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -543,30 +619,104 @@ impl PythonMatrix {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .matrix
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Convert the matrix into a human-readable string.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .matrix
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
     }
 
-    /// Add this matrix to `rhs`, returning the result.
-    pub fn __add__(&self, rhs: PythonMatrix) -> PythonMatrix {
-        let (new_self, new_rhs) = self.unify(&rhs);
-        PythonMatrix {
-            matrix: &new_self.matrix + &new_rhs.matrix,
+    /// Convert the matrix into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .matrix
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the matrix into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.matrix.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always)
+                .pretty_matrix(true),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the matrix into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the matrix into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.matrix.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always)
+                    .pretty_matrix(true),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
+    }
+
+    /// Add two matrices `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Matrix
+    ///     The right-hand-side operand.
+    pub fn __add__(&self, rhs: PythonMatrix) -> PyResult<PythonMatrix> {
+        if self.matrix.nrows() != rhs.matrix.nrows() || self.matrix.ncols() != rhs.matrix.ncols() {
+            return Err(exceptions::PyValueError::new_err(format!(
+                "Cannot add matrices of different dimensions: ({},{}) vs ({},{})",
+                self.matrix.nrows(),
+                self.matrix.ncols(),
+                rhs.matrix.nrows(),
+                rhs.matrix.ncols()
+            )));
         }
+
+        let (new_self, new_rhs) = self.unify(&rhs);
+        Ok(PythonMatrix {
+            matrix: &new_self.matrix + &new_rhs.matrix,
+        })
     }
 
-    ///  Subtract `rhs` from this matrix, returning the result.
-    pub fn __sub__(&self, rhs: PythonMatrix) -> PythonMatrix {
+    /// Subtract matrix `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Matrix
+    ///     The right-hand-side operand.
+    pub fn __sub__(&self, rhs: PythonMatrix) -> PyResult<PythonMatrix> {
         self.__add__(rhs.__neg__())
     }
 
     /// Matrix multiply `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Matrix | RationalPolynomial | Polynomial | Expression | int
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: ScalarOrMatrix) -> PyResult<PythonMatrix> {
         match rhs {
             ScalarOrMatrix::Scalar(s) => {
@@ -577,6 +727,16 @@ impl PythonMatrix {
                 })
             }
             ScalarOrMatrix::Matrix(m) => {
+                if self.matrix.ncols() != m.matrix.nrows() {
+                    return Err(exceptions::PyValueError::new_err(format!(
+                        "Cannot multiply matrices because of a dimension mismatch: ({},{}) vs ({},{})",
+                        self.matrix.nrows(),
+                        self.matrix.ncols(),
+                        m.matrix.nrows(),
+                        m.matrix.ncols()
+                    )));
+                }
+
                 let (new_self, new_rhs) = self.unify(&m);
                 Ok(PythonMatrix {
                     matrix: &new_self.matrix * &new_rhs.matrix,
@@ -585,25 +745,52 @@ impl PythonMatrix {
         }
     }
 
-    /// Matrix multiply `rhs` and `self` returning the result.
+    /// Matrix multiply  `rhs` and `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial | Polynomial | Expression | int
+    ///     The right-hand-side operand.
     pub fn __rmul__(&self, rhs: ConvertibleToRationalPolynomial) -> PyResult<PythonMatrix> {
         self.__mul__(ScalarOrMatrix::Scalar(rhs))
     }
 
-    /// Matrix multiply this matrix and `self`, returning the result.
+    /// Matrix multiply `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Matrix | RationalPolynomial | Polynomial | Expression | int
+    ///     The right-hand-side operand.
     pub fn __matmul__(&self, rhs: ScalarOrMatrix) -> PyResult<PythonMatrix> {
         self.__mul__(rhs)
     }
 
-    /// Matrix multiply `rhs` and `self`, returning the result.
+    /// Matrix multiply  `rhs` and `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial | Polynomial | Expression | int
+    ///     The right-hand-side operand.
     pub fn __rmatmul__(&self, rhs: ConvertibleToRationalPolynomial) -> PyResult<PythonMatrix> {
         self.__mul__(ScalarOrMatrix::Scalar(rhs))
     }
 
-    /// Divide the matrix by the scalar, returning the result.
+    /// Divide this matrix by scalar `rhs` and return the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial | Polynomial | Expression | int
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: ConvertibleToRationalPolynomial) -> PyResult<PythonMatrix> {
+        let rhs = rhs.to_rational_polynomial()?;
+        if rhs.poly.is_zero() {
+            return Err(exceptions::PyZeroDivisionError::new_err(
+                "Cannot divide a matrix by zero",
+            ));
+        }
+
         Ok(PythonMatrix {
-            matrix: self.matrix.div_scalar(&rhs.to_rational_polynomial()?.poly),
+            matrix: self.matrix.div_scalar(&rhs.poly),
         })
     }
 

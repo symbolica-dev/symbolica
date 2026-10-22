@@ -10,25 +10,87 @@ use std::{borrow::Cow, fmt::Write, str::Chars, string::String, sync::Arc};
 
 use ahash::HashMap;
 use bytes::Buf;
-use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
-    LicenseManager,
     atom::{Atom, DefaultNamespace, NamespacedSymbol, Symbol, SymbolAttribute, SymbolBuilder},
     coefficient::{Coefficient, ConvertToRing},
     domains::{
         Ring,
+        backend::integer::from_digits_radix,
         float::{Complex, Float, FloatLike},
         integer::Integer,
         rational::Rational,
     },
+    license::LicenseManager,
     poly::{PolyVariable, PositiveExponent, polynomial::MultivariatePolynomial},
     printer::AnsiWrap,
     state::{RecycledAtom, State, Workspace},
 };
+
+/// Mathematica names for Symbolica's built-in mathematical symbols.
+///
+/// Keep this table as the single source of truth for both Mathematica parsing
+/// and printing. The Symbolica names are ASCII names (including aliases for
+/// built-ins whose canonical name is Unicode).
+pub(crate) const MATHEMATICA_SYMBOLS: &[(&str, &str)] = &[
+    ("Pi", "pi"),
+    ("E", "euler_e"),
+    ("Sqrt", "sqrt"),
+    ("Cos", "cos"),
+    ("Sin", "sin"),
+    ("Tan", "tan"),
+    ("Cot", "cot"),
+    ("Sec", "sec"),
+    ("Csc", "csc"),
+    ("ArcSin", "asin"),
+    ("ArcCos", "acos"),
+    ("ArcTan", "atan"),
+    ("ArcCot", "acot"),
+    ("ArcSec", "asec"),
+    ("ArcCsc", "acsc"),
+    ("Sinh", "sinh"),
+    ("Cosh", "cosh"),
+    ("Tanh", "tanh"),
+    ("Coth", "coth"),
+    ("Sech", "sech"),
+    ("Csch", "csch"),
+    ("ArcSinh", "asinh"),
+    ("ArcCosh", "acosh"),
+    ("ArcTanh", "atanh"),
+    ("ArcCoth", "acoth"),
+    ("ArcSech", "asech"),
+    ("ArcCsch", "acsch"),
+    ("Exp", "exp"),
+    ("Log", "log"),
+    ("Gamma", "gamma"),
+    ("PolyGamma", "polygamma"),
+    ("PolyLog", "polylog"),
+    ("Zeta", "zeta"),
+    ("Erf", "erf"),
+    ("BesselJ", "bessel_j"),
+    ("BesselY", "bessel_y"),
+    ("BesselI", "bessel_i"),
+    ("BesselK", "bessel_k"),
+    ("EulerGamma", "euler_gamma"),
+    ("Conjugate", "conj"),
+    ("Abs", "abs"),
+    ("Derivative", "der"),
+];
+
+fn mathematica_to_symbolica_name(name: &str) -> Option<&'static str> {
+    MATHEMATICA_SYMBOLS
+        .iter()
+        .find_map(|(mathematica, symbolica)| (*mathematica == name).then_some(*symbolica))
+}
+
+pub(crate) fn symbolica_to_mathematica_name(name: &str) -> Option<&'static str> {
+    MATHEMATICA_SYMBOLS
+        .iter()
+        .find_map(|(mathematica, symbolica)| (*symbolica == name).then_some(*mathematica))
+}
 
 const HEX_DIGIT_MASK: [bool; 255] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
@@ -92,42 +154,54 @@ enum ParseState {
 /// An operator in the expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operator {
+    /// Multiplication.
     Mul,
+    /// Addition.
     Add,
+    /// Exponentiation.
     Pow,
+    /// The comma separating function arguments.
     Argument, // comma
-    Neg,      // left side should be tagged as 'finished'
-    Inv,      // left side should be tagged as 'finished', for internal use
+    /// Unary negation.
+    Neg, // left side should be tagged as 'finished'
+    /// Unary reciprocal, used to represent division during parsing.
+    Inv, // left side should be tagged as 'finished', for internal use
 }
 
 /// The mode in which to parse the expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum ParseMode {
     #[default]
+    /// Symbolica expression syntax, with parentheses for function arguments.
     Symbolica,
+    /// Supported Mathematica expression syntax, with square brackets for function arguments.
     Mathematica,
 }
 
 /// Settings for parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParseSettings {
-    pub mode: ParseMode,
+    pub(crate) mode: ParseMode,
     /// Convert completed terms to atoms during parsing, to save memory
-    pub convert_mul_to_atom: bool,
-    pub distribute_neg: bool,
+    pub(crate) convert_mul_to_atom: bool,
+    pub(crate) distribute_neg: bool,
 }
 
 impl ParseMode {
+    /// Return whether this is Mathematica parsing mode.
     pub fn is_mathematica(&self) -> bool {
         *self == ParseMode::Mathematica
     }
 
+    /// Return whether this is Symbolica parsing mode.
     pub fn is_symbolica(&self) -> bool {
         *self == ParseMode::Symbolica
     }
 }
 
 impl ParseSettings {
+    /// Create default Symbolica parsing settings, converting completed products
+    /// to expressions during parsing.
     pub const fn symbolica() -> Self {
         ParseSettings {
             mode: ParseMode::Symbolica,
@@ -136,6 +210,8 @@ impl ParseSettings {
         }
     }
 
+    /// Create Mathematica parsing settings, converting completed products
+    /// to expressions during parsing.
     pub const fn mathematica() -> Self {
         ParseSettings {
             mode: ParseMode::Mathematica,
@@ -144,12 +220,32 @@ impl ParseSettings {
         }
     }
 
+    /// Create settings for direct polynomial parsing: retain product tokens
+    /// and distribute leading negative signs.
     pub const fn polynomial() -> Self {
         ParseSettings {
             mode: ParseMode::Symbolica,
             convert_mul_to_atom: false,
             distribute_neg: true,
         }
+    }
+
+    /// Set the parser mode.
+    pub fn mode(mut self, mode: ParseMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enable or disable converting completed multiplications to atoms during parsing.
+    pub fn convert_mul_to_atom(mut self, convert_mul_to_atom: bool) -> Self {
+        self.convert_mul_to_atom = convert_mul_to_atom;
+        self
+    }
+
+    /// Enable or disable distributing a leading negative sign.
+    pub fn distribute_neg(mut self, distribute_neg: bool) -> Self {
+        self.distribute_neg = distribute_neg;
+        self
     }
 }
 
@@ -178,6 +274,8 @@ impl std::fmt::Display for Operator {
 
 impl Operator {
     #[inline]
+    /// Return the operator's parsing arity: one for negation and reciprocal,
+    /// two for the other operators.
     pub const fn get_arity(&self) -> usize {
         match self {
             Operator::Neg | Operator::Inv => 1,
@@ -186,6 +284,7 @@ impl Operator {
     }
 
     #[inline]
+    /// Return the precedence level; higher values bind more tightly.
     pub const fn get_precedence(&self) -> u8 {
         match self {
             Operator::Mul => 8,
@@ -198,6 +297,8 @@ impl Operator {
     }
 
     #[inline]
+    /// Return whether the parser may attach a same-precedence operator on
+    /// the left. Exponentiation is excluded to retain right grouping.
     pub const fn left_associative(&self) -> bool {
         match self {
             Operator::Mul => true,
@@ -210,6 +311,7 @@ impl Operator {
     }
 
     #[inline]
+    /// Return whether the parser may attach a same-precedence operator on the right.
     pub const fn right_associative(&self) -> bool {
         match self {
             Operator::Mul => true,
@@ -224,7 +326,9 @@ impl Operator {
 
 /// The position in a string, used for error messages.
 pub struct Position {
+    /// The line component of the source position.
     pub line_number: usize,
+    /// The character-position component of the source position.
     pub char_pos: usize,
 }
 
@@ -234,17 +338,31 @@ pub struct Position {
 /// an expression or a polynomial.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Token {
+    /// A numeric literal and a flag indicating an imaginary-unit suffix.
     Number(SmartString<LazyCompact>, bool),
+    /// A special numeric literal identified by its character, such as infinity.
     SpecialNumber(char),
+    /// A symbol name.
     ID(SmartString<LazyCompact>),
+    /// A rational-polynomial coefficient in bracket notation.
     RationalPolynomial(SmartString<LazyCompact>),
+    /// An operator and its operands. The first two flags indicate whether
+    /// operands may still be attached on the left and right.
     Op(bool, bool, Operator, Vec<Token>),
+    /// A function with its head as the first token, followed by its arguments.
+    /// The flags indicate an unfinished argument list and square-bracket syntax.
     Fn(bool, bool, Vec<Token>),
+    /// A completed product already converted to an expression to save parsing memory.
     ParsedMul(Box<RecycledAtom>), // a partially parsed and converted expression
+    /// The start-of-input sentinel.
     Start,
+    /// An opening parenthesis.
     OpenParenthesis,
+    /// A closing parenthesis.
     CloseParenthesis,
+    /// A closing square bracket.
     CloseBracket,
+    /// The end-of-input sentinel.
     EOF,
 }
 
@@ -523,7 +641,7 @@ impl Token {
             Err(format!("operator expected between '{self}' and '{n}'"))
         } else if let Token::OpenParenthesis = self {
             // reached EOF
-            Err(format!("parenthesis not closed"))
+            Err("parenthesis not closed".to_string())
         } else if let Token::Fn(_, _, a) = self {
             Err(format!(
                 "missing closing parenthesis for function '{}'",
@@ -559,7 +677,8 @@ impl Token {
         Ok(out)
     }
 
-    /// Parse a symbol with potential attributes.
+    /// Parse a symbol with potential attributes and tags. Existing symbols may
+    /// have additional properties, but must have all specified attributes and tags.
     pub(crate) fn parse_symbol<T>(
         x: &str,
         namespace: &DefaultNamespace<T>,
@@ -578,6 +697,7 @@ impl Token {
                     match x {
                         "" => {}
                         "linear" => attributes.push(SymbolAttribute::Linear),
+                        "flat" => attributes.push(SymbolAttribute::Flat),
                         "symmetric" => attributes.push(SymbolAttribute::Symmetric),
                         "antisymmetric" => attributes.push(SymbolAttribute::Antisymmetric),
                         "cyclesymmetric" => attributes.push(SymbolAttribute::Cyclesymmetric),
@@ -599,11 +719,24 @@ impl Token {
 
                 let symbol_whole = format!("{}::{}", namespace, symbol);
 
-                SymbolBuilder::new(crate::atom::NamespacedSymbol::parse(&symbol_whole))
-                    .with_attributes(attributes)
-                    .with_tags(tags)
-                    .build_with_state(state)
-                    .map_err(|e| e.to_string())
+                // Parsed references do not carry aliases, callbacks, or user data.
+                // Reuse a compatible definition rather than redefining it.
+                if let Some(existing) = state.fetch_symbol(&symbol_whole)
+                    && attributes.iter().all(|attr| {
+                        existing
+                            .get_attributes_tuple()
+                            .contains(&(attr.clone(), true))
+                    })
+                    && tags.iter().all(|tag| existing.has_tag(tag))
+                {
+                    Ok(existing)
+                } else {
+                    SymbolBuilder::new(NamespacedSymbol::parse(&symbol_whole))
+                        .with_attributes(attributes)
+                        .with_tags(tags)
+                        .build_with_state(state)
+                        .map_err(|e| e.to_string())
+                }
             } else {
                 Err(format!("Malformatted attribute section in {}", x))
             }
@@ -617,7 +750,7 @@ impl Token {
             .build_with_state(state)
             .map_err(|e| e.to_string())
         } else {
-            SymbolBuilder::new(namespace.attach_namespace(x))
+            SymbolBuilder::new(namespace.attach_namespace_no_builtin(x))
                 .build_with_state(state)
                 .map_err(|e| e.to_string())
         }?;
@@ -653,16 +786,16 @@ impl Token {
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
-                        out.to_num(Complex::new(Rational::zero(), x.into()).into());
+                        out.to_num(Complex::new(Rational::zero(), x.into()));
                     } else {
-                        out.to_num(x.into());
+                        out.to_num(x);
                     }
                 }
                 Err(_) => match Float::parse(n, None) {
                     Ok(f) => {
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f).into());
+                            out.to_num(Complex::new(f.zero(), f));
                         } else {
                             out.to_num(Coefficient::Float(f.into()));
                         }
@@ -783,16 +916,16 @@ impl Token {
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
-                        out.to_num(Complex::new(Rational::zero(), x.into()).into());
+                        out.to_num(Complex::new(Rational::zero(), x.into()));
                     } else {
-                        out.to_num(x.into());
+                        out.to_num(x);
                     }
                 }
                 Err(_) => match Float::parse(n, None) {
                     Ok(f) => {
                         // derive precision from string length, should be overestimate
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f).into());
+                            out.to_num(Complex::new(f.zero(), f));
                         } else {
                             out.to_num(Coefficient::Float(f.into()));
                         }
@@ -1160,6 +1293,7 @@ impl Token {
         let mut extra_ops: SmallVec<[char; 6]> = SmallVec::new();
 
         let mut id_buffer = String::with_capacity(30);
+        let mut preceded_by_separating_whitespace = false;
 
         let mut line_counter = 1;
         let mut column_counter = 1;
@@ -1192,41 +1326,23 @@ impl Token {
                         state = ParseState::Any;
 
                         if settings.mode.is_mathematica() {
-                            match id_buffer.as_str() {
-                                "Pi" => {
-                                    stack.push(Token::ID(Symbol::PI_STR.into()));
-                                }
-                                "E" => {
-                                    stack.push(Token::ID(Symbol::E_STR.into()));
-                                }
-                                "I" => {
-                                    stack.push(Token::Number("1".into(), true));
-                                }
-                                "Sqrt" => {
-                                    stack.push(Token::ID("sqrt".into()));
-                                }
-                                "Cos" => {
-                                    stack.push(Token::ID("cos".into()));
-                                }
-                                "Sin" => {
-                                    stack.push(Token::ID("sin".into()));
-                                }
-                                "Log" => {
-                                    stack.push(Token::ID("log".into()));
-                                }
-                                "Exp" => {
-                                    stack.push(Token::ID("exp".into()));
-                                }
-                                "Conjugate" => {
-                                    stack.push(Token::ID("conj".into()));
-                                }
-                                "Indeterminate" => {
-                                    stack.push(Token::SpecialNumber('¿'));
-                                }
-                                _ => {
-                                    stack.push(Token::ID(id_buffer.as_str().into()));
+                            if let Some(name) = mathematica_to_symbolica_name(id_buffer.as_str()) {
+                                stack.push(Token::ID(name.into()));
+                            } else {
+                                match id_buffer.as_str() {
+                                    "I" => {
+                                        stack.push(Token::Number("1".into(), true));
+                                    }
+                                    "Indeterminate" => {
+                                        stack.push(Token::SpecialNumber('¿'));
+                                    }
+                                    _ => {
+                                        stack.push(Token::ID(id_buffer.as_str().into()));
+                                    }
                                 }
                             }
+                        } else if id_buffer == "𝑖" {
+                            stack.push(Token::Number("1".into(), true));
                         } else {
                             stack.push(Token::ID(id_buffer.as_str().into()));
                         }
@@ -1388,6 +1504,8 @@ impl Token {
 
             if state == ParseState::Any {
                 if whitespaces.contains(&c) {
+                    preceded_by_separating_whitespace |= c != '\\';
+
                     if c == '\n' {
                         column_counter = 1;
                         line_counter += 1;
@@ -1398,6 +1516,10 @@ impl Token {
                     c = char_iter.next().unwrap_or('\0');
                     continue;
                 }
+
+                // Consume this once for the next non-whitespace character. This is important for
+                // characters replayed through `extra_ops`, which must not inherit the whitespace.
+                let had_leading_whitespace = std::mem::take(&mut preceded_by_separating_whitespace);
 
                 match c {
                     '+' => {
@@ -1432,7 +1554,9 @@ impl Token {
                     }
                     '(' => {
                         // check if the opening bracket belongs to a function
+                        // a space after an id is treated as an implicit multiplication
                         if settings.mode == ParseMode::Symbolica
+                            && !had_leading_whitespace
                             && let Some(Token::ID(_)) = stack.last()
                         {
                             let name = unsafe { stack.pop().unwrap_unchecked() };
@@ -1440,7 +1564,7 @@ impl Token {
                                 stack.push(Token::Fn(true, false, vec![name])); // serves as open paren
                             }
                         } else if unsafe { stack.last().unwrap_unchecked() }.is_normal() {
-                            // insert multiplication: x(...) -> x*(...)
+                            // insert multiplication: 3(...) -> 3*(...)
                             stack.push(Token::Op(true, true, Operator::Mul, vec![]));
                             extra_ops.push(c);
                         } else {
@@ -1521,12 +1645,13 @@ impl Token {
                             && (!c.is_ascii_digit()
                                 || !matches!(
                                     unsafe { stack.last().unwrap_unchecked() },
-                                    Token::Number(_, _)
+                                    Token::Number(_, false)
                                 ))
                         {
                             // insert implicit multiplication: x y -> x*y
-                            // do not allow implicit multiplication between two numbers as the risk
-                            // of a typo is too high
+                            // Two real numeric literals require an explicit operator to avoid
+                            // copy-paste mistakes such as 2 3. An imaginary suffix makes
+                            // products such as 3i 2 or Mathematica's I 3^(1/2) unambiguous.
                             stack.push(Token::Op(true, true, Operator::Mul, vec![]));
                             extra_ops.push(c);
                         } else if c.is_ascii_digit() {
@@ -1857,7 +1982,7 @@ impl Token {
 
                         if let Ok(n) = n.parse::<i128>() {
                             break 'read_coeff field
-                                .element_from_coefficient(Integer::Double(n).into());
+                                .element_from_coefficient(Integer::Double(n.into()).into());
                         }
                     }
 
@@ -1879,16 +2004,10 @@ impl Token {
                         digit_buffer.extend(digits.iter().map(|&x| x - b'0'));
                     }
 
-                    let mut p = MultiPrecisionInteger::new();
-                    unsafe {
-                        p.assign_bytes_radix_unchecked(
-                            &digit_buffer,
-                            if is_hex { 16 } else { 10 },
-                            is_negative,
-                        )
-                    };
+                    let p =
+                        from_digits_radix(&digit_buffer, if is_hex { 16 } else { 10 }, is_negative);
 
-                    field.element_from_coefficient(p.into())
+                    field.element_from_coefficient(Integer::from(p).into())
                 }
             }
 
@@ -2003,6 +2122,28 @@ mod test {
     };
 
     #[test]
+    fn unicode_imaginary_unit() {
+        for (input, expected) in [
+            ("𝑖", "1i"),
+            ("-𝑖", "-1i"),
+            ("1+𝑖", "1+1i"),
+            ("1-𝑖", "1-1i"),
+            ("𝑖/2", "1i/2"),
+            ("𝑖^2", "-1"),
+            ("𝑖*x", "1i*x"),
+            ("𝑖(x+1)", "1i*(x+1)"),
+            ("f(𝑖,-𝑖)", "f(1i,-1i)"),
+            ("2𝑖", "2i"),
+        ] {
+            assert_eq!(parse!(input), parse!(expected), "{input}");
+        }
+
+        for name in ["i", "𝑖x", "x𝑖", "𝑖_", "test::𝑖"] {
+            assert!(parse!(name).get_symbol().is_some(), "{name}");
+        }
+    }
+
+    #[test]
     fn mathematica() {
         let a = parse!("cos(x+2i + 3)+sqrt(conj(x)) + test::y + exp(test::test2::x) + log(α)");
         let s = a.format_string(&PrintOptions::mathematica(), PrintState::default());
@@ -2028,13 +2169,149 @@ mod test {
     }
 
     #[test]
+    fn mathematica_imaginary_implicit_multiplication() {
+        use crate::{atom::Atom, parser::ParseSettings};
+
+        for eager in [true, false] {
+            for (input, expected) in [
+                ("I 3", "3i"),
+                ("1I 3^(1/2)", "1i*3^(1/2)"),
+                ("2I 3", "6i"),
+                ("I 3/2", "3i/2"),
+                ("(1+I 3^(1/2))/2", "(1+1i*3^(1/2))/2"),
+                ("I 3 x", "3i*x"),
+            ] {
+                let actual = Atom::parse(
+                    input,
+                    "imaginary_parse_test",
+                    ParseSettings::mathematica().convert_mul_to_atom(eager),
+                )
+                .unwrap_or_else(|error| panic!("{input}: {error}"));
+                let expected =
+                    Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
+                        .unwrap();
+                assert_eq!(actual, expected, "{input}, eager={eager}");
+            }
+        }
+    }
+
+    #[test]
+    fn symbolica_imaginary_implicit_multiplication() {
+        use crate::{atom::Atom, parser::ParseSettings};
+
+        for eager in [true, false] {
+            for (input, expected) in [
+                ("2+3i 2^3", "2+24i"),
+                ("3i 2", "6i"),
+                ("-3i 2", "-6i"),
+                ("3i 2/3", "2i"),
+                ("3i 2 x", "6i*x"),
+                ("(2+3i 2^3)/2", "1+12i"),
+                ("3i\t2", "6i"),
+                ("3i\n2", "6i"),
+                ("3𝑖 2", "6i"),
+                ("𝑖 3", "3i"),
+            ] {
+                let actual = Atom::parse(
+                    input,
+                    "imaginary_parse_test",
+                    ParseSettings::default().convert_mul_to_atom(eager),
+                )
+                .unwrap_or_else(|error| panic!("{input}: {error}"));
+                let expected =
+                    Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
+                        .unwrap();
+                assert_eq!(actual, expected, "{input}, eager={eager}");
+            }
+        }
+    }
+
+    #[test]
+    fn mathematica_complex_print_parse_roundtrip() {
+        use crate::{atom::Atom, parser::ParseSettings};
+
+        for input in [
+            "1i",
+            "1i*3^(1/2)",
+            "(1+1i*3^(1/2))/2",
+            "2+3i",
+            "1i/2",
+            "(-1+1i*3^(1/2))/2",
+            "complex_roundtrip::f((1+1i*3^(1/2))/2)",
+            "-4/9*3^(-1/2)*complex_roundtrip::h(1,0,(1+1i*3^(1/2))/2)",
+        ] {
+            let atom = Atom::parse(input, "complex_roundtrip", ParseSettings::default()).unwrap();
+            for explicit in [false, true] {
+                let mut options = PrintOptions::mathematica();
+                if explicit {
+                    options.multiplication_operator = '*';
+                }
+                let text = atom.format_string(&options, PrintState::default());
+                for eager in [true, false] {
+                    let parsed = Atom::parse(
+                        &text,
+                        "complex_roundtrip",
+                        ParseSettings::mathematica().convert_mul_to_atom(eager),
+                    )
+                    .unwrap_or_else(|error| panic!("{text}: {error}"));
+                    assert_eq!(parsed, atom, "{text}, eager={eager}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn imaginary_implicit_multiplication_preserves_other_tokens() {
+        use crate::{atom::Atom, parser::ParseSettings};
+
+        for settings in [ParseSettings::default(), ParseSettings::mathematica()] {
+            for eager in [true, false] {
+                let settings = settings.clone().convert_mul_to_atom(eager);
+                for input in ["2 3", "2\t3", "2\n3", "2.0 3.0", "2e3 4", "2 3i", "3i 2 3"] {
+                    assert!(
+                        Atom::parse(input, "imaginary_parse_test", settings.clone()).is_err(),
+                        "{input}, mode={:?}, eager={eager}",
+                        settings.mode,
+                    );
+                }
+                for (input, expected) in [
+                    ("I3", "I3"),
+                    ("1IntegerName", "IntegerName"),
+                    ("2 I3", "2*I3"),
+                    ("1i3", "i3"),
+                    ("3i2", "3*i2"),
+                    ("3ix", "3*ix"),
+                ] {
+                    assert_eq!(
+                        Atom::parse(input, "imaginary_parse_test", settings.clone()).unwrap(),
+                        Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
+                            .unwrap(),
+                        "{input}, mode={:?}, eager={eager}",
+                        settings.mode,
+                    );
+                }
+            }
+        }
+        for (input, expected) in [("I 3", "3*I"), ("1i3", "i3")] {
+            assert_eq!(
+                Atom::parse(input, "imaginary_parse_test", ParseSettings::default()).unwrap(),
+                Atom::parse(expected, "imaginary_parse_test", ParseSettings::default()).unwrap(),
+            );
+        }
+    }
+
+    #[test]
     fn attributes() {
-        let input = parse!("symbolica::b::{linear,symmetric,test::a}::dot_ls");
+        let input = parse!("symbolica::b::{linear,flat,symmetric,test::a}::dot_ls");
         let s = input.get_symbol().unwrap();
         assert_eq!(s.get_name(), "symbolica::b::dot_ls");
         assert_eq!(
             s.get_attributes(),
-            vec![SymbolAttribute::Symmetric, SymbolAttribute::Linear,]
+            vec![
+                SymbolAttribute::Symmetric,
+                SymbolAttribute::Linear,
+                SymbolAttribute::Flat,
+            ]
         );
         assert_eq!(s.get_tags(), vec!["test::a"]);
 
@@ -2092,11 +2369,23 @@ mod test {
     }
 
     #[test]
+    fn whitespace_separates_parenthesized_implicit_multiplication() {
+        assert_eq!(parse!("x y (a+b)"), parse!("x*y*(a+b)"));
+        assert_eq!(parse!("x\ty\n(a+b)"), parse!("x*y*(a+b)"));
+        assert_eq!(parse!("x y(a+b)"), parse!("x*y(a+b)"));
+
+        assert_eq!(parse!("f (x)"), parse!("f*x"));
+        assert_eq!(parse!("f\t(x)"), parse!("f*x"));
+        assert_eq!(parse!("f\n(x)"), parse!("f*x"));
+        assert_eq!(parse!("f(x)"), parse!(r"f\(x)"));
+    }
+
+    #[test]
     fn float() {
         let input = parse!("1.2`20x+1e-5`20+1e+5 * 1.1234e23 +2exp(5)");
 
         let r = format!("{}", input.printer(PrintOptions::file_no_namespace()));
-        assert_eq!(r, "1.123400000000000e28+1.2000000000000000000*x+2*exp(5)");
+        assert_eq!(r, "1.123400000000000e28+1.2000000000000000000*x+2*𝑒^5");
     }
 
     #[test]

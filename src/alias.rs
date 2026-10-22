@@ -908,8 +908,6 @@ fn atom_core_alias_subexpressions_can_create_opaque_aliases() {
 
 #[test]
 fn test_alias_evaluator_reuses_alias_instruction() {
-    use crate::evaluate::{FunctionMap, OptimizationSettings};
-
     let aliased = alias_literal(
         crate::parse!("exp(x+y)+log(x+y)"),
         crate::parse!("x+y"),
@@ -917,31 +915,21 @@ fn test_alias_evaluator_reuses_alias_instruction() {
     );
     let params = vec![crate::parse!("x"), crate::parse!("y")];
     let direct_evaluator = aliased
-        .evaluator(
-            &FunctionMap::new(),
-            &params,
-            OptimizationSettings {
-                horner_iterations: 0,
-                cpe_iterations: Some(0),
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .horner_iterations(0)
+        .cpe_iterations(Some(0))
+        .build()
         .unwrap();
     let tree_evaluator = aliased
-        .evaluator(
-            &FunctionMap::new(),
-            &params,
-            OptimizationSettings {
-                horner_iterations: 0,
-                cpe_iterations: Some(0),
-                direct_translation: false,
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .horner_iterations(0)
+        .cpe_iterations(Some(0))
+        .direct_translation(false)
+        .build()
         .unwrap();
 
-    assert_eq!(direct_evaluator.count_operations().0, 2);
-    assert_eq!(tree_evaluator.count_operations().0, 2);
+    assert_eq!(direct_evaluator.count_operations().additions, 2);
+    assert_eq!(tree_evaluator.count_operations().additions, 2);
 
     drop(aliased);
 
@@ -957,8 +945,6 @@ fn test_alias_evaluator_reuses_alias_instruction() {
 
 #[test]
 fn test_alias_evaluator_horners_alias_body() {
-    use crate::evaluate::{FunctionMap, OptimizationSettings};
-
     let poly = crate::parse!("x^3+x^2+x+1");
     let aliased = alias_literal(
         crate::parse!("exp(x^3+x^2+x+1)+log(x^3+x^2+x+1)"),
@@ -967,29 +953,22 @@ fn test_alias_evaluator_horners_alias_body() {
     );
     let params = vec![crate::parse!("x")];
     let without_horner = aliased
-        .evaluator(
-            &FunctionMap::new(),
-            &params,
-            OptimizationSettings {
-                horner_iterations: 0,
-                cpe_iterations: Some(0),
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .horner_iterations(0)
+        .cpe_iterations(Some(0))
+        .build()
         .unwrap();
     let with_horner = aliased
-        .evaluator(
-            &FunctionMap::new(),
-            &params,
-            OptimizationSettings {
-                horner_iterations: 1,
-                cpe_iterations: Some(0),
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .horner_iterations(1)
+        .cpe_iterations(Some(0))
+        .build()
         .unwrap();
 
-    assert!(with_horner.count_operations().1 < without_horner.count_operations().1);
+    assert!(
+        with_horner.count_operations().multiplications
+            < without_horner.count_operations().multiplications
+    );
 
     drop(aliased);
 
@@ -1040,7 +1019,7 @@ fn alias_expanded_byte_size_expands_opaque_and_nested_aliases() {
 
     assert_eq!(
         aliased.get_alias_expanded_byte_size(),
-        aliased.alias_known_aliases().get_byte_size()
+        aliased.inline_aliases(true).get_byte_size()
     );
 }
 
@@ -1071,7 +1050,7 @@ fn alias_known_aliases_expands_opaque_aliases() {
 
 #[test]
 fn test_alias_inside_function_map_uses_outer_arguments() {
-    use crate::evaluate::{FunctionMap, OptimizationSettings};
+    use crate::evaluate::FunctionMap;
     use crate::symbol;
 
     let body = alias_literal(crate::parse!("x^2+4"), crate::parse!("x^2"), false);
@@ -1084,27 +1063,19 @@ fn test_alias_inside_function_map_uses_outer_arguments() {
     let params = vec![crate::parse!("y")];
 
     let direct_evaluator = aliased
-        .evaluator(
-            &fn_map,
-            &params,
-            OptimizationSettings {
-                horner_iterations: 0,
-                cpe_iterations: Some(0),
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .function_map(fn_map.clone())
+        .horner_iterations(0)
+        .cpe_iterations(Some(0))
+        .build()
         .unwrap();
     let tree_evaluator = aliased
-        .evaluator(
-            &fn_map,
-            &params,
-            OptimizationSettings {
-                horner_iterations: 0,
-                cpe_iterations: Some(0),
-                direct_translation: false,
-                ..OptimizationSettings::default()
-            },
-        )
+        .evaluator(&params)
+        .function_map(fn_map)
+        .horner_iterations(0)
+        .cpe_iterations(Some(0))
+        .direct_translation(false)
+        .build()
         .unwrap();
 
     let mut evaluator = direct_evaluator.map_coeff(&|x| x.re.to_f64());

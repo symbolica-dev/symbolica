@@ -4,13 +4,15 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct ComplexEvaluatorSettings {
     /// Whether sqrt with real arguments yields real results.
-    pub sqrt_real: bool,
+    pub(crate) sqrt_real: bool,
     /// Whether log with real arguments yields real results.
-    pub log_real: bool,
+    pub(crate) log_real: bool,
     /// Whether powf with real arguments yields real results.
-    pub powf_real: bool,
+    pub(crate) powf_real: bool,
+    /// Whether custom evaluator functions with real arguments yield real results.
+    pub(crate) real_if_args_real: bool,
     /// Report on the number of converted operations.
-    pub verbose: bool,
+    pub(crate) verbose: bool,
 }
 
 impl ComplexEvaluatorSettings {
@@ -20,6 +22,7 @@ impl ComplexEvaluatorSettings {
             sqrt_real,
             log_real,
             powf_real,
+            real_if_args_real: false,
             verbose,
         }
     }
@@ -42,6 +45,12 @@ impl ComplexEvaluatorSettings {
         self
     }
 
+    /// Set that all custom evaluator functions with real arguments yield real results.
+    pub fn real_if_args_real(mut self) -> Self {
+        self.real_if_args_real = true;
+        self
+    }
+
     /// Set verbose reporting.
     pub fn verbose(mut self) -> Self {
         self.verbose = true;
@@ -56,6 +65,7 @@ impl Default for ComplexEvaluatorSettings {
             sqrt_real: false,
             log_real: false,
             powf_real: false,
+            real_if_args_real: false,
             verbose: false,
         }
     }
@@ -66,8 +76,8 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
     /// assembly output that uses real arithmetic instead of complex arithmetic
     /// where possible.
     ///
-    /// You can also set if all encountered sqrt, log, and powf operations with real
-    /// arguments are expected to yield real results.
+    /// You can also set if all encountered sqrt, log, powf, and custom evaluator
+    /// operations with real arguments are expected to yield real results.
     ///
     /// Must be called after all optimization functions and merging are performed
     /// on the evaluator, or the registration will be lost.
@@ -192,8 +202,15 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
                     }
                     subcomponents[*r] = *sc;
                 }
-                Instr::ExternalFun(r, ..) => {
-                    *sc = ComplexPhase::Any;
+                Instr::ExternalFun(r, _, a) => {
+                    if settings.real_if_args_real
+                        && !a.is_empty()
+                        && a.iter().all(|x| subcomponents[*x] == ComplexPhase::Real)
+                    {
+                        *sc = ComplexPhase::Real;
+                    } else {
+                        *sc = ComplexPhase::Any;
+                    }
                     subcomponents[*r] = *sc;
                 }
                 Instr::IfElse(..) | Instr::Goto(..) | Instr::Label(..) => {
@@ -232,7 +249,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Constant<T: Default + Clone + Eq + Hash> {
             Literal(T),
-            Function(String),
+            Function(Symbol, Vec<Atom>, Vec<Complex<Rational>>),
         }
 
         for (i, c) in self.stack[self.param_count..self.reserved_indices]
@@ -244,7 +261,10 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 .iter()
                 .find(|f| f.constant_index == Some(i))
             {
-                constants.insert(Constant::Function(ext.export_name().to_owned()), i);
+                constants.insert(
+                    Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone()),
+                    i,
+                );
             } else {
                 constants.insert(Constant::Literal(c.clone()), i);
             }
@@ -262,16 +282,19 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         {
             if let Some(ext) = other
                 .external_fns
-                .iter_mut()
+                .iter()
                 .find(|f| f.constant_index == Some(i))
             {
-                let key = Constant::Function(ext.export_name().to_owned());
+                let key = Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone());
                 if !constants.contains_key(&key) {
                     let new_i = constants.len();
                     constants.insert(key.clone(), new_i);
                     self.stack.push(T::default());
-                    ext.constant_index = Some(new_i);
-                    self.external_fns.push(ext.clone());
+                    // Preserve source indices while scanning incoming constants:
+                    // the destination index may name a later incoming literal.
+                    let mut destination = ext.clone();
+                    destination.constant_index = Some(new_i);
+                    self.external_fns.push(destination);
                 }
                 constant_indices.push(self.param_count + constants[&key]);
             } else {
@@ -287,16 +310,21 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 
         // add new external functions
         let mut external_fn_indices = Vec::with_capacity(other.external_fns.len());
-        for e in &other.external_fns {
-            if let Some(i) = self
-                .external_fns
-                .iter()
-                .position(|f| f.export_name == e.export_name)
-            {
+        for mut external in std::mem::take(&mut other.external_fns) {
+            if let Some(i) = self.external_fns.iter().position(|f| {
+                f == &external && f.constant_index.is_some() == external.constant_index.is_some()
+            }) {
                 external_fn_indices.push(i);
             } else {
+                if let Some(body) = &mut external.body {
+                    for (instruction, _) in &mut Arc::make_mut(body).instructions {
+                        if let Instr::ExternalFun(_, index, _) = instruction {
+                            *index = external_fn_indices[*index];
+                        }
+                    }
+                }
                 external_fn_indices.push(self.external_fns.len());
-                self.external_fns.push(e.clone());
+                self.external_fns.push(external);
             }
         }
 
@@ -471,6 +499,8 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// Reduce temporary storage by reusing stack slots after their last use,
+    /// remapping instructions while preserving the evaluator's results.
     pub fn optimize_stack(&mut self) {
         let mut last_use: Vec<usize> = vec![0; self.stack.len()];
 

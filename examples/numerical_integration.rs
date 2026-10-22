@@ -1,6 +1,6 @@
 use std::f64::consts::PI;
 
-use symbolica::numerical_integration::{ContinuousGrid, DiscreteGrid, Grid, MonteCarloRng, Sample};
+use symbolica::prelude::*;
 
 fn main() {
     // Integrate x*pi + x^2 using multi-channeling:
@@ -9,16 +9,17 @@ fn main() {
 
     let mut grid = DiscreteGrid::new(
         vec![
-            Some(Grid::Continuous(ContinuousGrid::new(
-                1, 10, 1000, None, false,
-            ))),
-            Some(Grid::Continuous(ContinuousGrid::new(
-                1, 10, 1000, None, false,
-            ))),
+            Some(Grid::Continuous(
+                ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+            )),
+            Some(Grid::Continuous(
+                ContinuousGrid::new(1, 10, 1000, None, false).unwrap(),
+            )),
         ],
         0.01,
         false,
-    );
+    )
+    .unwrap();
 
     let mut rng = MonteCarloRng::new(0, 0);
 

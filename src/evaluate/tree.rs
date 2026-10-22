@@ -1,4 +1,220 @@
+use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
+
+use crate::{atom::InlineVar, coefficient::ConvertToRing};
+
 use super::*;
+
+/// Errors that can occur while building or performing numerical expression evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EvaluationError {
+    /// An expression supplied as a parameter is not a supported indeterminate.
+    NotIndeterminate {
+        /// The invalid parameter expression.
+        atom: Atom,
+    },
+    /// The number of supplied parameter values does not match the evaluator.
+    InvalidParameterCount {
+        /// The evaluator's parameter count.
+        expected: usize,
+        /// The number of supplied values.
+        actual: usize,
+    },
+    /// The output buffer has the wrong length.
+    InvalidOutputCount {
+        /// The evaluator's output count.
+        expected: usize,
+        /// The supplied output length.
+        actual: usize,
+    },
+    /// The requested hot-start optimization is unavailable for this evaluation path.
+    UnsupportedHotStart,
+    /// A coefficient cannot be converted to the evaluation domain.
+    UnsupportedCoefficient {
+        /// A printable description of the unsupported coefficient.
+        coefficient: String,
+    },
+    /// A variable has neither a parameter value nor a registered evaluator.
+    UndefinedVariable {
+        /// The unresolved variable.
+        symbol: Symbol,
+    },
+    /// A function call has neither a parameter value nor a registered evaluator.
+    UndefinedFunction {
+        /// The unresolved function call.
+        expression: Atom,
+    },
+    /// A function call supplies the wrong number of arguments.
+    WrongNumberOfArguments {
+        /// The called function.
+        function: Symbol,
+        /// The registered argument count.
+        expected: usize,
+        /// The number of supplied arguments.
+        actual: usize,
+    },
+    /// A built-in function is called with an unsupported number of arguments.
+    UnsupportedBuiltinArity {
+        /// The built-in function.
+        function: Symbol,
+        /// The supported argument count.
+        expected: usize,
+        /// The number of supplied arguments.
+        actual: usize,
+    },
+    /// A function registration disagrees with the existing number of tag arguments.
+    InconsistentFunctionTagCount {
+        /// The function being registered.
+        function: Symbol,
+        /// The previously registered tag count.
+        expected: usize,
+        /// The new registration's tag count.
+        actual: usize,
+    },
+    /// A function definition conflicts with an existing definition.
+    FunctionRedefined {
+        /// The function being redefined.
+        function: Atom,
+    },
+    /// The evaluation domain cannot represent the imaginary unit required by the expression.
+    NumericalTypeDoesNotSupportImaginaryUnit,
+    /// An expression could not be evaluated.
+    EvaluationFailed {
+        /// The expression being evaluated.
+        expression: Atom,
+        /// The underlying failure message.
+        reason: String,
+    },
+    /// An evaluation tree could not be constructed.
+    EvaluationTreeConstructionFailed {
+        /// The expression being converted.
+        expression: Atom,
+        /// The underlying failure message.
+        reason: String,
+    },
+    /// An evaluator could not be constructed.
+    EvaluatorConstructionFailed {
+        /// The expression being converted.
+        expression: Atom,
+        /// The underlying failure message.
+        reason: String,
+    },
+    /// A joint evaluator for several expressions could not be constructed.
+    MultiEvaluatorConstructionFailed {
+        /// The number of requested expressions.
+        expression_count: usize,
+        /// The underlying failure message.
+        reason: String,
+    },
+    /// No evaluator is registered for an expression in the requested numerical domain.
+    MissingEvaluator {
+        /// The expression requiring an evaluator.
+        expression: Atom,
+        /// The requested evaluator type.
+        eval_type: String,
+    },
+}
+
+impl std::error::Error for EvaluationError {}
+
+impl std::fmt::Display for EvaluationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvaluationError::NotIndeterminate { atom } => {
+                write!(f, "atom is not indeterminate: {atom:?}")
+            }
+            EvaluationError::InvalidParameterCount { expected, actual } => {
+                write!(
+                    f,
+                    "invalid parameter count: expected {expected}, got {actual}"
+                )
+            }
+            EvaluationError::InvalidOutputCount { expected, actual } => {
+                write!(f, "invalid output count: expected {expected}, got {actual}")
+            }
+            EvaluationError::UnsupportedHotStart => {
+                f.write_str("hot start is not supported before the deprecation of Expression")
+            }
+            EvaluationError::UnsupportedCoefficient { coefficient } => {
+                write!(
+                    f,
+                    "{coefficient} coefficients are not supported for evaluation"
+                )
+            }
+            EvaluationError::UndefinedVariable { symbol } => {
+                write!(
+                    f,
+                    "variable {symbol} is not in a parameter map and does not have an evaluator"
+                )
+            }
+            EvaluationError::UndefinedFunction { expression } => {
+                write!(
+                    f,
+                    "function {expression} is not in a parameter map and does not have an evaluator"
+                )
+            }
+            EvaluationError::WrongNumberOfArguments {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "function {} called with wrong number of arguments: {actual} vs {expected}",
+                function.get_name()
+            ),
+            EvaluationError::UnsupportedBuiltinArity {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "builtin function {} must have exactly {expected} argument(s), got {actual}",
+                function.get_name()
+            ),
+            EvaluationError::InconsistentFunctionTagCount {
+                function,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "function {} cannot be registered with {actual} tag(s); it was already registered with {expected} tag(s)",
+                function.get_name()
+            ),
+            EvaluationError::FunctionRedefined { function } => {
+                write!(f, "function {} is redefined", function.to_plain_string())
+            }
+
+            EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
+                f.write_str("numerical type does not support imaginary unit")
+            }
+            EvaluationError::EvaluationFailed { expression, reason } => {
+                write!(f, "could not evaluate {expression}: {reason}")
+            }
+            EvaluationError::EvaluationTreeConstructionFailed { expression, reason } => write!(
+                f,
+                "could not build an evaluation tree for {expression}: {reason}"
+            ),
+            EvaluationError::EvaluatorConstructionFailed { expression, reason } => {
+                write!(f, "could not build an evaluator for {expression}: {reason}")
+            }
+            EvaluationError::MultiEvaluatorConstructionFailed {
+                expression_count,
+                reason,
+            } => write!(
+                f,
+                "could not build an evaluator for {expression_count} expressions: {reason}"
+            ),
+            EvaluationError::MissingEvaluator {
+                expression,
+                eval_type,
+            } => {
+                write!(
+                    f,
+                    "could not find an evaluator of type {eval_type} for {expression}"
+                )
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct SplitExpression<T> {
@@ -24,7 +240,7 @@ fn register_constant_external_container<T>(
 ) -> usize {
     let index = if let Some(index) = external_functions
         .iter()
-        .position(|x| x.symbol == symbol && x.tags == tags)
+        .position(|x| x.symbol == symbol && x.tags == tags && x.fixed_args == fixed_args)
     {
         index
     } else {
@@ -42,46 +258,81 @@ fn register_constant_external_container<T>(
     constant_index
 }
 
+// Shared by the root and every function compiled in this build.
+struct LinearizationContext<'a> {
+    external_functions: Vec<ExternalFunctionContainer<Complex<Rational>>>,
+    // Hidden global slots for each body; a pending entry detects recursive definitions.
+    functions: HashMap<usize, Option<Vec<Slot>>>,
+    // None denotes a registered constant whose value is resolved in the numerical domain.
+    constants: Vec<Option<Complex<Rational>>>,
+    constant_indices: HashMap<Complex<Rational>, usize>,
+    // None denotes a callable; Some contains the fixed arguments of a constant.
+    external_indices: HashMap<(Symbol, Vec<Atom>, Option<Vec<Complex<Rational>>>), usize>,
+    inputs: Vec<AtomView<'a>>,
+    expanding_functions: HashSet<usize>,
+}
+
+impl LinearizationContext<'_> {
+    fn constant_slot(&mut self, constant: Complex<Rational>) -> Slot {
+        let index = *self
+            .constant_indices
+            .entry(constant.clone())
+            .or_insert_with(|| {
+                self.constants.push(Some(constant));
+                self.constants.len() - 1
+            });
+        Slot::Const(index)
+    }
+
+    fn external_constant_slot(
+        &mut self,
+        symbol: Symbol,
+        tags: Vec<Atom>,
+        fixed_args: Vec<Complex<Rational>>,
+    ) -> Slot {
+        let index = *self
+            .external_indices
+            .entry((symbol, tags.clone(), Some(fixed_args.clone())))
+            .or_insert_with(|| {
+                let mut external = ExternalFunctionContainer::new(symbol, tags, fixed_args);
+                external.constant_index = Some(self.constants.len());
+                self.constants.push(None);
+                self.external_functions.push(external);
+                self.external_functions.len() - 1
+            });
+        Slot::Const(self.external_functions[index].constant_index.unwrap())
+    }
+}
+
 impl<'a> AtomView<'a> {
     pub(crate) fn to_evaluator(
         expressions: &[Self],
         fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
         if settings.verbose {
             let mut cse = HashSet::default();
-            let (mut n_add, mut n_mul) = (0, 0);
+            let mut count = OperationCount::default();
             for e in expressions {
-                let (add, mul) = e.count_operations_with_subexpressions(&mut cse);
-                n_add += add;
-                n_mul += mul;
+                count += e.count_operations_with_subexpressions(&mut cse);
             }
-            info!(
-                "Initial ops: {} additions and {} multiplications",
-                n_add, n_mul
-            );
+            info!("Initial ops: {}", count);
         }
 
         if settings.horner_iterations == 0 {
-            return Self::linearize_views(expressions, fn_map, params, settings);
+            return Self::linearize_multiple(expressions, fn_map, params, settings);
         }
 
-        let horner_inputs = expressions
+        let horner_input_views = expressions
             .iter()
-            .map(|x| x.to_owned())
-            .chain(fn_map.bodies().map(|x| x.to_owned()))
-            .collect::<Vec<_>>();
-        let horner_input_views: Vec<AtomView<'_>> = horner_inputs
-            .iter()
-            .map(|x| x.as_view())
+            .copied()
+            .chain(fn_map.bodies())
             .collect::<Vec<_>>();
 
         let v = match &settings.hot_start {
             Some(_) => {
-                return Err(
-                    "Hot start not supported before the deprecation of Expression".to_owned(),
-                );
+                return Err(EvaluationError::UnsupportedHotStart);
             }
             None => {
                 // start with an occurence order Horner scheme
@@ -109,21 +360,16 @@ impl<'a> AtomView<'a> {
 
         let hornered_expressions = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(&scheme), true))
+            .map(|x| x.horner_scheme(Some(&scheme), true, true))
             .collect::<Vec<_>>();
 
         if settings.horner_iterations == 1 && settings.verbose {
             let mut cse = HashSet::default();
-            let (mut n_add, mut n_mul) = (0, 0);
-            for e in &horner_input_views {
-                let (add, mul) = e.count_operations_with_subexpressions(&mut cse);
-                n_add += add;
-                n_mul += mul;
+            let mut count = OperationCount::default();
+            for e in &hornered_expressions {
+                count += e.as_view().count_operations_with_subexpressions(&mut cse);
             }
-            info!(
-                "Horner scheme ops: {} additions and {} multiplications",
-                n_add, n_mul
-            );
+            info!("Horner scheme ops: {}", count);
         }
 
         let mut f = fn_map.clone();
@@ -149,11 +395,8 @@ impl<'a> AtomView<'a> {
             }
 
             if e.settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common instructions: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                let count = e.count_operations();
+                info!("Removed {} common instructions: {}", r, count);
             }
         }
 
@@ -165,11 +408,8 @@ impl<'a> AtomView<'a> {
             }
 
             if e.settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                let count = e.count_operations();
+                info!("Removed {} common pairs: {}", r, count);
             }
         }
 
@@ -177,6 +417,9 @@ impl<'a> AtomView<'a> {
         e
     }
 
+    /// Search for a Horner variable order that reduces the combined operation
+    /// count of `expressions`. `vars` supplies the initial order; `settings`
+    /// controls the search budget and parallelism. Returns the best order found.
     pub fn optimize_horner_scheme_multiple(
         expressions: &[Self],
         vars: &[Indeterminate],
@@ -188,26 +431,23 @@ impl<'a> AtomView<'a> {
 
         let horner: Vec<_> = expressions
             .iter()
-            .map(|x| x.horner_scheme(Some(&vars), true))
+            .map(|x| x.horner_scheme(Some(vars), true, true))
             .collect();
         let mut subexpr = HashSet::default();
-        let mut best_ops = (0, 0);
+        let mut best_ops = OperationCount::default();
         for h in &horner {
             let ops = h
                 .as_view()
                 .count_operations_with_subexpressions(&mut subexpr);
-            best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
+            best_ops += ops;
         }
 
         if settings.verbose {
-            info!(
-                "Initial Horner scheme ops: {} additions and {} multiplications",
-                best_ops.0, best_ops.1
-            );
+            info!("Initial Horner scheme ops: {}", best_ops);
         }
 
-        let best_mul = Arc::new(AtomicUsize::new(best_ops.1));
-        let best_add = Arc::new(AtomicUsize::new(best_ops.0));
+        let best_mul = Arc::new(AtomicUsize::new(best_ops.multiplications));
+        let best_add = Arc::new(AtomicUsize::new(best_ops.additions));
         let best_scheme = Arc::new(Mutex::new(vars.to_vec()));
 
         let n_iterations = settings.horner_iterations.max(1) - 1;
@@ -222,12 +462,8 @@ impl<'a> AtomView<'a> {
         };
         let p_ref = &permutations;
 
-        let n_cores = if LicenseManager::is_licensed() {
-            settings.n_cores
-        } else {
-            1
-        }
-        .min(n_iterations);
+        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -244,6 +480,7 @@ impl<'a> AtomView<'a> {
                 let abort = abort.clone();
 
                 let mut op = move || {
+                    let _unlock = inherited_unlock.activate();
                     for j in 0..n_iterations / n_cores {
                         if abort.load(Ordering::Relaxed) {
                             return;
@@ -286,54 +523,58 @@ impl<'a> AtomView<'a> {
 
                         let horner: Vec<_> = expressions
                             .iter()
-                            .map(|x| x.horner_scheme(Some(&cvars), true))
+                            .map(|x| x.horner_scheme(Some(&cvars), true, true))
                             .collect();
                         let mut subexpr = HashSet::default();
-                        let mut cur_ops = (0, 0);
+                        let mut cur_ops = OperationCount::default();
 
                         for h in &horner {
                             let ops = h
                                 .as_view()
                                 .count_operations_with_subexpressions(&mut subexpr);
-                            cur_ops = (cur_ops.0 + ops.0, cur_ops.1 + ops.1);
+                            cur_ops += ops;
                         }
 
                         // prefer fewer multiplications
-                        if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
+                        if cur_ops.multiplications <= last_mul
+                            || cur_ops.multiplications == last_mul && cur_ops.additions <= last_add
+                        {
                             if settings.verbose {
                                 info!(
-                                    "Accept move at step {}/{}: {} + and {} ×",
+                                    "Accept move at step {}/{}: {}",
                                     j,
                                     settings.horner_iterations / n_cores,
-                                    cur_ops.0,
-                                    cur_ops.1
+                                    cur_ops
                                 );
                             }
 
-                            last_add = cur_ops.0;
-                            last_mul = cur_ops.1;
+                            last_add = cur_ops.additions;
+                            last_mul = cur_ops.multiplications;
 
-                            if cur_ops.1 <= best_mul.load(Ordering::Relaxed)
-                                || cur_ops.1 == best_mul.load(Ordering::Relaxed)
-                                    && cur_ops.0 <= best_add.load(Ordering::Relaxed)
+                            if cur_ops.multiplications <= best_mul.load(Ordering::Relaxed)
+                                || cur_ops.multiplications == best_mul.load(Ordering::Relaxed)
+                                    && cur_ops.additions <= best_add.load(Ordering::Relaxed)
                             {
                                 let mut best_scheme = best_scheme.lock().unwrap();
 
                                 // check again if it is the best now that we have locked
                                 let best_mul_l = best_mul.load(Ordering::Relaxed);
                                 let best_add_l = best_add.load(Ordering::Relaxed);
-                                if cur_ops.1 <= best_mul_l
-                                    || cur_ops.1 == best_mul_l && cur_ops.0 <= best_add_l
+                                if cur_ops.multiplications <= best_mul_l
+                                    || cur_ops.multiplications == best_mul_l
+                                        && cur_ops.additions <= best_add_l
                                 {
-                                    if cur_ops.0 == best_add_l && cur_ops.1 == best_mul_l {
+                                    if cur_ops.additions == best_add_l
+                                        && cur_ops.multiplications == best_mul_l
+                                    {
                                         if *best_scheme < cvars {
                                             // on a draw, accept the lexicographical minimum
                                             // to get a deterministic scheme
                                             *best_scheme = cvars.clone();
                                         }
                                     } else {
-                                        best_mul.store(cur_ops.1, Ordering::Relaxed);
-                                        best_add.store(cur_ops.0, Ordering::Relaxed);
+                                        best_mul.store(cur_ops.multiplications, Ordering::Relaxed);
+                                        best_add.store(cur_ops.additions, Ordering::Relaxed);
                                         *best_scheme = cvars.clone();
                                     }
                                 }
@@ -370,59 +611,102 @@ impl<'a> AtomView<'a> {
         fn_map: &FunctionMap,
         params: &[Atom],
         settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
-        let expression_views = expressions
+    ) -> Result<ExpressionEvaluator<Complex<Rational>>, EvaluationError> {
+        let expressions = expressions
             .iter()
             .map(|e| e.as_atom_view())
             .collect::<Vec<_>>();
-
-        Self::linearize_views(&expression_views, fn_map, params, settings)
+        let params = params.iter().map(|p| p.as_view()).collect::<Vec<_>>();
+        let mut context = LinearizationContext {
+            external_functions: Vec::new(),
+            functions: HashMap::default(),
+            constants: Vec::new(),
+            constant_indices: HashMap::default(),
+            external_indices: HashMap::default(),
+            inputs: params.clone(),
+            expanding_functions: HashSet::default(),
+        };
+        let (instr, results) = AtomView::linearize_multiple_impl(
+            &expressions,
+            fn_map,
+            &params,
+            &settings,
+            &mut context,
+        )?;
+        let param_count = params.len();
+        let reserved_indices = param_count + context.constants.len();
+        let mut stack = vec![Complex::default(); reserved_indices + instr.len()];
+        let (instructions, result_indices) = AtomView::lower_instructions(
+            instr,
+            results,
+            param_count,
+            reserved_indices,
+            &mut context,
+        )?;
+        for (slot, constant) in stack[param_count..reserved_indices]
+            .iter_mut()
+            .zip(context.constants)
+        {
+            if let Some(value) = constant {
+                *slot = value;
+            }
+        }
+        Ok(ExpressionEvaluator {
+            stack,
+            param_count,
+            reserved_indices,
+            instructions,
+            result_indices,
+            external_fns: context.external_functions,
+            settings,
+        })
     }
 
-    fn linearize_views<'b>(
-        expression_views: &[AtomView<'b>],
-        fn_map: &FunctionMap,
-        params: &[Atom],
-        settings: OptimizationSettings,
-    ) -> Result<ExpressionEvaluator<Complex<Rational>>, String> {
-        let mut constants = Vec::new();
-        let mut constant_map = HashMap::new();
+    fn linearize_multiple_impl(
+        expressions: &[AtomView<'a>],
+        fn_map: &'a FunctionMap,
+        params: &[AtomView<'a>],
+        settings: &OptimizationSettings,
+        context: &mut LinearizationContext<'a>,
+    ) -> Result<(Vec<Instruction>, Vec<Slot>), EvaluationError> {
         let mut instr = Vec::new();
 
         // we can only safely remove entries that don't depend on any of the function arguments
         let mut subexpression: HashMap<AtomView, Slot> = HashMap::default();
 
-        let mut external_functions = vec![];
-
         let mut result_indices = vec![];
-        let mut arg_stack = vec![];
-        for expr in expression_views {
+        let args = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, Slot::Param(i)))
+            .collect();
+        for expr in expressions {
             let res = expr.linearize_impl(
                 fn_map,
-                params,
-                &mut constants,
-                &mut constant_map,
-                &mut external_functions,
+                context,
+                &args,
+                settings,
                 &mut instr,
                 &mut subexpression,
-                &mut arg_stack,
-                0,
             )?;
             result_indices.push(res);
         }
 
-        let reserved_indices = params.len() + constants.len();
+        Ok((instr, result_indices))
+    }
 
-        let mut stack = vec![Complex::default(); params.len() + constants.len() + instr.len()];
-        for (s, c) in stack.iter_mut().skip(params.len()).zip(constants) {
-            *s = c;
-        }
-
+    fn lower_instructions(
+        instr: Vec<Instruction>,
+        results: Vec<Slot>,
+        param_count: usize,
+        reserved_indices: usize,
+        context: &mut LinearizationContext<'a>,
+    ) -> Result<(Vec<(Instr, ComplexPhase)>, Vec<usize>), EvaluationError> {
         macro_rules! slot_map {
             ($s: expr) => {
                 match $s {
                     Slot::Param(i) => i,
-                    Slot::Const(i) => params.len() + i,
+                    Slot::Const(i) => param_count + i,
                     Slot::Temp(i) => reserved_indices + i,
                     Slot::Out(_) => unreachable!(),
                 }
@@ -436,7 +720,7 @@ impl<'a> AtomView<'a> {
                     instructions.push((
                         Instr::Add(
                             slot_map!(o),
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -445,7 +729,7 @@ impl<'a> AtomView<'a> {
                     instructions.push((
                         Instr::Mul(
                             slot_map!(o),
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -463,38 +747,39 @@ impl<'a> AtomView<'a> {
                     ));
                 }
                 Instruction::Fun(o, b, _) => {
-                    let (sym, tags, args) = &*b;
+                    let (sym, tags, args) = *b;
 
                     if sym.is_fixed_builtin() {
                         if args.len() != 1 {
-                            return Err(format!(
-                                "Builtin function {} must have exactly one argument",
-                                sym.get_name()
-                            ));
+                            return Err(EvaluationError::UnsupportedBuiltinArity {
+                                function: sym,
+                                expected: 1,
+                                actual: args.len(),
+                            });
                         }
                         instructions.push((
-                            Instr::BuiltinFun(slot_map!(o), sym.clone(), slot_map!(args[0])),
+                            Instr::BuiltinFun(slot_map!(o), sym, slot_map!(args[0])),
                             ComplexPhase::default(),
                         ));
                         continue;
                     }
 
                     let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
-                    let index = if let Some(index) = external_functions
-                        .iter()
-                        .position(|x| x.symbol == *sym && x.tags == tags)
-                    {
-                        index
-                    } else {
-                        external_functions.push(ExternalFunctionContainer::new(*sym, tags, vec![]));
-                        external_functions.len() - 1
-                    };
+                    let index = *context
+                        .external_indices
+                        .entry((sym, tags.clone(), None))
+                        .or_insert_with(|| {
+                            context
+                                .external_functions
+                                .push(ExternalFunctionContainer::new(sym, tags, vec![]));
+                            context.external_functions.len() - 1
+                        });
 
                     instructions.push((
                         Instr::ExternalFun(
                             slot_map!(o),
                             index,
-                            args.clone().into_iter().map(|x| slot_map!(x)).collect(),
+                            args.into_iter().map(|x| slot_map!(x)).collect(),
                         ),
                         ComplexPhase::default(),
                     ));
@@ -523,37 +808,215 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        Ok(ExpressionEvaluator {
-            stack,
-            param_count: params.len(),
-            reserved_indices,
-            instructions: instructions,
-            result_indices: result_indices.iter().map(|s| slot_map!(*s)).collect(),
-            external_fns: external_functions,
-            settings: settings.clone(),
-        })
+        Ok((
+            instructions,
+            results.into_iter().map(|s| slot_map!(s)).collect(),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn linearize_function_call(
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        settings: &OptimizationSettings,
+        symbol: Symbol,
+        tags: Vec<Atom>,
+        function: &'a Expr,
+        arg_slots: Vec<Slot>,
+        instr: &mut Vec<Instruction>,
+    ) -> Result<Slot, EvaluationError> {
+        if arg_slots.len() != function.args.len() {
+            return Err(EvaluationError::WrongNumberOfArguments {
+                function: symbol,
+                expected: function.args.len() + function.tag_len,
+                actual: arg_slots.len() + tags.len(),
+            });
+        }
+        let recursive_call = || EvaluationError::EvaluatorConstructionFailed {
+            expression: symbol.call(&tags),
+            reason: "recursive function dependency".into(),
+        };
+        if !context.functions.contains_key(&function.id) {
+            // A pending entry detects recursion. No caller bindings enter this compilation:
+            // root inputs precede declared arguments, which shadow matching input names.
+            context.functions.insert(function.id, None);
+            let body_params = context
+                .inputs
+                .iter()
+                .copied()
+                .chain(function.args.iter().map(|arg| arg.as_view()))
+                .collect::<Vec<_>>();
+            let (mut instr, mut result_indices) = Self::linearize_multiple_impl(
+                &[function.body.as_view()],
+                fn_map,
+                &body_params,
+                settings,
+                context,
+            )?;
+            // Root inputs and constants stay symbolic during construction. Compact only
+            // the surviving references, including globals forwarded to callees, once the
+            // body is complete. Declared arguments retain their original positions.
+            let mut globals = Vec::new();
+            let root_param_count = context.inputs.len();
+            let mut param_count = function.args.len();
+            let mut indices = HashMap::default();
+            let mut lower_global = |slot: &mut Slot| match *slot {
+                Slot::Param(index) if index >= root_param_count => {
+                    *slot = Slot::Param(index - root_param_count);
+                }
+                Slot::Param(_) | Slot::Const(_) => {
+                    let index = *indices.entry(*slot).or_insert_with(|| {
+                        let index = param_count + globals.len();
+                        globals.push(*slot);
+                        index
+                    });
+                    *slot = Slot::Param(index);
+                }
+                Slot::Temp(_) | Slot::Out(_) => {}
+            };
+            for instruction in &mut instr {
+                match instruction {
+                    Instruction::Add(_, args, _) | Instruction::Mul(_, args, _) => {
+                        args.iter_mut().for_each(&mut lower_global);
+                    }
+                    Instruction::Pow(_, base, _, _) | Instruction::Assign(_, base) => {
+                        lower_global(base);
+                    }
+                    Instruction::Powf(_, base, exp, _) => {
+                        lower_global(base);
+                        lower_global(exp);
+                    }
+                    Instruction::Fun(_, function, _) => {
+                        function.2.iter_mut().for_each(&mut lower_global);
+                    }
+                    Instruction::IfElse(cond, _) => lower_global(cond),
+                    Instruction::Join(_, cond, then_value, else_value) => {
+                        lower_global(cond);
+                        lower_global(then_value);
+                        lower_global(else_value);
+                    }
+                    Instruction::Goto(_) | Instruction::Label(_) => {}
+                }
+            }
+            result_indices.iter_mut().for_each(lower_global);
+            param_count += globals.len();
+
+            let stack_size = param_count + instr.len();
+            let (instructions, result_indices) =
+                Self::lower_instructions(instr, result_indices, param_count, param_count, context)?;
+            let body = FunctionBody {
+                instructions,
+                param_count,
+                result_index: result_indices[0],
+                stack_size,
+            };
+            // Recursive compilation has already registered every callee.
+            context.external_indices.insert(
+                (symbol, tags.clone(), None),
+                context.external_functions.len(),
+            );
+            context
+                .external_functions
+                .push(ExternalFunctionContainer::with_body(
+                    symbol,
+                    tags.clone(),
+                    Arc::new(body),
+                ));
+            context.functions.insert(function.id, Some(globals));
+        }
+        let globals = context.functions[&function.id]
+            .as_ref()
+            .ok_or_else(recursive_call)?;
+
+        // Global slots bypass local name bindings, including shadowing arguments.
+        // The caller's final lowering pass will compact them in its own signature.
+        let mut call_args = arg_slots;
+        call_args.extend_from_slice(globals);
+
+        let result = Slot::Temp(instr.len());
+        instr.push(Instruction::Fun(
+            result,
+            Box::new((
+                symbol,
+                tags.iter().map(|tag| tag.to_canonical_string()).collect(),
+                call_args,
+            )),
+            false,
+        ));
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn linearize_inline_function(
+        &self,
+        function: &'a Expr,
+        arg_slots: Vec<Slot>,
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+    ) -> Result<Slot, EvaluationError> {
+        if !context.expanding_functions.insert(function.id) {
+            return Err(EvaluationError::EvaluatorConstructionFailed {
+                expression: self.to_owned(),
+                reason: "recursive function or alias dependency".into(),
+            });
+        }
+        let mut body_params = HashMap::default();
+        if !function.is_alias {
+            body_params.extend(
+                context
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (*p, Slot::Param(i))),
+            );
+            body_params.extend(
+                function
+                    .args
+                    .iter()
+                    .zip(arg_slots)
+                    .map(|(arg, slot)| (arg.as_view(), slot)),
+            );
+        }
+        // Aliases inherit the caller's bindings and cache. Ordinary functions, including
+        // zero-argument functions, get their own scope and expression cache.
+        let mut body_subexpressions = HashMap::default();
+        let result = function.body.as_view().linearize_impl(
+            fn_map,
+            context,
+            if function.is_alias {
+                params
+            } else {
+                &body_params
+            },
+            settings,
+            instr,
+            if function.is_alias {
+                subexpressions
+            } else {
+                &mut body_subexpressions
+            },
+        );
+        context.expanding_functions.remove(&function.id);
+        result
     }
 
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
         fn_map: &'a FunctionMap,
-        params: &[Atom],
-        constants: &mut Vec<Complex<Rational>>,
-        constant_map: &mut HashMap<Complex<Rational>, usize>,
-        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<AtomView<'a>, Slot>,
-        args: &mut Vec<(AtomView<'a>, Slot)>,
-        arg_start: usize,
-    ) -> Result<Slot, String> {
+    ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
-            if let Some(p) = args.iter().skip(arg_start).find(|s| *self == s.0) {
-                return Ok(p.1);
-            }
-
-            if let Some(p) = params.iter().position(|a| a.as_view() == *self) {
-                return Ok(Slot::Param(p));
+            if let Some(slot) = params.get(self) {
+                return Ok(*slot);
             }
         }
 
@@ -565,14 +1028,11 @@ impl<'a> AtomView<'a> {
             AtomView::Alias(a) => {
                 return a.get_body().linearize_impl(
                     fn_map,
+                    context,
                     params,
-                    constants,
-                    constant_map,
-                    external_functions,
+                    settings,
                     instr,
                     subexpressions,
-                    args,
-                    arg_start,
                 );
             }
             AtomView::Num(n) => {
@@ -585,69 +1045,99 @@ impl<'a> AtomView<'a> {
                         // TODO: converting back to rational is slow
                         Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
                     }
-                    CoefficientView::Indeterminate => Err("Cannot convert indeterminate")?,
-                    CoefficientView::Infinity(_) => Err("Cannot convert infinity")?,
-                    CoefficientView::FiniteField(_, _) => {
-                        Err("Finite field not yet supported for evaluation".to_string())?
+                    CoefficientView::Indeterminate => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "indeterminate".to_string(),
+                        });
                     }
-                    CoefficientView::RationalPolynomial(_) => Err(
-                        "Rational polynomial coefficient not yet supported for evaluation"
-                            .to_string(),
-                    )?,
+                    CoefficientView::Infinity(_) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "infinity".to_string(),
+                        });
+                    }
+                    CoefficientView::FiniteField(_, _) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "finite field".to_string(),
+                        });
+                    }
+                    CoefficientView::RationalPolynomial(_) => {
+                        return Err(EvaluationError::UnsupportedCoefficient {
+                            coefficient: "rational polynomial".to_string(),
+                        });
+                    }
                 };
 
-                if let Some(&i) = constant_map.get(&c) {
-                    return Ok(Slot::Const(i));
-                }
-
-                let i = constants.len();
-                constants.push(c.clone());
-                constant_map.insert(c, i);
-                Slot::Const(i)
+                context.constant_slot(c)
             }
             AtomView::Var(v) => {
                 let s = v.get_symbol();
-                if s.get_evaluation_info().is_some() {
-                    let i = register_constant_external_container(
-                        external_functions,
+
+                if let Some(expr) = fn_map.get(*self) {
+                    if !expr.args.is_empty() {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: s,
+                            expected: expr.args.len(),
+                            actual: 0,
+                        });
+                    }
+                    if expr.is_alias || expr.options.should_inline() {
+                        return self.linearize_inline_function(
+                            expr,
+                            vec![],
+                            fn_map,
+                            context,
+                            params,
+                            settings,
+                            instr,
+                            subexpressions,
+                        );
+                    }
+
+                    return Self::linearize_function_call(
+                        fn_map,
+                        context,
+                        settings,
                         s,
                         vec![],
+                        expr,
                         vec![],
-                        constants,
+                        instr,
                     );
-                    return Ok(Slot::Const(i));
                 }
 
-                Err(format!(
-                    "Variable {} not in constant map",
-                    v.get_symbol().get_name()
-                ))?
+                if s.get_evaluation_info().is_some() {
+                    return Ok(context.external_constant_slot(s, vec![], vec![]));
+                }
+
+                return Err(EvaluationError::UndefinedVariable { symbol: s });
             }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
                 .contains(&name.get_id())
                 {
-                    assert!(f.get_nargs() == 1);
+                    if f.get_nargs() != 1 {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 1,
+                            actual: f.get_nargs(),
+                        });
+                    }
+
                     let arg = f.iter().next().unwrap();
                     let arg_eval = arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         subexpressions,
-                        args,
-                        arg_start,
                     )?;
 
                     let temp = Slot::Temp(instr.len());
@@ -660,10 +1150,11 @@ impl<'a> AtomView<'a> {
 
                 let fun = if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
@@ -675,29 +1166,25 @@ impl<'a> AtomView<'a> {
                     let subexpression_len = subexpressions.len();
                     let cond = cond.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         subexpressions,
-                        args,
-                        arg_start,
                     )?;
 
                     // try to resolve the condition if it is fully numeric
                     fn resolve(
                         cond: Slot,
                         instr: &[Instruction],
-                        constants: &[Complex<Rational>],
+                        constants: &[Option<Complex<Rational>>],
                     ) -> Option<Complex<Rational>> {
                         let i = match cond {
                             Slot::Param(_) => {
                                 return None;
                             }
                             Slot::Const(i) => {
-                                // TODO: check that this constant is not an external function evaluation slot!
-                                return Some(constants[i].clone());
+                                return constants[i].clone();
                             }
                             Slot::Temp(t) => t,
                             Slot::Out(_) => {
@@ -745,7 +1232,7 @@ impl<'a> AtomView<'a> {
                         }
                     }
 
-                    if let Some(cond_res) = resolve(cond, instr, constants) {
+                    if let Some(cond_res) = resolve(cond, instr, &context.constants) {
                         // remove dead code
                         instr.truncate(instr_len);
                         if subexpression_len != subexpressions.len() {
@@ -762,26 +1249,20 @@ impl<'a> AtomView<'a> {
                         let res = if !cond_res.is_zero() {
                             then_branch.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
-                                constants,
-                                constant_map,
-                                external_functions,
+                                settings,
                                 instr,
                                 subexpressions,
-                                args,
-                                arg_start,
                             )?
                         } else {
                             else_branch.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
-                                constants,
-                                constant_map,
-                                external_functions,
+                                settings,
                                 instr,
                                 subexpressions,
-                                args,
-                                arg_start,
                             )?
                         };
 
@@ -795,14 +1276,11 @@ impl<'a> AtomView<'a> {
                     let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
                     let then_branch = then_branch.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         &mut sub_expr_pos_child,
-                        args,
-                        arg_start,
                     )?;
 
                     let label_end_pos = instr.len();
@@ -810,17 +1288,14 @@ impl<'a> AtomView<'a> {
                     instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
                     instr.push(Instruction::Label(instr.len()));
 
-                    sub_expr_pos_child.clone_from(&subexpressions);
+                    sub_expr_pos_child.clone_from(subexpressions);
                     let else_branch = else_branch.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         &mut sub_expr_pos_child,
-                        args,
-                        arg_start,
                     )?;
 
                     instr[label_end_pos] = Instruction::Goto(instr.len());
@@ -847,14 +1322,7 @@ impl<'a> AtomView<'a> {
 
                     // check if it a constant external function
                     if f.get_nargs() == eval_info.get_tag_count() + fixed_args.len() {
-                        let i = register_constant_external_container(
-                            external_functions,
-                            name,
-                            tags,
-                            fixed_args,
-                            constants,
-                        );
-                        return Ok(Slot::Const(i));
+                        return Ok(context.external_constant_slot(name, tags, fixed_args));
                     };
 
                     let eval_args = f
@@ -863,14 +1331,11 @@ impl<'a> AtomView<'a> {
                         .map(|arg| {
                             arg.linearize_impl(
                                 fn_map,
+                                context,
                                 params,
-                                constants,
-                                constant_map,
-                                external_functions,
+                                settings,
                                 instr,
                                 subexpressions,
-                                args,
-                                arg_start,
                             )
                         })
                         .collect::<Result<_, _>>()?;
@@ -885,95 +1350,86 @@ impl<'a> AtomView<'a> {
                         )),
                         false,
                     ));
+                    // Use the same scope-local cache as arithmetic expressions.
+                    // This branch returns before the common insertion below.
+                    subexpressions.insert(*self, temp);
                     return Ok(temp);
                 } else {
-                    return Err(format!("Undefined function {}", self.to_plain_string()));
+                    return Err(EvaluationError::UndefinedFunction {
+                        expression: self.to_owned(),
+                    });
                 };
 
                 {
                     let Expr {
                         tag_len,
                         args: arg_spec,
-                        body: e,
+                        options,
                         ..
                     } = fun;
 
                     if f.get_nargs() != arg_spec.len() + tag_len {
-                        return Err(format!(
-                            "Function {} called with wrong number of arguments: {} vs {}",
-                            f.get_symbol().get_name(),
-                            f.get_nargs(),
-                            arg_spec.len() + tag_len
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: f.get_symbol(),
+                            expected: arg_spec.len() + tag_len,
+                            actual: f.get_nargs(),
+                        });
                     }
 
-                    let old_arg_stack_len = args.len();
-
-                    let mut arg_shadowed = false;
-                    for (eval_arg, arg_spec) in f.iter().skip(*tag_len).zip(arg_spec) {
+                    let mut arg_slots = Vec::with_capacity(arg_spec.len());
+                    for eval_arg in f.iter().skip(*tag_len) {
                         let slot = eval_arg.linearize_impl(
                             fn_map,
+                            context,
                             params,
-                            constants,
-                            constant_map,
-                            external_functions,
+                            settings,
                             instr,
                             subexpressions,
-                            args,
-                            arg_start,
                         )?;
 
-                        if args.iter().any(|(a, _)| *a == arg_spec.as_view()) {
-                            arg_shadowed = true;
-                        }
-
-                        args.push((arg_spec.as_view(), slot));
+                        arg_slots.push(slot);
                     }
 
-                    // inline function call
-                    // we have to use a new subexpression list as the function has arguments that may be different per call
-                    // this means that not all subexpressions will be shared across calls
-                    let mut sub_expr_pos_child = HashMap::default();
-                    let r = e.as_view().linearize_impl(
+                    if !fun.is_alias && !options.should_inline() {
+                        let tags = f.iter().take(*tag_len).map(|tag| tag.to_owned()).collect();
+                        return Self::linearize_function_call(
+                            fn_map, context, settings, name, tags, fun, arg_slots, instr,
+                        );
+                    }
+
+                    self.linearize_inline_function(
+                        fun,
+                        arg_slots,
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
-                        if old_arg_stack_len == args.len() {
-                            subexpressions
-                        } else {
-                            // we can only inherit the subexpressions if the new function argument symbols
-                            // have not been used earlier
-                            if !arg_shadowed {
-                                sub_expr_pos_child.clone_from(subexpressions);
-                            }
-
-                            &mut sub_expr_pos_child
-                        },
-                        args,
-                        old_arg_stack_len,
-                    )?;
-
-                    args.truncate(old_arg_stack_len);
-
-                    r
+                        subexpressions,
+                    )?
                 }
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                let b_eval = b.linearize_impl(
-                    fn_map,
-                    params,
-                    constants,
-                    constant_map,
-                    external_functions,
-                    instr,
-                    subexpressions,
-                    args,
-                    arg_start,
-                )?;
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval =
+                        e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+                    let temp = Slot::Temp(instr.len());
+                    let c = Instruction::Fun(
+                        temp,
+                        Box::new((Symbol::EXP, vec![], vec![e_eval])),
+                        false,
+                    );
+                    instr.push(c);
+
+                    subexpressions.insert(*self, temp);
+                    return Ok(temp);
+                }
+
+                let b_eval =
+                    b.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
@@ -1004,17 +1460,24 @@ impl<'a> AtomView<'a> {
                     return Ok(res);
                 }
 
-                let e_eval = e.linearize_impl(
-                    fn_map,
-                    params,
-                    constants,
-                    constant_map,
-                    external_functions,
-                    instr,
-                    subexpressions,
-                    args,
-                    arg_start,
-                )?;
+                if let Ok(r) = Rational::try_from(e) {
+                    // FIXME: support 3,2 etc as well
+                    if r == (1, 2) {
+                        let temp = Slot::Temp(instr.len());
+                        let c = Instruction::Fun(
+                            temp,
+                            Box::new((Symbol::SQRT, vec![], vec![b_eval])),
+                            false,
+                        );
+                        instr.push(c);
+
+                        subexpressions.insert(*self, temp);
+                        return Ok(temp);
+                    }
+                }
+
+                let e_eval =
+                    e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
 
                 let temp = Slot::Temp(instr.len());
                 instr.push(Instruction::Powf(temp, b_eval, e_eval, false));
@@ -1025,14 +1488,11 @@ impl<'a> AtomView<'a> {
                 for arg in m.iter() {
                     let a = arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         subexpressions,
-                        args,
-                        arg_start,
                     )?;
                     muls.push(a);
                 }
@@ -1048,14 +1508,11 @@ impl<'a> AtomView<'a> {
                 for arg in a.iter() {
                     adds.push(arg.linearize_impl(
                         fn_map,
+                        context,
                         params,
-                        constants,
-                        constant_map,
-                        external_functions,
+                        settings,
                         instr,
                         subexpressions,
-                        args,
-                        arg_start,
                     )?);
                 }
 
@@ -1080,20 +1537,33 @@ pub type ExpressionHash = u64;
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression<T> {
+    /// A cached hash and a numerical constant.
     Const(ExpressionHash, Box<T>),
+    /// A cached hash and an index into the evaluator's parameter storage.
     Parameter(ExpressionHash, usize),
+    /// A cached hash, an index of a defined function, and its argument trees.
     Eval(ExpressionHash, u32, Vec<Expression<T>>),
+    /// A cached hash and the terms of a sum.
     Add(ExpressionHash, Vec<Expression<T>>),
+    /// A cached hash and the factors of a product.
     Mul(ExpressionHash, Vec<Expression<T>>),
+    /// A cached hash and a base raised to an integer exponent.
     Pow(ExpressionHash, Box<(Expression<T>, i64)>),
+    /// A cached hash and a pair of base and exponent expressions.
     Powf(ExpressionHash, Box<(Expression<T>, Expression<T>)>),
+    /// A cached hash and a zero-based index of an argument of the current function.
     ReadArg(ExpressionHash, usize), // read nth function argument
+    /// A cached hash, a built-in function symbol, and its argument.
     BuiltinFun(ExpressionHash, Symbol, Box<Expression<T>>),
+    /// A cached hash, an external function symbol, its symbolic tags, and argument trees.
     Fun(ExpressionHash, Symbol, Vec<String>, Vec<Expression<T>>),
+    /// A cached hash and a condition, true branch, and false branch.
+    /// A zero condition selects the false branch.
     IfElse(
         ExpressionHash,
         Box<(Expression<T>, Expression<T>, Expression<T>)>,
     ),
+    /// A cached hash and an index into the extracted common subexpressions.
     SubExpression(ExpressionHash, usize),
 }
 
@@ -1261,85 +1731,84 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
         }
     }
 
-    // Count the number of additions and multiplications in the expression, counting
+    // Count the number of operations in the expression, counting
     // subexpressions only once.
+    /// Count arithmetic operations, counting each distinct subexpression once.
+    /// `sub_expr` records visited expressions and can be shared across calls to
+    /// measure the combined cost of several trees.
     pub fn count_operations_with_subexpression<'a>(
         &'a self,
         sub_expr: &mut HashMap<&'a Self, usize>,
-    ) -> (usize, usize) {
+    ) -> OperationCount {
         if matches!(
             self,
             Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _)
         ) {
-            return (0, 0);
+            return OperationCount::default();
         }
 
         if sub_expr.contains_key(self) {
-            return (0, 0);
+            return OperationCount::default();
         }
 
         sub_expr.insert(self, 1);
 
         match self {
-            Expression::Const(_, _) => (0, 0),
-            Expression::Parameter(_, _) => (0, 0),
+            Expression::Const(_, _) => OperationCount::default(),
+            Expression::Parameter(_, _) => OperationCount::default(),
             Expression::Eval(_, _, args) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in args {
-                    let (a, m) = arg.count_operations_with_subexpression(sub_expr);
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations_with_subexpression(sub_expr);
                 }
-                (add, mul)
+                count
             }
             Expression::Add(_, a) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in a {
-                    let (a, m) = arg.count_operations_with_subexpression(sub_expr);
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations_with_subexpression(sub_expr);
                 }
-                (add + a.len() - 1, mul)
+                count.additions += a.len() - 1;
+                count
             }
             Expression::Mul(_, m) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in m {
-                    let (a, m) = arg.count_operations_with_subexpression(sub_expr);
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations_with_subexpression(sub_expr);
                 }
-                (add, mul + m.len() - 1)
+                count.multiplications += m.len() - 1;
+                count
             }
             Expression::Pow(_, p) => {
-                let (a, m) = p.0.count_operations_with_subexpression(sub_expr);
-                (a, m + p.1.unsigned_abs() as usize - 1)
+                let mut count = p.0.count_operations_with_subexpression(sub_expr);
+                count.add_integer_power(p.1);
+                count
             }
             Expression::Powf(_, p) => {
-                let (a, m) = p.0.count_operations_with_subexpression(sub_expr);
-                let (a2, m2) = p.1.count_operations_with_subexpression(sub_expr);
-                (a + a2, m + m2 + 1) // not clear how to count this
+                let mut count = p.0.count_operations_with_subexpression(sub_expr)
+                    + p.1.count_operations_with_subexpression(sub_expr);
+                count.add_function_call();
+                count
             }
-            Expression::ReadArg(_, _) => (0, 0),
-            Expression::BuiltinFun(_, _, b) => b.count_operations_with_subexpression(sub_expr), // not clear how to count this, third arg?
-            Expression::SubExpression(_, _) => (0, 0),
+            Expression::ReadArg(_, _) => OperationCount::default(),
+            Expression::BuiltinFun(_, _, b) => {
+                let mut count = b.count_operations_with_subexpression(sub_expr);
+                count.add_function_call();
+                count
+            }
+            Expression::SubExpression(_, _) => OperationCount::default(),
             Expression::Fun(_, _, _, a) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in a {
-                    let (a, m) = arg.count_operations_with_subexpression(sub_expr);
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations_with_subexpression(sub_expr);
                 }
-                (add + a.len() - 1, mul)
+                count.add_function_call();
+                count
             }
             Expression::IfElse(_, b) => {
-                let (a1, m1) = b.0.count_operations_with_subexpression(sub_expr);
-                let (a2, m2) = b.1.count_operations_with_subexpression(sub_expr);
-                let (a3, m3) = b.2.count_operations_with_subexpression(sub_expr);
-                (a1 + a2 + a3, m1 + m2 + m3)
+                b.0.count_operations_with_subexpression(sub_expr)
+                    + b.1.count_operations_with_subexpression(sub_expr)
+                    + b.2.count_operations_with_subexpression(sub_expr)
             }
         }
     }
@@ -1517,33 +1986,6 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
     }
 }
 
-impl<T> ExpressionEvaluator<T> {
-    pub(super) fn export_external_cpps(&self) -> String {
-        let mut seen = HashSet::default();
-        let mut res = String::new();
-
-        for external in &self.external_fns {
-            if external.constant_index.is_some() {
-                continue;
-            }
-
-            let Some(snippet) = external.cpp() else {
-                continue;
-            };
-
-            if seen.insert(snippet.to_owned()) {
-                res += snippet;
-                if !snippet.ends_with('\n') {
-                    res += "\n";
-                }
-                res += "\n";
-            }
-        }
-
-        res
-    }
-}
-
 impl<T: Clone + PartialEq> SplitExpression<T> {
     pub fn map_coeff<T2, F: Fn(&T) -> T2>(&self, f: &F) -> SplitExpression<T2> {
         SplitExpression {
@@ -1602,55 +2044,85 @@ impl<T: Clone + PartialEq> Expression<T> {
             }
         }
     }
+}
 
-    fn strip_constants(&mut self, stack: &mut Vec<T>, param_len: usize) {
+impl Expression<Complex<Rational>> {
+    fn strip_constants(
+        &mut self,
+        constants: &mut Vec<Complex<Rational>>,
+        param_count: usize,
+        external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
+    ) {
         match self {
             Expression::Const(_, t) => {
-                if let Some(p) = stack.iter().skip(param_len).position(|x| x == &**t) {
-                    *self = Expression::Parameter(0, param_len + p);
+                if let Some(p) = constants.iter().position(|x| x == &**t) {
+                    *self = Expression::Parameter(0, param_count + p);
                 } else {
-                    stack.push(t.as_ref().clone());
-                    *self = Expression::Parameter(0, stack.len() - 1);
+                    constants.push(t.as_ref().clone());
+                    *self = Expression::Parameter(0, param_count + constants.len() - 1);
                 }
             }
             Expression::Parameter(_, _) => {}
             Expression::Eval(_, _, e_args) => {
                 for a in e_args {
-                    a.strip_constants(stack, param_len);
+                    a.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::Add(_, a) | Expression::Mul(_, a) => {
                 for arg in a {
-                    arg.strip_constants(stack, param_len);
+                    arg.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::Pow(_, p) => {
-                p.0.strip_constants(stack, param_len);
+                p.0.strip_constants(constants, param_count, external_functions);
             }
             Expression::Powf(_, p) => {
-                p.0.strip_constants(stack, param_len);
-                p.1.strip_constants(stack, param_len);
+                p.0.strip_constants(constants, param_count, external_functions);
+                p.1.strip_constants(constants, param_count, external_functions);
             }
             Expression::ReadArg(_, _) => {}
             Expression::BuiltinFun(_, _, a) => {
-                a.strip_constants(stack, param_len);
+                a.strip_constants(constants, param_count, external_functions);
             }
             Expression::SubExpression(_, _) => {}
-            Expression::Fun(_, _, _, a) => {
+            Expression::Fun(_, symbol, tags, a) => {
+                let fixed_args = a
+                    .iter()
+                    .map(|arg| match arg {
+                        Expression::Const(_, c) => Some(c.as_ref().clone()),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+
+                if let Some(fixed_args) = fixed_args {
+                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
+                    let i = register_constant_external_container(
+                        external_functions,
+                        *symbol,
+                        tags,
+                        fixed_args,
+                        constants,
+                    );
+                    *self = Expression::Parameter(0, param_count + i);
+                    return;
+                }
+
                 for arg in a {
-                    arg.strip_constants(stack, param_len);
+                    arg.strip_constants(constants, param_count, external_functions);
                 }
             }
             Expression::IfElse(_, b) => {
-                b.0.strip_constants(stack, param_len);
-                b.1.strip_constants(stack, param_len);
-                b.2.strip_constants(stack, param_len);
+                b.0.strip_constants(constants, param_count, external_functions);
+                b.1.strip_constants(constants, param_count, external_functions);
+                b.2.strip_constants(constants, param_count, external_functions);
             }
         }
     }
 }
 
 impl<T: Clone + PartialEq> EvalTree<T> {
+    /// Convert all numerical coefficients with `f`, preserving the expression
+    /// structure, parameter order, and function definitions.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> EvalTree<T2> {
         EvalTree {
             expressions: SplitExpression {
@@ -1684,10 +2156,12 @@ impl EvalTree<Complex<Rational>> {
         &mut self,
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
-        let mut stack = vec![Complex::<Rational>::default(); self.param_count];
-
         // strip every constant and move them into the stack after the params
-        self.strip_constants(&mut stack); // FIXME
+        let mut constants = vec![];
+        self.strip_constants(&mut constants, self.param_count);
+
+        let mut stack = vec![Complex::<Rational>::default(); self.param_count];
+        stack.extend(constants);
         let reserved_indices = stack.len();
 
         let mut sub_expr_pos = HashMap::default();
@@ -1728,11 +2202,8 @@ impl EvalTree<Complex<Rational>> {
             }
 
             if settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common instructions: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                let count = e.count_operations();
+                info!("Removed {} common instructions: {}", r, count);
             }
         }
 
@@ -1744,11 +2215,8 @@ impl EvalTree<Complex<Rational>> {
             }
 
             if settings.verbose {
-                let (add_count, mul_count) = e.count_operations();
-                info!(
-                    "Removed {} common pairs: {} + and {} ×",
-                    r, add_count, mul_count
-                );
+                let count = e.count_operations();
+                info!("Removed {} common pairs: {}", r, count);
             }
         }
 
@@ -1756,22 +2224,22 @@ impl EvalTree<Complex<Rational>> {
         e
     }
 
-    fn strip_constants(&mut self, stack: &mut Vec<Complex<Rational>>) {
+    fn strip_constants(&mut self, constants: &mut Vec<Complex<Rational>>, param_count: usize) {
         for t in &mut self.expressions.tree {
-            t.strip_constants(stack, self.param_count);
+            t.strip_constants(constants, param_count, &mut self.external_functions);
         }
 
         for e in &mut self.expressions.subexpressions {
-            e.strip_constants(stack, self.param_count);
+            e.strip_constants(constants, param_count, &mut self.external_functions);
         }
 
         for (_, _, e) in &mut self.functions {
             for t in &mut e.tree {
-                t.strip_constants(stack, self.param_count);
+                t.strip_constants(constants, param_count, &mut self.external_functions);
             }
 
             for e in &mut e.subexpressions {
-                e.strip_constants(stack, self.param_count);
+                e.strip_constants(constants, param_count, &mut self.external_functions);
             }
         }
     }
@@ -1998,7 +2466,12 @@ impl EvalTree<Complex<Rational>> {
                 let index = self
                     .external_functions
                     .iter()
-                    .position(|x| x.symbol == *s && x.tags == tag_atoms)
+                    .position(|x| {
+                        x.symbol == *s
+                            && x.tags == tag_atoms
+                            && x.fixed_args.is_empty()
+                            && x.constant_index.is_none()
+                    })
                     .expect("missing external function container");
 
                 let f = Instr::ExternalFun(res, index, args);
@@ -2170,11 +2643,8 @@ impl EvalTree<Complex<Rational>> {
         settings: &OptimizationSettings,
     ) -> ExpressionEvaluator<Complex<Rational>> {
         if settings.verbose {
-            let (n_add, n_mul) = self.count_operations();
-            info!(
-                "Initial ops: {} additions and {} multiplications",
-                n_add, n_mul
-            );
+            let count = self.count_operations();
+            info!("Initial ops: {}", count);
         }
 
         if settings.horner_iterations > 0 {
@@ -2286,6 +2756,8 @@ impl EvalTree<Complex<Rational>> {
 }
 
 impl Expression<Complex<Rational>> {
+    /// Rewrite sums using a Horner scheme in the supplied variable order.
+    /// The entries in `scheme` identify the subexpressions to factor out.
     pub fn apply_horner_scheme(&mut self, scheme: &[Expression<Complex<Rational>>]) {
         if scheme.is_empty() {
             return;
@@ -2658,6 +3130,8 @@ impl Expression<Complex<Rational>> {
         }
     }
 
+    /// Search for a Horner variable order that reduces this expression's operation
+    /// count. `vars` supplies the initial order and `settings` bounds the search.
     pub fn optimize_horner_scheme(
         &self,
         vars: &[Self],
@@ -2666,6 +3140,9 @@ impl Expression<Complex<Rational>> {
         Self::optimize_horner_scheme_multiple(std::slice::from_ref(self), vars, settings)
     }
 
+    /// Search for a shared Horner variable order that reduces the combined
+    /// operation count of `expressions`, accounting for common subexpressions.
+    /// `vars` supplies the initial order and `settings` bounds the search.
     pub fn optimize_horner_scheme_multiple(
         expressions: &[Self],
         vars: &[Self],
@@ -2684,21 +3161,18 @@ impl Expression<Complex<Rational>> {
             })
             .collect();
         let mut subexpr = HashMap::default();
-        let mut best_ops = (0, 0);
+        let mut best_ops = OperationCount::default();
         for h in &horner {
             let ops = h.count_operations_with_subexpression(&mut subexpr);
-            best_ops = (best_ops.0 + ops.0, best_ops.1 + ops.1);
+            best_ops += ops;
         }
 
         if settings.verbose {
-            info!(
-                "Initial Horner scheme ops: {} additions and {} multiplications",
-                best_ops.0, best_ops.1
-            );
+            info!("Initial Horner scheme ops: {}", best_ops);
         }
 
-        let best_mul = Arc::new(AtomicUsize::new(best_ops.1));
-        let best_add = Arc::new(AtomicUsize::new(best_ops.0));
+        let best_mul = Arc::new(AtomicUsize::new(best_ops.multiplications));
+        let best_add = Arc::new(AtomicUsize::new(best_ops.additions));
         let best_scheme = Arc::new(Mutex::new(vars.to_vec()));
 
         let n_iterations = settings.horner_iterations.max(1) - 1;
@@ -2713,12 +3187,8 @@ impl Expression<Complex<Rational>> {
         };
         let p_ref = &permutations;
 
-        let n_cores = if LicenseManager::is_licensed() {
-            settings.n_cores
-        } else {
-            1
-        }
-        .min(n_iterations);
+        let n_cores = LicenseManager::max_threads(settings.n_cores).min(n_iterations);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         std::thread::scope(|s| {
             let abort = Arc::new(AtomicBool::new(false));
@@ -2735,6 +3205,7 @@ impl Expression<Complex<Rational>> {
                 let abort = abort.clone();
 
                 let mut op = move || {
+                    let _unlock = inherited_unlock.activate();
                     for j in 0..n_iterations / n_cores {
                         if abort.load(Ordering::Relaxed) {
                             return;
@@ -2785,49 +3256,53 @@ impl Expression<Complex<Rational>> {
                             })
                             .collect();
                         let mut subexpr = HashMap::default();
-                        let mut cur_ops = (0, 0);
+                        let mut cur_ops = OperationCount::default();
 
                         for h in &horner {
                             let ops = h.count_operations_with_subexpression(&mut subexpr);
-                            cur_ops = (cur_ops.0 + ops.0, cur_ops.1 + ops.1);
+                            cur_ops += ops;
                         }
 
                         // prefer fewer multiplications
-                        if cur_ops.1 <= last_mul || cur_ops.1 == last_mul && cur_ops.0 <= last_add {
+                        if cur_ops.multiplications <= last_mul
+                            || cur_ops.multiplications == last_mul && cur_ops.additions <= last_add
+                        {
                             if settings.verbose {
                                 info!(
-                                    "Accept move at step {}/{}: {} + and {} ×",
+                                    "Accept move at step {}/{}: {}",
                                     j,
                                     settings.horner_iterations / n_cores,
-                                    cur_ops.0,
-                                    cur_ops.1
+                                    cur_ops
                                 );
                             }
 
-                            last_add = cur_ops.0;
-                            last_mul = cur_ops.1;
+                            last_add = cur_ops.additions;
+                            last_mul = cur_ops.multiplications;
 
-                            if cur_ops.1 <= best_mul.load(Ordering::Relaxed)
-                                || cur_ops.1 == best_mul.load(Ordering::Relaxed)
-                                    && cur_ops.0 <= best_add.load(Ordering::Relaxed)
+                            if cur_ops.multiplications <= best_mul.load(Ordering::Relaxed)
+                                || cur_ops.multiplications == best_mul.load(Ordering::Relaxed)
+                                    && cur_ops.additions <= best_add.load(Ordering::Relaxed)
                             {
                                 let mut best_scheme = best_scheme.lock().unwrap();
 
                                 // check again if it is the best now that we have locked
                                 let best_mul_l = best_mul.load(Ordering::Relaxed);
                                 let best_add_l = best_add.load(Ordering::Relaxed);
-                                if cur_ops.1 <= best_mul_l
-                                    || cur_ops.1 == best_mul_l && cur_ops.0 <= best_add_l
+                                if cur_ops.multiplications <= best_mul_l
+                                    || cur_ops.multiplications == best_mul_l
+                                        && cur_ops.additions <= best_add_l
                                 {
-                                    if cur_ops.0 == best_add_l && cur_ops.1 == best_mul_l {
+                                    if cur_ops.additions == best_add_l
+                                        && cur_ops.multiplications == best_mul_l
+                                    {
                                         if *best_scheme < cvars {
                                             // on a draw, accept the lexicographical minimum
                                             // to get a deterministic scheme
                                             *best_scheme = cvars.clone();
                                         }
                                     } else {
-                                        best_mul.store(cur_ops.1, Ordering::Relaxed);
-                                        best_add.store(cur_ops.0, Ordering::Relaxed);
+                                        best_mul.store(cur_ops.multiplications, Ordering::Relaxed);
+                                        best_add.store(cur_ops.additions, Ordering::Relaxed);
                                         *best_scheme = cvars.clone();
                                     }
                                 }
@@ -2928,6 +3403,8 @@ impl Expression<Complex<Rational>> {
 }
 
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering> EvalTree<T> {
+    /// Extract repeated subexpressions from the outputs and each function body
+    /// so that subsequent evaluation can reuse their values.
     pub fn common_subexpression_elimination(&mut self) {
         self.expressions.common_subexpression_elimination();
 
@@ -2936,17 +3413,15 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
         }
     }
 
-    pub fn count_operations(&self) -> (usize, usize) {
-        let mut add = 0;
-        let mut mul = 0;
+    /// Count arithmetic operations in the outputs, extracted subexpressions,
+    /// and function definitions, counting each stored tree once.
+    pub fn count_operations(&self) -> OperationCount {
+        let mut count = OperationCount::default();
         for e in &self.functions {
-            let (ea, em) = e.2.count_operations();
-            add += ea;
-            mul += em;
+            count += e.2.count_operations();
         }
 
-        let (ea, em) = self.expressions.count_operations();
-        (add + ea, mul + em)
+        count + self.expressions.count_operations()
     }
 }
 
@@ -2974,7 +3449,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
         // assign a unique index to every subexpression
         let mut h = HashMap::default();
         for (index, (_, e)) in v.iter().enumerate() {
-            h.insert(&*e, self.subexpressions.len() + index);
+            h.insert(e, self.subexpressions.len() + index);
         }
 
         for t in &mut self.tree {
@@ -3108,88 +3583,79 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering>
     SplitExpression<T>
 {
-    pub fn count_operations(&self) -> (usize, usize) {
-        let mut add = 0;
-        let mut mul = 0;
+    pub fn count_operations(&self) -> OperationCount {
+        let mut count = OperationCount::default();
         for e in &self.subexpressions {
-            let (ea, em) = e.count_operations();
-            add += ea;
-            mul += em;
+            count += e.count_operations();
         }
 
         for e in &self.tree {
-            let (ea, em) = e.count_operations();
-            add += ea;
-            mul += em;
+            count += e.count_operations();
         }
 
-        (add, mul)
+        count
     }
 }
 
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering> Expression<T> {
-    // Count the number of additions and multiplications in the expression.
-    pub fn count_operations(&self) -> (usize, usize) {
+    // Count the number of operations in the expression.
+    /// Count arithmetic operations recursively, including repeated occurrences
+    /// of the same subtree. Use [`Self::count_operations_with_subexpression`]
+    /// to count shared subexpressions only once.
+    pub fn count_operations(&self) -> OperationCount {
         match self {
-            Expression::Const(_, _) => (0, 0),
-            Expression::Parameter(_, _) => (0, 0),
+            Expression::Const(_, _) => OperationCount::default(),
+            Expression::Parameter(_, _) => OperationCount::default(),
             Expression::Eval(_, _, args) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in args {
-                    let (a, m) = arg.count_operations();
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations();
                 }
-                (add, mul)
+                count
             }
             Expression::Add(_, a) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in a {
-                    let (a, m) = arg.count_operations();
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations();
                 }
-                (add + a.len() - 1, mul)
+                count.additions += a.len() - 1;
+                count
             }
             Expression::Mul(_, m) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in m {
-                    let (a, m) = arg.count_operations();
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations();
                 }
-                (add, mul + m.len() - 1)
+                count.multiplications += m.len() - 1;
+                count
             }
             Expression::Pow(_, p) => {
-                let (a, m) = p.0.count_operations();
-                (a, m + p.1.unsigned_abs() as usize - 1)
+                let mut count = p.0.count_operations();
+                count.add_integer_power(p.1);
+                count
             }
             Expression::Powf(_, p) => {
-                let (a, m) = p.0.count_operations();
-                let (a2, m2) = p.1.count_operations();
-                (a + a2, m + m2 + 1) // not clear how to count this
+                let mut count = p.0.count_operations() + p.1.count_operations();
+                count.add_function_call();
+                count
             }
-            Expression::ReadArg(_, _) => (0, 0),
-            Expression::BuiltinFun(_, _, b) => b.count_operations(), // not clear how to count this, third arg?
-            Expression::SubExpression(_, _) => (0, 0),
+            Expression::ReadArg(_, _) => OperationCount::default(),
+            Expression::BuiltinFun(_, _, b) => {
+                let mut count = b.count_operations();
+                count.add_function_call();
+                count
+            }
+            Expression::SubExpression(_, _) => OperationCount::default(),
             Expression::Fun(_, _, _, args) => {
-                let mut add = 0;
-                let mut mul = 0;
+                let mut count = OperationCount::default();
                 for arg in args {
-                    let (a, m) = arg.count_operations();
-                    add += a;
-                    mul += m;
+                    count += arg.count_operations();
                 }
-                (add, mul)
+                count.add_function_call();
+                count
             }
             Expression::IfElse(_, b) => {
-                let (a1, m1) = b.0.count_operations();
-                let (a2, m2) = b.1.count_operations();
-                let (a3, m3) = b.2.count_operations();
-                (a1 + a2 + a3, m1 + m2 + m3)
+                b.0.count_operations() + b.1.count_operations() + b.2.count_operations()
             }
         }
     }
@@ -3290,14 +3756,13 @@ impl<T: Real> EvalTree<T> {
     }
 }
 
-/// Represents exported code that can be compiled with [Self::compile].
 impl<'a> AtomView<'a> {
     /// Convert nested expressions to a tree.
     pub fn to_evaluation_tree(
         &self,
         fn_map: &FunctionMap,
         params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, String> {
+    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
         Self::to_eval_tree_multiple(std::slice::from_ref(self), fn_map, params)
     }
 
@@ -3306,7 +3771,7 @@ impl<'a> AtomView<'a> {
         exprs: &[A],
         fn_map: &FunctionMap,
         params: &[Atom],
-    ) -> Result<EvalTree<Complex<Rational>>, String> {
+    ) -> Result<EvalTree<Complex<Rational>>, EvaluationError> {
         let mut funcs = vec![];
         let mut func_id_to_index = HashMap::default();
         let mut external_functions = vec![];
@@ -3343,14 +3808,14 @@ impl<'a> AtomView<'a> {
         fn_map: &FunctionMap,
         params: &[Atom],
         args: &[Indeterminate],
-        fn_id_map: &mut HashMap<usize, usize>,
+        fn_id_map: &mut HashMap<usize, Option<usize>>,
         funcs: &mut Vec<(
             String,
             Vec<Indeterminate>,
             SplitExpression<Complex<Rational>>,
         )>,
         external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
-    ) -> Result<Expression<Complex<Rational>>, String> {
+    ) -> Result<Expression<Complex<Rational>>, EvaluationError> {
         if matches!(self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(p) = args.iter().position(|s| *self == s.as_view()) {
                 return Ok(Expression::ReadArg(0, p));
@@ -3392,31 +3857,81 @@ impl<'a> AtomView<'a> {
                         )),
                     ))
                 }
-                CoefficientView::Indeterminate => {
-                    panic!("Cannot convert indeterminate")
-                }
-                CoefficientView::Infinity(_) => {
-                    panic!("Cannot convert infinity")
-                }
+                CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "indeterminate".to_owned(),
+                }),
+                CoefficientView::Infinity(_) => Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "infinity".to_owned(),
+                }),
                 CoefficientView::FiniteField(_, _) => {
-                    Err("Finite field not yet supported for evaluation".to_string())
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "finite field".to_owned(),
+                    })
                 }
-                CoefficientView::RationalPolynomial(_) => Err(
-                    "Rational polynomial coefficient not yet supported for evaluation".to_string(),
-                ),
+                CoefficientView::RationalPolynomial(_) => {
+                    Err(EvaluationError::UnsupportedCoefficient {
+                        coefficient: "rational polynomial".to_owned(),
+                    })
+                }
             },
-            AtomView::Var(v) => Err(format!(
-                "Variable {} not in constant map",
-                v.get_symbol().get_name()
-            )),
+            AtomView::Var(v) => {
+                let name = v.get_symbol();
+                if let Some(expr) = fn_map.get(*self) {
+                    if !expr.args.is_empty() {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: expr.args.len(),
+                            actual: 0,
+                        });
+                    }
+                    if fn_id_map.get(&expr.id) == Some(&None) {
+                        return Err(EvaluationError::EvaluatorConstructionFailed {
+                            expression: self.to_owned(),
+                            reason: "recursive function or alias dependency".into(),
+                        });
+                    }
+                    let previous = fn_id_map.insert(expr.id, None);
+                    let result = expr.body.as_view().to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        if expr.is_alias { args } else { &[] },
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    );
+                    if let Some(index) = previous {
+                        fn_id_map.insert(expr.id, index);
+                    } else {
+                        fn_id_map.remove(&expr.id);
+                    }
+                    return result;
+                }
+
+                if name.get_evaluation_info().is_some() {
+                    if external_functions
+                        .iter()
+                        .all(|x| x.symbol != name || !x.tags.is_empty())
+                    {
+                        external_functions.push(ExternalFunctionContainer::new(
+                            name,
+                            vec![],
+                            vec![],
+                        ));
+                    }
+
+                    return Ok(Expression::Fun(0, name, vec![], vec![]));
+                }
+
+                Err(EvaluationError::UndefinedVariable {
+                    symbol: v.get_symbol(),
+                })
+            }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
@@ -3442,10 +3957,11 @@ impl<'a> AtomView<'a> {
 
                 if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
@@ -3504,18 +4020,40 @@ impl<'a> AtomView<'a> {
                 if let Some(Expr {
                     id,
                     tag_len,
+                    is_alias,
                     args: arg_spec,
                     body: e,
+                    ..
                 }) = fn_map.get(*self)
                 {
                     return {
                         if f.get_nargs() != arg_spec.len() + tag_len {
-                            return Err(format!(
-                                "Function {} called with wrong number of arguments: {} vs {}",
-                                f.get_symbol().get_name(),
-                                f.get_nargs(),
-                                arg_spec.len() + tag_len
-                            ));
+                            return Err(EvaluationError::WrongNumberOfArguments {
+                                function: f.get_symbol(),
+                                expected: arg_spec.len() + tag_len,
+                                actual: f.get_nargs(),
+                            });
+                        }
+
+                        // Pending entries detect cycles before expanding aliases or bodies.
+                        if fn_id_map.get(id) == Some(&None) {
+                            return Err(EvaluationError::EvaluatorConstructionFailed {
+                                expression: self.to_owned(),
+                                reason: "recursive function or alias dependency".into(),
+                            });
+                        }
+                        if *is_alias {
+                            fn_id_map.insert(*id, None);
+                            let result = e.as_view().to_eval_tree_impl(
+                                fn_map,
+                                params,
+                                args,
+                                fn_id_map,
+                                funcs,
+                                external_functions,
+                            );
+                            fn_id_map.remove(id);
+                            return result;
                         }
 
                         let eval_args = f
@@ -3533,9 +4071,10 @@ impl<'a> AtomView<'a> {
                             })
                             .collect::<Result<_, _>>()?;
 
-                        if let Some(pos) = fn_id_map.get(id) {
+                        if let Some(Some(pos)) = fn_id_map.get(id) {
                             Ok(Expression::Eval(0, *pos as u32, eval_args))
                         } else {
+                            fn_id_map.insert(*id, None);
                             let r = e.as_view().to_eval_tree_impl(
                                 fn_map,
                                 params,
@@ -3552,7 +4091,7 @@ impl<'a> AtomView<'a> {
                                     subexpressions: vec![],
                                 },
                             ));
-                            fn_id_map.insert(*id, funcs.len() - 1);
+                            fn_id_map.insert(*id, Some(funcs.len() - 1));
                             Ok(Expression::Eval(0, funcs.len() as u32 - 1, eval_args))
                         }
                     };
@@ -3594,10 +4133,25 @@ impl<'a> AtomView<'a> {
                     return Ok(Expression::Fun(0, name, tags, eval_args));
                 }
 
-                Err(format!("Undefined function {}", self.to_plain_string()))
+                Err(EvaluationError::UndefinedFunction {
+                    expression: self.to_owned(),
+                })
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.to_eval_tree_impl(
+                        fn_map,
+                        params,
+                        args,
+                        fn_id_map,
+                        funcs,
+                        external_functions,
+                    )?;
+                    return Ok(Expression::BuiltinFun(0, Symbol::EXP, Box::new(e_eval)));
+                }
+
                 let b_eval = b.to_eval_tree_impl(
                     fn_map,
                     params,
@@ -3667,130 +4221,88 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Evaluate an expression using a constant map and a function map.
-    /// The constant map can map any literal expression to a value, for example
-    /// a variable or a function with fixed arguments.
-    ///
-    /// All variables and all user functions in the expression must occur in the map.
-    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: Real, F: Fn(&Rational) -> T + Copy>(
+    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        coeff_map: F,
-        const_map: &HashMap<A, T>,
-        function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
-    ) -> Result<T, String> {
+        map: &StdHashMap<A, T, impl BuildHasher>,
+        binary_prec: u32,
+    ) -> Result<T, EvaluationError> {
         let mut cache = HashMap::default();
-        self.evaluate_impl(coeff_map, const_map, function_map, &mut cache)
+        self.evaluate_impl(map, &mut cache, binary_prec)
     }
 
-    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real, F: Fn(&Rational) -> T + Copy>(
+    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        coeff_map: F,
-        const_map: &HashMap<A, T>,
-        function_map: &HashMap<Symbol, EvaluationFn<A, T>>,
+        map: &StdHashMap<A, T, impl BuildHasher>,
         cache: &mut HashMap<AtomView<'a>, T>,
-    ) -> Result<T, String> {
-        if let Some(c) = const_map.get(self.get_data()) {
-            return Ok(c.clone());
-        }
-
+        binary_prec: u32,
+    ) -> Result<T, EvaluationError> {
         match self {
-            AtomView::Alias(a) => {
-                a.get_body()
-                    .evaluate_impl(coeff_map, const_map, function_map, cache)
+            AtomView::Alias(a) => a.get_body().evaluate_impl(map, cache, binary_prec),
+            AtomView::Num(n) => {
+                let f = n
+                    .get_coeff_view()
+                    .to_float(binary_prec)
+                    .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })?;
+                T::try_from_complex_float(f).map_err(|e| EvaluationError::EvaluationFailed {
+                    expression: self.to_owned(),
+                    reason: e,
+                })
             }
-            AtomView::Num(n) => match n.get_coeff_view() {
-                CoefficientView::Natural(n, d, ni, di) => {
-                    if ni == 0 {
-                        Ok(coeff_map(&Rational::from_int_unchecked(n, d)))
-                    } else {
-                        let num = coeff_map(&Rational::from_int_unchecked(n, d));
-                        Ok(coeff_map(&Rational::from_int_unchecked(ni, di))
-                            * num.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
-                            + num)
-                    }
-                }
-                CoefficientView::Large(l, i) => {
-                    if i.is_zero() {
-                        Ok(coeff_map(&l.to_rat()))
-                    } else {
-                        let num = coeff_map(&l.to_rat());
-                        Ok(coeff_map(&i.to_rat())
-                            * num.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
-                            + num)
-                    }
-                }
-                CoefficientView::Float(r, i) => {
-                    // TODO: converting back to rational is slow
-                    let rm = coeff_map(&r.to_float().to_rational());
-                    if i.is_zero() {
-                        Ok(rm)
-                    } else {
-                        Ok(coeff_map(&i.to_float().to_rational())
-                            * rm.i().ok_or_else(|| {
-                                "Numerical type does not support imaginary unit".to_string()
-                            })?
-                            + rm)
-                    }
-                }
-                CoefficientView::Indeterminate => Err("Cannot evaluate indeterminate".to_string()),
-                CoefficientView::Infinity(_) => Err("Cannot evaluate infinity".to_string()),
-                CoefficientView::FiniteField(_, _) => {
-                    Err("Finite field not yet supported for evaluation".to_string())
-                }
-                CoefficientView::RationalPolynomial(_) => Err(
-                    "Rational polynomial coefficient not yet supported for evaluation".to_string(),
-                ),
-            },
             AtomView::Var(v) => {
                 let s = v.get_symbol();
-                match s.get_id() {
-                    Symbol::E_ID => Ok(coeff_map(&1.into()).e()),
-                    Symbol::PI_ID => Ok(coeff_map(&1.into()).pi()),
-                    _ => {
-                        if let Some(fun) = function_map.get(&s) {
-                            if let Some(eval) = cache.get(self) {
-                                return Ok(eval.clone());
-                            }
 
-                            let eval = fun.get()(&[], const_map, function_map, cache);
-                            cache.insert(*self, eval.clone());
-                            Ok(eval)
-                        } else {
-                            Err(format!(
-                                "Variable {} not in constant map or function map",
-                                v.get_symbol().get_name()
-                            ))
-                        }
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(val) = cache.get(self) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(eval) = s.get_evaluation_info() {
+                    if let Ok(val) = T::try_from_complex_float(
+                        eval.evaluate_constant(&[], binary_prec).map_err(|e| {
+                            EvaluationError::UnsupportedCoefficient { coefficient: e }
+                        })?,
+                    ) {
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
+                    } else {
+                        return Err(EvaluationError::MissingEvaluator {
+                            expression: self.to_owned(),
+                            eval_type: std::any::type_name::<T>().to_string(),
+                        });
                     }
                 }
+
+                Err(EvaluationError::UndefinedVariable { symbol: s })
             }
             AtomView::Fun(f) => {
                 let name = f.get_symbol();
                 if [
-                    Symbol::EXP_ID,
                     Symbol::LOG_ID,
                     Symbol::SIN_ID,
                     Symbol::COS_ID,
-                    Symbol::SQRT_ID,
                     Symbol::ABS_ID,
                     Symbol::CONJ_ID,
                 ]
                 .contains(&name.get_id())
                 {
-                    assert!(f.get_nargs() == 1);
+                    if f.get_nargs() != 1 {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 1,
+                            actual: f.get_nargs(),
+                        });
+                    }
+
                     let arg = f.iter().next().unwrap();
-                    let arg_eval = arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    let arg_eval = arg.evaluate_impl(map, cache, binary_prec)?;
 
                     return Ok(match f.get_symbol_id() {
-                        Symbol::EXP_ID => arg_eval.exp(),
                         Symbol::LOG_ID => arg_eval.log(),
                         Symbol::SIN_ID => arg_eval.sin(),
                         Symbol::COS_ID => arg_eval.cos(),
-                        Symbol::SQRT_ID => arg_eval.sqrt(),
                         Symbol::ABS_ID => arg_eval.norm(),
                         Symbol::CONJ_ID => arg_eval.conj(),
                         _ => unreachable!(),
@@ -3799,247 +4311,369 @@ impl<'a> AtomView<'a> {
 
                 if name == Symbol::IF {
                     if f.get_nargs() != 3 {
-                        return Err(format!(
-                            "Condition function called with wrong number of arguments: {} vs 3",
-                            f.get_nargs(),
-                        ));
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
                     }
 
                     let mut arg_iter = f.iter();
 
-                    let cond_eval = arg_iter.next().unwrap().evaluate_impl(
-                        coeff_map,
-                        const_map,
-                        function_map,
-                        cache,
-                    )?;
+                    let cond_eval =
+                        arg_iter
+                            .next()
+                            .unwrap()
+                            .evaluate_impl(map, cache, binary_prec)?;
 
                     if !cond_eval.is_fully_zero() {
-                        let t_eval = arg_iter.next().unwrap().evaluate_impl(
-                            coeff_map,
-                            const_map,
-                            function_map,
-                            cache,
-                        )?;
+                        let t_eval =
+                            arg_iter
+                                .next()
+                                .unwrap()
+                                .evaluate_impl(map, cache, binary_prec)?;
                         return Ok(t_eval);
                     } else {
                         let _ = arg_iter.next().unwrap();
-                        let f_eval = arg_iter.next().unwrap().evaluate_impl(
-                            coeff_map,
-                            const_map,
-                            function_map,
-                            cache,
-                        )?;
+                        let f_eval =
+                            arg_iter
+                                .next()
+                                .unwrap()
+                                .evaluate_impl(map, cache, binary_prec)?;
                         return Ok(f_eval);
                     }
+                }
+
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
                 }
 
                 if let Some(eval) = cache.get(self) {
                     return Ok(eval.clone());
                 }
 
-                let mut args = Vec::with_capacity(f.get_nargs());
-                for arg in f {
-                    args.push(arg.evaluate_impl(coeff_map, const_map, function_map, cache)?);
+                if let Some(eval) = name.get_evaluation_info() {
+                    let tag_count = eval.get_tag_count();
+                    let mut iter = f.iter();
+                    let mut tags = Vec::with_capacity(tag_count);
+
+                    for i in 0..tag_count {
+                        if let Some(tag) = iter.next() {
+                            tags.push(tag);
+                        } else {
+                            return Err(EvaluationError::WrongNumberOfArguments {
+                                function: name,
+                                expected: tag_count,
+                                actual: i,
+                            });
+                        }
+                    }
+
+                    let mut args = Vec::with_capacity(f.get_nargs());
+                    for arg in iter {
+                        args.push(arg.evaluate_impl(map, cache, binary_prec)?);
+                    }
+
+                    if args.is_empty() && eval.has_constant_evaluator() {
+                        let val = T::try_from_complex_float(
+                            eval.evaluate_constant(&tags, binary_prec).map_err(|e| {
+                                EvaluationError::EvaluationFailed {
+                                    expression: self.to_owned(),
+                                    reason: e,
+                                }
+                            })?,
+                        )
+                        .map_err(|_| {
+                            EvaluationError::MissingEvaluator {
+                                expression: self.to_owned(),
+                                eval_type: std::any::type_name::<T>().to_string(),
+                            }
+                        })?;
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
+                    }
+
+                    if let Some(eval_fun) = T::resolve_function(&tags, eval) {
+                        let val = (eval_fun)(&args);
+                        cache.insert(*self, val.clone());
+                        return Ok(val);
+                    } else {
+                        return Err(EvaluationError::MissingEvaluator {
+                            expression: self.to_owned(),
+                            eval_type: std::any::type_name::<T>().to_string(),
+                        });
+                    }
                 }
 
-                let Some(fun) = function_map.get(&f.get_symbol()) else {
-                    Err(format!("Missing function {}", f.get_symbol().get_name()))?
-                };
-                let eval = fun.get()(&args, const_map, function_map, cache);
-
-                cache.insert(*self, eval.clone());
-                Ok(eval)
+                Err(EvaluationError::UndefinedFunction {
+                    expression: self.to_owned(),
+                })
             }
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
-                let b_eval = b.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+
+                if b == InlineVar::new(Symbol::E).as_view() {
+                    let e_eval = e.evaluate_impl(map, cache, binary_prec)?;
+                    return Ok(e_eval.exp());
+                }
+
+                let b_eval = b.evaluate_impl(map, cache, binary_prec)?;
+
+                if let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(num, den, ni, _di) = n.get_coeff_view()
+                    && ni == 0
+                {
+                    if den == 1 {
+                        if num == -1 {
+                            return Ok(b_eval.inv());
+                        } else if num >= 0 {
+                            return Ok(b_eval.pow(num as u64));
+                        } else {
+                            return Ok(b_eval.pow(num.unsigned_abs()).inv());
+                        }
+                    } else if den == 2 {
+                        if num == -1 {
+                            return Ok(b_eval.sqrt().inv());
+                        } else if num >= 0 {
+                            return Ok(b_eval.sqrt().pow(num as u64));
+                        } else {
+                            return Ok(b_eval.sqrt().pow(num.unsigned_abs()).inv());
+                        }
+                    }
+                }
+
+                let e_eval = e.evaluate_impl(map, cache, binary_prec)?;
+                Ok(b_eval.powf(&e_eval))
+            }
+            AtomView::Mul(m) => {
+                let mut it = m.iter();
+                let mut r = it.next().unwrap().evaluate_impl(map, cache, binary_prec)?;
+                for arg in it {
+                    r *= arg.evaluate_impl(map, cache, binary_prec)?;
+                }
+                Ok(r)
+            }
+            AtomView::Add(a) => {
+                let mut it = a.iter();
+                let mut r = it.next().unwrap().evaluate_impl(map, cache, binary_prec)?;
+                for arg in it {
+                    r += arg.evaluate_impl(map, cache, binary_prec)?;
+                }
+                Ok(r)
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_in_ring<A: AtomCore + KeyLookup, R: ConvertToRing>(
+        &self,
+        map: &StdHashMap<A, R::Element, impl BuildHasher>,
+        ring: &R,
+    ) -> Result<R::Element, EvaluationError> {
+        self.evaluate_in_ring_impl(map, &mut HashMap::new(), ring)
+    }
+
+    fn evaluate_in_ring_impl<A: AtomCore + KeyLookup, R: ConvertToRing>(
+        &self,
+        map: &StdHashMap<A, R::Element, impl BuildHasher>,
+        cache: &mut HashMap<AtomView<'a>, R::Element>,
+        ring: &R,
+    ) -> Result<R::Element, EvaluationError> {
+        match self {
+            AtomView::Alias(a) => a.get_body().evaluate_in_ring_impl(map, cache, ring),
+            AtomView::Num(n) => ring
+                .try_element_from_coefficient_view(n.get_coeff_view())
+                .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e }),
+            AtomView::Var(v) => {
+                let s = v.get_symbol();
+
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(val) = cache.get(self) {
+                    return Ok(val.clone());
+                }
+
+                Err(EvaluationError::UndefinedVariable { symbol: s })
+            }
+            AtomView::Fun(f) => {
+                let name = f.get_symbol();
+                if [
+                    Symbol::LOG_ID,
+                    Symbol::SIN_ID,
+                    Symbol::COS_ID,
+                    Symbol::ABS_ID,
+                    Symbol::CONJ_ID,
+                ]
+                .contains(&name.get_id())
+                {
+                    return Err(EvaluationError::UnsupportedBuiltinArity {
+                        function: name,
+                        expected: 1,
+                        actual: f.get_nargs(),
+                    });
+                }
+
+                if name == Symbol::IF {
+                    if f.get_nargs() != 3 {
+                        return Err(EvaluationError::WrongNumberOfArguments {
+                            function: name,
+                            expected: 3,
+                            actual: f.get_nargs(),
+                        });
+                    }
+
+                    let mut arg_iter = f.iter();
+
+                    let cond_eval = arg_iter
+                        .next()
+                        .unwrap()
+                        .evaluate_in_ring_impl(map, cache, ring)?;
+
+                    if !ring.is_zero(&cond_eval) {
+                        let t_eval = arg_iter
+                            .next()
+                            .unwrap()
+                            .evaluate_in_ring_impl(map, cache, ring)?;
+                        return Ok(t_eval);
+                    } else {
+                        let _ = arg_iter.next().unwrap();
+                        let f_eval = arg_iter
+                            .next()
+                            .unwrap()
+                            .evaluate_in_ring_impl(map, cache, ring)?;
+                        return Ok(f_eval);
+                    }
+                }
+
+                if let Some(val) = map.get::<[u8]>(self.get_data()) {
+                    return Ok(val.clone());
+                }
+
+                if let Some(eval) = cache.get(self) {
+                    return Ok(eval.clone());
+                }
+
+                Err(EvaluationError::UndefinedFunction {
+                    expression: self.to_owned(),
+                })
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                let mut b_eval = b.evaluate_in_ring_impl(map, cache, ring)?;
 
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(num, den, ni, _di) = n.get_coeff_view()
                     && den == 1
                     && ni == 0
                 {
-                    if num == -1 {
-                        return Ok(b_eval.inv());
-                    } else if num >= 0 {
-                        return Ok(b_eval.pow(num as u64));
-                    } else {
-                        return Ok(b_eval.pow(num.unsigned_abs()).inv());
+                    if num < 0 {
+                        b_eval = ring.try_inv(&b_eval).ok_or_else(|| {
+                            EvaluationError::EvaluationFailed {
+                                expression: self.to_owned(),
+                                reason: format!("Could not invert {}", ring.printer(&b_eval)),
+                            }
+                        })?;
                     }
-                }
 
-                let e_eval = e.evaluate_impl(coeff_map, const_map, function_map, cache)?;
-                Ok(b_eval.powf(&e_eval))
+                    let num = num.unsigned_abs();
+
+                    if num != 1 {
+                        Ok(ring.pow(&b_eval, num as u64))
+                    } else {
+                        Ok(b_eval)
+                    }
+                } else {
+                    Err(EvaluationError::EvaluationFailed {
+                        expression: self.to_owned(),
+                        reason: format!("Cannot evaluate {}", self),
+                    })
+                }
             }
             AtomView::Mul(m) => {
                 let mut it = m.iter();
-                let mut r =
-                    it.next()
-                        .unwrap()
-                        .evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let mut r = it.next().unwrap().evaluate_in_ring_impl(map, cache, ring)?;
                 for arg in it {
-                    r *= arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    ring.mul_assign(&mut r, arg.evaluate_in_ring_impl(map, cache, ring)?);
                 }
                 Ok(r)
             }
             AtomView::Add(a) => {
                 let mut it = a.iter();
-                let mut r =
-                    it.next()
-                        .unwrap()
-                        .evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                let mut r = it.next().unwrap().evaluate_in_ring_impl(map, cache, ring)?;
                 for arg in it {
-                    r += arg.evaluate_impl(coeff_map, const_map, function_map, cache)?;
+                    ring.add_assign(&mut r, arg.evaluate_in_ring_impl(map, cache, ring)?);
                 }
                 Ok(r)
             }
         }
     }
+}
 
-    /// Check if the expression could be 0, using (potentially) numerical sampling with
-    /// a given tolerance and number of iterations.
-    pub fn zero_test(&self, iterations: usize, tolerance: f64) -> ConditionResult {
-        match self {
-            AtomView::Alias(a) => a.get_body().zero_test(iterations, tolerance),
-            AtomView::Num(num_view) => {
-                if num_view.is_zero() {
-                    ConditionResult::True
-                } else {
-                    ConditionResult::False
-                }
-            }
-            AtomView::Var(_) => ConditionResult::False,
-            AtomView::Fun(_) => ConditionResult::False,
-            AtomView::Pow(p) => p.get_base().zero_test(iterations, tolerance),
-            AtomView::Mul(mul_view) => {
-                let mut is_zero = ConditionResult::False;
-                for arg in mul_view {
-                    match arg.zero_test(iterations, tolerance) {
-                        ConditionResult::True => return ConditionResult::True,
-                        ConditionResult::False => {}
-                        ConditionResult::Inconclusive => {
-                            is_zero = ConditionResult::Inconclusive;
-                        }
-                    }
-                }
+#[cfg(test)]
+mod external_cache_tests {
+    use crate::{
+        atom::{Atom, AtomCore, EvaluationInfo, Symbol},
+        domains::float::{Complex, Real},
+        evaluate::OptimizationSettings,
+        function, symbol,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-                is_zero
-            }
-            AtomView::Add(_) => self.zero_test_impl(iterations, tolerance),
+    fn settings() -> OptimizationSettings {
+        OptimizationSettings::new()
+            .direct_translation(true)
+            .horner_iterations(0)
+            .cpe_iterations(Some(0))
+    }
+
+    fn counted<T: Real>(calls: Arc<AtomicUsize>) -> impl Fn(&[T]) -> T + Clone {
+        move |arguments: &[T]| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            arguments[0].clone() * &arguments[0]
         }
     }
 
-    fn zero_test_impl(&self, iterations: usize, tolerance: f64) -> ConditionResult {
-        // collect all variables and functions and fill in random variables
+    fn square(name: &str) -> (Symbol, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let f = symbol!(
+            name,
+            eval = EvaluationInfo::new()
+                .register(counted::<f64>(calls.clone()))
+                .register(counted::<Complex<f64>>(calls.clone()))
+        );
+        (f, calls)
+    }
 
-        let mut rng = MonteCarloRng::new(0, 0);
-
-        if !self.is_real() {
-            let mut vars: HashMap<_, _> = self
-                .get_all_indeterminates(true)
-                .into_iter()
-                .filter_map(|x| {
-                    let s = x.get_symbol().unwrap();
-                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
-                        Some((x, Complex::new(0f64.into(), 0f64.into())))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            for _ in 0..iterations {
-                for x in vars.values_mut() {
-                    *x = x.sample_unit(&mut rng);
-                }
-
-                let r = self
-                    .evaluate(
-                        |x| {
-                            Complex::new(
-                                ErrorPropagatingFloat::new(
-                                    0f64.from_rational(x),
-                                    -0f64.get_epsilon().log10(),
-                                ),
-                                ErrorPropagatingFloat::new(
-                                    0f64.zero(),
-                                    -0f64.get_epsilon().log10(),
-                                ),
-                            )
-                        },
-                        &vars,
-                        &HashMap::default(),
-                    )
-                    .unwrap();
-
-                let res_re = r.re.get_num().to_f64();
-                let res_im = r.im.get_num().to_f64();
-                if res_re.is_finite()
-                    && (res_re - r.re.get_absolute_error() > 0.
-                        || res_re + r.re.get_absolute_error() < 0.)
-                    || res_im.is_finite()
-                        && (res_im - r.im.get_absolute_error() > 0.
-                            || res_im + r.im.get_absolute_error() < 0.)
-                {
-                    return ConditionResult::False;
-                }
-
-                if vars.is_empty() && r.re.get_absolute_error() < tolerance {
-                    return ConditionResult::True;
-                }
-            }
-
-            ConditionResult::Inconclusive
-        } else {
-            let mut vars: HashMap<_, ErrorPropagatingFloat<f64>> = self
-                .get_all_indeterminates(true)
-                .into_iter()
-                .filter_map(|x| {
-                    let s = x.get_symbol().unwrap();
-                    if !State::is_fixed_builtin(s) || s == Symbol::DERIVATIVE {
-                        Some((x, 0f64.into()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            for _ in 0..iterations {
-                for x in vars.values_mut() {
-                    *x = x.sample_unit(&mut rng);
-                }
-
-                let r = self
-                    .evaluate(
-                        |x| {
-                            ErrorPropagatingFloat::new(
-                                0f64.from_rational(x),
-                                -0f64.get_epsilon().log10(),
-                            )
-                        },
-                        &vars,
-                        &HashMap::default(),
-                    )
-                    .unwrap();
-
-                let res = r.get_num().to_f64();
-
-                // trust the error when the relative error is less than 20%
-                if res != 0.
-                    && res.is_finite()
-                    && r.get_absolute_error() / res.abs() < 0.2
-                    && (res - r.get_absolute_error() > 0. || res + r.get_absolute_error() < 0.)
-                {
-                    return ConditionResult::False;
-                }
-
-                if vars.is_empty() && r.get_absolute_error() < tolerance {
-                    return ConditionResult::True;
-                }
-            }
-
-            ConditionResult::Inconclusive
-        }
+    #[test]
+    fn direct_external_calls_share_across_vector_outputs_without_optimizer() {
+        let (f, calls) = square("direct_external_cache::vector_f");
+        let x = Atom::var(symbol!("direct_external_cache::vector_x"));
+        let value = function!(f, &x);
+        let exact = Atom::evaluator_multiple(
+            &[value.clone(), &value + 1, 3 * &value],
+            std::slice::from_ref(&x),
+        )
+        .optimization_settings(settings())
+        .build()
+        .unwrap();
+        let mut real = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 3];
+        real.evaluate(&[2.], &mut output);
+        assert_eq!(output, [4., 5., 12.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        real.evaluate(&[3.], &mut output);
+        assert_eq!(output, [9., 10., 27.]);
+        assert_eq!(calls.swap(0, Ordering::SeqCst), 1);
+        let mut complex = exact.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        let mut output = [Complex::new(0., 0.); 3];
+        complex.evaluate(&[Complex::new(2., 1.)], &mut output);
+        assert_eq!(output[0], Complex::new(3., 4.));
+        assert_eq!(output[1], Complex::new(4., 4.));
+        assert_eq!(output[2], Complex::new(9., 12.));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -1,4 +1,119 @@
 use super::*;
+use crate::poly::univariate::{IsolatedRoot, RootLocation, UnivariatePolynomial};
+
+/// Proven location of an isolated root relative to the coordinate axes.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass_enum)]
+#[pyclass(
+    from_py_object,
+    name = "RootLocation",
+    eq,
+    eq_int,
+    module = "symbolica.core"
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PythonRootLocation {
+    Complex,
+    Real,
+    Imaginary,
+    Zero,
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[pymethods]
+impl PythonRootLocation {
+    fn __hash__(&self) -> usize {
+        // Match the integer hash because this enum supports integer equality.
+        *self as usize
+    }
+}
+
+impl From<RootLocation> for PythonRootLocation {
+    fn from(location: RootLocation) -> Self {
+        match location {
+            RootLocation::Complex => Self::Complex,
+            RootLocation::Real => Self::Real,
+            RootLocation::Imaginary => Self::Imaginary,
+            RootLocation::Zero => Self::Zero,
+        }
+    }
+}
+
+/// A certified isolated root in the complex plane.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(from_py_object, name = "IsolatedRoot", module = "symbolica.core")]
+#[derive(Clone)]
+pub struct PythonIsolatedRoot {
+    root: IsolatedRoot,
+}
+
+impl From<IsolatedRoot> for PythonIsolatedRoot {
+    fn from(root: IsolatedRoot) -> Self {
+        Self { root }
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonIsolatedRoot {
+    /// Canonical index of this root within its defining polynomial.
+    #[getter]
+    pub fn index(&self) -> usize {
+        self.root.index()
+    }
+
+    /// Center of the certified complex disk as exact real and imaginary parts.
+    #[getter]
+    pub fn center(&self) -> (PythonExpression, PythonExpression) {
+        (
+            Atom::num(self.root.enclosure().center().re.clone()).into(),
+            Atom::num(self.root.enclosure().center().im.clone()).into(),
+        )
+    }
+
+    /// Radius of the certified complex disk.
+    #[getter]
+    pub fn radius(&self) -> PythonExpression {
+        Atom::num(self.root.enclosure().radius().clone()).into()
+    }
+
+    /// Convert this isolated root to an exact expression.
+    pub fn to_expression(&self) -> PythonExpression {
+        self.root.to_atom().into()
+    }
+
+    /// Return a new root whose cached enclosure has at most `tolerance` radius.
+    pub fn refine(&self, tolerance: PythonMultiPrecisionFloat) -> PyResult<Self> {
+        let tolerance = tolerance.0.to_rational();
+        if tolerance <= Rational::zero() {
+            return Err(exceptions::PyValueError::new_err(
+                "Root refinement tolerance must be positive",
+            ));
+        }
+        Ok(self.root.clone().refined(&tolerance).into())
+    }
+
+    /// Resolve and cache the root's exact relationship to the coordinate axes.
+    pub fn location(&mut self) -> PythonRootLocation {
+        self.root.classify_location().into()
+    }
+
+    /// Determine whether this root lies on the positive real axis.
+    pub fn is_positive(&mut self) -> bool {
+        self.root.is_positive_real()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "IsolatedRoot(index={}, center=({}, {}), radius={}, polynomial={})",
+            self.root.index(),
+            self.root.enclosure().center().re,
+            self.root.enclosure().center().im,
+            self.root.enclosure().radius(),
+            self.root.defining_polynomial()
+        )
+    }
+}
 
 /// A multivariate polynomial with rational coefficients.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
@@ -18,6 +133,129 @@ impl_stub_type!(&mut PythonPolynomial = PythonPolynomial);
 
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(OneOrMultiple<PythonExpression> = PythonExpression | Vec<PythonExpression>);
+
+impl PythonPolynomial {
+    fn as_univariate(&self) -> PyResult<UnivariatePolynomial<RationalField>> {
+        let var = if self.poly.nvars() == 1 {
+            0
+        } else {
+            let variables: Vec<_> = (0..self.poly.nvars())
+                .filter(|variable| self.poly.degree(*variable) > 0)
+                .collect();
+            if variables.len() != 1 {
+                return Err(exceptions::PyValueError::new_err(
+                    "Polynomial is not univariate",
+                ));
+            }
+            variables[0]
+        };
+
+        Ok(self.poly.to_univariate_from_univariate(var))
+    }
+
+    fn format_latex_with_options(
+        &self,
+        max_line_length: Option<usize>,
+        max_terms: Option<usize>,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+        alias_print_mode: PythonAliasPrintMode,
+    ) -> String {
+        format!(
+            "$${}$$",
+            self.poly.format_string(
+                &PrintOptions {
+                    max_line_length,
+                    precision,
+                    hide_all_namespaces: !show_namespaces,
+                    hide_namespace: if show_namespaces {
+                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
+                    } else {
+                        None
+                    },
+                    include_attributes,
+                    max_terms,
+                    alias_print_mode: alias_print_mode.into(),
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
+                    ..(*LATEX_PRINT_OPTIONS).clone()
+                },
+                PrintState::new(),
+            )
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn format_with_color_mode(
+        &self,
+        mode: PythonPrintMode,
+        max_line_length: Option<usize>,
+        indentation: usize,
+        fill_indented_lines: bool,
+        terms_on_new_line: bool,
+        color_top_level_sum: bool,
+        color_builtin_symbols: bool,
+        bracket_level_colors: Option<[u8; 16]>,
+        print_ring: bool,
+        symmetric_representation_for_finite_field: bool,
+        explicit_rational_polynomial: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        function_brackets: (char, char),
+        num_exp_as_superscript: bool,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        max_terms: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+        alias_print_mode: PythonAliasPrintMode,
+        color_mode: ColorMode,
+    ) -> String {
+        self.poly.format_string(
+            &PrintOptions {
+                max_line_length,
+                indentation,
+                fill_indented_lines,
+                terms_on_new_line,
+                color_mode,
+                color_top_level_sum,
+                color_builtin_symbols,
+                bracket_level_colors,
+                print_ring,
+                symmetric_representation_for_finite_field,
+                explicit_rational_polynomial,
+                number_thousands_separator,
+                multiplication_operator,
+                double_star_for_exponentiation,
+                function_brackets,
+                num_exp_as_superscript,
+                mode: mode.into(),
+                precision,
+                pretty_matrix: false,
+                hide_all_namespaces: !show_namespaces,
+                color_namespace: true,
+                hide_namespace: if show_namespaces {
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
+                } else {
+                    None
+                },
+                include_attributes,
+                max_terms,
+                alias_print_mode: alias_print_mode.into(),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
+            },
+            PrintState::new(),
+        )
+    }
+}
 
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
@@ -105,8 +343,55 @@ impl PythonPolynomial {
     /// --------
     /// >>> p = FiniteFieldPolynomial.parse("3*x^2+2*x+7*x^3", ['x'], 11)
     /// >>> print(p.format(symmetric_representation_for_finite_field=True))
+    /// Parameters
+    /// ----------
+    /// max_terms: int | None
+    ///     The maximum number of terms to print before truncating the output.
+    /// mode: PrintMode
+    ///     The mode that controls how the input is interpreted or formatted.
+    /// max_line_length: int | None
+    ///     The preferred maximum line length before wrapping.
+    /// indentation: int
+    ///     The number of spaces used for wrapped lines.
+    /// fill_indented_lines: bool
+    ///     Whether wrapped lines should be padded to the configured indentation.
+    /// terms_on_new_line: bool
+    ///     Whether wrapped output should place terms on separate lines.
+    /// color_top_level_sum: bool
+    ///     Whether top-level sums should be colorized.
+    /// color_builtin_symbols: bool
+    ///     Whether built-in symbols should be colorized.
+    /// bracket_level_colors: Sequence[int] | None
+    ///     The colors assigned to successive nested bracket levels.
+    /// print_ring: bool
+    ///     Whether the coefficient ring should be included in the printed output.
+    /// symmetric_representation_for_finite_field: bool
+    ///     Whether finite-field elements should be printed using symmetric representatives.
+    /// explicit_rational_polynomial: bool
+    ///     Whether rational polynomials should be printed explicitly as numerator and denominator.
+    /// number_thousands_separator: str | None
+    ///     The separator inserted between groups of digits in printed integers.
+    /// multiplication_operator: str
+    ///     The string used to print multiplication.
+    /// double_star_for_exponentiation: bool
+    ///     Whether exponentiation should be printed as `**` instead of `^`.
+    /// function_brackets: tuple[str, str]
+    ///     The opening and closing brackets used when printing function arguments.
+    /// num_exp_as_superscript: bool
+    ///     Whether small integer exponents should be printed as superscripts.
+    /// precision: int | None
+    ///     The decimal precision used when printing numeric coefficients.
+    /// show_namespaces: bool
+    ///     Whether namespaces should be included in the formatted output.
+    /// hide_namespace: str | None
+    ///     A namespace prefix to omit from printed symbol names.
+    /// include_attributes: bool
+    ///     Whether symbol attributes should be included in the printed output.
+    /// custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+    ///     Custom print data passed through to custom print callbacks.
     #[pyo3(signature =
-        (mode = PythonPrintMode::Symbolica,
+        (max_terms = None,
+            mode = PythonPrintMode::Symbolica,
             max_line_length = Some(80),
             indentation = 4,
             fill_indented_lines = true,
@@ -120,19 +405,18 @@ impl PythonPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
             show_namespaces = false,
             hide_namespace = None,
             include_attributes = false,
-            max_terms = None,
             custom_print_mode = None,
             alias_print_mode = PythonAliasPrintMode::Transparent)
         )]
     pub fn format(
         &self,
+        max_terms: Option<usize>,
         mode: PythonPrintMode,
         max_line_length: Option<usize>,
         indentation: usize,
@@ -147,52 +431,166 @@ impl PythonPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
         include_attributes: bool,
-        max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
-        Ok(self.poly.format_string(
-            &PrintOptions {
-                max_line_length,
-                indentation,
-                fill_indented_lines,
-                terms_on_new_line,
-                color_top_level_sum,
-                color_builtin_symbols,
-                bracket_level_colors,
-                print_ring,
-                symmetric_representation_for_finite_field,
-                explicit_rational_polynomial,
-                number_thousands_separator,
-                multiplication_operator,
-                double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
-                function_brackets,
-                num_exp_as_superscript,
-                mode: mode.into(),
-                precision,
-                pretty_matrix: false,
-                hide_all_namespaces: !show_namespaces,
-                color_namespace: true,
-                hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
-                } else {
-                    None
-                },
-                include_attributes,
-                max_terms,
-                alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
-            },
-            PrintState::new(),
+        Ok(self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode,
+            alias_print_mode,
+            ColorMode::Auto,
+        ))
+    }
+
+    /// Convert the polynomial into a rich display object, with tunable settings.
+    ///
+    /// In notebooks, the returned object displays as highlighted HTML while
+    /// `str(...)` returns the plain formatted text.
+    #[pyo3(signature =
+        (max_terms = None,
+            mode = PythonPrintMode::Symbolica,
+            max_line_length = Some(80),
+            indentation = 4,
+            fill_indented_lines = true,
+            terms_on_new_line = false,
+            color_top_level_sum = true,
+            color_builtin_symbols = true,
+            bracket_level_colors = None,
+            print_ring = true,
+            symmetric_representation_for_finite_field = false,
+            explicit_rational_polynomial = false,
+            number_thousands_separator = None,
+            multiplication_operator = '·',
+            double_star_for_exponentiation = false,
+            function_brackets = ('(',')'),
+            num_exp_as_superscript = true,
+            precision = None,
+            show_namespaces = false,
+            hide_namespace = None,
+            include_attributes = false,
+            custom_print_mode = None,
+            alias_print_mode = PythonAliasPrintMode::Transparent)
+        )]
+    pub fn formatted(
+        &self,
+        max_terms: Option<usize>,
+        mode: PythonPrintMode,
+        max_line_length: Option<usize>,
+        indentation: usize,
+        fill_indented_lines: bool,
+        terms_on_new_line: bool,
+        color_top_level_sum: bool,
+        color_builtin_symbols: bool,
+        bracket_level_colors: Option<[u8; 16]>,
+        print_ring: bool,
+        symmetric_representation_for_finite_field: bool,
+        explicit_rational_polynomial: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        function_brackets: (char, char),
+        num_exp_as_superscript: bool,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+        alias_print_mode: PythonAliasPrintMode,
+    ) -> PyResult<PythonFormattedOutput> {
+        let text = self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode.clone(),
+            alias_print_mode,
+            ColorMode::Never,
+        );
+
+        let formatted = self.format_with_color_mode(
+            mode,
+            max_line_length,
+            indentation,
+            fill_indented_lines,
+            terms_on_new_line,
+            color_top_level_sum,
+            color_builtin_symbols,
+            bracket_level_colors,
+            print_ring,
+            symmetric_representation_for_finite_field,
+            explicit_rational_polynomial,
+            number_thousands_separator,
+            multiplication_operator,
+            double_star_for_exponentiation,
+            function_brackets,
+            num_exp_as_superscript,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            max_terms,
+            custom_print_mode.clone(),
+            alias_print_mode,
+            ColorMode::Always,
+        );
+        let latex = self.format_latex_with_options(
+            max_line_length,
+            max_terms,
+            precision,
+            show_namespaces,
+            hide_namespace,
+            include_attributes,
+            custom_print_mode,
+            alias_print_mode,
+        );
+
+        Ok(PythonFormattedOutput::new(
+            text,
+            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(latex),
         ))
     }
 
@@ -200,14 +598,61 @@ impl PythonPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(&self, exponent: usize, modulo: Option<i64>) -> PyResult<PythonPolynomial> {
@@ -227,7 +672,7 @@ impl PythonPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -259,11 +704,16 @@ impl PythonPolynomial {
         Ok(var_list)
     }
 
-    /// Add two polynomials `self and `rhs`, returning the result.
+    /// Add two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial | int
+    ///     The right-hand-side operand.
     pub fn __add__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -280,10 +730,15 @@ impl PythonPolynomial {
     }
 
     /// Subtract polynomials `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial | int
+    ///     The right-hand-side operand.
     pub fn __sub__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -299,11 +754,16 @@ impl PythonPolynomial {
         }
     }
 
-    /// Multiply two polynomials `self and `rhs`, returning the result.
+    /// Multiply two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial | int
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -326,7 +786,7 @@ impl PythonPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<PythonPolynomial>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -351,7 +811,7 @@ impl PythonPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -363,26 +823,26 @@ impl PythonPolynomial {
     }
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-
-        if self.poly.ring != rhs.poly.ring {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {r}",
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -428,24 +888,33 @@ impl PythonPolynomial {
         Ok(self.poly.degree(x) as isize)
     }
 
-    /// Set a new variable ordering for the polynomial.
-    /// This can be used to introduce new variables as well.
+    /// Reorder the polynomial in-place to use the given variable order.
+    ///
+    /// Parameters
+    /// ----------
+    /// order: Sequence[Expression]
+    ///     The variables treated as polynomial variables, in the given order.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Divide `self` by `rhs`, returning the quotient and remainder.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
     pub fn quot_rem(&self, rhs: Self) -> PyResult<(PythonPolynomial, PythonPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -466,9 +935,14 @@ impl PythonPolynomial {
         }
     }
 
-    /// Compute the remainder `self % rhs.
+    /// Compute the remainder of the division of `self` by `rhs`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -484,6 +958,11 @@ impl PythonPolynomial {
     }
 
     /// Compute the greatest common divisor (GCD) of two or more polynomials.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
     #[pyo3(signature = (*rhs))]
     pub fn gcd(
         &self,
@@ -491,7 +970,7 @@ impl PythonPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -504,7 +983,7 @@ impl PythonPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -528,17 +1007,22 @@ impl PythonPolynomial {
     /// >>> E('(1+x)(20+x)').to_polynomial().extended_gcd(E('x^2+2').to_polynomial())
     ///
     /// yields `(1, 1/67-7/402*x, 47/134+7/402*x)`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
     pub fn extended_gcd(
         &self,
         rhs: Self,
     ) -> PyResult<(PythonPolynomial, PythonPolynomial, PythonPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -554,6 +1038,13 @@ impl PythonPolynomial {
     }
 
     /// Compute the resultant of two polynomials with respect to the variable `var`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: Polynomial
+    ///     The right-hand-side operand.
+    /// var: Expression
+    ///     The variable with respect to which the resultant is computed.
     pub fn resultant(&self, rhs: Self, var: &PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -574,7 +1065,7 @@ impl PythonPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -585,7 +1076,7 @@ impl PythonPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -631,10 +1122,15 @@ impl PythonPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.derivative(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to differentiate.
     pub fn derivative(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -721,11 +1217,16 @@ impl PythonPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
     /// >>> for n, pp in p.coefficient_list(x):
     /// >>>     print(n, pp)
+    ///
+    /// Parameters
+    /// ----------
+    /// vars: Expression | Sequence[Expression] | None
+    ///     The variables with respect to which coefficients should be listed.
     #[pyo3(signature = (vars = None))]
     pub fn coefficient_list(
         &self,
@@ -809,7 +1310,7 @@ impl PythonPolynomial {
         }
     }
 
-    /// Evaluate the polynomial at point `input`.
+    /// Evaluate the polynomial at point `inputs`.
     ///
     /// Examples
     /// --------
@@ -818,13 +1319,18 @@ impl PythonPolynomial {
     /// >>> P('x*y+2*x+x^2').evaluate([2., 3.])
     ///
     /// Yields `14.0`.
+    ///
+    /// Parameters
+    /// ----------
+    /// inputs: npt.ArrayLike
+    ///     The input value.
     fn evaluate<'py>(
         &mut self,
         #[gen_stub(override_type(
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, f64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, f64, Ix1>,
     ) -> PyResult<f64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
@@ -841,7 +1347,7 @@ impl PythonPolynomial {
         Ok(self.poly.evaluate(|c| c.to_f64(), input))
     }
 
-    /// Evaluate the polynomial at point `input` with complex input.
+    /// Evaluate the polynomial at point `inputs` with complex input.
     ///
     /// Examples
     /// --------
@@ -850,13 +1356,18 @@ impl PythonPolynomial {
     /// >>> P('x*y+2*x+x^2').evaluate([2+1j, 3+2j])
     ///
     /// Yields `11+13j`.
+    ///
+    /// Parameters
+    /// ----------
+    /// inputs: npt.ArrayLike
+    ///     The input value.
     fn evaluate_complex<'py>(
         &mut self,
         #[gen_stub(override_type(
             type_repr = "numpy.typing.ArrayLike",
             imports = ("numpy.typing",),
         ))]
-        inputs: PyArrayLike1<'py, Complex64, AllowTypeChange>,
+        inputs: EvaluationInput<'py, Complex64, Ix1>,
     ) -> PyResult<Complex64> {
         let input = inputs.as_slice().map_err(|e| {
             exceptions::PyValueError::new_err(format!("Could not convert input to slice: {}", e))
@@ -881,16 +1392,23 @@ impl PythonPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable to replace.
+    /// v: Polynomial | int
+    ///     The polynomial or scalar value that should replace `x`.
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let var: PolyVariable = x
             .expr
             .try_into()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p,
@@ -922,7 +1440,7 @@ impl PythonPolynomial {
         }
     }
 
-    /// Parse a polynomial with rational coefficients from a string.
+    /// Parse a polynomial with integer coefficients from a string.
     /// The input must be written in an expanded format and a list of all
     /// the variables must be provided.
     ///
@@ -931,7 +1449,16 @@ impl PythonPolynomial {
     ///
     /// Examples
     /// --------
-    /// >>> e = Polynomial.parse('3/4*x^2+y+y*4', ['x', 'y'])
+    /// >>> e = Polynomial.parse('3*x^2+y+y*4', ['x', 'y'])
+    ///
+    /// Parameters
+    /// ----------
+    /// arg: str
+    ///     The input value.
+    /// vars: Sequence[str]
+    ///     The variables treated as polynomial variables, in the given order.
+    /// default_namespace: str | None
+    ///     The namespace assumed for unqualified symbols during parsing.
     ///
     /// Raises
     /// ------
@@ -946,7 +1473,7 @@ impl PythonPolynomial {
         vars: Vec<PyBackedStr>,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map: SmallVec<[SmartString<LazyCompact>; INLINED_EXPONENTS]> =
             SmallVec::new();
 
@@ -962,64 +1489,67 @@ impl PythonPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_polynomial(&Q, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
 
-    /// Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-    /// and the multiplicity of that root. Optionally, the intervals can be refined to a given precision.
+    /// Return one root from the canonical ordering, counting multiplicity.
+    /// Indices start at zero. Real roots come first in increasing order, then
+    /// nonreal roots ordered by real part and imaginary part.
+    pub fn root(&self, index: usize) -> PyResult<Option<PythonIsolatedRoot>> {
+        Ok(self.as_univariate()?.root(index).map(Into::into))
+    }
+
+    /// Isolate all distinct roots in the complex plane, together with their
+    /// multiplicities. Real roots come first in increasing order, followed by
+    /// nonreal roots ordered by real part and imaginary part.
     ///
     /// Examples
     /// --------
     /// >>> from symbolica import *
-    /// >>> p = E('2016+5808*x+5452*x^2+1178*x^3+-753*x^4+-232*x^5+41*x^6').to_polynomial()
-    /// >>> for a, b, n in p.isolate_roots():
-    /// >>>     print('({},{}): {}'.format(a, b, n))
-    ///
-    /// yields
-    /// ```
-    /// (-56/45,-77/62): 1
-    /// (-98/79,-119/96): 1
-    /// (-119/96,-21/17): 1
-    /// (-7/6,0): 1
-    /// (0,6): 1
-    /// (6,12): 1
-    /// ```
-    #[pyo3(signature = (refine = None))]
-    pub fn isolate_roots(
+    /// >>> p = E('(x-1)^2*(x^2+1)').to_polynomial()
+    /// >>> for root, multiplicity in p.isolate_roots():
+    /// ...     print(root.center, multiplicity)
+    pub fn isolate_roots(&self) -> PyResult<Vec<(PythonIsolatedRoot, usize)>> {
+        Ok(self
+            .as_univariate()?
+            .isolate_roots()
+            .into_iter()
+            .map(|(root, multiplicity)| (root.into(), multiplicity))
+            .collect())
+    }
+
+    /// Isolate all distinct real roots in increasing order, with multiplicities
+    /// stored separately. Each entry defines one CAD section. A returned root's
+    /// index belongs to its defining factor, not its position in this list.
+    pub fn isolate_real_roots(&self) -> PyResult<Vec<(PythonIsolatedRoot, usize)>> {
+        Ok(self
+            .as_univariate()?
+            .isolate_real_roots()
+            .into_iter()
+            .map(|(root, multiplicity)| (root.into(), multiplicity))
+            .collect())
+    }
+
+    /// Isolate the real roots as rational intervals containing exactly one
+    /// distinct root, together with their multiplicities.
+    pub fn isolate_real_root_intervals(
         &self,
-        refine: Option<PythonMultiPrecisionFloat>,
     ) -> PyResult<Vec<(PythonExpression, PythonExpression, usize)>> {
-        let refine = refine.map(|x| x.0.to_rational());
-
-        let var = if self.poly.nvars() == 1 {
-            0
-        } else {
-            let degs: Vec<_> = (0..self.poly.nvars())
-                .filter(|x| self.poly.degree(*x) > 0)
-                .collect();
-            if degs.len() > 1 || degs.is_empty() {
-                Err(exceptions::PyValueError::new_err(
-                    "Polynomial is not univariate",
-                ))?
-            } else {
-                degs[0]
-            }
-        };
-
-        let uni = self.poly.to_univariate_from_univariate(var);
-
-        Ok(uni
-            .isolate_roots(refine)
+        Ok(self
+            .as_univariate()?
+            .isolate_real_root_intervals()
             .into_iter()
             .map(|(l, r, m)| (Atom::num(l).into(), Atom::num(r).into(), m))
             .collect())
@@ -1028,48 +1558,88 @@ impl PythonPolynomial {
     /// Approximate all complex roots of a univariate polynomial, given a maximal number of iterations
     /// and a given tolerance. Returns the roots and their multiplicity.
     ///
+    /// Computes using double-precision floating-point arithmetic unless `decimal_digit_precision`
+    /// is provided, in which case it uses arbitrary precision and returns roots as
+    /// `ComplexFloat` values.
+    ///
     /// Examples
     /// --------
     ///
     /// >>> p = E('x^10+9x^7+4x^3+2x+1').to_polynomial()
     /// >>> for (r, m) in p.approximate_roots(1000, 1e-10):
     /// >>>     print(r, m)
-    pub fn approximate_roots<'py>(
+    ///
+    /// >>> p = E('x^2-2').to_polynomial()
+    /// >>> for (r, m) in p.approximate_roots(1000, 1e-10, 100):
+    /// >>>     print(r.real, r.imag, m)
+    ///
+    /// Parameters
+    /// ----------
+    /// max_iterations: int
+    ///     The maximum number of iterations for the root finder.
+    /// tolerance: float
+    ///     The tolerance on a root `z`, relative to `max(1, abs(z))` and independent
+    ///     of the scale of the coefficients.
+    /// decimal_digit_precision: int | None
+    ///     The decimal precision of the numerical type used for root finding.
+    #[pyo3(signature = (max_iterations, tolerance, decimal_digit_precision = None))]
+    #[gen_stub(override_return_type(
+        type_repr = "list[tuple[complex, int]] | list[tuple[ComplexFloat, int]]"
+    ))]
+    pub fn approximate_roots(
         &self,
         max_iterations: usize,
         tolerance: f64,
-        py: Python<'py>,
-    ) -> PyResult<Vec<(Bound<'py, PyComplex>, usize)>> {
-        let var = if self.poly.nvars() == 1 {
-            0
-        } else {
-            let degs: Vec<_> = (0..self.poly.nvars())
-                .filter(|x| self.poly.degree(*x) > 0)
+        decimal_digit_precision: Option<u32>,
+        py: Python,
+    ) -> PyResult<Py<PyAny>> {
+        let uni = self.as_univariate()?;
+
+        let Some(decimal_digit_precision) = decimal_digit_precision else {
+            let roots: Vec<_> = uni
+                .approximate_roots::<F64>(max_iterations, &tolerance.into())
+                .unwrap_or_else(|e| e)
+                .into_iter()
+                .map(|(r, p)| (PyComplex::from_doubles(py, r.re.to_f64(), r.im.to_f64()), p))
                 .collect();
-            if degs.len() > 1 || degs.is_empty() {
-                Err(exceptions::PyValueError::new_err(
-                    "Polynomial is not univariate",
-                ))?
-            } else {
-                degs[0]
-            }
+
+            return roots.into_py_any(py);
         };
 
-        let uni = self.poly.to_univariate_from_univariate(var);
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
+        let tolerance = Float::with_val(prec, tolerance);
 
-        Ok(uni
-            .approximate_roots::<F64>(max_iterations, &tolerance.into())
+        uni.approximate_roots::<Float>(max_iterations, &tolerance)
             .unwrap_or_else(|e| e)
             .into_iter()
-            .map(|(r, p)| (PyComplex::from_doubles(py, r.re.to_f64(), r.im.to_f64()), p))
-            .collect())
+            .map(|(r, p)| (PythonMultiPrecisionComplex(r), p))
+            .collect::<Vec<_>>()
+            .into_py_any(py)
     }
 
     /// Convert the coefficients of the polynomial to a finite field with prime `prime`.
-    pub fn to_finite_field(&self, prime: u64) -> PythonFiniteFieldPolynomial {
-        let f = Zp64::new(prime);
-        PythonFiniteFieldPolynomial {
-            poly: self.poly.map_coeff(|c| c.to_finite_field(&f), f.clone()),
+    ///
+    /// Parameters
+    /// ----------
+    /// prime: int
+    ///     The prime modulus of the target finite field.
+    pub fn to_finite_field(&self, prime: u64, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if prime == 2 {
+            PythonPrimeTwoPolynomial {
+                poly: self.poly.map_coeff(|c| c.to_finite_field(&Z2), Z2.clone()),
+            }
+            .into_py_any(py)
+        } else if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd modulus",
+            ));
+        } else {
+            let f = Zp64::new(prime);
+            PythonFiniteFieldPolynomial {
+                poly: self.poly.map_coeff(|c| c.to_finite_field(&f), f.clone()),
+            }
+            .into_py_any(py)
         }
     }
 
@@ -1084,14 +1654,23 @@ impl PythonPolynomial {
     /// --------
     /// >>> basis = Polynomial.groebner_basis(
     /// >>>     [E("a b c d - 1").to_polynomial(),
-    /// >>>      E("a b c + a b d + a c d + b c d").to_polynomial(),
-    /// >>>      E("a b + b c + a d + c d").to_polynomial(),
-    /// >>>      E("a + b + c + d").to_polynomial()],
+    /// >>>     E("a b c + a b d + a c d + b c d").to_polynomial(),
+    /// >>>     E("a b + b c + a d + c d").to_polynomial(),
+    /// >>>     E("a + b + c + d").to_polynomial()],
     /// >>>     grevlex=True,
     /// >>>     print_stats=True
     /// >>> )
     /// >>> for p in basis:
     /// >>>     print(p)
+    ///
+    /// Parameters
+    /// ----------
+    /// system: Sequence[Polynomial]
+    ///     The equations or polynomials that define the system.
+    /// grevlex: bool
+    ///     Whether graded reverse lexicographic ordering should be used.
+    /// print_stats: bool
+    ///     Whether Groebner basis statistics should be printed during computation.
     #[pyo3(signature = (system, grevlex = true, print_stats = false))]
     #[classmethod]
     pub fn groebner_basis(
@@ -1120,8 +1699,23 @@ impl PythonPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
-    /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
+    ///
+    /// If `grevlex=True`, reverse graded lexicographical ordering is used,
+    /// otherwise the ordering is lexicographical.
+    ///
+    /// Examples
+    /// --------
+    /// >>> E('y^2+x').to_polynomial().reduce([E('x').to_polynomial()])
+    ///
+    /// yields `y^2`
+    ///
+    /// Parameters
+    /// ----------
+    /// system: Sequence[Polynomial]
+    ///     The polynomials that define the reducing set.
+    /// grevlex: bool
+    ///     Whether graded reverse lexicographic ordering should be used.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
         if grevlex {
@@ -1148,10 +1742,15 @@ impl PythonPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.integrate(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
     pub fn integrate(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -1194,9 +1793,15 @@ impl PythonPolynomial {
     /// >>> x, y = S('x', 'y')
     /// >>> a = Polynomial.interpolate(
     /// >>>         x, [4, 5], [(y**2+5).to_polynomial(), (y**3).to_polynomial()])
-    /// >>> print(a)
-    ///
-    /// yields `25-5*x+5*y^2-y^2*x-4*y^3+y^3*x`.
+    /// >>> print(a)  # 25-5*x+5*y^2-y^2*x-4*y^3+y^3*x
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The interpolation variable.
+    /// sample_points: Sequence[Expression | int]
+    ///     The sample points used for interpolation.
+    /// values: Sequence[Polynomial]
+    ///     The values associated with the sample points.
     #[classmethod]
     pub fn interpolate(
         _cls: &Bound<'_, PyType>,
@@ -1219,7 +1824,7 @@ impl PythonPolynomial {
         let var = x
             .expr
             .try_into()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         let sample_points: Vec<Rational> = sample_points
             .into_iter()
@@ -1271,16 +1876,17 @@ impl PythonPolynomial {
         })
     }
 
-    /// Convert the polynomial to a number field defined by the minimal polynomial `minimal_poly`.
+    /// Convert the coefficients of the polynomial to a number field defined by the minimal polynomial `minimal_poly`.
     ///
     /// Examples
     /// --------
-    ///
     /// >>> from symbolica import *
     /// >>> a = P('a').to_number_field(P('a^2-2'))
-    /// >>> print(a * a)
-    ///
-    /// Yields `2`.
+    /// >>> print(a * a)  # 2
+    /// Parameters
+    /// ----------
+    /// minimal_poly: Polynomial
+    ///     The minimal polynomial that defines the algebraic extension.
     pub fn to_number_field(&self, minimal_poly: Self) -> PyResult<PythonNumberFieldPolynomial> {
         let a = AlgebraicExtension::new(minimal_poly.poly.clone());
         let poly_nf = self.poly.to_number_field(&a);
@@ -1305,7 +1911,14 @@ impl PythonPolynomial {
     /// >>> (min_poly, rep2, rep23) = sqrt2.adjoin(sqrt23)
     /// >>>
     /// >>> # convert to number field
-    /// >>> a = P('a^2+b').replace(S('a'), rep2).replace(S('b'), rep23).to_number_field(min_poly)
+    /// >>> a = P('a^2+b').replace(S('b'), rep23).replace(S('a'), rep2).to_number_field(min_poly)
+    ///
+    /// Parameters
+    /// ----------
+    /// b: Polynomial
+    ///     The polynomial that defines the extension to adjoin.
+    /// new_symbol: Expression | None
+    ///     The symbol chosen for the adjoined generator.
     #[pyo3(signature = (b, new_symbol = None))]
     pub fn adjoin(
         &self,
@@ -1342,15 +1955,22 @@ impl PythonPolynomial {
     /// >>> rep2.simplify_algebraic_number(min_poly)
     ///
     /// Yields `b^2-2`.
+    ///
+    /// Parameters
+    /// ----------
+    /// minimal_poly: Polynomial
+    ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
-        let poly_nf = a.simplify(&m).poly().clone();
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
+        let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
     }
@@ -1386,12 +2006,12 @@ impl PythonFiniteFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -1441,7 +2061,6 @@ impl PythonFiniteFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -1468,7 +2087,6 @@ impl PythonFiniteFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -1476,7 +2094,7 @@ impl PythonFiniteFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
@@ -1485,6 +2103,7 @@ impl PythonFiniteFieldPolynomial {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum,
                 color_builtin_symbols,
                 bracket_level_colors,
@@ -1494,8 +2113,6 @@ impl PythonFiniteFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -1504,14 +2121,16 @@ impl PythonFiniteFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -1521,14 +2140,61 @@ impl PythonFiniteFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(
@@ -1552,7 +2218,7 @@ impl PythonFiniteFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -1584,11 +2250,16 @@ impl PythonFiniteFieldPolynomial {
         Ok(var_list)
     }
 
-    /// Add two polynomials `self and `rhs`, returning the result.
+    /// Add two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -1602,16 +2273,21 @@ impl PythonFiniteFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
 
     /// Subtract polynomials `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -1622,19 +2298,25 @@ impl PythonFiniteFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
 
-    /// Multiply two polynomials `self and `rhs`, returning the result.
+    /// Multiply two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -1648,7 +2330,7 @@ impl PythonFiniteFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -1660,7 +2342,7 @@ impl PythonFiniteFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -1675,7 +2357,7 @@ impl PythonFiniteFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -1689,7 +2371,7 @@ impl PythonFiniteFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -1701,26 +2383,26 @@ impl PythonFiniteFieldPolynomial {
     }
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring != rhs.poly.ring {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -1766,28 +2448,37 @@ impl PythonFiniteFieldPolynomial {
         Ok(self.poly.degree(x) as isize)
     }
 
-    /// Set a new variable ordering for the polynomial.
-    /// This can be used to introduce new variables as well.
+    /// Reorder the polynomial in-place to use the given variable order.
+    ///
+    /// Parameters
+    /// ----------
+    /// order: Sequence[Expression]
+    ///     The variables treated as polynomial variables, in the given order.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
 
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Divide `self` by `rhs`, returning the quotient and remainder.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn quot_rem(
         &self,
         rhs: Self,
     ) -> PyResult<(PythonFiniteFieldPolynomial, PythonFiniteFieldPolynomial)> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -1808,9 +2499,14 @@ impl PythonFiniteFieldPolynomial {
         }
     }
 
-    /// Compute the remainder `self % rhs.
+    /// Compute the remainder of the division of `self` by `rhs`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -1826,6 +2522,11 @@ impl PythonFiniteFieldPolynomial {
     }
 
     /// Compute the greatest common divisor (GCD) of two or more polynomials.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
     #[pyo3(signature = (*rhs))]
     pub fn gcd(
         &self,
@@ -1833,7 +2534,7 @@ impl PythonFiniteFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -1846,7 +2547,7 @@ impl PythonFiniteFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -1870,6 +2571,11 @@ impl PythonFiniteFieldPolynomial {
     /// >>> E('(1+x)(20+x)').to_polynomial(modulus=5).extended_gcd(E('x^2+2').to_polynomial(modulus=5))
     ///
     /// yields `(1, 3+4*x, 3+x)`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn extended_gcd(
         &self,
         rhs: Self,
@@ -1878,13 +2584,13 @@ impl PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial,
         PythonFiniteFieldPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -1899,21 +2605,33 @@ impl PythonFiniteFieldPolynomial {
         Ok((Self { poly: g }, Self { poly: s }, Self { poly: t }))
     }
 
-    /// Convert the finite field polynomial to a polynomial with integer coefficients.
+    /// Convert the polynomial to a polynomial with integer coefficients.
+    ///
+    /// Parameters
+    /// ----------
+    /// symmetric_representation: bool
+    ///     Whether finite-field coefficients should use symmetric integer representatives.
     #[pyo3(signature = (symmetric_representation = true))]
     pub fn to_integer_polynomial(&self, symmetric_representation: bool) -> PythonPolynomial {
         PythonPolynomial {
             poly: if symmetric_representation {
                 self.poly
-                    .map_coeff(|x| self.poly.ring.to_symmetric_integer(x).into(), Q)
+                    .map_coeff(|x| self.poly.ring().to_symmetric_integer(x).into(), Q)
             } else {
                 self.poly
-                    .map_coeff(|x| self.poly.ring.to_integer(x).into(), Q)
+                    .map_coeff(|x| self.poly.ring().to_integer(x).into(), Q)
             },
         }
     }
 
     /// Compute the resultant of two polynomials with respect to the variable `var`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldPolynomial
+    ///     The right-hand-side operand.
+    /// var: Expression
+    ///     The variable with respect to which the resultant is computed.
     pub fn resultant(&self, rhs: Self, var: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -1934,7 +2652,7 @@ impl PythonFiniteFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -1945,7 +2663,7 @@ impl PythonFiniteFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -1991,10 +2709,15 @@ impl PythonFiniteFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.derivative(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to differentiate.
     pub fn derivative(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -2016,7 +2739,7 @@ impl PythonFiniteFieldPolynomial {
     }
 
     pub fn get_modulus(&self) -> u64 {
-        self.poly.ring.get_prime()
+        self.poly.ring().get_prime()
     }
 
     /// Make the polynomial monic, i.e., the polynomial
@@ -2056,11 +2779,16 @@ impl PythonFiniteFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
     /// >>> for n, pp in p.coefficient_list(x):
     /// >>>     print(n, pp)
+    ///
+    /// Parameters
+    /// ----------
+    /// vars: Expression | Sequence[Expression] | None
+    ///     The variables with respect to which coefficients should be listed.
     #[pyo3(signature = (vars = None))]
     pub fn coefficient_list(
         &self,
@@ -2144,16 +2872,20 @@ impl PythonFiniteFieldPolynomial {
         }
     }
 
-    /// Evaluate the polynomial at the given values.
+    /// Evaluate the polynomial at point `values`.
     ///
     /// Examples
     /// --------
     ///
     /// >>> from symbolica import *
-    /// >>> x, y = S('x', 'y')
-    /// >>> p = E('x*y+2*x+x^2').to_polynomial(modulus=5)
-    /// >>> print(p.evaluate([2, 3]))
-    /// 4
+    /// >>> P('x*y+2*x+x^2', modulus=5).evaluate([2, 3])
+    ///
+    /// Yields `4`.
+    ///
+    /// Parameters
+    /// ----------
+    /// values: Sequence[int]
+    ///     The input value.
     pub fn evaluate(&self, values: Vec<Integer>) -> PyResult<Integer> {
         if values.len() != self.poly.get_vars_ref().len() {
             return Err(exceptions::PyValueError::new_err(format!(
@@ -2165,12 +2897,12 @@ impl PythonFiniteFieldPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -2178,11 +2910,17 @@ impl PythonFiniteFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
-    /// >>> x = S('x')
+    /// >>> from symbolica import *
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
-    /// >>> p.replace(x, r)
+    /// >>> r = E('y+1').to_polynomial()
+    /// >>> p.replace(S('x'), r)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable to replace.
+    /// v: FiniteFieldPolynomial | int
+    ///     The polynomial or scalar value that should replace `x`.
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
             AtomView::Var(x) => x.get_symbol(),
@@ -2196,7 +2934,7 @@ impl PythonFiniteFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -2229,10 +2967,25 @@ impl PythonFiniteFieldPolynomial {
 
     /// Compute the Groebner basis of a polynomial system.
     ///
-    /// If `grevlex=True`, reverse graded lexicographical ordering is used,
-    /// otherwise the ordering is lexicographical.
+    /// Examples
+    /// --------
+    /// >>> basis = Polynomial.groebner_basis(
+    /// >>>     [E("a b c d - 1").to_polynomial(),
+    /// >>>     E("a b c + a b d + a c d + b c d").to_polynomial(),
+    /// >>>     E("a b + b c + a d + c d").to_polynomial(),
+    /// >>>     E("a + b + c + d").to_polynomial()],
+    /// >>>     grevlex=True,
+    /// >>>     print_stats=True
+    /// >>> )
+    /// >>> for p in basis:
+    /// >>>     print(p)
     ///
-    /// If `print_stats=True` intermediate statistics will be printed.
+    /// Parameters
+    /// ----------
+    /// grevlex: bool
+    ///     If `True`, reverse graded lexicographical ordering is used, otherwise the ordering is lexicographical.
+    /// print_stats: bool
+    ///     If `True`, intermediate statistics will be printed.
     #[pyo3(signature = (system, grevlex = true, print_stats = false))]
     #[classmethod]
     pub fn groebner_basis(
@@ -2261,8 +3014,23 @@ impl PythonFiniteFieldPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
-    /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
+    ///
+    /// If `grevlex=True`, reverse graded lexicographical ordering is used,
+    /// otherwise the ordering is lexicographical.
+    ///
+    /// Examples
+    /// --------
+    /// >>> E('y^2+x').to_polynomial().reduce([E('x').to_polynomial()])
+    ///
+    /// yields `y^2`
+    ///
+    /// Parameters
+    /// ----------
+    /// system: Sequence[Polynomial]
+    ///     The polynomials that define the reducing set.
+    /// grevlex: bool
+    ///     Whether graded reverse lexicographic ordering should be used.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
         if grevlex {
@@ -2289,10 +3057,15 @@ impl PythonFiniteFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.integrate(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
     pub fn integrate(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -2322,7 +3095,18 @@ impl PythonFiniteFieldPolynomial {
     ///
     /// Examples
     /// --------
-    /// >>> e = Polynomial.parse('3*x^2+y+y*4', ['x', 'y'], 5)
+    /// >>> e = FiniteFieldPolynomial.parse('18*x^2+y+y*4', ['x', 'y'], 17)
+    ///
+    /// Parameters
+    /// ----------
+    /// arg: str
+    ///     The input value.
+    /// vars: Sequence[str]
+    ///     The variables treated as polynomial variables, in the given order.
+    /// prime: int
+    ///     The prime modulus of the finite field.
+    /// default_namespace: str | None
+    ///     The namespace assumed for unqualified symbols during parsing.
     ///
     /// Raises
     /// ------
@@ -2338,7 +3122,7 @@ impl PythonFiniteFieldPolynomial {
         prime: u64,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -2353,15 +3137,23 @@ impl PythonFiniteFieldPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
 
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
+        }
+
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_polynomial(&Zp64::new(prime), &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
@@ -2370,14 +3162,19 @@ impl PythonFiniteFieldPolynomial {
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         let p = self
             .poly
-            .map_coeff(|x| self.poly.ring.to_symmetric_integer(x), Z);
+            .map_coeff(|x| self.poly.ring().to_symmetric_integer(x), Z);
 
         Ok(p.to_expression().into())
     }
 
-    /// Convert the polynomial to a Galois field defined by the minimal polynomial `minimal_poly`.
+    /// Convert the coefficients of the polynomial to a Galois field defined by the minimal polynomial `minimal_poly`.
+    ///
+    /// Parameters
+    /// ----------
+    /// minimal_poly: FiniteFieldPolynomial
+    ///     The minimal polynomial that defines the algebraic extension.
     pub fn to_galois_field(&self, minimal_poly: Self) -> PyResult<PythonGaloisFieldPolynomial> {
-        if self.poly.ring != minimal_poly.poly.ring {
+        if self.poly.ring() != minimal_poly.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different moduli".to_string(),
             ));
@@ -2396,6 +3193,13 @@ impl PythonFiniteFieldPolynomial {
     ///
     /// If `new_symbol` is provided, the variable of the new extension will be renamed to it.
     /// Otherwise, the variable of the new extension will be the same as that of `b`.
+    ///
+    /// Parameters
+    /// ----------
+    /// b: FiniteFieldPolynomial
+    ///     The finite-field polynomial that defines the extension to adjoin.
+    /// new_symbol: Expression | None
+    ///     The symbol chosen for the adjoined generator.
     #[pyo3(signature = (b, new_symbol = None))]
     pub fn adjoin(
         &self,
@@ -2406,7 +3210,7 @@ impl PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial,
         PythonFiniteFieldPolynomial,
     )> {
-        if self.poly.ring != b.poly.ring {
+        if self.poly.ring() != b.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different moduli".to_string(),
             ));
@@ -2434,23 +3238,21 @@ impl PythonFiniteFieldPolynomial {
     /// Find the minimal polynomial for the algebraic number represented by this polynomial
     /// expressed in the number field defined by `minimal_poly`.
     ///
-    /// Examples
-    /// --------
-    ///
-    /// >>> from symbolica import *
-    /// >>> (min_poly, rep2, rep23) = P('a^2-2').adjoin(P('b^2-3'))
-    /// >>> rep2.simplify_algebraic_number(min_poly)
-    ///
-    /// Yields `b^2-2`.
+    /// Parameters
+    /// ----------
+    /// minimal_poly: FiniteFieldPolynomial
+    ///     The minimal polynomial that defines the algebraic extension.
     pub fn simplify_algebraic_number(&self, minimal_poly: Self) -> PyResult<Self> {
         let a = AlgebraicExtension::new(minimal_poly.poly);
-        let m = a.try_to_element(self.poly.clone()).map_err(|e| {
-            exceptions::PyValueError::new_err(format!(
-                "Could not convert polynomial to algebraic number: {}",
-                e
-            ))
-        })?;
-        let poly_nf = a.simplify(&m).poly().clone();
+        let m = a
+            .try_element_from_polynomial(self.poly.clone())
+            .map_err(|e| {
+                exceptions::PyValueError::new_err(format!(
+                    "Could not convert polynomial to algebraic number: {}",
+                    e
+                ))
+            })?;
+        let poly_nf = a.minimal_polynomial_of_element(&m);
 
         Ok(Self { poly: poly_nf })
     }
@@ -2486,12 +3288,12 @@ impl PythonPrimeTwoPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -2541,7 +3343,6 @@ impl PythonPrimeTwoPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -2568,7 +3369,6 @@ impl PythonPrimeTwoPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -2576,7 +3376,7 @@ impl PythonPrimeTwoPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
@@ -2585,6 +3385,7 @@ impl PythonPrimeTwoPolynomial {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum,
                 color_builtin_symbols,
                 bracket_level_colors,
@@ -2594,8 +3395,6 @@ impl PythonPrimeTwoPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -2604,14 +3403,16 @@ impl PythonPrimeTwoPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -2621,14 +3422,61 @@ impl PythonPrimeTwoPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(
@@ -2652,7 +3500,7 @@ impl PythonPrimeTwoPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -2688,7 +3536,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2702,7 +3550,7 @@ impl PythonPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2711,7 +3559,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2722,10 +3570,11 @@ impl PythonPrimeTwoPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -2734,7 +3583,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2748,7 +3597,7 @@ impl PythonPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2760,7 +3609,7 @@ impl PythonPrimeTwoPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -2775,7 +3624,7 @@ impl PythonPrimeTwoPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -2789,7 +3638,7 @@ impl PythonPrimeTwoPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -2802,19 +3651,20 @@ impl PythonPrimeTwoPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -2863,15 +3713,15 @@ impl PythonPrimeTwoPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -2880,6 +3730,12 @@ impl PythonPrimeTwoPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonPrimeTwoPolynomial, PythonPrimeTwoPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -2897,6 +3753,12 @@ impl PythonPrimeTwoPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -2954,7 +3816,7 @@ impl PythonPrimeTwoPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -2965,7 +3827,7 @@ impl PythonPrimeTwoPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -3179,12 +4041,12 @@ impl PythonPrimeTwoPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -3195,7 +4057,7 @@ impl PythonPrimeTwoPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -3210,7 +4072,7 @@ impl PythonPrimeTwoPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -3275,7 +4137,7 @@ impl PythonPrimeTwoPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
     /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
@@ -3368,12 +4230,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -3423,7 +4285,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -3450,7 +4311,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -3458,7 +4318,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
@@ -3467,6 +4327,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum,
                 color_builtin_symbols,
                 bracket_level_colors,
@@ -3476,8 +4337,6 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -3486,14 +4345,16 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -3503,14 +4364,61 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(
@@ -3534,7 +4442,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -3570,7 +4478,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3584,7 +4492,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3593,7 +4501,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3604,10 +4512,11 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -3616,7 +4525,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3630,7 +4539,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3642,7 +4551,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -3657,7 +4566,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -3671,7 +4580,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -3684,25 +4593,20 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        if self.poly.ring != rhs.poly.ring {
-            return Err(exceptions::PyValueError::new_err(
-                "Polynomials have different rings".to_string(),
-            ));
-        };
-
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -3751,15 +4655,15 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -3771,7 +4675,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         PythonGaloisFieldPrimeTwoPolynomial,
         PythonGaloisFieldPrimeTwoPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -3794,7 +4698,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -3817,7 +4721,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -3830,7 +4734,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -3862,13 +4766,13 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         PythonGaloisFieldPrimeTwoPolynomial,
         PythonGaloisFieldPrimeTwoPolynomial,
     )> {
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
         }
 
-        if self.poly.variables != rhs.poly.variables
+        if self.poly.variables() != rhs.poly.variables()
             || (0..self.poly.nvars())
                 .filter(|i| self.poly.degree(*i) > 0 || rhs.poly.degree(*i) > 0)
                 .count()
@@ -3904,7 +4808,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -3915,7 +4819,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -4129,12 +5033,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -4145,7 +5049,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -4160,7 +5064,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -4225,7 +5129,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
     /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
@@ -4294,14 +5198,14 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonPrimeTwoPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
         let mut poly = MultivariatePolynomial::new(
-            &c.ring.poly().ring,
+            c.ring().poly().ring(),
             None,
             Arc::new(c.get_vars_ref().to_vec()),
         );
@@ -4317,7 +5221,7 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonPrimeTwoPolynomial {
         PythonPrimeTwoPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 }
@@ -4352,12 +5256,12 @@ impl PythonGaloisFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -4407,7 +5311,6 @@ impl PythonGaloisFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -4434,7 +5337,6 @@ impl PythonGaloisFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -4442,7 +5344,7 @@ impl PythonGaloisFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
@@ -4451,6 +5353,7 @@ impl PythonGaloisFieldPolynomial {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum,
                 color_builtin_symbols,
                 bracket_level_colors,
@@ -4460,8 +5363,6 @@ impl PythonGaloisFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -4470,14 +5371,16 @@ impl PythonGaloisFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -4487,14 +5390,61 @@ impl PythonGaloisFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(
@@ -4518,7 +5468,7 @@ impl PythonGaloisFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -4554,7 +5504,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4568,7 +5518,7 @@ impl PythonGaloisFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4577,7 +5527,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4588,10 +5538,11 @@ impl PythonGaloisFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
@@ -4600,7 +5551,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4614,7 +5565,7 @@ impl PythonGaloisFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4626,7 +5577,7 @@ impl PythonGaloisFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -4641,7 +5592,7 @@ impl PythonGaloisFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -4655,7 +5606,7 @@ impl PythonGaloisFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -4668,19 +5619,20 @@ impl PythonGaloisFieldPolynomial {
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -4729,15 +5681,15 @@ impl PythonGaloisFieldPolynomial {
     /// Set a new variable ordering for the polynomial.
     /// This can be used to introduce new variables as well.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
@@ -4746,6 +5698,12 @@ impl PythonGaloisFieldPolynomial {
         &self,
         rhs: Self,
     ) -> PyResult<(PythonGaloisFieldPolynomial, PythonGaloisFieldPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -4763,6 +5721,12 @@ impl PythonGaloisFieldPolynomial {
 
     /// Compute the remainder `self % rhs.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -4780,7 +5744,7 @@ impl PythonGaloisFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -4793,7 +5757,7 @@ impl PythonGaloisFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -4828,7 +5792,7 @@ impl PythonGaloisFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -4839,7 +5803,7 @@ impl PythonGaloisFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -5053,12 +6017,12 @@ impl PythonGaloisFieldPolynomial {
 
         let input = values
             .into_iter()
-            .map(|x| self.poly.ring.element_from_integer(x))
+            .map(|x| self.poly.ring().element_from_integer(x))
             .collect::<Vec<_>>();
 
         let r = self.poly.replace_all(&input);
 
-        Ok(self.poly.ring.to_integer(&r))
+        Ok(self.poly.ring().to_integer(&r))
     }
 
     /// Replace the variable `x` with a polynomial `v`.
@@ -5069,7 +6033,7 @@ impl PythonGaloisFieldPolynomial {
     /// >>> from symbolica import Expression
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
@@ -5084,7 +6048,7 @@ impl PythonGaloisFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -5149,7 +6113,7 @@ impl PythonGaloisFieldPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
     /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
@@ -5207,7 +6171,7 @@ impl PythonGaloisFieldPolynomial {
             .poly
             .to_expression_with_coeff_map(|_, element, out| {
                 let p = element.poly.map_coeff(
-                    |c| Integer::from_finite_field(&element.poly.ring, *c),
+                    |c| Integer::from_finite_field(&element.poly.ring(), *c),
                     IntegerRing::new(),
                 );
                 p.to_expression_into(out);
@@ -5219,14 +6183,14 @@ impl PythonGaloisFieldPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonFiniteFieldPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
         let mut poly = MultivariatePolynomial::new(
-            &c.ring.poly().ring,
+            c.ring().poly().ring(),
             None,
             Arc::new(c.get_vars_ref().to_vec()),
         );
@@ -5242,13 +6206,13 @@ impl PythonGaloisFieldPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonFiniteFieldPolynomial {
         PythonFiniteFieldPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 
     /// Get the modulus of the base finite field.
     pub fn get_modulus(&self) -> u64 {
-        self.poly.ring.poly().ring.get_prime()
+        self.poly.ring().poly().ring().get_prime()
     }
 }
 
@@ -5282,12 +6246,12 @@ impl PythonNumberFieldPolynomial {
         match op {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.is_constant()
-                    && self.poly.get_constant() == self.poly.ring.element_from_integer(i)),
+                    && self.poly.get_constant() == self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.is_constant()
-                    || self.poly.get_constant() != self.poly.ring.element_from_integer(i)),
+                    || self.poly.get_constant() != self.poly.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -5337,7 +6301,6 @@ impl PythonNumberFieldPolynomial {
             number_thousands_separator = None,
             multiplication_operator = '·',
             double_star_for_exponentiation = false,
-            square_brackets_for_function = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
             precision = None,
@@ -5364,7 +6327,6 @@ impl PythonNumberFieldPolynomial {
         number_thousands_separator: Option<char>,
         multiplication_operator: char,
         double_star_for_exponentiation: bool,
-        square_brackets_for_function: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
         precision: Option<usize>,
@@ -5372,7 +6334,7 @@ impl PythonNumberFieldPolynomial {
         hide_namespace: Option<&str>,
         include_attributes: bool,
         max_terms: Option<usize>,
-        custom_print_mode: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
     ) -> PyResult<String> {
         Ok(self.poly.format_string(
@@ -5381,6 +6343,7 @@ impl PythonNumberFieldPolynomial {
                 indentation,
                 fill_indented_lines,
                 terms_on_new_line,
+                color_mode: ColorMode::Auto,
                 color_top_level_sum,
                 color_builtin_symbols,
                 bracket_level_colors,
@@ -5390,8 +6353,6 @@ impl PythonNumberFieldPolynomial {
                 number_thousands_separator,
                 multiplication_operator,
                 double_star_for_exponentiation,
-                #[allow(deprecated)]
-                square_brackets_for_function,
                 function_brackets,
                 num_exp_as_superscript,
                 mode: mode.into(),
@@ -5400,14 +6361,16 @@ impl PythonNumberFieldPolynomial {
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
                 hide_namespace: if show_namespaces {
-                    hide_namespace.map(intern_string)
+                    hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
                 } else {
                     None
                 },
                 include_attributes,
                 max_terms,
                 alias_print_mode: alias_print_mode.into(),
-                custom_print_mode: custom_print_mode.map(|x| ("default", x)),
+                custom_print_mode: custom_print_mode
+                    .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                    .unwrap_or_default(),
             },
             PrintState::new(),
         ))
@@ -5417,14 +6380,61 @@ impl PythonNumberFieldPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     pub fn __pow__(
@@ -5448,7 +6458,7 @@ impl PythonNumberFieldPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
@@ -5480,11 +6490,16 @@ impl PythonNumberFieldPolynomial {
         Ok(var_list)
     }
 
-    /// Add two polynomials `self and `rhs`, returning the result.
+    /// Add two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __add__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5498,16 +6513,21 @@ impl PythonNumberFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
 
     /// Subtract polynomials `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __sub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5518,19 +6538,25 @@ impl PythonNumberFieldPolynomial {
                 }
             }
             PolynomialOrInteger::Integer(i) => Ok(Self {
-                poly: self
-                    .poly
-                    .clone()
-                    .add_constant(self.poly.ring.neg(&self.poly.ring.element_from_integer(i))),
+                poly: self.poly.clone().add_constant(
+                    self.poly
+                        .ring()
+                        .neg(&self.poly.ring().element_from_integer(i)),
+                ),
             }),
         }
     }
 
-    /// Multiply two polynomials `self and `rhs`, returning the result.
+    /// Multiply two polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial | int
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5544,7 +6570,7 @@ impl PythonNumberFieldPolynomial {
                 poly: self
                     .poly
                     .clone()
-                    .mul_coeff(self.poly.ring.element_from_integer(i)),
+                    .mul_coeff(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -5556,7 +6582,7 @@ impl PythonNumberFieldPolynomial {
     pub fn __rsub__(&self, rhs: PolynomialOrInteger<Self>) -> PyResult<Self> {
         match rhs {
             PolynomialOrInteger::Polynomial(p) => {
-                if self.poly.ring != p.poly.ring {
+                if self.poly.ring() != p.poly.ring() {
                     Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ))
@@ -5571,7 +6597,7 @@ impl PythonNumberFieldPolynomial {
                     .poly
                     .clone()
                     .neg()
-                    .add_constant(self.poly.ring.element_from_integer(i)),
+                    .add_constant(self.poly.ring().element_from_integer(i)),
             }),
         }
     }
@@ -5585,7 +6611,7 @@ impl PythonNumberFieldPolynomial {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
 
-        if self.poly.ring != rhs.poly.ring {
+        if self.poly.ring() != rhs.poly.ring() {
             return Err(exceptions::PyValueError::new_err(
                 "Polynomials have different rings".to_string(),
             ));
@@ -5597,20 +6623,26 @@ impl PythonNumberFieldPolynomial {
     }
 
     /// Divide the polynomial `self` by `rhs` if possible, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
         if rhs.poly.is_zero() {
             return Err(exceptions::PyValueError::new_err("Division by zero"));
         }
-        let (q, r) = self.poly.quot_rem(&rhs.poly, false);
-
-        if r.is_zero() {
-            Ok(Self { poly: q })
-        } else {
-            Err(exceptions::PyValueError::new_err(format!(
-                "The division has a remainder: {}",
-                r
-            )))
-        }
+        self.poly
+            .try_div(&rhs.poly)
+            .map(|poly| Self { poly })
+            .ok_or_else(|| {
+                exceptions::PyValueError::new_err("The division has a nonzero remainder")
+            })
     }
 
     pub fn unify_variables(&mut self, other: &mut Self) {
@@ -5656,26 +6688,41 @@ impl PythonNumberFieldPolynomial {
         Ok(self.poly.degree(x) as isize)
     }
 
-    /// Set a new variable ordering for the polynomial.
-    /// This can be used to introduce new variables as well.
+    /// Reorder the polynomial in-place to use the given variable order.
+    ///
+    /// Parameters
+    /// ----------
+    /// order: Sequence[Expression]
+    ///     The variables treated as polynomial variables, in the given order.
     pub fn reorder(&mut self, order: Vec<PythonExpression>) -> PyResult<()> {
-        let vars: Vec<_> = order
+        let vars: Vec<PolyVariable> = order
             .into_iter()
             .map(|x| x.expr.try_into())
             .collect::<Result<_, _>>()
-            .map_err(|e| exceptions::PyValueError::new_err(e))?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         self.poly = self
             .poly
             .rearrange_with_growth(&vars)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(())
     }
 
     /// Divide `self` by `rhs`, returning the quotient and remainder.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn quot_rem(
         &self,
         rhs: Self,
     ) -> PyResult<(PythonNumberFieldPolynomial, PythonNumberFieldPolynomial)> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -5691,8 +6738,19 @@ impl PythonNumberFieldPolynomial {
         }
     }
 
-    /// Compute the remainder `self % rhs.
+    /// Compute the remainder of the division of `self` by `rhs`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial
+    ///     The right-hand-side operand.
     pub fn __mod__(&self, rhs: Self) -> PyResult<Self> {
+        if self.poly.ring() != rhs.poly.ring() {
+            return Err(exceptions::PyValueError::new_err(
+                "Polynomials have different rings",
+            ));
+        }
+
         if rhs.poly.is_zero() {
             Err(exceptions::PyValueError::new_err("Division by zero"))
         } else {
@@ -5703,6 +6761,11 @@ impl PythonNumberFieldPolynomial {
     }
 
     /// Compute the greatest common divisor (GCD) of two or more polynomials.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial
+    ///     The right-hand-side operand.
     #[pyo3(signature = (*rhs))]
     pub fn gcd(
         &self,
@@ -5710,7 +6773,7 @@ impl PythonNumberFieldPolynomial {
     ) -> PyResult<Self> {
         if rhs.len() == 1 {
             let rhs = rhs.get_item(0)?.extract::<Self>()?;
-            if self.poly.ring != rhs.poly.ring {
+            if self.poly.ring() != rhs.poly.ring() {
                 Err(exceptions::PyValueError::new_err(
                     "Polynomials have different rings".to_string(),
                 ))
@@ -5723,7 +6786,7 @@ impl PythonNumberFieldPolynomial {
             let mut args = vec![self.poly.clone()];
             for r in rhs.iter() {
                 let p = r.extract::<Self>()?;
-                if args[0].ring != p.poly.ring {
+                if args[0].ring() != p.poly.ring() {
                     return Err(exceptions::PyValueError::new_err(
                         "Polynomials have different rings".to_string(),
                     ));
@@ -5738,6 +6801,13 @@ impl PythonNumberFieldPolynomial {
     }
 
     /// Compute the resultant of two polynomials with respect to the variable `var`.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: NumberFieldPolynomial
+    ///     The right-hand-side operand.
+    /// var: Expression
+    ///     The variable with respect to which the resultant is computed.
     pub fn resultant(&self, rhs: Self, var: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -5758,7 +6828,7 @@ impl PythonNumberFieldPolynomial {
             let rhs_uni = rhs.poly.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         } else {
             let mut new_self = self.poly.clone();
@@ -5769,7 +6839,7 @@ impl PythonNumberFieldPolynomial {
             let rhs_uni = new_rhs.to_univariate(x);
 
             Ok(Self {
-                poly: self_uni.resultant_prs(&rhs_uni),
+                poly: self_uni.resultant(&rhs_uni),
             })
         }
     }
@@ -5815,10 +6885,15 @@ impl PythonNumberFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.derivative(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to differentiate.
     pub fn derivative(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -5905,11 +6980,16 @@ impl PythonNumberFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
     /// >>> for n, pp in p.coefficient_list(x):
     /// >>>     print(n, pp)
+    ///
+    /// Parameters
+    /// ----------
+    /// vars: Expression | Sequence[Expression] | None
+    ///     The variables with respect to which coefficients should be listed.
     #[pyo3(signature = (vars = None))]
     pub fn coefficient_list(
         &self,
@@ -5998,11 +7078,18 @@ impl PythonNumberFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x*y+2*x+x^2').to_polynomial()
-    /// >>> r = E('y+1').to_polynomial())
+    /// >>> r = E('y+1').to_polynomial()
     /// >>> p.replace(x, r)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable to replace.
+    /// v: NumberFieldPolynomial | int
+    ///     The polynomial or scalar value that should replace `x`.
     pub fn replace(&self, x: PythonExpression, v: PolynomialOrInteger<Self>) -> PyResult<Self> {
         let id = match x.expr.as_view() {
             AtomView::Var(x) => x.get_symbol(),
@@ -6016,7 +7103,7 @@ impl PythonNumberFieldPolynomial {
         let v = match v {
             PolynomialOrInteger::Polynomial(p) => p.poly,
             PolynomialOrInteger::Integer(i) => {
-                self.poly.constant(self.poly.ring.element_from_integer(i))
+                self.poly.constant(self.poly.ring().element_from_integer(i))
             }
         };
 
@@ -6053,6 +7140,15 @@ impl PythonNumberFieldPolynomial {
     /// otherwise the ordering is lexicographical.
     ///
     /// If `print_stats=True` intermediate statistics will be printed.
+    ///
+    /// Parameters
+    /// ----------
+    /// system: list[NumberFieldPolynomial]
+    ///     The equations or polynomials that define the system.
+    /// grevlex: bool
+    ///     Whether graded reverse lexicographic ordering should be used.
+    /// print_stats: bool
+    ///     Whether Groebner basis statistics should be printed during computation.
     #[pyo3(signature = (system, grevlex = true, print_stats = false))]
     #[classmethod]
     pub fn groebner_basis(
@@ -6081,8 +7177,23 @@ impl PythonNumberFieldPolynomial {
         }
     }
 
-    /// Completely reduce the polynomial w.r.t the polynomials `gs`.
-    /// For example reducing `f=y^2+x` by `g=[x]` yields `y^2`.
+    /// Completely reduce the polynomial w.r.t. the polynomials `system`.
+    ///
+    /// If `grevlex=True`, reverse graded lexicographical ordering is used,
+    /// otherwise the ordering is lexicographical.
+    ///
+    /// Examples
+    /// --------
+    /// >>> E('y^2+x').to_polynomial().reduce([E('x').to_polynomial()])
+    ///
+    /// yields `y^2`
+    ///
+    /// Parameters
+    /// ----------
+    /// system: Sequence[Polynomial]
+    ///     The polynomials that define the reducing set.
+    /// grevlex: bool
+    ///     Whether graded reverse lexicographic ordering should be used.
     #[pyo3(signature = (system, grevlex = true))]
     pub fn reduce(&self, system: Vec<Self>, grevlex: bool) -> Self {
         if grevlex {
@@ -6109,10 +7220,15 @@ impl PythonNumberFieldPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('x^2+2').to_polynomial()
     /// >>> print(p.integrate(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
     pub fn integrate(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -6134,11 +7250,23 @@ impl PythonNumberFieldPolynomial {
     }
 
     /// Convert the polynomial to an expression.
+    ///
+    /// Examples
+    /// --------
+    ///
+    /// >>> from symbolica import *
+    /// >>> e = E('x*y+2*x+x^2')
+    /// >>> p = e.to_polynomial()
+    /// >>> print((e - p.to_expression()).expand())
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         Ok(self
             .poly
-            .to_expression_with_coeff_map(|_, element, out| {
-                element.poly.to_expression_into(out);
+            .to_expression_with_coeff_map(|field, element, out| {
+                if matches!(field.poly().get_vars_ref()[0], PolyVariable::Temporary(_)) {
+                    *out = field.element_to_atom_simplified(element);
+                } else {
+                    element.poly.to_expression_into(out);
+                }
             })
             .into())
     }
@@ -6147,9 +7275,9 @@ impl PythonNumberFieldPolynomial {
     pub fn to_polynomial(&self) -> PyResult<PythonPolynomial> {
         let mut c = self.poly.clone();
         let mut min_poly = MultivariatePolynomial::new(
-            &c.ring,
+            c.ring(),
             None,
-            Arc::new(self.poly.ring.poly().get_vars_ref().to_vec()),
+            Arc::new(self.poly.ring().poly().get_vars_ref().to_vec()),
         );
         c.unify_variables(&mut min_poly);
 
@@ -6166,7 +7294,7 @@ impl PythonNumberFieldPolynomial {
     /// Get the minimal polynomial of the algebraic extension.
     pub fn get_minimal_polynomial(&self) -> PythonPolynomial {
         PythonPolynomial {
-            poly: self.poly.ring.poly().clone(),
+            poly: self.poly.ring().poly().clone(),
         }
     }
 }
@@ -6206,13 +7334,13 @@ impl PythonRationalPolynomial {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.denominator.is_one()
                     && self.poly.numerator.get_constant()
-                        == self.poly.numerator.ring.element_from_integer(i)),
+                        == self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.denominator.is_one()
                     || self.poly.numerator.get_constant()
-                        != self.poly.numerator.ring.element_from_integer(i)),
+                        != self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -6261,14 +7389,61 @@ impl PythonRationalPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the rational polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the rational polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the rational polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the rational polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     /// Convert the rational polynomial into a LaTeX string.
@@ -6276,11 +7451,16 @@ impl PythonRationalPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
-    /// Add two rational polynomials `self and `rhs`, returning the result.
+    /// Add two rational polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __add__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6297,6 +7477,11 @@ impl PythonRationalPolynomial {
     }
 
     /// Subtract rational polynomials `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __sub__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6312,7 +7497,12 @@ impl PythonRationalPolynomial {
         }
     }
 
-    /// Multiply two rational polynomials `self and `rhs`, returning the result.
+    /// Multiply two rational polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6329,6 +7519,11 @@ impl PythonRationalPolynomial {
     }
 
     /// Divide the rational polynomial `self` by `rhs` if possible, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6352,6 +7547,11 @@ impl PythonRationalPolynomial {
     }
 
     /// Compute the greatest common divisor (GCD) of two rational polynomials.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: RationalPolynomial
+    ///     The right-hand-side operand.
     pub fn gcd(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6372,10 +7572,15 @@ impl PythonRationalPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('1/((x+y)*(x^2+x*y+1)(x+1))').to_rational_polynomial()
     /// >>> print(p.derivative(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to differentiate.
     pub fn derivative(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -6397,17 +7602,24 @@ impl PythonRationalPolynomial {
         })
     }
 
-    /// Compute the partial fraction decomposition in `x`. If `x` is `None`,
-    /// compute the multivariate partial fraction decomposition.
+    /// Compute the partial fraction decomposition in `x`.
+    ///
+    /// If `None` is passed, the expression will be decomposed in all variables
+    /// which involves a potentially expensive Groebner basis computation.
     ///
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('1/((x+y)*(x^2+x*y+1)(x+1))').to_rational_polynomial()
     /// >>> for pp in p.apart(x):
     /// >>>     print(pp)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression | None
+    ///     The variable with respect to which to perform the partial-fraction decomposition.
     #[pyo3(signature = (x = None))]
     pub fn apart(&self, x: Option<PythonExpression>) -> PyResult<Vec<Self>> {
         if let Some(x) = x {
@@ -6458,10 +7670,16 @@ impl PythonRationalPolynomial {
     }
 
     /// Convert the coefficients to finite fields with prime `prime`.
-    pub fn to_finite_field(&self, prime: u64) -> PythonFiniteFieldRationalPolynomial {
-        PythonFiniteFieldRationalPolynomial {
-            poly: self.poly.to_finite_field(&Zp64::new(prime)),
+    pub fn to_finite_field(&self, prime: u64) -> PyResult<PythonFiniteFieldRationalPolynomial> {
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
         }
+
+        Ok(PythonFiniteFieldRationalPolynomial {
+            poly: self.poly.to_finite_field(&Zp64::new(prime)),
+        })
     }
 
     /// Get the numerator.
@@ -6501,7 +7719,7 @@ impl PythonRationalPolynomial {
         vars: Vec<PyBackedStr>,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -6516,28 +7734,22 @@ impl PythonRationalPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
 
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_rational_polynomial(&Q, &Z, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }
 
-    /// Convert the rational polynomial to an expression.
-    ///
-    /// Examples
-    /// --------
-    ///
-    /// >>> from symbolica import Expression
-    /// >>> e = E('(x*y+2*x+x^2)/(1+y^2+x^7)')
-    /// >>> p = e.to_rational_polynomial()
-    /// >>> print((e - p.to_expression()).expand())
+    /// Convert the polynomial to an expression.
     pub fn to_expression(&self) -> PyResult<PythonExpression> {
         Ok(self.poly.to_expression().into())
     }
@@ -6579,13 +7791,13 @@ impl PythonFiniteFieldRationalPolynomial {
             CompareOp::Eq => match other {
                 PolynomialOrInteger::Integer(i) => Ok(self.poly.denominator.is_one()
                     && self.poly.numerator.get_constant()
-                        == self.poly.numerator.ring.element_from_integer(i)),
+                        == self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly == p.poly),
             },
             CompareOp::Ne => match other {
                 PolynomialOrInteger::Integer(i) => Ok(!self.poly.denominator.is_one()
                     || self.poly.numerator.get_constant()
-                        != self.poly.numerator.ring.element_from_integer(i)),
+                        != self.poly.numerator.ring().element_from_integer(i)),
                 PolynomialOrInteger::Polynomial(p) => Ok(self.poly != p.poly),
             },
             _ => Err(exceptions::PyTypeError::new_err(format!(
@@ -6634,14 +7846,61 @@ impl PythonFiniteFieldRationalPolynomial {
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&PLAIN_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
     /// Print the rational polynomial in a human-readable format.
     pub fn __str__(&self) -> PyResult<String> {
         Ok(self
             .poly
-            .format_string(&DEFAULT_PRINT_OPTIONS, PrintState::new()))
+            .format_string(&*DEFAULT_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the polynomial into a plain string, useful for importing and exporting.
+    pub fn format_plain(&self) -> PyResult<String> {
+        Ok(self
+            .poly
+            .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
+    }
+
+    /// Convert the rational polynomial into an HTML representation.
+    pub fn _repr_html_(&self) -> PyResult<String> {
+        let formatted = self.poly.format_string(
+            &PrintOptions::new()
+                .max_line_length(Some(80))
+                .multiplication_operator('·')
+                .num_exp_as_superscript(true)
+                .max_terms(Some(100))
+                .color_mode(ColorMode::Always),
+            PrintState::new(),
+        );
+
+        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    }
+
+    /// Convert the rational polynomial into a LaTeX representation.
+    pub fn _repr_latex_(&self) -> PyResult<String> {
+        self.to_latex()
+    }
+
+    /// Convert the rational polynomial into a pretty string representation.
+    pub fn _repr_pretty_(&self, pretty: &Bound<'_, PyAny>, cycle: bool) -> PyResult<()> {
+        let text = if cycle {
+            "...".to_string()
+        } else {
+            self.poly.format_string(
+                &PrintOptions::new()
+                    .max_line_length(Some(80))
+                    .multiplication_operator('·')
+                    .num_exp_as_superscript(true)
+                    .max_terms(Some(100))
+                    .color_mode(ColorMode::Always),
+                PrintState::new(),
+            )
+        };
+
+        pretty.call_method1("text", (text,))?;
+        Ok(())
     }
 
     /// Convert the rational polynomial into a LaTeX string.
@@ -6649,11 +7908,16 @@ impl PythonFiniteFieldRationalPolynomial {
         Ok(format!(
             "$${}$$",
             self.poly
-                .format_string(&LATEX_PRINT_OPTIONS, PrintState::new())
+                .format_string(&*LATEX_PRINT_OPTIONS, PrintState::new())
         ))
     }
 
-    /// Add two rational polynomials `self and `rhs`, returning the result.
+    /// Add two rational polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldRationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __add__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6670,6 +7934,11 @@ impl PythonFiniteFieldRationalPolynomial {
     }
 
     /// Subtract rational polynomials `rhs` from `self`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldRationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __sub__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6685,7 +7954,12 @@ impl PythonFiniteFieldRationalPolynomial {
         }
     }
 
-    /// Multiply two rational polynomials `self and `rhs`, returning the result.
+    /// Multiply two rational polynomials `self` and `rhs`, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldRationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __mul__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6702,6 +7976,11 @@ impl PythonFiniteFieldRationalPolynomial {
     }
 
     /// Divide the rational polynomial `self` by `rhs` if possible, returning the result.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldRationalPolynomial
+    ///     The right-hand-side operand.
     pub fn __truediv__(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6725,6 +8004,11 @@ impl PythonFiniteFieldRationalPolynomial {
     }
 
     /// Compute the greatest common divisor (GCD) of two rational polynomials.
+    ///
+    /// Parameters
+    /// ----------
+    /// rhs: FiniteFieldRationalPolynomial
+    ///     The right-hand-side operand.
     pub fn gcd(&self, rhs: Self) -> Self {
         if self.poly.get_variables() == rhs.poly.get_variables() {
             Self {
@@ -6742,7 +8026,7 @@ impl PythonFiniteFieldRationalPolynomial {
 
     /// Get the modulus of the finite field.
     pub fn get_modulus(&self) -> u64 {
-        self.poly.numerator.ring.get_prime()
+        self.poly.numerator.ring().get_prime()
     }
 
     /// Take a derivative in `x`.
@@ -6750,10 +8034,15 @@ impl PythonFiniteFieldRationalPolynomial {
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('1/((x+y)*(x^2+x*y+1)(x+1))').to_rational_polynomial()
     /// >>> print(p.derivative(x))
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to differentiate.
     pub fn derivative(&self, x: PythonExpression) -> PyResult<Self> {
         let x = self
             .poly
@@ -6777,14 +8066,22 @@ impl PythonFiniteFieldRationalPolynomial {
 
     /// Compute the partial fraction decomposition in `x`.
     ///
+    /// If `None` is passed, the expression will be decomposed in all variables
+    /// which involves a potentially expensive Groebner basis computation.
+    ///
     /// Examples
     /// --------
     ///
-    /// >>> from symbolica import Expression
+    /// >>> from symbolica import *
     /// >>> x = S('x')
     /// >>> p = E('1/((x+y)*(x^2+x*y+1)(x+1))').to_rational_polynomial()
     /// >>> for pp in p.apart(x):
     /// >>>     print(pp)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression | None
+    ///     The variable with respect to which to perform the partial-fraction decomposition.
     pub fn apart(&self, x: PythonExpression) -> PyResult<Vec<Self>> {
         let id = match x.expr.as_view() {
             AtomView::Var(x) => x.get_symbol(),
@@ -6821,10 +8118,20 @@ impl PythonFiniteFieldRationalPolynomial {
     ///
     /// If this requirements is too strict, use `Expression.to_polynomial()` instead.
     ///
-    ///
     /// Examples
     /// --------
-    /// >>> e = Polynomial.parse('3/4*x^2+y+y*4', ['x', 'y'])
+    /// >>> e = FiniteFieldRationalPolynomial.parse('3*x^2+y+y*4', ['x', 'y'], 17)
+    ///
+    /// Parameters
+    /// ----------
+    /// arg: str
+    ///     The input value.
+    /// vars: Sequence[str]
+    ///     The variables treated as polynomial variables, in the given order.
+    /// prime: int
+    ///     The prime modulus of the finite field.
+    /// default_namespace: str | None
+    ///     The namespace assumed for unqualified symbols during parsing.
     ///
     /// Raises
     /// ------
@@ -6840,7 +8147,7 @@ impl PythonFiniteFieldRationalPolynomial {
         prime: u64,
         default_namespace: Option<String>,
     ) -> PyResult<Self> {
-        let mut var_map = vec![];
+        let mut var_map: Vec<PolyVariable> = vec![];
         let mut var_name_map = vec![];
 
         let namespace = DefaultNamespace {
@@ -6855,16 +8162,24 @@ impl PythonFiniteFieldRationalPolynomial {
         };
 
         for v in vars {
-            let id = Symbol::new(namespace.attach_namespace(&v)).build().unwrap();
+            let id = SymbolBuilder::new(namespace.attach_namespace(&v))
+                .build()
+                .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
             var_map.push(id.into());
             var_name_map.push((*v).into());
         }
 
+        if prime < 3 || prime.is_multiple_of(2) {
+            return Err(exceptions::PyValueError::new_err(
+                "FiniteFieldPolynomial requires an odd prime modulus greater than 2",
+            ));
+        }
+
         let field = Zp64::new(prime);
         let e = Token::parse(arg, ParseSettings::polynomial())
-            .map_err(exceptions::PyValueError::new_err)?
+            .map_err(|e: String| exceptions::PyValueError::new_err(e.to_string()))?
             .to_rational_polynomial(&field, &field, &Arc::new(var_map), &var_name_map)
-            .map_err(exceptions::PyValueError::new_err)?;
+            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
 
         Ok(Self { poly: e })
     }

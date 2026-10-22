@@ -7,12 +7,14 @@ use crate::{
 };
 
 use super::{
-    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SelfRing, integer::Integer,
+    Derivable, EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing, SelfRing,
+    integer::Integer,
 };
 
 use dyn_clone::DynClone;
-use rand::Rng;
 
+/// A cloneable, thread-safe normalization callback. Write a replacement into
+/// the output and return true to use it; return false to retain the input.
 pub trait Map: Fn(AtomView, &mut Atom) -> bool + DynClone + Send + Sync {}
 dyn_clone::clone_trait_object!(Map);
 impl<T: Clone + Send + Sync + Fn(AtomView<'_>, &mut Atom) -> bool> Map for T {}
@@ -22,11 +24,7 @@ impl<T: Clone + Send + Sync + Fn(AtomView<'_>, &mut Atom) -> bool> Map for T {}
 /// # Examples
 ///
 /// ```
-/// use symbolica::{
-/// atom::Atom,
-/// domains::{atom::AtomField, Field},
-/// parse,
-/// };
+/// use symbolica::prelude::*;
 ///
 /// let field = AtomField {
 ///     statistical_zero_test: false,
@@ -42,7 +40,11 @@ impl<T: Clone + Send + Sync + Fn(AtomView<'_>, &mut Atom) -> bool> Map for T {}
 /// ```
 #[derive(Clone)]
 pub struct AtomField {
-    /// Use a statistical test to check for zero, instead of only checking for an exact zero.
+    /// Treat expressions that may be identically zero as zero.
+    ///
+    /// When enabled, both `True` and `Inconclusive` from [`AtomCore::check_zero`]
+    /// count as zero. When disabled, only literal numerical zeros count as zero.
+    /// Use `check_zero().is_true()` directly when a proof of zero is required.
     pub statistical_zero_test: bool,
     /// Perform a cancellation check of numerators and denominators after a division.
     pub cancel_check_on_division: bool,
@@ -69,6 +71,8 @@ impl Default for AtomField {
 }
 
 impl AtomField {
+    /// Create an expression field with statistical zero testing enabled,
+    /// division cancellation disabled, and no custom normalization.
     pub fn new() -> AtomField {
         AtomField {
             statistical_zero_test: true,
@@ -226,7 +230,7 @@ impl Ring for AtomField {
     /// Check if the result could be 0 using a statistical method.
     fn is_zero(&self, a: &Self::Element) -> bool {
         if self.statistical_zero_test {
-            !a.as_view().zero_test(10, f64::EPSILON).is_false()
+            !a.check_zero().is_false()
         } else {
             a.is_zero()
         }
@@ -245,7 +249,7 @@ impl Ring for AtomField {
     }
 
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(a) {
+        if <Self as Ring>::is_zero(self, a) {
             None
         } else {
             Some(self.inv(a))
@@ -253,16 +257,11 @@ impl Ring for AtomField {
     }
 
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
-        if SelfRing::is_zero(b) {
+        if <Self as Ring>::is_zero(self, b) {
             None
         } else {
             Some(self.div(a, b))
         }
-    }
-
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element {
-        let r = rng.random_range(range.0..range.1);
-        Atom::num(r)
     }
 
     fn nth(&self, n: Integer) -> Self::Element {
@@ -284,9 +283,23 @@ impl Ring for AtomField {
     }
 }
 
+impl SampleableRing for AtomField {
+    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+
+    fn sample<R: rand::RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        self.sample_small_integer(rng, policy.clone())
+    }
+}
+
 impl SelfRing for Atom {
+    /// Return whether the expression could be identically zero.
+    /// Both proven zero and inconclusive results count as zero.
     fn is_zero(&self) -> bool {
-        !self.as_view().zero_test(10, f64::EPSILON).is_false()
+        !self.check_zero().is_false()
     }
 
     fn is_one(&self) -> bool {

@@ -6,10 +6,29 @@ use std::{
 
 use rand::Rng;
 
-use super::{Constructible, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 impl FloatLike for f64 {
+    fn nan(&self) -> Option<Self> {
+        Some(f64::NAN)
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(f64::classify(*self))
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -66,6 +85,9 @@ impl FloatLike for f64 {
     fn get_precision(&self) -> u32 {
         53
     }
+
+    #[inline(always)]
+    fn set_precision(&mut self, _precision: u32) {}
 
     #[inline(always)]
     fn get_epsilon(&self) -> f64 {
@@ -151,6 +173,26 @@ impl Constructible for f64 {
 }
 
 impl Real for f64 {
+    #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        self.abs().copysign(*sign)
+    }
+
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let n = (*self) * (*self) + (*other) * (*other);
+        if n.is_normal() {
+            n.sqrt()
+        } else {
+            (*self).hypot(*other)
+        }
+    }
+
+    #[inline(always)]
+    fn log1p(&self) -> Self {
+        (*self).ln_1p()
+    }
+
     #[inline(always)]
     fn pi(&self) -> Self {
         std::f64::consts::PI
@@ -267,6 +309,10 @@ impl Real for f64 {
     }
 }
 
+impl FixedPrecision for f64 {
+    const BINARY_PRECISION: usize = 53;
+}
+
 impl From<&Rational> for f64 {
     fn from(value: &Rational) -> Self {
         value.to_f64()
@@ -294,6 +340,25 @@ impl F64 {
 }
 
 impl FloatLike for F64 {
+    fn nan(&self) -> Option<Self> {
+        Some(F64(f64::NAN))
+    }
+
+    #[inline(always)]
+    fn real_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(other)
+    }
+
+    #[inline(always)]
+    fn real_classify(&self) -> Option<std::num::FpCategory> {
+        Some(self.0.classify())
+    }
+
+    #[inline(always)]
+    fn needs_rescaling(&self) -> bool {
+        !self.0.is_normal()
+    }
+
     #[inline(always)]
     fn set_from(&mut self, other: &Self) {
         *self = *other;
@@ -347,6 +412,11 @@ impl FloatLike for F64 {
     #[inline(always)]
     fn get_precision(&self) -> u32 {
         self.0.get_precision()
+    }
+
+    #[inline(always)]
+    fn set_precision(&mut self, precision: u32) {
+        self.0.set_precision(precision);
     }
 
     #[inline(always)]
@@ -568,6 +638,26 @@ impl Constructible for F64 {
 
 impl Real for F64 {
     #[inline(always)]
+    fn copy_sign(&self, sign: &Self) -> Self {
+        self.0.abs().copysign(sign.0).into()
+    }
+
+    #[inline]
+    fn hypot(&self, other: &Self) -> Self {
+        let n = self.0 * self.0 + other.0 * other.0;
+        if n.is_normal() {
+            n.sqrt().into()
+        } else {
+            self.0.hypot(other.0).into()
+        }
+    }
+
+    #[inline(always)]
+    fn log1p(&self) -> Self {
+        self.0.ln_1p().into()
+    }
+
+    #[inline(always)]
     fn pi(&self) -> Self {
         std::f64::consts::PI.into()
     }
@@ -683,6 +773,10 @@ impl Real for F64 {
     }
 }
 
+impl FixedPrecision for F64 {
+    const BINARY_PRECISION: usize = 53;
+}
+
 impl From<f64> for F64 {
     #[inline(always)]
     fn from(value: f64) -> Self {
@@ -708,7 +802,8 @@ impl PartialOrd for F64 {
 
 impl InternalOrdering for F64 {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.partial_cmp(other)
+            .unwrap_or_else(|| self.0.is_nan().cmp(&other.0.is_nan()))
     }
 }
 

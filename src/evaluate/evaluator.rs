@@ -1,5 +1,9 @@
+use crate::coefficient::{Coefficient, ConvertToRing};
+use crate::domains::Ring;
+
 use super::*;
 
+/// An evaluator for symbolic expressions. Use [AtomCore::evaluator] to create an evaluator for a given expression.
 #[derive(Clone)]
 pub struct ExpressionEvaluator<T> {
     pub(super) stack: Vec<T>,
@@ -10,6 +14,96 @@ pub struct ExpressionEvaluator<T> {
     pub(super) external_fns: Vec<ExternalFunctionContainer<T>>,
     pub(super) settings: OptimizationSettings,
 }
+
+/// Immutable, coefficient-independent instructions for a single non-inlined function.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug)]
+pub(super) struct FunctionBody {
+    pub(super) instructions: Vec<(Instr, ComplexPhase)>,
+    pub(super) param_count: usize,
+    pub(super) result_index: usize,
+    pub(super) stack_size: usize,
+}
+
+// Borrowed instruction data shared by the root and function-body exporters.
+pub(super) struct ProgramView<'a, T> {
+    pub(super) instructions: &'a [(Instr, ComplexPhase)],
+    pub(super) param_count: usize,
+    pub(super) reserved_indices: usize,
+    pub(super) result_indices: &'a [usize],
+    pub(super) stack_size: usize,
+    pub(super) constants: &'a [T],
+}
+
+impl<T> ExpressionEvaluator<T> {
+    pub(super) fn program(&self) -> ProgramView<'_, T> {
+        ProgramView {
+            instructions: &self.instructions,
+            param_count: self.param_count,
+            reserved_indices: self.reserved_indices,
+            result_indices: &self.result_indices,
+            stack_size: self.stack.len(),
+            constants: &self.stack[self.param_count..self.reserved_indices],
+        }
+    }
+}
+
+impl FunctionBody {
+    pub(super) fn program<T>(&self) -> ProgramView<'_, T> {
+        ProgramView {
+            instructions: &self.instructions,
+            param_count: self.param_count,
+            reserved_indices: self.param_count,
+            result_indices: std::slice::from_ref(&self.result_index),
+            stack_size: self.stack_size,
+            constants: &[],
+        }
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl bincode::Encode for FunctionBody {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        // 255 cannot start an old stack vector's length with varint encoding.
+        bincode::Encode::encode(
+            &(
+                255u8,
+                &self.instructions,
+                self.param_count,
+                self.result_index,
+                self.stack_size,
+            ),
+            encoder,
+        )
+    }
+}
+
+#[cfg(feature = "bincode")]
+impl<Context> bincode::Decode<Context> for FunctionBody {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        if u8::decode(decoder)? != 255 {
+            return Err(bincode::error::DecodeError::Other(
+                "Old function-body format. Rebuild the evaluator.",
+            ));
+        }
+        let (instructions, param_count, result_index, stack_size) =
+            bincode::Decode::decode(decoder)?;
+        Ok(Self {
+            instructions,
+            param_count,
+            result_index,
+            stack_size,
+        })
+    }
+}
+
+#[cfg(feature = "bincode")]
+bincode::impl_borrow_decode!(FunctionBody);
 
 #[cfg(feature = "serde")]
 impl<T: serde::Serialize> serde::Serialize for ExpressionEvaluator<T> {
@@ -153,94 +247,40 @@ impl<T: Real> ExpressionEvaluator<T> {
 
     /// Evaluate the expression evaluator and write the results in `out`.
     #[inline]
-    pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
-        self.evaluate_impl(params, out);
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn evaluate_impl_no_ops(
-        stack: &mut [T],
-        instr: &Instr,
-        external_fns: &mut [ExternalFunctionContainer<T>],
-    ) -> Option<usize> {
-        match instr {
-            Instr::Powf(r, b, e) => {
-                stack[*r] = stack[*b].powf(&stack[*e]);
-            }
-            Instr::BuiltinFun(r, s, arg) => match s.get_id() {
-                Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
-                Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
-                Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
-                Symbol::COS_ID => stack[*r] = stack[*arg].cos(),
-                Symbol::SQRT_ID => stack[*r] = stack[*arg].sqrt(),
-                Symbol::ABS_ID => stack[*r] = stack[*arg].norm(),
-                Symbol::CONJ_ID => stack[*r] = stack[*arg].conj(),
-                _ => unreachable!(),
-            },
-            Instr::ExternalFun(r, s, args) => {
-                let external = &mut external_fns[*s];
-                let Some(f) = external.imp.as_ref() else {
-                    panic!(
-                        "External function '{external}' does not have an implementation for {}",
-                        std::any::type_name::<T>()
-                    );
-                };
-
-                if external.cache.len() < args.len() {
-                    external.cache.resize(args.len(), T::new_zero());
-                }
-
-                for (dst, src) in external.cache.iter_mut().zip(args) {
-                    dst.set_from(&stack[*src]);
-                }
-
-                stack[*r] = (f)(&external.cache[..args.len()]);
-            }
-            Instr::IfElse(n, label) => {
-                // jump to else block
-                if stack[*n].is_fully_zero() {
-                    return Some(label.0);
-                }
-            }
-            Instr::Goto(label) => {
-                return Some(label.0);
-            }
-            Instr::Label(_) => {}
-            Instr::Join(r, c, a, b) => {
-                if !stack[*c].is_fully_zero() {
-                    stack[*r] = stack[*a].clone();
-                } else {
-                    stack[*r] = stack[*b].clone();
-                }
-            }
-            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
-                unreachable!()
-            }
+    pub fn try_evaluate(&mut self, params: &[T], out: &mut [T]) -> Result<(), EvaluationError> {
+        if params.len() != self.param_count {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.param_count,
+                actual: params.len(),
+            });
         }
-
-        None
-    }
-
-    /// Evaluate the expression evaluator and write the results in `out`.
-    fn evaluate_impl(&mut self, params: &[T], out: &mut [T]) {
-        if self.param_count != params.len() {
-            panic!(
-                "Parameter count mismatch: expected {}, got {}",
-                self.param_count,
-                params.len()
-            );
+        if out.len() != self.result_indices.len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.result_indices.len(),
+                actual: out.len(),
+            });
         }
-
         for (t, p) in self.stack.iter_mut().zip(params) {
             t.set_from(p);
         }
+        Self::evaluate_program(&self.instructions, &mut self.stack, &mut self.external_fns);
+        for (o, i) in out.iter_mut().zip(&self.result_indices) {
+            o.set_from(&self.stack[*i]);
+        }
+        Ok(())
+    }
 
+    // Keep the interpreter loop in the caller, as it was before sharing it with bodies.
+    #[inline(always)]
+    fn evaluate_program(
+        instructions: &[(Instr, ComplexPhase)],
+        stack: &mut [T],
+        external_fns: &mut [ExternalFunctionContainer<T>],
+    ) {
         let mut tmp = T::new_zero();
         let mut i = 0;
-        let (stack, external_fns) = (&mut self.stack, &mut self.external_fns);
-        while i < self.instructions.len() {
-            let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
+        while i < instructions.len() {
+            let (instr, _) = unsafe { &instructions.get_unchecked(i) };
             match instr {
                 Instr::Add(r, v) => unsafe {
                     match v.len() {
@@ -303,14 +343,310 @@ impl<T: Real> ExpressionEvaluator<T> {
 
             i += 1;
         }
+    }
 
-        for (o, i) in out.iter_mut().zip(&self.result_indices) {
-            o.set_from(&stack[*i]);
+    /// Evaluate the expression evaluator and write the results in `out`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let mut evaluator = parse!("x^2").evaluator(&[parse!("x")]).build()
+    ///     .unwrap().map_coeff(&|c| c.re.to_f64());
+    /// let mut out = [0.];
+    /// evaluator.evaluate(&[2.], &mut out);
+    /// assert_eq!(out, [4.]);
+    /// ```
+    #[inline]
+    pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
+        self.try_evaluate(params, out).unwrap();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn evaluate_impl_no_ops(
+        stack: &mut [T],
+        instr: &Instr,
+        external_fns: &mut [ExternalFunctionContainer<T>],
+    ) -> Option<usize> {
+        match instr {
+            Instr::Powf(r, b, e) => {
+                stack[*r] = stack[*b].powf(&stack[*e]);
+            }
+            Instr::BuiltinFun(r, s, arg) => match s.get_id() {
+                Symbol::EXP_ID => stack[*r] = stack[*arg].exp(),
+                Symbol::LOG_ID => stack[*r] = stack[*arg].log(),
+                Symbol::SIN_ID => stack[*r] = stack[*arg].sin(),
+                Symbol::COS_ID => stack[*r] = stack[*arg].cos(),
+                Symbol::SQRT_ID => stack[*r] = stack[*arg].sqrt(),
+                Symbol::ABS_ID => stack[*r] = stack[*arg].norm(),
+                Symbol::CONJ_ID => stack[*r] = stack[*arg].conj(),
+                _ => unreachable!(),
+            },
+            Instr::ExternalFun(r, s, args) => {
+                // Callees precede callers. No recursion means this function's stack is
+                // disjoint from every mutable function instance it can call.
+                let (callees, current) = external_fns.split_at_mut(*s);
+                let external = &mut current[0];
+                if let Some(body) = &external.body {
+                    if external.stack.is_empty() {
+                        external.stack.resize_with(body.stack_size, T::new_zero);
+                    }
+                    // Construction fixes the call signature, including hidden global slots.
+                    debug_assert_eq!(args.len(), body.param_count);
+                    for (dst, src) in external.stack.iter_mut().zip(args) {
+                        dst.set_from(&stack[*src]);
+                    }
+                    Self::evaluate_program(&body.instructions, &mut external.stack, callees);
+                    stack[*r].set_from(&external.stack[body.result_index]);
+                } else if let Some(f) = external.imp.as_ref() {
+                    if external.stack.len() < args.len() {
+                        external.stack.resize_with(args.len(), T::new_zero);
+                    }
+                    for (dst, src) in external.stack.iter_mut().zip(args) {
+                        dst.set_from(&stack[*src]);
+                    }
+                    let result = (f)(&external.stack[..args.len()]);
+                    stack[*r] = result;
+                } else {
+                    panic!(
+                        "External function '{external}' does not have an implementation for {}",
+                        std::any::type_name::<T>()
+                    );
+                }
+            }
+            Instr::IfElse(n, label) => {
+                // jump to else block
+                if stack[*n].is_fully_zero() {
+                    return Some(label.0);
+                }
+            }
+            Instr::Goto(label) => {
+                return Some(label.0);
+            }
+            Instr::Label(_) => {}
+            Instr::Join(r, c, a, b) => {
+                if !stack[*c].is_fully_zero() {
+                    stack[*r] = stack[*a].clone();
+                } else {
+                    stack[*r] = stack[*b].clone();
+                }
+            }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+                unreachable!()
+            }
         }
+
+        None
     }
 }
 
-impl ExpressionEvaluator<Complex<Rational>> {}
+impl<T: Clone> ExpressionEvaluator<T> {
+    /// Evaluate the expression evaluator which yields a single result.
+    pub fn evaluate_single_in_ring<R: Ring<Element = T>>(&mut self, params: &[T], ring: &R) -> T {
+        if self.result_indices.len() != 1 {
+            panic!(
+                "Evaluator does not return a single result but {} results",
+                self.result_indices.len()
+            );
+        }
+
+        let mut res = ring.zero();
+        self.evaluate_in_ring(params, std::slice::from_mut(&mut res), ring);
+        res
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    #[inline]
+    pub fn try_evaluate_in_ring<R: Ring<Element = T>>(
+        &mut self,
+        params: &[T],
+        out: &mut [T],
+        ring: &R,
+    ) -> Result<(), EvaluationError> {
+        if params.len() != self.param_count {
+            return Err(EvaluationError::InvalidParameterCount {
+                expected: self.param_count,
+                actual: params.len(),
+            });
+        }
+
+        if self.result_indices.len() != out.len() {
+            return Err(EvaluationError::InvalidOutputCount {
+                expected: self.result_indices.len(),
+                actual: out.len(),
+            });
+        }
+
+        for (t, p) in self.stack.iter_mut().zip(params) {
+            *t = p.clone();
+        }
+
+        let mut i = 0;
+        let stack = &mut self.stack;
+        while i < self.instructions.len() {
+            let (instr, _) = unsafe { &self.instructions.get_unchecked(i) };
+            match instr {
+                Instr::Add(r, v) => unsafe {
+                    let mut tmp = stack.get_unchecked(*v.get_unchecked(0)).clone();
+                    for x in v.get_unchecked(1..) {
+                        ring.add_assign(&mut tmp, stack.get_unchecked(*x));
+                    }
+
+                    *stack.get_unchecked_mut(*r) = tmp;
+                },
+                Instr::Mul(r, v) => unsafe {
+                    let mut tmp = stack.get_unchecked(*v.get_unchecked(0)).clone();
+                    for x in v.get_unchecked(1..) {
+                        ring.mul_assign(&mut tmp, stack.get_unchecked(*x));
+                    }
+
+                    *stack.get_unchecked_mut(*r) = tmp;
+                },
+                Instr::Pow(r, b, e) => {
+                    if *e == -1 {
+                        stack[*r] = ring.try_inv(&stack[*b]).ok_or_else(|| {
+                            EvaluationError::EvaluationFailed {
+                                expression: Atom::num(0),
+                                reason: format!("Could not invert {}", ring.printer(&stack[*b])),
+                            }
+                        })?;
+                    } else if *e >= 0 {
+                        stack[*r] = ring.pow(&stack[*b], *e as u64);
+                    } else {
+                        let p = ring.pow(&stack[*b], e.unsigned_abs());
+                        stack[*r] =
+                            ring.try_inv(&p)
+                                .ok_or_else(|| EvaluationError::EvaluationFailed {
+                                    expression: Atom::num(0),
+                                    reason: format!("Could not invert {}", ring.printer(&p)),
+                                })?;
+                    }
+                }
+                _ => {
+                    if let Some(idx) = Self::evaluate_impl_no_ops_in_ring(stack, instr, ring)? {
+                        i = idx;
+                        continue;
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        for (o, i) in out.iter_mut().zip(&self.result_indices) {
+            *o = stack[*i].clone();
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate the expression evaluator and write the results in `out`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let ring = Zp::new(5);
+    /// let mut evaluator = parse!("x^2").evaluator(&[parse!("x")]).build()
+    ///     .unwrap().map_to_ring(&ring).unwrap();
+    /// let mut out = vec![ring.zero()];
+    /// evaluator.evaluate_in_ring(&[ring.nth(2.into())], &mut out, &ring);
+    /// assert_eq!(out, vec![ring.nth(4.into())]);
+    /// ```
+    #[inline]
+    pub fn evaluate_in_ring<R: Ring<Element = T>>(
+        &mut self,
+        params: &[T],
+        out: &mut [T],
+        ring: &R,
+    ) {
+        self.try_evaluate_in_ring(params, out, ring).unwrap();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn evaluate_impl_no_ops_in_ring<R: Ring<Element = T>>(
+        stack: &mut [T],
+        instr: &Instr,
+        ring: &R,
+    ) -> Result<Option<usize>, EvaluationError> {
+        match instr {
+            Instr::Powf(_, _, _) => {
+                return Err(EvaluationError::EvaluationFailed {
+                    expression: Atom::num(0),
+                    reason: "Non-integer powers are not supported in ring evaluation".to_string(),
+                });
+            }
+            Instr::BuiltinFun(_, s, _) => {
+                return Err(EvaluationError::UndefinedFunction {
+                    expression: s.to_atom(),
+                });
+            }
+            Instr::ExternalFun(_, _, _) => {
+                return Err(EvaluationError::EvaluationFailed {
+                    expression: Atom::num(0),
+                    reason: "External functions are not supported in ring evaluation".to_string(),
+                });
+            }
+            Instr::IfElse(n, label) => {
+                // jump to else block
+                if ring.is_zero(&stack[*n]) {
+                    return Ok(Some(label.0));
+                }
+            }
+            Instr::Goto(label) => {
+                return Ok(Some(label.0));
+            }
+            Instr::Label(_) => {}
+            Instr::Join(r, c, a, b) => {
+                if !ring.is_zero(&stack[*c]) {
+                    stack[*r] = stack[*a].clone();
+                } else {
+                    stack[*r] = stack[*b].clone();
+                }
+            }
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+                unreachable!()
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+impl ExpressionEvaluator<Complex<Rational>> {
+    /// Map the coefficients to a given ring.
+    pub fn map_to_ring<R: ConvertToRing>(
+        self,
+        ring: &R,
+    ) -> Result<ExpressionEvaluator<R::Element>, EvaluationError> {
+        if self.external_fns.len() > 0 {
+            return Err(EvaluationError::UndefinedFunction {
+                expression: self.external_fns[0].symbol.to_atom(),
+            });
+        }
+
+        let stack = self
+            .stack
+            .into_iter()
+            .map(|x| {
+                ring.try_element_from_coefficient(Coefficient::from(x))
+                    .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ExpressionEvaluator {
+            stack,
+            param_count: self.param_count,
+            reserved_indices: self.reserved_indices,
+            instructions: self.instructions,
+            result_indices: self.result_indices,
+            external_fns: vec![],
+            settings: self.settings,
+        })
+    }
+}
 
 impl<T: Default> ExpressionEvaluator<T> {
     /// Map the coefficients to a different type.
@@ -321,42 +657,15 @@ impl<T: Default> ExpressionEvaluator<T> {
     ) -> ExpressionEvaluator<T2> {
         let mut stack: Vec<_> = self.stack.iter().map(f).collect();
 
-        let mut external_fns = self
+        let external_fns = self
             .external_fns
             .iter()
             .map(|x| x.map())
             .collect::<Vec<_>>();
-        for external in &mut external_fns {
+        for external in &external_fns {
             if let Some(i) = external.constant_index {
-                let Some(eval) = external.symbol.get_evaluation_info() else {
-                    panic!(
-                        "Symbol '{}' does not have evaluation info",
-                        external.symbol.get_name()
-                    );
-                };
-                let tags = external.tag_views();
-
-                let res = if external.fixed_args.is_empty() {
-                    let c = eval.evaluate_constant(&tags, binary_prec).unwrap();
-                    T2::try_from_complex_float(c).unwrap()
-                } else {
-                    let fixed_args = external
-                        .fixed_args
-                        .iter()
-                        .map(|c| {
-                            T2::try_from_complex_float(Complex::new(
-                                c.re.to_multi_prec_float(binary_prec),
-                                c.im.to_multi_prec_float(binary_prec),
-                            ))
-                            .unwrap()
-                        })
-                        .collect::<Vec<_>>();
-
-                    let eval = T2::resolve_function(&tags, eval).unwrap();
-                    eval(&fixed_args)
-                };
-
-                stack[self.param_count + i] = res;
+                stack[self.param_count + i] =
+                    external.evaluate_constant::<T2>(binary_prec).unwrap();
             }
         }
 
@@ -367,11 +676,12 @@ impl<T: Default> ExpressionEvaluator<T> {
             instructions: self.instructions,
             result_indices: self.result_indices,
             external_fns,
-            settings: self.settings.clone(),
+            settings: self.settings,
         }
     }
 
-    /// Map the coefficients to a different type.
+    /// Map the coefficients to a different type with a known precision.
+    /// Use [Self::map_coeff_with_prec] to specify a custom precision.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(
         self,
         f: &F,
@@ -389,7 +699,7 @@ impl<T: Default> ExpressionEvaluator<T> {
 
     #[allow(dead_code)]
     pub(crate) fn set_coeff<T2: Default + Clone + EvaluationDomain>(
-        self,
+        &self,
         coeffs: &[T2],
     ) -> ExpressionEvaluator<T2> {
         if coeffs.len() != self.reserved_indices - self.param_count {
@@ -409,39 +719,45 @@ impl<T: Default> ExpressionEvaluator<T> {
             stack,
             param_count: self.param_count,
             reserved_indices: self.reserved_indices,
-            instructions: self.instructions,
-            result_indices: self.result_indices,
-            external_fns: self.external_fns.into_iter().map(|x| x.map()).collect(),
-            settings: self.settings,
+            instructions: self.instructions.clone(),
+            result_indices: self.result_indices.clone(),
+            external_fns: self.external_fns.iter().map(|x| x.map()).collect(),
+            settings: self.settings.clone(),
         }
     }
 
+    /// Return the number of parameter values required for one evaluation.
     pub fn get_input_len(&self) -> usize {
         self.param_count
     }
 
+    /// Return the number of results produced by one evaluation.
     pub fn get_output_len(&self) -> usize {
         self.result_indices.len()
     }
 
+    /// Borrow the numerical constants stored by the evaluator.
     pub fn get_constants(&self) -> &[T] {
         &self.stack[self.param_count..self.reserved_indices]
     }
 
-    /// Return the total number of additions and multiplications.
-    pub fn count_operations(&self) -> (usize, usize) {
-        let mut add_count = 0;
-        let mut mul_count = 0;
+    /// Return the total number of operations.
+    pub fn count_operations(&self) -> OperationCount {
+        let mut count = OperationCount::default();
 
         for (instr, _) in &self.instructions {
             match instr {
-                Instr::Add(_, s) => add_count += s.len() - 1,
-                Instr::Mul(_, s) => mul_count += s.len() - 1,
+                Instr::Add(_, s) => count.additions += s.len() - 1,
+                Instr::Mul(_, s) => count.multiplications += s.len() - 1,
+                Instr::Pow(_, _, e) => count.add_integer_power(*e),
+                Instr::Powf(..) | Instr::BuiltinFun(..) | Instr::ExternalFun(..) => {
+                    count.add_function_call()
+                }
                 _ => {}
             }
         }
 
-        (add_count, mul_count)
+        count
     }
 
     /// Remove common instructions and return the number of removed instructions.
@@ -458,7 +774,6 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         let mut common_instr = HashMap::with_capacity(self.instructions.len());
         let mut new_instr = Vec::with_capacity(self.instructions.len());
-        let mut i = 0;
 
         let mut rename_map: Vec<_> = (0..self.reserved_indices).collect();
         let mut removed = 0;
@@ -466,51 +781,13 @@ impl<T: Default> ExpressionEvaluator<T> {
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
-        for (instr, phase) in &self.instructions {
+        for (instr, phase) in &mut self.instructions {
             let new_pos = new_instr.len() + self.reserved_indices;
 
-            let key = match &self.instructions[i].0 {
-                Instr::Add(_, a) => Some(CSE::Add(a)),
-                Instr::Mul(_, a) => Some(CSE::Mul(a)),
-                Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
-                Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
-                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
-                Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
-                _ => None,
-            };
-
-            if let Some(key) = key {
-                match common_instr.entry(key) {
-                    Entry::Occupied(mut o) => {
-                        let (old_pos, branch) = o.get_mut();
-
-                        let mut cur = current_node;
-                        while cur > *branch {
-                            cur = dag_nodes[cur];
-                        }
-
-                        if cur == *branch {
-                            removed += 1;
-                            rename_map.push(*old_pos);
-                            i += 1;
-                            continue;
-                        } else {
-                            // the previous occurrence was in a non-parent branch
-                            // that cannot be reused, so treat this occurrence
-                            // as the first
-                            *old_pos = new_pos;
-                            *branch = current_node;
-                        }
-                    }
-                    Entry::Vacant(v) => {
-                        v.insert((new_pos, current_node));
-                    }
-                }
-            }
-
-            let mut s = instr.clone();
-
-            match &mut s {
+            // Use already-renamed operands as the key, so dependent duplicate
+            // instructions collapse in the same forward pass. The original
+            // instruction storage keeps borrowed keys stable until the pass ends.
+            match instr {
                 Instr::Add(p, a) | Instr::Mul(p, a) => {
                     let mut last = 0;
                     let mut sort = false;
@@ -563,9 +840,46 @@ impl<T: Default> ExpressionEvaluator<T> {
                 _ => {}
             }
 
-            new_instr.push((s, *phase));
+            let key = match &*instr {
+                Instr::Add(_, a) => Some(CSE::Add(a)),
+                Instr::Mul(_, a) => Some(CSE::Mul(a)),
+                Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
+                Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
+                Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
+                Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
+                _ => None,
+            };
+
+            if let Some(key) = key {
+                match common_instr.entry(key) {
+                    Entry::Occupied(mut o) => {
+                        let (old_pos, branch) = o.get_mut();
+
+                        let mut cur = current_node;
+                        while cur > *branch {
+                            cur = dag_nodes[cur];
+                        }
+
+                        if cur == *branch {
+                            removed += 1;
+                            rename_map.push(*old_pos);
+                            continue;
+                        } else {
+                            // the previous occurrence was in a non-parent branch
+                            // that cannot be reused, so treat this occurrence
+                            // as the first
+                            *old_pos = new_pos;
+                            *branch = current_node;
+                        }
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert((new_pos, current_node));
+                    }
+                }
+            }
+
+            new_instr.push((instr.clone(), *phase));
             rename_map.push(new_pos);
-            i += 1;
         }
 
         for x in &mut self.result_indices {
@@ -602,14 +916,18 @@ impl<T: Default> ExpressionEvaluator<T> {
     /// Remove common pairs of instructions. Assumes that the arguments
     /// of the instructions are sorted.
     pub(super) fn remove_common_pairs(&mut self) -> usize {
-        let mut affected_lines = vec![false; self.instructions.len()];
-
         // store the global branch a line belongs to
         let mut branch_id = vec![0; self.instructions.len()];
         let mut dag_nodes = vec![0]; // store index to parent node
         let mut current_node = 0;
 
-        let mut common_ops_simple: HashMap<_, u32> = HashMap::default();
+        const PROMOTED_PAIR: u32 = 1 << 31;
+
+        // A value below PROMOTED_PAIR is the line containing the pair's first
+        // occurrence. On the second occurrence it is promoted to an index in
+        // common_pair_lines, marked by PROMOTED_PAIR.
+        let mut common_ops: HashMap<u64, u32> = HashMap::default();
+        let mut common_pair_lines: Vec<(u64, Vec<u32>)> = vec![];
 
         if self.instructions.len() > u32::MAX as usize / 2 {
             // the extension is easy, but it will cost more memory.
@@ -621,38 +939,55 @@ impl<T: Default> ExpressionEvaluator<T> {
         }
 
         for (p, (i, _)) in self.instructions.iter().enumerate() {
-            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries {
+            if p % 10000 == 0
+                && let Some(abort_check) = &self.settings.abort_check
+                && abort_check()
+            {
+                self.settings.abort_level = 1;
                 break;
-            }
-
-            if p % 10000 == 0 {
-                if let Some(abort_check) = &self.settings.abort_check {
-                    if abort_check() {
-                        self.settings.abort_level = 1;
-                        break;
-                    }
-                }
             }
 
             match i {
                 Instr::Add(_, a) | Instr::Mul(_, a) => {
                     let is_add = matches!(i, Instr::Add(_, _));
-                    'add_loop: for (li, l) in a.iter().enumerate() {
+                    let line = p as u32;
+                    for (li, l) in a.iter().enumerate() {
                         for r in &a[li + 1..] {
                             let mut key = (*l as u64) << 32 | (*r as u64) << 1;
                             if !is_add {
                                 key |= 1;
                             }
 
-                            if common_ops_simple.len() > self.settings.max_common_pair_cache_entries
-                            {
-                                break 'add_loop;
+                            let allow_new_pair =
+                                common_ops.len() <= self.settings.max_common_pair_cache_entries;
+                            match common_ops.entry(key) {
+                                Entry::Occupied(mut entry) => {
+                                    let location = *entry.get();
+                                    if location & PROMOTED_PAIR == 0 {
+                                        debug_assert!(
+                                            common_pair_lines.len() < PROMOTED_PAIR as usize
+                                        );
+                                        let index = common_pair_lines.len() as u32;
+                                        let mut lines = vec![location];
+                                        if location != line {
+                                            lines.push(line);
+                                        }
+                                        common_pair_lines.push((key, lines));
+                                        *entry.get_mut() = PROMOTED_PAIR | index;
+                                    } else {
+                                        let index = (location & !PROMOTED_PAIR) as usize;
+                                        let lines = &mut common_pair_lines[index].1;
+                                        if lines.last() != Some(&line) {
+                                            lines.push(line);
+                                        }
+                                    }
+                                }
+                                Entry::Vacant(entry) => {
+                                    if allow_new_pair {
+                                        entry.insert(line);
+                                    }
+                                }
                             }
-
-                            common_ops_simple
-                                .entry(key)
-                                .and_modify(|x| *x += 1)
-                                .or_insert(1);
                         }
                     }
                 }
@@ -675,59 +1010,79 @@ impl<T: Default> ExpressionEvaluator<T> {
             branch_id[p] = current_node;
         }
 
-        common_ops_simple.retain(|_, v| *v > 1);
+        drop(common_ops);
 
-        let mut common_ops_2: HashMap<_, Vec<usize>> = HashMap::default();
-
-        for (p, (i, _)) in self.instructions.iter().enumerate() {
-            match i {
-                Instr::Add(_, a) | Instr::Mul(_, a) => {
-                    let is_add = matches!(i, Instr::Add(_, _));
-                    for (li, l) in a.iter().enumerate() {
-                        for r in &a[li + 1..] {
-                            let mut key = (*l as u64) << 32 | (*r as u64) << 1;
-                            if !is_add {
-                                key |= 1;
-                            }
-
-                            if *common_ops_simple.get(&key).unwrap_or(&0) > 1 {
-                                common_ops_2.entry(key).or_default().push(p);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        drop(common_ops_simple); // clear the memory
-
-        if common_ops_2.is_empty() {
+        if common_pair_lines.is_empty() {
             return 0;
         }
 
-        let mut to_remove: Vec<_> = common_ops_2.into_iter().collect();
-        to_remove.retain_mut(|(_, v)| {
-            let keep = v.len() > 1;
-            v.dedup();
-            keep
-        });
+        let mut to_remove = common_pair_lines;
 
         // sort in other direction since we pop
         to_remove.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.cmp(b)));
 
-        let total_remove = to_remove.len();
-
         let old_len = self.instructions.len();
+        let operand_count_key = |line: u32, operand: usize| {
+            debug_assert!(u32::try_from(operand).is_ok());
+            ((line as u64) << 32) + operand as u64
+        };
 
         let mut new_symb_branch = vec![];
+        let mut active_lines = vec![];
+        let mut operand_counts_initialized = vec![false; old_len];
+        let mut operand_counts: HashMap<u64, u32> = HashMap::default();
+        let mut line_replacements: HashMap<u32, Vec<(usize, u32)>> = HashMap::default();
+        let mut removed = 0;
 
         while let Some((key, lines)) = to_remove.pop() {
             let l = (key >> 32) as usize;
             let r = ((key >> 1) & 0x7FFFFFFF) as usize;
             let is_add = key & 1 == 0;
 
-            if lines.iter().any(|x| affected_lines[*x]) {
+            // Reassess whether the pair still exists in each line, as it may
+            // have been consumed by an earlier extraction.
+            active_lines.clear();
+            let mut usage_count = 0u64;
+            for line in lines {
+                let line_index = line as usize;
+                let args = match &self.instructions[line_index].0 {
+                    Instr::Add(_, args) if is_add => args,
+                    Instr::Mul(_, args) if !is_add => args,
+                    _ => continue,
+                };
+
+                if !operand_counts_initialized[line_index] {
+                    for &arg in args {
+                        operand_counts
+                            .entry(operand_count_key(line, arg))
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                    }
+                    operand_counts_initialized[line_index] = true;
+                }
+
+                let l_key = operand_count_key(line, l);
+                let r_key = operand_count_key(line, r);
+                let l_count = *operand_counts.get(&l_key).unwrap_or(&0);
+                let r_count = if l == r {
+                    l_count
+                } else {
+                    *operand_counts.get(&r_key).unwrap_or(&0)
+                };
+
+                let pair_count = if l == r {
+                    l_count / 2
+                } else {
+                    l_count.min(r_count)
+                };
+
+                if pair_count > 0 {
+                    usage_count += pair_count as u64;
+                    active_lines.push((line, l_count, r_count, pair_count));
+                }
+            }
+
+            if usage_count < 2 {
                 continue;
             }
 
@@ -741,11 +1096,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             self.stack.push(T::default());
             self.instructions.push((new_op, ComplexPhase::Any));
 
-            let mut branch = branch_id[lines[0]];
-            for &line in &lines {
-                affected_lines[line] = true;
-
-                let mut new_branch = branch_id[line];
+            let first_usage = active_lines[0].0 as usize;
+            let mut branch = branch_id[first_usage];
+            for &(line, l_count, r_count, pair_count) in &active_lines {
+                let mut new_branch = branch_id[line as usize];
                 // find common root
                 while branch != new_branch {
                     if branch > new_branch {
@@ -755,54 +1109,80 @@ impl<T: Default> ExpressionEvaluator<T> {
                     }
                 }
 
-                if let Instr::Add(_, a) | Instr::Mul(_, a) = &mut self.instructions[line].0 {
-                    if l == r {
-                        let count = a.iter().filter(|x| **x == l).count();
-                        let pairs = count / 2;
-                        if pairs > 0 {
-                            a.retain(|x| *x != l);
-
-                            if count % 2 == 1 {
-                                a.push(l);
-                            }
-
-                            a.extend(std::iter::repeat_n(new_idx, pairs));
-                            a.sort_unstable();
-                        }
+                let l_key = operand_count_key(line, l);
+                let r_key = operand_count_key(line, r);
+                if l == r {
+                    let remaining = l_count - pair_count * 2;
+                    if remaining == 0 {
+                        operand_counts.remove(&l_key);
                     } else {
-                        let mut idx1_count = 0;
-                        let mut idx2_count = 0;
-                        for v in &*a {
-                            if *v == l {
-                                idx1_count += 1;
-                            }
-                            if *v == r {
-                                idx2_count += 1;
-                            }
-                        }
+                        operand_counts.insert(l_key, remaining);
+                    }
+                } else {
+                    let l_remaining = l_count - pair_count;
+                    if l_remaining == 0 {
+                        operand_counts.remove(&l_key);
+                    } else {
+                        operand_counts.insert(l_key, l_remaining);
+                    }
 
-                        let pair_count = idx1_count.min(idx2_count);
-
-                        if pair_count > 0 {
-                            a.retain(|x| *x != l && *x != r);
-
-                            // add back removed indices in cases such as idx1*idx2*idx2
-                            if idx1_count > pair_count {
-                                a.extend(std::iter::repeat_n(l, idx1_count - pair_count));
-                            }
-                            if idx2_count > pair_count {
-                                a.extend(std::iter::repeat_n(r, idx2_count - pair_count));
-                            }
-
-                            a.extend(std::iter::repeat_n(new_idx, pair_count));
-                            a.sort_unstable();
-                        }
+                    let r_remaining = r_count - pair_count;
+                    if r_remaining == 0 {
+                        operand_counts.remove(&r_key);
+                    } else {
+                        operand_counts.insert(r_key, r_remaining);
                     }
                 }
+
+                line_replacements
+                    .entry(line)
+                    .or_default()
+                    .push((new_idx, pair_count));
             }
 
-            new_symb_branch.push((lines[0], branch));
+            new_symb_branch.push((first_usage, branch));
+            removed += 1;
         }
+
+        drop(operand_counts_initialized);
+
+        // Apply all accepted replacements to each affected instruction at
+        // once. This avoids repeatedly scanning and sorting a long operand
+        // list when several disjoint pairs are extracted from it.
+        for (line, replacements) in line_replacements {
+            let args = match &mut self.instructions[line as usize].0 {
+                Instr::Add(_, args) | Instr::Mul(_, args) => args,
+                _ => unreachable!(),
+            };
+
+            // Compact the original operands in place according to the counts
+            // left after all accepted extractions.
+            let original_len = args.len();
+            let mut read = 0;
+            let mut write = 0;
+            while read < original_len {
+                let arg = args[read];
+                read += 1;
+                while read < original_len && args[read] == arg {
+                    read += 1;
+                }
+
+                let count = *operand_counts
+                    .get(&operand_count_key(line, arg))
+                    .unwrap_or(&0);
+                for _ in 0..count {
+                    args[write] = arg;
+                    write += 1;
+                }
+            }
+            args.truncate(write);
+
+            for (arg, count) in replacements {
+                args.extend(std::iter::repeat_n(arg, count as usize));
+            }
+            args.sort_unstable();
+        }
+        drop(operand_counts);
 
         // detect the earliest point and latest point for an instruction placement
         // earliest point: after last dependency
@@ -885,14 +1265,17 @@ impl<T: Default> ExpressionEvaluator<T> {
 
                 j += 1;
             } else {
-                let (mut s, sc) = self.instructions[i].clone();
+                let (mut s, sc) = std::mem::replace(
+                    &mut self.instructions[i],
+                    (Instr::Label(Label(0)), ComplexPhase::Any),
+                );
 
                 match &mut s {
                     Instr::Add(p, a) | Instr::Mul(p, a) => {
                         for x in &mut *a {
                             *x = rename!(*x);
                         }
-                        a.sort();
+                        a.sort_unstable();
 
                         // remove assignments
                         if a.len() == 1 {
@@ -945,6 +1328,436 @@ impl<T: Default> ExpressionEvaluator<T> {
         self.instructions = new_instr;
         self.fix_labels();
 
-        total_remove
+        removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coefficient_conversion_shares_function_bodies() {
+        let exact = crate::parse!("shared_body::outer(x)")
+            .evaluator(&[crate::parse!("x"), crate::parse!("q")])
+            .add_function_with_options(
+                crate::symbol!("shared_body::inner"),
+                vec![crate::symbol!("z")],
+                crate::parse!("z^2+2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .add_function_with_options(
+                crate::symbol!("shared_body::outer"),
+                vec![crate::symbol!("y")],
+                crate::parse!("shared_body::inner(y)+q"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut real = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let coefficients = real
+            .get_constants()
+            .iter()
+            .map(|c| Complex::new(2. * c, 0.))
+            .collect::<Vec<_>>();
+        let mut complex = real.set_coeff(&coefficients);
+        assert_eq!(exact.external_fns.len(), 2);
+        for ((exact, real), complex) in exact
+            .external_fns
+            .iter()
+            .zip(&real.external_fns)
+            .zip(&complex.external_fns)
+        {
+            let body = exact.body.as_ref().unwrap();
+            assert!(Arc::ptr_eq(body, real.body.as_ref().unwrap()));
+            assert!(Arc::ptr_eq(body, complex.body.as_ref().unwrap()));
+            assert!(real.stack.is_empty());
+            assert!(complex.stack.is_empty());
+        }
+        assert_eq!(real.evaluate_single(&[3., 10.]), 21.);
+        assert_eq!(
+            complex.evaluate_single(&[Complex::new(3., 1.), Complex::new(10., 0.)]),
+            Complex::new(22., 6.)
+        );
+        assert_eq!(real.evaluate_single(&[4., 10.]), 28.);
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&complex, bincode::config::standard()).unwrap();
+            let (mut restored, consumed) = bincode::decode_from_slice::<
+                ExpressionEvaluator<Complex<f64>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            assert_eq!(consumed, bytes.len());
+            assert!(restored.external_fns.iter().all(|f| f.stack.is_empty()));
+            assert_eq!(
+                restored.evaluate_single(&[Complex::new(3., 1.), Complex::new(10., 0.)]),
+                Complex::new(22., 6.)
+            );
+        }
+    }
+
+    #[test]
+    fn merged_functions_share_one_global_table_and_reuse_their_stacks() {
+        use crate::domains::float::DoubleFloat;
+        crate::symbol!(
+            "flat_merge::sum",
+            eval = EvaluationInfo::new().register(|args: &[DoubleFloat]| args
+                .iter()
+                .fold(DoubleFloat::default(), |sum, arg| sum + arg))
+        );
+        let mut functions = FunctionMap::new();
+        for (name, body) in [
+            (
+                crate::symbol!("flat_merge::common"),
+                crate::parse!("flat_merge::sum(y, y+1)"),
+            ),
+            (
+                crate::symbol!("flat_merge::f"),
+                crate::parse!("flat_merge::common(y)+2"),
+            ),
+            (
+                crate::symbol!("flat_merge::g"),
+                crate::parse!("flat_merge::common(2*y)+3"),
+            ),
+            (
+                crate::symbol!("flat_merge::h"),
+                crate::parse!("flat_merge::f(y)+flat_merge::g(y)"),
+            ),
+        ] {
+            functions
+                .add_function_with_options(
+                    name,
+                    vec![crate::symbol!("y")],
+                    body,
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap();
+        }
+        let build = |expression: Atom| {
+            expression
+                .evaluator(&[crate::parse!("x")])
+                .function_map(functions.clone())
+                .build()
+                .unwrap()
+                .map_coeff(&|c| DoubleFloat::from(c.re.to_f64()))
+        };
+        let mut left = build(crate::parse!("flat_merge::g(x)"));
+        let right = build(crate::parse!("flat_merge::h(x)"));
+        let mut retained = right.clone();
+        assert_eq!(left.evaluate_single(&[DoubleFloat::from(3.)]).to_f64(), 16.);
+        left.merge(right, Some(2)).unwrap();
+        assert_eq!(
+            retained.evaluate_single(&[DoubleFloat::from(3.)]).to_f64(),
+            25.
+        );
+        assert_eq!(left.external_fns.len(), 5);
+        for (index, external) in left.external_fns.iter().enumerate() {
+            if let Some(body) = &external.body {
+                for (instruction, _) in &body.instructions {
+                    if let Instr::ExternalFun(_, callee, _) = instruction {
+                        assert!(*callee < index);
+                    }
+                }
+            }
+        }
+        let mut output = [DoubleFloat::default(), DoubleFloat::default()];
+        left.evaluate(&[DoubleFloat::from(3.)], &mut output);
+        assert_eq!(output.each_ref().map(|x| x.to_f64()), [16., 25.]);
+        let allocations = left
+            .external_fns
+            .iter()
+            .map(|f| f.stack.as_ptr())
+            .collect::<Vec<_>>();
+        let mut cloned = left.clone();
+        for (original, cloned) in left.external_fns.iter().zip(&cloned.external_fns) {
+            assert!(cloned.stack.is_empty());
+            if let Some(body) = &original.body {
+                assert!(Arc::ptr_eq(body, cloned.body.as_ref().unwrap()));
+            }
+        }
+        cloned.evaluate(&[DoubleFloat::from(5.)], &mut output);
+        assert_eq!(output.each_ref().map(|x| x.to_f64()), [24., 37.]);
+        left.evaluate(&[DoubleFloat::from(3.)], &mut output);
+        assert_eq!(output.each_ref().map(|x| x.to_f64()), [16., 25.]);
+        assert_eq!(
+            left.external_fns
+                .iter()
+                .map(|f| f.stack.as_ptr())
+                .collect::<Vec<_>>(),
+            allocations
+        );
+    }
+
+    #[cfg(feature = "bincode")]
+    #[test]
+    fn loading_legacy_function_bodies_requires_rebuilding() {
+        // Previous bodies serialized a complete evaluator, including its numerical stack.
+        let old_body = (
+            vec![0., 1., 0.],
+            1usize,
+            2usize,
+            vec![(Instr::Add(2, vec![0, 1]), ComplexPhase::Any)],
+            vec![2usize],
+            Vec::<ExternalFunctionContainer<f64>>::new(),
+            OptimizationSettings::default(),
+        );
+        let old_external = (
+            "legacy_body".to_owned(),
+            crate::symbol!("legacy_body::f"),
+            Vec::<String>::new(),
+            Vec::<Complex<Rational>>::new(),
+            None::<usize>,
+            Some(old_body),
+        );
+        let old_evaluator = (
+            vec![0., 0.],
+            1usize,
+            1usize,
+            vec![(Instr::ExternalFun(1, 0, vec![0]), ComplexPhase::Any)],
+            vec![1usize],
+            vec![old_external],
+            OptimizationSettings::default(),
+        );
+        let bytes = bincode::encode_to_vec(&old_evaluator, bincode::config::standard()).unwrap();
+        let error = bincode::decode_from_slice::<ExpressionEvaluator<f64>, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Rebuild the evaluator"));
+    }
+
+    #[test]
+    fn callback_stack_survives_stack_rewrites_and_unwinding() {
+        let mut external =
+            ExternalFunctionContainer::new(crate::symbol!("stack_scratch::sum"), vec![], vec![]);
+        external.imp = Some(Box::new(|args: &[f64]| {
+            assert!(args[0] >= 0., "test callback failure");
+            args.iter().sum()
+        }));
+        let mut evaluator = ExpressionEvaluator {
+            stack: vec![0.; 8],
+            param_count: 3,
+            reserved_indices: 3,
+            instructions: vec![
+                (Instr::ExternalFun(3, 0, vec![0, 1, 0]), ComplexPhase::Any),
+                (Instr::ExternalFun(4, 0, vec![0, 1, 0]), ComplexPhase::Any),
+                (
+                    Instr::Add(5, vec![3, 4, 0, 0, 0, 0, 1, 2]),
+                    ComplexPhase::Any,
+                ),
+                (Instr::Add(6, vec![0, 0, 1, 2]), ComplexPhase::Any),
+                (
+                    Instr::ExternalFun(7, 0, vec![5, 6, 0, 2, 1]),
+                    ComplexPhase::Any,
+                ),
+            ],
+            result_indices: vec![5, 6, 7],
+            external_fns: vec![external],
+            settings: OptimizationSettings::default(),
+        };
+        let mut callback_allocation = None;
+        for optimized in [false, true] {
+            if optimized {
+                assert!(evaluator.remove_common_instructions() > 0);
+                assert!(evaluator.remove_common_pairs() > 0);
+                evaluator.optimize_stack();
+            }
+            let temporary_count = evaluator.export_instructions().temporary_count;
+            let stack_len = evaluator.stack.len();
+            let allocation = evaluator.stack.as_ptr();
+            let mut output = [0.; 3];
+            for (inputs, expected) in [
+                ([1., 2., 3.], [17., 7., 30.]),
+                ([2., 3., 4.], [29., 11., 49.]),
+            ] {
+                evaluator.evaluate(&inputs, &mut output);
+                assert_eq!(output, expected);
+                let callback_stack = &evaluator.external_fns[0].stack;
+                assert_eq!(callback_stack.len(), 5);
+                assert_eq!(
+                    *callback_allocation.get_or_insert(callback_stack.as_ptr()),
+                    callback_stack.as_ptr()
+                );
+                assert_eq!(evaluator.stack.len(), stack_len);
+                assert_eq!(evaluator.stack.as_ptr(), allocation);
+                assert_eq!(
+                    evaluator.export_instructions().temporary_count,
+                    temporary_count
+                );
+            }
+            let capacity = evaluator.stack.capacity();
+            evaluator.evaluate(&[1., 2., 3.], &mut output);
+            assert_eq!(evaluator.stack.capacity(), capacity);
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    evaluator.evaluate(&[-1., 2., 3.], &mut output);
+                }))
+                .is_err()
+            );
+            assert_eq!(evaluator.stack.len(), stack_len);
+            evaluator.evaluate(&[1., 2., 3.], &mut output);
+            assert_eq!(output, [17., 7., 30.]);
+            assert_eq!(
+                Some(evaluator.external_fns[0].stack.as_ptr()),
+                callback_allocation
+            );
+        }
+    }
+
+    #[test]
+    fn evaluated_stacks_can_be_merged_with_nested_callbacks() {
+        use crate::domains::float::DoubleFloat;
+        crate::symbol!(
+            "stack_merge::sum",
+            eval = EvaluationInfo::new().register(|args: &[DoubleFloat]| args
+                .iter()
+                .fold(DoubleFloat::default(), |sum, arg| sum + arg))
+        );
+        let build = |expression: Atom| {
+            expression
+                .evaluator(&[crate::parse!("x")])
+                .add_function_with_options(
+                    crate::symbol!("stack_merge::f"),
+                    vec![crate::symbol!("y")],
+                    crate::parse!("stack_merge::sum(y, y+1)"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map_coeff(&|c| DoubleFloat::from(c.re.to_f64()))
+        };
+        let mut left = build(crate::parse!("stack_merge::f(x) + stack_merge::sum(x, x)"));
+        let mut right = build(crate::parse!(
+            "stack_merge::f(x) + stack_merge::sum(x, x, x, x) + 2"
+        ));
+        let input = [DoubleFloat::from(3.)];
+        assert_eq!(left.evaluate_single(&input).to_f64(), 13.);
+        assert_eq!(right.evaluate_single(&input).to_f64(), 21.);
+        assert_eq!(
+            left.external_fns
+                .iter()
+                .filter(|f| !f.stack.is_empty())
+                .count(),
+            2
+        );
+        left.merge(right, Some(2)).unwrap();
+        let stack_len = left.stack.len();
+        let mut output = [DoubleFloat::default(), DoubleFloat::default()];
+        left.evaluate(&input, &mut output);
+        assert_eq!(output.each_ref().map(|x| x.to_f64()), [13., 21.]);
+        assert_eq!(left.stack.len(), stack_len);
+        assert_eq!(
+            left.external_fns
+                .iter()
+                .find(|f| f.body.is_none())
+                .unwrap()
+                .stack
+                .len(),
+            4
+        );
+        // merge already ran CSE, CPE, and stack allocation.
+        let mut cloned = left.clone();
+        assert!(cloned.external_fns.iter().all(|f| f.stack.is_empty()));
+        cloned.evaluate(&[DoubleFloat::from(5.)], &mut output);
+        assert_eq!(output.each_ref().map(|x| x.to_f64()), [21., 33.]);
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&left, bincode::config::standard()).unwrap();
+            let (mut decoded, _) =
+                bincode::decode_from_slice::<ExpressionEvaluator<DoubleFloat>, _>(
+                    &bytes,
+                    bincode::config::standard(),
+                )
+                .unwrap();
+            assert!(decoded.external_fns.iter().all(|f| f.stack.is_empty()));
+            assert_eq!(decoded.stack.len(), left.stack.len());
+            decoded.evaluate(&input, &mut output);
+            assert_eq!(output.each_ref().map(|x| x.to_f64()), [13., 21.]);
+            assert_eq!(decoded.stack.len(), stack_len);
+        }
+    }
+
+    #[test]
+    fn common_pair_elimination_revalidates_multiplicity() {
+        let mut evaluator = ExpressionEvaluator {
+            stack: vec![0.0; 8],
+            param_count: 7,
+            reserved_indices: 7,
+            instructions: vec![(Instr::Add(7, vec![0, 0, 0, 0, 1, 2, 3]), ComplexPhase::Any)],
+            result_indices: vec![7],
+            external_fns: vec![],
+            settings: OptimizationSettings::default(),
+        };
+
+        // Four copies of parameter 0 contain two usable (0, 0) pairs. Other
+        // candidates occur combinatorially but have only one usable instance.
+        assert_eq!(evaluator.remove_common_pairs(), 1);
+        assert_eq!(evaluator.count_operations().additions, 5);
+        assert_eq!(evaluator.instructions.len(), 2);
+        assert_eq!(
+            evaluator.evaluate_single(&[1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0]),
+            13.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod cse_tests {
+    use super::*;
+
+    fn evaluator(
+        params: usize,
+        instructions: Vec<Instr>,
+        results: Vec<usize>,
+    ) -> ExpressionEvaluator<f64> {
+        ExpressionEvaluator {
+            stack: vec![0.; params + instructions.len()],
+            param_count: params,
+            reserved_indices: params,
+            instructions: instructions
+                .into_iter()
+                .map(|instruction| (instruction, ComplexPhase::Any))
+                .collect(),
+            result_indices: results,
+            external_fns: vec![],
+            settings: OptimizationSettings::default(),
+        }
+    }
+
+    #[test]
+    fn dependent_duplicates_collapse_in_one_pass() {
+        let depth = 128;
+        let copies = 4;
+        let mut instructions = vec![];
+        let mut results = vec![];
+        for _ in 0..copies {
+            let mut input = 0;
+            for _ in 0..depth {
+                let output = instructions.len() + 1;
+                instructions.push(Instr::BuiltinFun(output, Symbol::SIN, input));
+                input = output;
+            }
+            results.push(input);
+        }
+        let mut original = evaluator(1, instructions, results);
+        let mut optimized = original.clone();
+        assert_eq!(optimized.remove_common_instructions(), (copies - 1) * depth);
+        assert_eq!(optimized.instructions.len(), depth);
+        assert_eq!(optimized.remove_common_instructions(), 0);
+        assert_eq!(optimized.result_indices, vec![depth; copies]);
+        for point in [-0.7_f64, 0., 0.3, 1.] {
+            let expected = (0..depth).fold(point, |value, _| value.sin());
+            let mut before = vec![0.; copies];
+            let mut after = vec![0.; copies];
+            original.evaluate(&[point], &mut before);
+            optimized.evaluate(&[point], &mut after);
+            assert_eq!(after, before);
+            assert!(after.iter().all(|value| (value - expected).abs() < 1e-14));
+        }
     }
 }

@@ -1,12 +1,16 @@
 use rand::Rng;
-use wide::{f64x2, f64x4};
+use wide::{f64x2, f64x4, f64x8};
 
 use super::{FloatLike, Real};
 use crate::domains::rational::Rational;
 
 macro_rules! simd_impl {
-    ($t:ty, $p:ident) => {
+    ($t:ty) => {
         impl FloatLike for $t {
+            fn nan(&self) -> Option<Self> {
+                Some(Self::splat(f64::NAN))
+            }
+
             #[inline(always)]
             fn set_from(&mut self, other: &Self) {
                 *self = *other;
@@ -41,7 +45,7 @@ macro_rules! simd_impl {
             fn pow(&self, e: u64) -> Self {
                 // FIXME: use binary exponentiation
                 debug_assert!(e <= i32::MAX as u64);
-                (*self).powf(e as f64)
+                (*self).powf_simd(<$t>::splat(e as f64))
             }
 
             #[inline(always)]
@@ -63,6 +67,9 @@ macro_rules! simd_impl {
             fn get_precision(&self) -> u32 {
                 53
             }
+
+            #[inline(always)]
+            fn set_precision(&mut self, _precision: u32) {}
 
             #[inline(always)]
             fn get_epsilon(&self) -> f64 {
@@ -196,7 +203,7 @@ macro_rules! simd_impl {
 
             #[inline(always)]
             fn powf(&self, e: &Self) -> Self {
-                (*self).$p(*e)
+                (*self).powf_simd(*e)
             }
         }
 
@@ -208,5 +215,6 @@ macro_rules! simd_impl {
     };
 }
 
-simd_impl!(f64x2, pow_f64x2);
-simd_impl!(f64x4, pow_f64x4);
+simd_impl!(f64x2);
+simd_impl!(f64x4);
+simd_impl!(f64x8);

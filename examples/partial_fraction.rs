@@ -1,13 +1,6 @@
 use std::sync::Arc;
 
-use symbolica::{
-    domains::{
-        factorized_rational_polynomial::FactorizedRationalPolynomial, integer::Z,
-        rational_polynomial::RationalPolynomial,
-    },
-    parser::{ParseSettings, Token},
-    symbol,
-};
+use symbolica::prelude::*;
 
 fn univariate() {
     let var_names = vec!["x".into(), "y".into()];
