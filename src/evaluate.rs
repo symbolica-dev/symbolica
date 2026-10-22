@@ -783,6 +783,18 @@ mod test {
 
     #[test]
     fn non_inlined_function_reuses_temporary_stack_slots() {
+        // Keep this regression on libtest's default stack even when a local Cargo
+        // configuration raises RUST_MIN_STACK.
+        std::thread::Builder::new()
+            .name("non_inlined_function_temporary_stack_slots".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(check_non_inlined_function_temporary_stack_slots)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn check_non_inlined_function_temporary_stack_slots() {
         let helper = symbol!("symbolica::shared_stack::chain");
         let argument = symbol!("symbolica::shared_stack::argument");
         let parent = symbol!("symbolica::shared_stack::parent");

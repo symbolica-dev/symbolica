@@ -1705,6 +1705,9 @@ impl<'a> AtomView<'a> {
         result
     }
 
+    // Keep the recursive dispatcher small: coefficient conversion, function calls,
+    // powers, and conditionals need large debug-build frames even when their branch
+    // is not taken. Reserving them at every node overflows ordinary test stacks.
     // Yields the stack index that contains the output.
     fn linearize_impl(
         &self,
@@ -1726,40 +1729,7 @@ impl<'a> AtomView<'a> {
         }
 
         let res = match self {
-            AtomView::Num(n) => {
-                let c = match n.get_coeff_view() {
-                    CoefficientView::Natural(n, d, ni, di) => {
-                        Complex::new(Rational::from((n, d)), Rational::from((ni, di)))
-                    }
-                    CoefficientView::Large(l, i) => Complex::new(l.to_rat(), i.to_rat()),
-                    CoefficientView::Float(r, i) => {
-                        // TODO: converting back to rational is slow
-                        Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
-                    }
-                    CoefficientView::Indeterminate => {
-                        return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "indeterminate".to_string(),
-                        });
-                    }
-                    CoefficientView::Infinity(_) => {
-                        return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "infinity".to_string(),
-                        });
-                    }
-                    CoefficientView::FiniteField(_, _) => {
-                        return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "finite field".to_string(),
-                        });
-                    }
-                    CoefficientView::RationalPolynomial(_) => {
-                        return Err(EvaluationError::UnsupportedCoefficient {
-                            coefficient: "rational polynomial".to_string(),
-                        });
-                    }
-                };
-
-                context.constant_slot(c)
-            }
+            AtomView::Num(_) => self.linearize_number(context)?,
             AtomView::Var(v) => {
                 let s = v.get_symbol();
 
@@ -1802,380 +1772,18 @@ impl<'a> AtomView<'a> {
 
                 return Err(EvaluationError::UndefinedVariable { symbol: s });
             }
-            AtomView::Fun(f) => {
-                let name = f.get_symbol();
-                if [
-                    Symbol::LOG_ID,
-                    Symbol::SIN_ID,
-                    Symbol::COS_ID,
-                    Symbol::ABS_ID,
-                    Symbol::CONJ_ID,
-                ]
-                .contains(&name.get_id())
-                {
-                    if f.get_nargs() != 1 {
-                        return Err(EvaluationError::WrongNumberOfArguments {
-                            function: name,
-                            expected: 1,
-                            actual: f.get_nargs(),
-                        });
-                    }
-
-                    let arg = f.iter().next().unwrap();
-                    let arg_eval = arg.linearize_impl(
-                        fn_map,
-                        context,
-                        params,
-                        settings,
-                        instr,
-                        subexpressions,
-                    )?;
-
-                    let temp = Slot::Temp(instr.len());
-                    let c = Instruction::Fun(temp, Box::new((name, vec![], vec![arg_eval])), false);
-                    instr.push(c);
-
-                    subexpressions.insert(*self, temp);
-                    return Ok(temp);
-                }
-
-                let fun = if name == Symbol::IF {
-                    if f.get_nargs() != 3 {
-                        return Err(EvaluationError::WrongNumberOfArguments {
-                            function: name,
-                            expected: 3,
-                            actual: f.get_nargs(),
-                        });
-                    }
-
-                    let mut arg_iter = f.iter();
-                    let cond = arg_iter.next().unwrap();
-                    let then_branch = arg_iter.next().unwrap();
-                    let else_branch = arg_iter.next().unwrap();
-
-                    let instr_len = instr.len();
-                    let subexpression_len = subexpressions.len();
-                    let cond = cond.linearize_impl(
-                        fn_map,
-                        context,
-                        params,
-                        settings,
-                        instr,
-                        subexpressions,
-                    )?;
-
-                    // try to resolve the condition if it is fully numeric
-                    fn resolve(
-                        cond: Slot,
-                        instr: &[Instruction],
-                        constants: &[Option<Complex<Rational>>],
-                    ) -> Option<Complex<Rational>> {
-                        let i = match cond {
-                            Slot::Param(_) => {
-                                return None;
-                            }
-                            Slot::Const(i) => {
-                                return constants[i].clone();
-                            }
-                            Slot::Temp(t) => t,
-                            Slot::Out(_) => {
-                                unreachable!()
-                            }
-                        };
-
-                        match &instr[i] {
-                            Instruction::Add(_, args, _) => {
-                                let mut res = Complex::default();
-                                for x in args {
-                                    match resolve(*x, instr, constants) {
-                                        Some(v) => res += v,
-                                        None => return None,
-                                    }
-                                }
-
-                                Some(res)
-                            }
-                            Instruction::Mul(_, args, _) => {
-                                let mut res = Complex::new(Rational::one(), Rational::zero());
-                                for x in args {
-                                    match resolve(*x, instr, constants) {
-                                        Some(v) => res *= v,
-                                        None => return None,
-                                    }
-                                }
-
-                                Some(res)
-                            }
-                            Instruction::Pow(_, base, exp, _) => {
-                                if let Some(base_val) = resolve(*base, instr, constants) {
-                                    if *exp == -1 {
-                                        Some(base_val.inv())
-                                    } else if *exp < 0 {
-                                        Some(base_val.pow(exp.unsigned_abs()).inv())
-                                    } else {
-                                        Some(base_val.pow(exp.unsigned_abs()))
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        }
-                    }
-
-                    if let Some(cond_res) = resolve(cond, instr, &context.constants) {
-                        // remove dead code
-                        instr.truncate(instr_len);
-                        if subexpression_len != subexpressions.len() {
-                            // remove subexpressions that are created as part of the conditions
-                            subexpressions.retain(|_, &mut v| {
-                                if let Slot::Temp(v) = v {
-                                    v < instr_len
-                                } else {
-                                    true
-                                }
-                            });
-                        }
-
-                        let res = if !cond_res.is_zero() {
-                            then_branch.linearize_impl(
-                                fn_map,
-                                context,
-                                params,
-                                settings,
-                                instr,
-                                subexpressions,
-                            )?
-                        } else {
-                            else_branch.linearize_impl(
-                                fn_map,
-                                context,
-                                params,
-                                settings,
-                                instr,
-                                subexpressions,
-                            )?
-                        };
-
-                        subexpressions.insert(*self, res);
-                        return Ok(res);
-                    }
-
-                    let if_instr_pos = instr.len();
-                    instr.push(Instruction::IfElse(cond, 0));
-
-                    let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
-                    let then_branch = then_branch.linearize_impl(
-                        fn_map,
-                        context,
-                        params,
-                        settings,
-                        instr,
-                        &mut sub_expr_pos_child,
-                    )?;
-
-                    let label_end_pos = instr.len();
-                    instr.push(Instruction::Goto(0));
-                    instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
-                    instr.push(Instruction::Label(instr.len()));
-
-                    sub_expr_pos_child.clone_from(subexpressions);
-                    let else_branch = else_branch.linearize_impl(
-                        fn_map,
-                        context,
-                        params,
-                        settings,
-                        instr,
-                        &mut sub_expr_pos_child,
-                    )?;
-
-                    instr[label_end_pos] = Instruction::Goto(instr.len());
-                    instr.push(Instruction::Label(instr.len()));
-
-                    let temp = Slot::Temp(instr.len());
-                    instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
-                    // The completed result now dominates this scope. Branch-local
-                    // values remain in their cloned caches, never in the parent.
-                    subexpressions.insert(*self, temp);
-                    return Ok(temp);
-                } else if let Some(fun) = fn_map.get(*self) {
-                    fun
-                } else if let Some(eval_info) = name.get_evaluation_info() {
-                    let tags = f
-                        .iter()
-                        .take(eval_info.get_tag_count())
-                        .map(|x| x.to_owned())
-                        .collect::<Vec<_>>();
-
-                    let mut fixed_args = vec![];
-                    for x in f.iter().skip(eval_info.get_tag_count()) {
-                        if let Ok(n) = Complex::<Rational>::try_from(x) {
-                            fixed_args.push(n);
-                        }
-                    }
-
-                    // check if it a constant external function
-                    if f.get_nargs() == eval_info.get_tag_count() + fixed_args.len() {
-                        return Ok(context.external_constant_slot(name, tags, fixed_args));
-                    };
-
-                    let eval_args = f
-                        .iter()
-                        .skip(eval_info.get_tag_count())
-                        .map(|arg| {
-                            arg.linearize_impl(
-                                fn_map,
-                                context,
-                                params,
-                                settings,
-                                instr,
-                                subexpressions,
-                            )
-                        })
-                        .collect::<Result<_, _>>()?;
-
-                    let temp = Slot::Temp(instr.len());
-                    instr.push(Instruction::Fun(
-                        temp,
-                        Box::new((
-                            name,
-                            tags.iter().map(|x| x.to_canonical_string()).collect(),
-                            eval_args,
-                        )),
-                        false,
-                    ));
-                    // Use the same scope-local cache as arithmetic expressions.
-                    // This branch returns before the common insertion below.
-                    subexpressions.insert(*self, temp);
-                    return Ok(temp);
-                } else {
-                    return Err(EvaluationError::UndefinedFunction {
-                        expression: self.to_owned(),
-                    });
-                };
-
-                {
-                    let Expr {
-                        tag_len,
-                        args: arg_spec,
-                        options,
-                        ..
-                    } = fun;
-
-                    if f.get_nargs() != arg_spec.len() + tag_len {
-                        return Err(EvaluationError::WrongNumberOfArguments {
-                            function: f.get_symbol(),
-                            expected: arg_spec.len() + tag_len,
-                            actual: f.get_nargs(),
-                        });
-                    }
-
-                    let mut arg_slots = Vec::with_capacity(arg_spec.len());
-                    for eval_arg in f.iter().skip(*tag_len) {
-                        let slot = eval_arg.linearize_impl(
-                            fn_map,
-                            context,
-                            params,
-                            settings,
-                            instr,
-                            subexpressions,
-                        )?;
-
-                        arg_slots.push(slot);
-                    }
-
-                    if !fun.is_alias && !options.should_inline() {
-                        let tags = f.iter().take(*tag_len).map(|tag| tag.to_owned()).collect();
-                        return Self::linearize_function_call(
-                            fn_map, context, settings, name, tags, fun, arg_slots, instr,
-                        );
-                    }
-
-                    self.linearize_inline_function(
-                        fun,
-                        arg_slots,
-                        fn_map,
-                        context,
-                        params,
-                        settings,
-                        instr,
-                        subexpressions,
-                    )?
-                }
+            AtomView::Fun(_) => {
+                return self.linearize_function(
+                    fn_map,
+                    context,
+                    params,
+                    settings,
+                    instr,
+                    subexpressions,
+                );
             }
-            AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
-
-                if b == InlineVar::new(Symbol::E).as_view() {
-                    let e_eval =
-                        e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
-
-                    let temp = Slot::Temp(instr.len());
-                    let c = Instruction::Fun(
-                        temp,
-                        Box::new((Symbol::EXP, vec![], vec![e_eval])),
-                        false,
-                    );
-                    instr.push(c);
-
-                    subexpressions.insert(*self, temp);
-                    return Ok(temp);
-                }
-
-                let b_eval =
-                    b.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
-
-                if let AtomView::Num(n) = e
-                    && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
-                    && den == 1
-                    && num_i == 0
-                {
-                    let new_base = if num.unsigned_abs() > 1 {
-                        let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Mul(
-                            temp,
-                            vec![b_eval; num.unsigned_abs() as usize],
-                            0,
-                        ));
-                        temp
-                    } else {
-                        b_eval
-                    };
-
-                    let res = if num > 0 {
-                        new_base
-                    } else {
-                        let temp = Slot::Temp(instr.len());
-                        instr.push(Instruction::Pow(temp, new_base, -1, false));
-                        temp
-                    };
-
-                    subexpressions.insert(*self, res);
-                    return Ok(res);
-                }
-
-                if let Ok(r) = Rational::try_from(e) {
-                    // FIXME: support 3,2 etc as well
-                    if r == (1, 2) {
-                        let temp = Slot::Temp(instr.len());
-                        let c = Instruction::Fun(
-                            temp,
-                            Box::new((Symbol::SQRT, vec![], vec![b_eval])),
-                            false,
-                        );
-                        instr.push(c);
-
-                        subexpressions.insert(*self, temp);
-                        return Ok(temp);
-                    }
-                }
-
-                let e_eval =
-                    e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
-
-                let temp = Slot::Temp(instr.len());
-                instr.push(Instruction::Powf(temp, b_eval, e_eval, false));
-                temp
+            AtomView::Pow(_) => {
+                self.linearize_power(fn_map, context, params, settings, instr, subexpressions)?
             }
             AtomView::Mul(m) => {
                 let mut muls = vec![];
@@ -2220,6 +1828,440 @@ impl<'a> AtomView<'a> {
 
         subexpressions.insert(*self, res);
         Ok(res)
+    }
+
+    fn linearize_number(
+        &self,
+        context: &mut LinearizationContext<'a>,
+    ) -> Result<Slot, EvaluationError> {
+        let AtomView::Num(n) = self else {
+            unreachable!()
+        };
+        let c = match n.get_coeff_view() {
+            CoefficientView::Natural(n, d, ni, di) => {
+                Complex::new(Rational::from((n, d)), Rational::from((ni, di)))
+            }
+            CoefficientView::Large(l, i) => Complex::new(l.to_rat(), i.to_rat()),
+            CoefficientView::Float(r, i) => {
+                // TODO: converting back to rational is slow
+                Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
+            }
+            CoefficientView::Indeterminate => {
+                return Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "indeterminate".to_string(),
+                });
+            }
+            CoefficientView::Infinity(_) => {
+                return Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "infinity".to_string(),
+                });
+            }
+            CoefficientView::FiniteField(_, _) => {
+                return Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "finite field".to_string(),
+                });
+            }
+            CoefficientView::RationalPolynomial(_) => {
+                return Err(EvaluationError::UnsupportedCoefficient {
+                    coefficient: "rational polynomial".to_string(),
+                });
+            }
+        };
+
+        Ok(context.constant_slot(c))
+    }
+
+    fn linearize_function(
+        &self,
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+    ) -> Result<Slot, EvaluationError> {
+        let AtomView::Fun(f) = self else {
+            unreachable!()
+        };
+        let name = f.get_symbol();
+        if [
+            Symbol::LOG_ID,
+            Symbol::SIN_ID,
+            Symbol::COS_ID,
+            Symbol::ABS_ID,
+            Symbol::CONJ_ID,
+        ]
+        .contains(&name.get_id())
+        {
+            if f.get_nargs() != 1 {
+                return Err(EvaluationError::WrongNumberOfArguments {
+                    function: name,
+                    expected: 1,
+                    actual: f.get_nargs(),
+                });
+            }
+
+            let arg = f.iter().next().unwrap();
+            let arg_eval =
+                arg.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+            let temp = Slot::Temp(instr.len());
+            let c = Instruction::Fun(temp, Box::new((name, vec![], vec![arg_eval])), false);
+            instr.push(c);
+
+            subexpressions.insert(*self, temp);
+            return Ok(temp);
+        }
+
+        if name == Symbol::IF {
+            return self.linearize_conditional(
+                fn_map,
+                context,
+                params,
+                settings,
+                instr,
+                subexpressions,
+            );
+        }
+        let fun = if let Some(fun) = fn_map.get(*self) {
+            fun
+        } else if let Some(eval_info) = name.get_evaluation_info() {
+            let tags = f
+                .iter()
+                .take(eval_info.get_tag_count())
+                .map(|x| x.to_owned())
+                .collect::<Vec<_>>();
+
+            let mut fixed_args = vec![];
+            for x in f.iter().skip(eval_info.get_tag_count()) {
+                if let Ok(n) = Complex::<Rational>::try_from(x) {
+                    fixed_args.push(n);
+                }
+            }
+
+            // check if it a constant external function
+            if f.get_nargs() == eval_info.get_tag_count() + fixed_args.len() {
+                return Ok(context.external_constant_slot(name, tags, fixed_args));
+            };
+
+            let eval_args = f
+                .iter()
+                .skip(eval_info.get_tag_count())
+                .map(|arg| {
+                    arg.linearize_impl(fn_map, context, params, settings, instr, subexpressions)
+                })
+                .collect::<Result<_, _>>()?;
+
+            let temp = Slot::Temp(instr.len());
+            instr.push(Instruction::Fun(
+                temp,
+                Box::new((
+                    name,
+                    tags.iter().map(|x| x.to_canonical_string()).collect(),
+                    eval_args,
+                )),
+                false,
+            ));
+            // Use the same scope-local cache as arithmetic expressions.
+            // This branch returns before the common insertion below.
+            subexpressions.insert(*self, temp);
+            return Ok(temp);
+        } else {
+            return Err(EvaluationError::UndefinedFunction {
+                expression: self.to_owned(),
+            });
+        };
+
+        let Expr {
+            tag_len,
+            args: arg_spec,
+            options,
+            ..
+        } = fun;
+
+        if f.get_nargs() != arg_spec.len() + tag_len {
+            return Err(EvaluationError::WrongNumberOfArguments {
+                function: f.get_symbol(),
+                expected: arg_spec.len() + tag_len,
+                actual: f.get_nargs(),
+            });
+        }
+
+        let mut arg_slots = Vec::with_capacity(arg_spec.len());
+        for eval_arg in f.iter().skip(*tag_len) {
+            let slot = eval_arg.linearize_impl(
+                fn_map,
+                context,
+                params,
+                settings,
+                instr,
+                subexpressions,
+            )?;
+
+            arg_slots.push(slot);
+        }
+
+        if !fun.is_alias && !options.should_inline() {
+            let tags = f.iter().take(*tag_len).map(|tag| tag.to_owned()).collect();
+            return Self::linearize_function_call(
+                fn_map, context, settings, name, tags, fun, arg_slots, instr,
+            );
+        }
+
+        let res = self.linearize_inline_function(
+            fun,
+            arg_slots,
+            fn_map,
+            context,
+            params,
+            settings,
+            instr,
+            subexpressions,
+        )?;
+        subexpressions.insert(*self, res);
+        Ok(res)
+    }
+
+    fn linearize_power(
+        &self,
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+    ) -> Result<Slot, EvaluationError> {
+        let AtomView::Pow(p) = self else {
+            unreachable!()
+        };
+        let (b, e) = p.get_base_exp();
+
+        if b == InlineVar::new(Symbol::E).as_view() {
+            let e_eval =
+                e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+            let temp = Slot::Temp(instr.len());
+            let c = Instruction::Fun(temp, Box::new((Symbol::EXP, vec![], vec![e_eval])), false);
+            instr.push(c);
+
+            subexpressions.insert(*self, temp);
+            return Ok(temp);
+        }
+
+        let b_eval = b.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+        if let AtomView::Num(n) = e
+            && let CoefficientView::Natural(num, den, num_i, _den_i) = n.get_coeff_view()
+            && den == 1
+            && num_i == 0
+        {
+            let new_base = if num.unsigned_abs() > 1 {
+                let temp = Slot::Temp(instr.len());
+                instr.push(Instruction::Mul(
+                    temp,
+                    vec![b_eval; num.unsigned_abs() as usize],
+                    0,
+                ));
+                temp
+            } else {
+                b_eval
+            };
+
+            let res = if num > 0 {
+                new_base
+            } else {
+                let temp = Slot::Temp(instr.len());
+                instr.push(Instruction::Pow(temp, new_base, -1, false));
+                temp
+            };
+
+            subexpressions.insert(*self, res);
+            return Ok(res);
+        }
+
+        if let Ok(r) = Rational::try_from(e) {
+            // FIXME: support 3,2 etc as well
+            if r == (1, 2) {
+                let temp = Slot::Temp(instr.len());
+                let c =
+                    Instruction::Fun(temp, Box::new((Symbol::SQRT, vec![], vec![b_eval])), false);
+                instr.push(c);
+
+                subexpressions.insert(*self, temp);
+                return Ok(temp);
+            }
+        }
+
+        let e_eval = e.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+        let temp = Slot::Temp(instr.len());
+        instr.push(Instruction::Powf(temp, b_eval, e_eval, false));
+        Ok(temp)
+    }
+
+    fn linearize_conditional(
+        &self,
+        fn_map: &'a FunctionMap,
+        context: &mut LinearizationContext<'a>,
+        params: &HashMap<AtomView<'a>, Slot>,
+        settings: &OptimizationSettings,
+        instr: &mut Vec<Instruction>,
+        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+    ) -> Result<Slot, EvaluationError> {
+        let AtomView::Fun(f) = self else {
+            unreachable!()
+        };
+        if f.get_nargs() != 3 {
+            return Err(EvaluationError::WrongNumberOfArguments {
+                function: Symbol::IF,
+                expected: 3,
+                actual: f.get_nargs(),
+            });
+        }
+
+        let mut arg_iter = f.iter();
+        let cond = arg_iter.next().unwrap();
+        let then_branch = arg_iter.next().unwrap();
+        let else_branch = arg_iter.next().unwrap();
+
+        let instr_len = instr.len();
+        let subexpression_len = subexpressions.len();
+        let cond = cond.linearize_impl(fn_map, context, params, settings, instr, subexpressions)?;
+
+        // try to resolve the condition if it is fully numeric
+        fn resolve(
+            cond: Slot,
+            instr: &[Instruction],
+            constants: &[Option<Complex<Rational>>],
+        ) -> Option<Complex<Rational>> {
+            let i = match cond {
+                Slot::Param(_) => {
+                    return None;
+                }
+                Slot::Const(i) => {
+                    return constants[i].clone();
+                }
+                Slot::Temp(t) => t,
+                Slot::Out(_) => {
+                    unreachable!()
+                }
+            };
+
+            match &instr[i] {
+                Instruction::Add(_, args, _) => {
+                    let mut res = Complex::default();
+                    for x in args {
+                        match resolve(*x, instr, constants) {
+                            Some(v) => res += v,
+                            None => return None,
+                        }
+                    }
+
+                    Some(res)
+                }
+                Instruction::Mul(_, args, _) => {
+                    let mut res = Complex::new(Rational::one(), Rational::zero());
+                    for x in args {
+                        match resolve(*x, instr, constants) {
+                            Some(v) => res *= v,
+                            None => return None,
+                        }
+                    }
+
+                    Some(res)
+                }
+                Instruction::Pow(_, base, exp, _) => {
+                    if let Some(base_val) = resolve(*base, instr, constants) {
+                        if *exp == -1 {
+                            Some(base_val.inv())
+                        } else if *exp < 0 {
+                            Some(base_val.pow(exp.unsigned_abs()).inv())
+                        } else {
+                            Some(base_val.pow(exp.unsigned_abs()))
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+
+        if let Some(cond_res) = resolve(cond, instr, &context.constants) {
+            // remove dead code
+            instr.truncate(instr_len);
+            if subexpression_len != subexpressions.len() {
+                // remove subexpressions that are created as part of the conditions
+                subexpressions.retain(|_, &mut v| {
+                    if let Slot::Temp(v) = v {
+                        v < instr_len
+                    } else {
+                        true
+                    }
+                });
+            }
+
+            let res = if !cond_res.is_zero() {
+                then_branch.linearize_impl(
+                    fn_map,
+                    context,
+                    params,
+                    settings,
+                    instr,
+                    subexpressions,
+                )?
+            } else {
+                else_branch.linearize_impl(
+                    fn_map,
+                    context,
+                    params,
+                    settings,
+                    instr,
+                    subexpressions,
+                )?
+            };
+
+            subexpressions.insert(*self, res);
+            return Ok(res);
+        }
+
+        let if_instr_pos = instr.len();
+        instr.push(Instruction::IfElse(cond, 0));
+
+        let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
+        let then_branch = then_branch.linearize_impl(
+            fn_map,
+            context,
+            params,
+            settings,
+            instr,
+            &mut sub_expr_pos_child,
+        )?;
+
+        let label_end_pos = instr.len();
+        instr.push(Instruction::Goto(0));
+        instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
+        instr.push(Instruction::Label(instr.len()));
+
+        sub_expr_pos_child.clone_from(subexpressions);
+        let else_branch = else_branch.linearize_impl(
+            fn_map,
+            context,
+            params,
+            settings,
+            instr,
+            &mut sub_expr_pos_child,
+        )?;
+
+        instr[label_end_pos] = Instruction::Goto(instr.len());
+        instr.push(Instruction::Label(instr.len()));
+
+        let temp = Slot::Temp(instr.len());
+        instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
+        // The completed result now dominates this scope. Branch-local
+        // values remain in their cloned caches, never in the parent.
+        subexpressions.insert(*self, temp);
+        Ok(temp)
     }
 }
 

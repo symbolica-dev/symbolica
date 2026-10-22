@@ -1897,41 +1897,66 @@ impl UnivariatePolynomial<RationalField> {
         false
     }
 
+    /// Select the wider disks in overlapping pairs for refinement.
+    fn root_disks_to_refine(roots: &[IsolatedRoot]) -> Vec<bool> {
+        let mut refine = vec![false; roots.len()];
+        for i in 0..roots.len() {
+            for j in i + 1..roots.len() {
+                if roots[i].enclosure.is_disjoint(&roots[j].enclosure) {
+                    continue;
+                }
+
+                // Shrinking an already precise disk cannot resolve an overlap
+                // dominated by a much wider neighbor. Repeated exact Newton
+                // steps on that precise root only inflate its rational center.
+                match roots[i].enclosure.radius.cmp(&roots[j].enclosure.radius) {
+                    Ordering::Less => refine[j] = true,
+                    Ordering::Greater => refine[i] = true,
+                    Ordering::Equal => {
+                        refine[i] = true;
+                        refine[j] = true;
+                    }
+                }
+            }
+        }
+        refine
+    }
+
     /// Refine roots of one polynomial until their disks are pairwise disjoint.
     fn separate_root_disks(
         poly: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
         derivative: &UnivariatePolynomial<FloatField<Complex<Rational>>>,
         roots: &mut [IsolatedRoot],
     ) -> bool {
-        if Self::root_disks_are_pairwise_disjoint(roots) {
-            return true;
-        }
-
         for _ in 0..32 {
-            for root in roots.iter_mut() {
-                if !Self::refine_root_disk_with_newton(poly, derivative, root) {
+            let refine = Self::root_disks_to_refine(roots);
+            if !refine.iter().any(|refine| *refine) {
+                return true;
+            }
+
+            for (root, refine) in roots.iter_mut().zip(refine) {
+                if refine && !Self::refine_root_disk_with_newton(poly, derivative, root) {
                     return false;
                 }
             }
-
-            if Self::root_disks_are_pairwise_disjoint(roots) {
-                return true;
-            }
         }
 
-        false
+        Self::root_disks_are_pairwise_disjoint(roots)
     }
 
     /// Refine roots from potentially different polynomials until disks separate.
     fn separate_isolated_roots(roots: &mut [IsolatedRoot]) {
         for _ in 0..32 {
-            if Self::root_disks_are_pairwise_disjoint(roots) {
+            let refine = Self::root_disks_to_refine(roots);
+            if !refine.iter().any(|refine| *refine) {
                 return;
             }
 
-            for root in roots.iter_mut() {
+            for (root, refine) in roots.iter_mut().zip(refine) {
+                if !refine {
+                    continue;
+                }
                 let poly_complex = (*root.poly).clone();
-
                 let derivative = poly_complex.derivative();
 
                 if !Self::refine_root_disk_with_newton(&poly_complex, &derivative, root) {
