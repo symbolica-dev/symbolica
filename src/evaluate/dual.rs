@@ -681,7 +681,11 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         );
         self.external_fns = new_external_fns;
 
-        self.remove_common_pairs();
+        if function_scope {
+            self.optimize_instructions();
+        } else {
+            self.remove_common_pairs();
+        }
         self.optimize_stack();
         self.fix_labels();
 

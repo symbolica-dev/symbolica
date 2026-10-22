@@ -70,8 +70,7 @@ use crate::{
         integer::Integer,
         rational::Rational,
     },
-    error, get_symbol,
-    info,
+    error, get_symbol, info,
     license::LicenseManager,
     numerical_integration::MonteCarloRng,
     utils::AbortCheck,
@@ -704,6 +703,81 @@ mod test {
 
             let _ = std::fs::remove_file(source);
             let _ = std::fs::remove_file(library);
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_optimizes_instructions_and_respects_pair_budget() {
+        let build = |rounds| {
+            parse!("shared_body_opt::outer(x)+shared_body_opt::outer(x+1)")
+                .evaluator(&[parse!("x"), parse!("b"), parse!("c"), parse!("d")])
+                .add_function(
+                    symbol!("shared_body_opt::inner"),
+                    vec![symbol!("z")],
+                    parse!("sin(z)"),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    symbol!("shared_body_opt::outer"),
+                    vec![symbol!("a")],
+                    // Inlining inner produces the same instruction as sin(a),
+                    // but in a different symbolic subexpression cache.
+                    parse!("shared_body_opt::inner(a)*b*c+sin(a)*b*d"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .cpe_iterations(rounds)
+                .build()
+                .unwrap()
+        };
+        for rounds in [Some(0), Some(1), None] {
+            let exact = build(rounds);
+            assert_eq!(exact.external_fns.len(), 1);
+            let body = exact.external_fns[0].body.as_ref().unwrap();
+            assert_eq!(
+                body.instructions
+                    .iter()
+                    .filter(|(i, _)| matches!(i, super::Instr::BuiltinFun(..)))
+                    .count(),
+                1,
+                "instruction CSE must run even with CPE disabled"
+            );
+            let multiplications: usize = body
+                .instructions
+                .iter()
+                .filter_map(|(i, _)| match i {
+                    super::Instr::Mul(_, args) => Some(args.len() - 1),
+                    _ => None,
+                })
+                .sum();
+            assert_eq!(multiplications, if rounds == Some(0) { 4 } else { 3 });
+            assert!(std::sync::Arc::ptr_eq(
+                body,
+                exact.clone().external_fns[0].body.as_ref().unwrap()
+            ));
+            let mut dual = exact
+                .clone()
+                .vectorize(&Dualizer::new(
+                    crate::domains::dual::HyperDual::<Complex<Rational>>::new(vec![
+                        vec![0],
+                        vec![1],
+                    ]),
+                    vec![],
+                ))
+                .unwrap()
+                .map_coeff(&|c| c.re.to_f64());
+            let mut evaluator = exact.map_coeff(&|c| c.re.to_f64());
+            for x in [0.2_f64, -0.7, 1.3] {
+                let expected = (x.sin() + (x + 1.).sin()) * 2. * (3. + 5.);
+                let actual = evaluator.evaluate_single(&[x, 2., 3., 5.]);
+                assert!((actual - expected).abs() < 1e-12);
+                let mut out = [0.; 2];
+                dual.evaluate(&[x, 1., 2., 0., 3., 0., 5., 0.], &mut out);
+                assert!((out[0] - expected).abs() < 1e-12);
+                let derivative = (x.cos() + (x + 1.).cos()) * 2. * (3. + 5.);
+                assert!((out[1] - derivative).abs() < 1e-12);
+            }
         }
     }
 
