@@ -1004,6 +1004,54 @@ impl SingleFloat for Float {
 }
 
 impl RealLike for Float {
+    #[cfg(feature = "float-mpfr")]
+    #[inline]
+    fn mul_integer_coefficient(&self, rhs: &Self, coefficient: &Integer) -> Self {
+        if let Integer::Single(value) = coefficient
+            && *value != 0
+        {
+            let magnitude = value.unsigned_abs();
+            let significant_bits =
+                u64::BITS - magnitude.leading_zeros() - magnitude.trailing_zeros();
+            let precision = self.prec().min(rhs.prec());
+            // Mul<&Float> first rounds its left operand to the smaller
+            // precision. Only use exact integer multiplication if that rounding
+            // leaves the coefficient unchanged. The equality check also makes
+            // an inaccurate coefficient hint harmless. Leave signed zero to
+            // the normal multiplication path.
+            if precision >= significant_bits && self.0 == *value {
+                return MultiPrecisionFloat::with_val(precision, &rhs.0 * *value).into();
+            }
+        }
+
+        self.clone() * rhs
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    fn div_round_to_nearest_integer(&self, rhs: &Self) -> Integer {
+        // MPFR can round a quotient directly to a short significand without
+        // rounding either operand first. Away from half-integers, that is enough
+        // to determine the integer even when the operands have thousands of bits.
+        if self.prec().min(rhs.prec()) > f64::MANTISSA_DIGITS {
+            // Match Div<&Float>, which first rounds the numerator down when
+            // the denominator has lower precision.
+            let rounded_numerator = (self.prec() > rhs.prec())
+                .then(|| MultiPrecisionFloat::with_val(rhs.prec(), &self.0));
+            let numerator = rounded_numerator.as_ref().unwrap_or(&self.0);
+            let quotient =
+                MultiPrecisionFloat::with_val(f64::MANTISSA_DIGITS, numerator / &rhs.0).to_f64();
+            // Below 2^52 every half-integer is exactly representable. Any
+            // rounding ambiguity therefore lands on a half-integer and falls
+            // back to the original full-precision division. Larger quotients
+            // may lose integer bits and must also use the fallback.
+            if quotient.abs() < (1u64 << 52) as f64 && quotient.fract().abs() != 0.5 {
+                return Integer::from_f64(quotient.round());
+            }
+        }
+
+        (self.clone() / rhs).round_to_nearest_integer()
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.0
             .to_integer()

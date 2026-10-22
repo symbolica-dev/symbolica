@@ -1,6 +1,7 @@
 //! Arbitrary precision integers.
 
 mod polynomial_kernels;
+mod pslq;
 
 use std::{
     cmp::Ordering,
@@ -2050,6 +2051,11 @@ impl Integer {
     /// where every element of `a` is less than `max_coeff`, using a specified tolerance and number
     /// of iterations. The parameter `gamma` must be more than or equal to `2/sqrt(3)`.
     ///
+    /// Large, high-precision scalar problems use a native-precision reduction
+    /// matrix with periodic high-precision updates and exact integer transforms.
+    /// Returned relations are checked against the original input values, and
+    /// unsafe native arithmetic falls back to the full-precision solver.
+    ///
     /// If the procedure runs out of iterations, the current best candidate is returned
     /// in [`IntegerRelationError::IterationLimit`]. Initial Hermite reduction does not
     /// count towards `max_iter` and can already find a relation.
@@ -2103,21 +2109,50 @@ impl Integer {
             }
         }
 
-        let mut b = Matrix::identity(n as u32, IntegerRing);
+        // Each vector stores a column of the exact transformation. Reductions
+        // update whole columns, and pivot exchanges can swap them without
+        // moving their entries.
+        let mut b: Vec<_> = (0..n)
+            .map(|i| {
+                let mut column = vec![Integer::zero(); n];
+                column[i] = Integer::one();
+                column
+            })
+            .collect();
 
-        let relation = |y: &[T], b: &Matrix<IntegerRing>| {
-            let i = y.iter().position(|yy| yy.norm() < tolerance)?;
-            let res = (0..n as u32)
-                .map(|j| b[(j, i as u32)].clone())
-                .collect::<Vec<_>>();
-            if max_coeff
-                .as_ref()
-                .is_none_or(|bound| res.iter().all(|r| &r.abs() <= bound))
-            {
-                Some(res)
-            } else {
-                None
+        let mut max_iter = max_iter;
+        let pslq = pslq::Pslq::new(x, &tolerance);
+        let accelerated = max_iter > 0 && pslq.can_accelerate();
+        if accelerated {
+            match pslq.accelerate(&mut h, &mut y, &mut b, &gamma, max_iter, max_coeff.as_ref()) {
+                pslq::Outcome::Found(relation) => return Ok(relation),
+                pslq::Outcome::Exhausted(relation) => {
+                    return Err(IntegerRelationError::IterationLimit(relation));
+                }
+                pslq::Outcome::Resume(iterations) => max_iter -= iterations,
+                pslq::Outcome::PrecisionLimit => return Err(IntegerRelationError::PrecisionLimit),
             }
+        }
+
+        let mut gamma_power = gamma.clone();
+        let gamma_powers: Vec<_> = (0..n - 1)
+            .map(|_| {
+                let power = gamma_power.clone();
+                gamma_power *= &gamma;
+                power
+            })
+            .collect();
+
+        let relation = |y: &[T], b: &[Vec<Integer>]| {
+            pslq.candidate(y, b, max_coeff.as_ref()).map(|res| {
+                // A fallback keeps the accelerated basis and transformed y.
+                // Check both initial and later candidates against the inputs.
+                if accelerated && !pslq.verified_relation(res) {
+                    Err(IntegerRelationError::PrecisionLimit)
+                } else {
+                    Ok(res.to_vec())
+                }
+            })
         };
 
         macro_rules! hermite_reduction {
@@ -2126,23 +2161,23 @@ impl Integer {
                     return Err(IntegerRelationError::PrecisionLimit);
                 }
 
-                let t = (h[($i, $j)].clone() / &h[($j, $j)]).round_to_nearest_integer();
+                let t = h[($i, $j)].div_round_to_nearest_integer(&h[($j, $j)]);
 
                 if t.is_zero() {
                     continue;
                 }
 
                 let t_f = x[0].from_rational(&(t.clone(), Integer::one()).into());
-                let r = t_f.clone() * &y[$i as usize];
+                let r = t_f.mul_integer_coefficient(&y[$i as usize], &t);
                 y[$j as usize] += r;
 
                 for k in 0..$j + 1 {
-                    let r = t_f.clone() * &h[($j, k)];
+                    let r = t_f.mul_integer_coefficient(&h[($j, k)], &t);
                     h[($i, k)] -= r;
                 }
-                for k in 0..n as u32 {
-                    let r = t.clone() * &b[(k, $i)];
-                    b[(k, $j)] += r;
+                let (before, after) = b.split_at_mut($i as usize);
+                for (target, source) in before[$j as usize].iter_mut().zip(&after[0]) {
+                    target.fused_mul_assign(&t, source, false);
                 }
             };
         }
@@ -2158,31 +2193,27 @@ impl Integer {
         // zero in y. Swapping rows before testing convergence may then put zero
         // on the diagonal of h and incorrectly report a precision failure.
         if let Some(res) = relation(&y, &b) {
-            return Ok(res);
+            return res;
         }
-
+        let mut pivot_scores = vec![x[0].zero(); n - 1];
+        let mut changed_diagonals = 0..n as u32 - 1;
         for i in 0..max_iter {
-            let mut gamma_max = gamma.clone();
-            let ms: Vec<_> = (0..n as u32 - 1)
-                .map(|i| {
-                    if !h[(i, i)].is_finite() {
-                        return Err(IntegerRelationError::PrecisionLimit);
-                    }
-
-                    let r = h[(i, i)].norm() * &gamma_max;
-                    gamma_max *= &gamma;
-                    Ok((i, r))
-                })
-                .collect::<Result<_, _>>()?;
-            let m = ms
+            for j in changed_diagonals.clone() {
+                if !h[(j, j)].is_finite() {
+                    return Err(IntegerRelationError::PrecisionLimit);
+                }
+                pivot_scores[j as usize] = h[(j, j)].norm() * &gamma_powers[j as usize];
+            }
+            let m = pivot_scores
                 .iter()
+                .enumerate()
                 .max_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap())
                 .unwrap()
-                .0;
+                .0 as u32;
 
             y.swap(m as usize, m as usize + 1);
             h.swap_rows(m, m + 1, 0);
-            b.swap_cols(m, m + 1);
+            b.swap(m as usize, m as usize + 1);
 
             // make h lower trapezoidal
             if m < n as u32 - 2 {
@@ -2203,6 +2234,10 @@ impl Integer {
                 }
             }
 
+            // Hermite reduction only changes entries below the diagonal. The
+            // exchange and rotation can change just these two pivot scores.
+            changed_diagonals = m..(m + 2).min(n as u32 - 1);
+
             for i in (m + 1)..n as u32 {
                 for j in (0..i.min(m + 2)).rev() {
                     hermite_reduction!(i, j);
@@ -2210,7 +2245,7 @@ impl Integer {
             }
 
             if let Some(res) = relation(&y, &b) {
-                return Ok(res);
+                return res;
             }
 
             // check the norm of the largest element once in a while
@@ -2226,6 +2261,22 @@ impl Integer {
 
                     if row_norm_sq > norm {
                         norm = row_norm_sq;
+                    }
+
+                    // The maximum row norm can only increase. Once one row
+                    // gives a bound comfortably below the coefficient cap,
+                    // further rows cannot rule out a relation. Keep a rounding
+                    // margin and only use this shortcut for scalar floats.
+                    if norm.real_classify() == Some(std::num::FpCategory::Normal)
+                        && norm.get_precision() >= 32
+                    {
+                        let inverse_norm = norm.sqrt().inv();
+                        if inverse_norm.to_f64().is_finite() {
+                            let bound = inverse_norm.round_to_nearest_integer();
+                            if (bound + Integer::one()) * Integer::from(2) <= *max_coeff {
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -2246,9 +2297,7 @@ impl Integer {
             })
             .unwrap()
             .0;
-        let res = (0..n as u32)
-            .map(|j| b[(j, min as u32)].clone())
-            .collect::<Vec<_>>();
+        let res = b.swap_remove(min);
 
         Err(IntegerRelationError::IterationLimit(res))
     }
