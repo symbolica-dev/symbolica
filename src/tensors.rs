@@ -542,7 +542,11 @@ impl<'a> AtomView<'a> {
         connections: &mut [(Vec<usize>, bool, usize)],
         g: &mut Graph<TensorGraphNode<'a>, HiddenData<(usize, Option<&'b G>), usize>>,
     ) -> Result<usize, TensorCanonicalizationError> {
-        if !indices.iter().any(|a| self.contains(a.0.as_atom_view())) {
+        // An explicitly scalar function is an atomic coefficient here. Its
+        // private arguments are not slots of the surrounding tensor product.
+        if matches!(self, AtomView::Fun(function) if function.get_symbol().is_scalar())
+            || !indices.iter().any(|a| self.contains(a.0.as_atom_view()))
+        {
             let node = g.add_node(TensorGraphNode::Slot(Some(*self)));
             return Ok(node);
         }
