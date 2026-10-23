@@ -1,135 +1,6 @@
 use super::*;
 
 impl<T: Default + Clone> ExpressionEvaluator<T> {
-    /// Import a generated evaluator's scalar constants and shared function table.
-    fn import_vector_context<V: Vectorize<T>>(
-        &self,
-        vectorizer: &V,
-        ins: &mut InstructionList<T>,
-        external_functions: &mut Vec<ExternalFunctionContainer<T>>,
-    ) -> (Vec<Slot>, Vec<usize>) {
-        let mut slots = Vec::new();
-        let mut constants = Vec::new();
-        let unknown: HashSet<_> = self
-            .external_fns
-            .iter()
-            .filter_map(|external| external.constant_index)
-            .collect();
-        for (index, value) in self.stack[self.param_count..self.reserved_indices]
-            .iter()
-            .enumerate()
-        {
-            let slot = if unknown.contains(&index) {
-                // Registered constants can have equal placeholder values. Keep
-                // their identities distinct and exclude them from interning
-                // before any later literal is imported.
-                let slot = Slot::Const(ins.constants.len());
-                ins.constants.push(value.clone());
-                ins.constants.extend((1..ins.dim).map(|_| T::default()));
-                ins.unknown_constants.push(true);
-                slot
-            } else {
-                vectorizer.import_scalar_constant(value.clone(), ins)
-            };
-            let Slot::Const(index) = slot else {
-                panic!("Imported scalar constants must use constant slots");
-            };
-            constants.push(index);
-            slots.push(slot);
-        }
-        let mut functions = Vec::new();
-        for external in &self.external_fns {
-            let mut external = external.clone();
-            if let Some(index) = external.constant_index.as_mut() {
-                *index = constants[*index];
-                ins.unknown_constants[*index / ins.dim] = true;
-            }
-            if let Some(body) = external.body.as_mut() {
-                let body = Arc::make_mut(body);
-                for (instruction, _) in &mut body.instructions {
-                    if let Instr::ExternalFun(_, function, _) = instruction {
-                        *function = functions[*function];
-                    }
-                }
-            }
-            let index = external_functions
-                .iter()
-                .position(|f| f == &external && f.constant_index == external.constant_index)
-                .unwrap_or_else(|| {
-                    external_functions.push(external);
-                    external_functions.len() - 1
-                });
-            functions.push(index);
-        }
-        (slots, functions)
-    }
-
-    /// Inline generated scalar instructions without dualizing them again.
-    fn inline_vector_components<V: Vectorize<T>>(
-        &self,
-        vectorizer: &V,
-        args: &[Slot],
-        ins: &mut InstructionList<T>,
-        external_functions: &mut Vec<ExternalFunctionContainer<T>>,
-        next_label: &mut usize,
-    ) -> Vec<Slot> {
-        let (constants, functions) =
-            self.import_vector_context(vectorizer, ins, external_functions);
-        let mut slots = args.to_vec();
-        slots.extend(constants);
-        slots.resize(self.stack.len(), Slot::Temp(0));
-        let mut labels = HashMap::default();
-        for (instr, _) in &self.instructions {
-            if let Instr::Label(label) = instr {
-                labels.insert(*label, Label(*next_label));
-                *next_label += 1;
-            }
-        }
-        for (instr, _) in &self.instructions {
-            let (output, instr) = match instr {
-                Instr::Add(output, args) | Instr::Mul(output, args) => {
-                    let mut value = slots[args[0]];
-                    for arg in &args[1..] {
-                        value = ins.add(if matches!(instr, Instr::Add(..)) {
-                            VectorInstruction::Add(value, slots[*arg])
-                        } else {
-                            VectorInstruction::Mul(value, slots[*arg])
-                        });
-                    }
-                    slots[*output] = value;
-                    continue;
-                }
-                Instr::Pow(o, a, p) => (*o, VectorInstruction::Pow(slots[*a], *p)),
-                Instr::Powf(o, a, b) => (*o, VectorInstruction::Powf(slots[*a], slots[*b])),
-                Instr::BuiltinFun(o, f, a) => (*o, VectorInstruction::BuiltinFun(*f, slots[*a])),
-                Instr::ExternalFun(o, f, args) => (
-                    *o,
-                    VectorInstruction::ExternalFun(
-                        functions[*f],
-                        args.iter().map(|a| slots[*a]).collect(),
-                    ),
-                ),
-                Instr::Join(o, c, a, b) => {
-                    (*o, VectorInstruction::Join(slots[*c], slots[*a], slots[*b]))
-                }
-                Instr::IfElse(c, l) => {
-                    ins.add(VectorInstruction::IfElse(slots[*c], labels[l]));
-                    continue;
-                }
-                Instr::Goto(l) => {
-                    ins.add(VectorInstruction::Goto(labels[l]));
-                    continue;
-                }
-                Instr::Label(l) => {
-                    ins.add(VectorInstruction::Label(labels[l]));
-                    continue;
-                }
-            };
-            slots[output] = ins.add(instr);
-        }
-        self.result_indices.iter().map(|i| slots[*i]).collect()
-    }
-
     /// Retain one vector component without executing instructions exclusive to
     /// other components. Keep control-flow instructions and their conditions so
     /// singular expressions in inactive branches remain unevaluated.
@@ -308,7 +179,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 }
             }
         }
-        let old_constants_num = constants.len();
 
         let mut slot_map = HashMap::default();
         for x in 0..self.reserved_indices {
@@ -325,17 +195,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                     Slot::Const($i - self.param_count)
                 } else {
                     Slot::Temp($i - self.reserved_indices)
-                }
-            };
-        }
-
-        macro_rules! from_slot {
-            ($i:expr) => {
-                match $i {
-                    Slot::Param(x) => x,
-                    Slot::Const(x) => x + self.param_count,
-                    Slot::Temp(x) => x + self.reserved_indices,
-                    Slot::Out(_) => unreachable!(),
                 }
             };
         }
@@ -404,8 +263,11 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                                     bodies.insert(key, evaluator);
                                 }
                                 let generated = &bodies[&key];
-                                let (constants, function_indices) = generated
-                                    .import_vector_context(v, &mut ins, &mut new_external_fns);
+                                let (constants, function_indices) = generated.import_context(
+                                    &mut ins,
+                                    &mut new_external_fns,
+                                    |ins, value| v.import_scalar_constant(value, ins),
+                                );
                                 let mut functions = Vec::with_capacity(v.get_dimension());
                                 for component in 0..v.get_dimension() {
                                     let mut evaluator = generated.clone();
@@ -475,7 +337,7 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         let generated = match generated_functions.entry((f, a.len())) {
                             Entry::Occupied(entry) => entry.into_mut(),
                             Entry::Vacant(entry) => {
-                                let mut evaluator = v.vectorize_function(external.symbol, &external.tags, a.len())?
+                                let evaluator = v.vectorize_function(external.symbol, &external.tags, a.len())?
                                     .ok_or_else(|| format!(
                                         "To vectorize the function '{0}', the symbol '{0}_v' must be defined that takes the vector index as an additional tag",
                                         external.symbol.get_name()
@@ -488,7 +350,6 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                                         external.symbol
                                     ));
                                 }
-                                evaluator.undo_stack_optimization();
                                 entry.insert(evaluator)
                             }
                         };
@@ -499,12 +360,12 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                                 (0..v.get_dimension()).map(move |k| slot.index(k))
                             })
                             .collect::<Vec<_>>();
-                        let results = generated.inline_vector_components(
-                            v,
+                        let results = generated.inline_instructions(
                             &args,
                             &mut ins,
                             &mut new_external_fns,
                             &mut next_label,
+                            |ins, value| v.import_scalar_constant(value, ins),
                         );
                         // Keep the components contiguous, as required by slot_map.
                         for result in results {
@@ -584,112 +445,29 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
             );
         }
 
-        self.stack.clear();
-        self.stack.resize(self.param_count, T::default());
-        self.stack.extend(ins.constants);
-
-        let stack_shift = self.stack.len() - old_constants_num - self.param_count;
-
-        let mut new_result_indices = vec![];
-        for x in 0..self.result_indices.len() {
-            let mut p = slot_map[&self.result_indices[x]];
-            if p >= self.reserved_indices {
-                p += stack_shift;
-            }
-
-            for i in 0..v.get_dimension() {
-                new_result_indices.push(p + i);
-            }
-        }
-
-        self.reserved_indices += stack_shift;
-        self.result_indices = new_result_indices;
-
-        for i in ins.instructions {
-            let out = self.instructions.len() + self.reserved_indices;
-            match i {
-                VectorInstruction::Add(slot, slot1) => {
-                    let mut s1 = from_slot!(slot);
-                    let mut s2 = from_slot!(slot1);
-                    if s1 > s2 {
-                        (s1, s2) = (s2, s1);
-                    }
-
-                    self.instructions
-                        .push((Instr::Add(out, vec![s1, s2]), ComplexPhase::Any));
-                }
-                VectorInstruction::Assign(slot) => {
-                    self.instructions
-                        .push((Instr::Add(out, vec![from_slot!(slot)]), ComplexPhase::Any));
-                }
-                VectorInstruction::Mul(slot, slot1) => {
-                    let mut s1 = from_slot!(slot);
-                    let mut s2 = from_slot!(slot1);
-                    if s1 > s2 {
-                        (s1, s2) = (s2, s1);
-                    }
-
-                    self.instructions
-                        .push((Instr::Mul(out, vec![s1, s2]), ComplexPhase::Any));
-                }
-                VectorInstruction::Pow(slot, e) => {
-                    self.instructions
-                        .push((Instr::Pow(out, from_slot!(slot), e), ComplexPhase::Any));
-                }
-                VectorInstruction::Powf(slot, slot1) => {
-                    self.instructions.push((
-                        Instr::Powf(out, from_slot!(slot), from_slot!(slot1)),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::BuiltinFun(builtin_symbol, slot) => {
-                    self.instructions.push((
-                        Instr::BuiltinFun(out, builtin_symbol, from_slot!(slot)),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::ExternalFun(f, args) => {
-                    self.instructions.push((
-                        Instr::ExternalFun(out, f, args.iter().map(|x| from_slot!(*x)).collect()),
-                        ComplexPhase::Any,
-                    ));
-                }
-                VectorInstruction::IfElse(cond, label) => {
-                    self.instructions
-                        .push((Instr::IfElse(from_slot!(cond), label), ComplexPhase::Any));
-                }
-                VectorInstruction::Goto(label) => {
-                    self.instructions
-                        .push((Instr::Goto(label), ComplexPhase::Any));
-                }
-                VectorInstruction::Label(label) => {
-                    self.instructions
-                        .push((Instr::Label(label), ComplexPhase::Any));
-                }
-                VectorInstruction::Join(cond, t, f) => {
-                    self.instructions.push((
-                        Instr::Join(out, from_slot!(cond), from_slot!(t), from_slot!(f)),
-                        ComplexPhase::Any,
-                    ));
-                }
-            }
-        }
-
-        self.stack.resize(
-            self.reserved_indices + self.instructions.len(),
-            T::default(),
+        let results = self
+            .result_indices
+            .iter()
+            .flat_map(|index| {
+                let slot = get_slot!(slot_map[index]);
+                (0..v.get_dimension()).map(move |component| slot.index(component))
+            })
+            .collect();
+        let mut evaluator = Self::from_instruction_list(
+            self.param_count,
+            ins,
+            new_external_fns,
+            results,
+            self.settings,
         );
-        self.external_fns = new_external_fns;
-
         if function_scope {
-            self.optimize_instructions();
+            evaluator.optimize_instructions();
         } else {
-            self.remove_common_pairs();
+            evaluator.remove_common_pairs();
         }
-        self.optimize_stack();
-        self.fix_labels();
-
-        Ok(self)
+        evaluator.optimize_stack();
+        evaluator.fix_labels();
+        Ok(evaluator)
     }
 }
 
@@ -711,13 +489,7 @@ pub trait Vectorize<T> {
     where
         T: Default + Clone,
     {
-        let slot = Slot::Const(instructions.constants.len());
-        instructions.constants.push(value);
-        instructions
-            .constants
-            .extend((1..instructions.dim).map(|_| T::default()));
-        instructions.unknown_constants.push(false);
-        slot
+        instructions.push_scalar_constant(value)
     }
 
     /// Map an instruction applied to a vector of slots (components accessible with [Slot::index])
@@ -1657,8 +1429,9 @@ mod test {
             dim: 2,
         };
         let mut functions = vec![];
-        let (slots, _) =
-            source.import_vector_context(&vectorizer, &mut instructions, &mut functions);
+        let (slots, _) = source.import_context(&mut instructions, &mut functions, |ins, value| {
+            vectorizer.import_scalar_constant(value, ins)
+        });
         let registered: Vec<_> = functions.iter().filter_map(|f| f.constant_index).collect();
         assert_eq!(registered.len(), 2);
         assert_ne!(registered[0], registered[1]);

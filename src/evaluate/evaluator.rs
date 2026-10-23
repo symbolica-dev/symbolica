@@ -17,7 +17,7 @@ pub struct ExpressionEvaluator<T> {
 
 /// Immutable, coefficient-independent instructions for a single non-inlined function.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct FunctionBody {
     pub(super) instructions: Vec<(Instr, ComplexPhase)>,
     pub(super) param_count: usize,
@@ -1043,12 +1043,13 @@ impl<T: Default> ExpressionEvaluator<T> {
                     current_node = dag_nodes.len() - 1;
                 }
                 Instr::Label(label) => {
-                    // One conditional can produce several Join instructions
-                    // (for example, one per vector component). Its control-flow
-                    // scope ends once, at the forward jump's target label.
+                    // New pairs are inserted before their assigned line, so
+                    // only lines after the label belong to the parent scope.
+                    branch_id[p] = current_node;
                     if let Some(parent) = branch_exits.get(label) {
                         current_node = *parent;
                     }
+                    continue;
                 }
                 _ => {}
             }

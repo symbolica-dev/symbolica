@@ -130,9 +130,10 @@ pub mod prelude {
         JITCompilationSettings,
     };
     pub use crate::evaluate::{
-        Dualizer, EvaluationDomain, EvaluationFn, EvaluatorBuilder, ExportedInstructions,
-        ExportedSubEvaluator, ExpressionEvaluator, ExternalFunction, FunctionMap, Instruction,
-        OperationCount, OptimizationSettings, Vectorize,
+        ComposeError, ComposerSlot, Dualizer, EvaluationDomain, EvaluationFn, EvaluatorBuilder,
+        EvaluatorComposer, ExportedInstructions, ExportedSubEvaluator, ExpressionEvaluator,
+        ExternalFunction, FunctionMap, Instruction, OperationCount, OptimizationSettings,
+        Vectorize,
     };
 
     pub use crate::id::{
