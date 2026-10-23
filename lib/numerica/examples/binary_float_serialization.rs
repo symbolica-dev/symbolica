@@ -25,7 +25,7 @@ mod benchmark {
     }
 
     fn hex_encode(value: &Float) -> Vec<u8> {
-        if value.as_raw().is_zero() || value.as_raw().is_nan() {
+        if value.as_raw().is_zero() {
             vec![b'0']
         } else {
             value.as_raw().to_string_radix(16, None).into_bytes()
