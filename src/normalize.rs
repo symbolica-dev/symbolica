@@ -686,17 +686,24 @@ impl AtomView<'_> {
             // Borrow canonical products while flattening them. Their children
             // need owned buffers for merging, but copying the parent is redundant.
             let mut handle;
-            let mul = if let AtomView::Mul(mul) = a
-                && !a.needs_normalization()
-            {
-                mul
+            let mul = if !a.needs_normalization() {
+                if let AtomView::Mul(mul) = a {
+                    mul
+                } else {
+                    if let AtomView::Num(n) = a
+                        && n.is_one()
+                    {
+                        continue;
+                    }
+                    // Fill the final factor slot directly instead of moving
+                    // the completed owned buffer through another stack value.
+                    atom_test_buf.push(workspace.new_atom());
+                    atom_test_buf.last_mut().unwrap().set_from_view(&a);
+                    continue;
+                }
             } else {
                 handle = workspace.new_atom();
-                if a.needs_normalization() {
-                    a.normalize(workspace, &mut handle);
-                } else {
-                    handle.set_from_view(&a);
-                }
+                a.normalize(workspace, &mut handle);
 
                 let Atom::Mul(mul) = handle.deref_mut() else {
                     if let AtomView::Num(n) = handle.as_view()
@@ -716,9 +723,8 @@ impl AtomView<'_> {
                 {
                     continue;
                 }
-                let mut handle = workspace.new_atom();
-                handle.set_from_view(&c);
-                atom_test_buf.push(handle);
+                atom_test_buf.push(workspace.new_atom());
+                atom_test_buf.last_mut().unwrap().set_from_view(&c);
             }
         }
 
