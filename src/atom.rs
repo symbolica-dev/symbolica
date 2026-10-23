@@ -411,6 +411,8 @@ pub struct EvaluationInfo {
     tag_count: usize,
     /// A precision-aware evaluator for constants, where no numeric arguments exist to carry precision.
     constant_eval: Option<ErasedConstantEval>,
+    /// Explicit precision-aware evaluation of exact fixed numeric arguments.
+    fixed_argument_eval: Option<ErasedFixedArgumentEval>,
     /// A cached double-precision value for the constant evaluation, if the symbol has no tags.
     constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
     /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
@@ -423,6 +425,9 @@ pub struct EvaluationInfo {
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
 type ErasedConstantEval =
     Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
+type ErasedFixedArgumentEval = Box<
+    dyn Fn(&[AtomView], &[Complex<Rational>], u32) -> Result<Complex<Float>, String> + Send + Sync,
+>;
 type ErasedTaggedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
 
 enum CppCode {
@@ -448,6 +453,7 @@ impl EvaluationInfo {
         Self {
             tag_count: 0,
             constant_eval: None,
+            fixed_argument_eval: None,
             constant_eval_cache: OnceLock::new(),
             eval_fns: HashMap::default(),
             cpp: None,
@@ -467,6 +473,7 @@ impl EvaluationInfo {
         Self {
             tag_count: 0,
             constant_eval: Some(Box::new(f)),
+            fixed_argument_eval: None,
             constant_eval_cache: OnceLock::new(),
             eval_fns: HashMap::default(),
             cpp: None,
@@ -491,6 +498,61 @@ impl EvaluationInfo {
     /// Return the number of leading symbolic arguments interpreted as tags.
     pub fn get_tag_count(&self) -> usize {
         self.tag_count
+    }
+
+    /// Explicitly support evaluation of exact fixed arguments when the target
+    /// numeric domain has no function implementation. Dynamic arguments never
+    /// use this callback. Its result is converted through the target domain's
+    /// native constant conversion, including any assumed numerical uncertainty.
+    ///
+    /// The callback must account for conversion of its exact rational arguments
+    /// and return both Float components at the requested working precision.
+    /// This interface does not confer a certified error bound.
+    pub fn with_fixed_argument_evaluator(
+        mut self,
+        f: impl Fn(&[AtomView], &[Complex<Rational>], u32) -> Result<Complex<Float>, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.fixed_argument_eval = Some(Box::new(f));
+        self
+    }
+
+    /// Evaluate exact fixed numeric arguments with the same admission used by
+    /// native evaluator mapping. Existing target-domain implementations take
+    /// precedence; otherwise an explicit fixed-argument registration is required.
+    pub fn evaluate_fixed_arguments<T: crate::evaluate::EvaluationDomain>(
+        &self,
+        tags: &[AtomView],
+        args: &[Complex<Rational>],
+        binary_prec: u32,
+    ) -> Result<T, String> {
+        if let Some(eval) = T::resolve_function(tags, self) {
+            let args = args
+                .iter()
+                .map(|c| {
+                    T::try_from_complex_float(Complex::new(
+                        c.re.to_multi_prec_float(binary_prec),
+                        c.im.to_multi_prec_float(binary_prec),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(eval(&args));
+        }
+        let eval = self
+            .fixed_argument_eval
+            .as_ref()
+            .ok_or("No target-domain or explicit fixed-argument implementation")?;
+        let precision = binary_prec.max(T::FIXED_PRECISION.unwrap_or(0));
+        let value = eval(tags, args, precision)?;
+        if value.re.prec() < precision || value.im.prec() < precision {
+            return Err("Fixed-argument evaluator returned insufficient working precision".into());
+        }
+        if !value.re.is_finite() || !value.im.is_finite() {
+            return Err("Fixed-argument evaluator returned a nonfinite value".into());
+        }
+        T::try_from_complex_float(value)
     }
 
     /// Attach a C++ snippet that defines this external function for exported code.
