@@ -34,9 +34,10 @@ pub struct RationalReconstructionStats {
 /// BMA methods use the finite `SMOOTH_PRIMES` list in descending order below
 /// 2^63, restricted to primes large enough for their exponent box. Other
 /// methods use consecutive primes above 2^61.
-/// `max_primes` includes verification primes. The probe
-/// bound in `options` applies separately to each reconstructed image. Failed
-/// modular interpolations and changing supports are retried within this bound.
+/// With explicit diagnostics, `max_primes` includes verification primes and
+/// the probe bound in `options` applies to each reconstructed image. Ordinary
+/// work ignores these counters and shares one RAM/time scope across all images.
+/// Inconclusive modular interpolations and changing supports are retried.
 /// Learned support and coefficient hypotheses with repeated agreement or a
 /// conservative size margin are reused when a known component fixes the scale. Reused
 /// images are independently checked, with ordinary reconstruction as fallback.
@@ -46,6 +47,7 @@ pub struct RationalReconstructionStats {
 /// before verification against the original oracle.
 /// A candidate is accepted only after checking at a prime unused in its CRT.
 /// This is a probabilistic identity check, not a coefficient-height proof.
+/// Compatibility adapter for oracles that only distinguish values from poles.
 pub fn reconstruct_rational_function_over_q<F>(
     variables: Arc<Vec<PolyVariable>>,
     mut black_box: F,
@@ -59,7 +61,51 @@ pub fn reconstruct_rational_function_over_q<F>(
 where
     F: FnMut(&Zp64, &[Element]) -> Option<Element>,
 {
-    if max_primes < 2 {
+    reconstruct_rational_function_over_q_fallible(
+        variables,
+        |field, point| Ok(black_box(field, point)),
+        method,
+        options,
+        max_primes,
+    )
+}
+
+/// Lift a fallible oracle over the rationals without treating errors as poles.
+pub fn reconstruct_rational_function_over_q_fallible<F>(
+    variables: Arc<Vec<PolyVariable>>,
+    black_box: F,
+    method: ReconstructionMethod,
+    options: &ReconstructionOptions,
+    max_primes: usize,
+) -> Result<(
+    RationalPolynomial<IntegerRing, u16>,
+    RationalReconstructionStats,
+)>
+where
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
+{
+    crate::utils::resources::ResourceBudget::new(options.resources).run(|| {
+        crate::utils::resources::checkpoint()?;
+        let result = reconstruct_over_q_scoped(variables, black_box, method, options, max_primes)?;
+        crate::utils::resources::checkpoint()?;
+        Ok(result)
+    })
+}
+
+fn reconstruct_over_q_scoped<F>(
+    variables: Arc<Vec<PolyVariable>>,
+    mut black_box: F,
+    method: ReconstructionMethod,
+    options: &ReconstructionOptions,
+    max_primes: usize,
+) -> Result<(
+    RationalPolynomial<IntegerRing, u16>,
+    RationalReconstructionStats,
+)>
+where
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
+{
+    if options.diagnostics_enabled && max_primes < 2 {
         return Err(ReconstructionError::InvalidOptions);
     }
     let mut primes: Box<dyn Iterator<Item = u64>> = if matches!(
@@ -87,7 +133,8 @@ where
     let mut pending_factors: Option<(super::rational_factors::Factors, Fraction)> = None;
     let mut factor_search_done = false;
     let mut rng = StdRng::seed_from_u64(options.seed ^ 0x637274);
-    while stats.primes < max_primes {
+    while !options.diagnostics_enabled || stats.primes < max_primes {
+        crate::utils::resources::checkpoint()?;
         let prime = primes.next().ok_or(ReconstructionError::PrimeLimit)?;
         stats.primes += 1;
         let field = Zp64::new(prime);
@@ -96,15 +143,17 @@ where
         let calls = std::cell::Cell::new(0usize);
         let modular_factors = factors.as_ref().map(|factors| factors.modular(&field));
         let mut oracle = |f: &Zp64, p: &[Element]| {
-            calls.set(calls.get() + 1);
-            let raw = black_box(f, p)?;
-            if let Some([numerator, denominator]) = &modular_factors {
+            calls.set(calls.get().saturating_add(1));
+            let Some(raw) = black_box(f, p)? else {
+                return Ok(None);
+            };
+            Ok(if let Some([numerator, denominator]) = &modular_factors {
                 let n = numerator.replace_all(p);
                 let d = denominator.replace_all(p);
                 (!f.is_zero(&n) && !f.is_zero(&d)).then(|| f.div(&f.mul(&raw, &d), &n))
             } else {
                 Some(raw)
-            }
+            })
         };
         let reused = options
             .reuse_coefficients
@@ -124,16 +173,25 @@ where
                 stats.support_reuses += 1;
                 Ok(image)
             }
+            Some(Err(
+                error @ (ReconstructionError::ResourceLimit(_)
+                | ReconstructionError::OracleFailure(_)
+                | ReconstructionError::InvalidOptions
+                | ReconstructionError::UnsupportedBmaGeometry),
+            )) => return Err(error),
             attempt => {
                 if attempt.is_some() {
                     stats.support_fallbacks += 1;
-                    image_options.max_probes -= calls.get();
+                    if options.diagnostics_enabled {
+                        image_options.max_probes =
+                            image_options.max_probes.saturating_sub(calls.get());
+                    }
                     image_options.seed = rng.random();
                 }
-                if image_options.max_probes == 0 {
+                if options.diagnostics_enabled && image_options.max_probes == 0 {
                     Err(ReconstructionError::ProbeLimit)
                 } else {
-                    reconstruct_rational_function(
+                    reconstruct_rational_function_fallible(
                         field.clone(),
                         variables.clone(),
                         &mut oracle,
@@ -146,12 +204,12 @@ where
         stats.probes += calls.get();
         let (mut image, image_stats) = match image {
             Ok(r) => r,
-            Err(ReconstructionError::InvalidOptions) => {
-                return Err(ReconstructionError::InvalidOptions);
-            }
-            Err(ReconstructionError::UnsupportedBmaGeometry) => {
-                return Err(ReconstructionError::UnsupportedBmaGeometry);
-            }
+            Err(
+                error @ (ReconstructionError::ResourceLimit(_)
+                | ReconstructionError::OracleFailure(_)
+                | ReconstructionError::InvalidOptions
+                | ReconstructionError::UnsupportedBmaGeometry),
+            ) => return Err(error),
             Err(_) => continue,
         };
         stats.successful_images += 1;
@@ -260,7 +318,7 @@ where
             }
             continue;
         };
-        if stats.primes == max_primes {
+        if options.diagnostics_enabled && stats.primes == max_primes {
             break;
         }
         let mut numerator = MultivariatePolynomial::<_, u16>::new(&Q, None, variables.clone());
@@ -293,7 +351,14 @@ where
         };
         let mut checked = 0;
         let mut seen = HashSet::new();
-        for _ in 0..(options.verification_points * 16).min(options.max_probes) {
+        let verification_attempts = options.verification_points.saturating_mul(16);
+        let verification_attempts = if options.diagnostics_enabled {
+            verification_attempts.min(options.max_probes)
+        } else {
+            verification_attempts
+        };
+        for _ in 0..verification_attempts {
+            crate::utils::resources::checkpoint()?;
             let point: Vec<_> = (0..variables.len())
                 .map(|_| field.to_element(rng.random_range(1..prime)))
                 .collect();
@@ -301,7 +366,9 @@ where
                 continue;
             }
             stats.probes += 1;
-            if let Some(v) = black_box(&field, &point) {
+            let raw = black_box(&field, &point)?;
+            crate::utils::resources::checkpoint()?;
+            if let Some(v) = raw {
                 if value(&modular, &point) != Some(v) {
                     break;
                 }

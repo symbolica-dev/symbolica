@@ -15,7 +15,7 @@ pub(super) fn reconstruct<F>(
     frozen: &[Option<Rational>],
 ) -> Option<Result<(Fraction, ReconstructionStats)>>
 where
-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
 {
     let template = Polynomial::new(&field, None, variables);
     let mut known = [template.zero(), template.zero()];
@@ -51,7 +51,7 @@ where
         field,
         template,
         black_box,
-        options,
+        options: options.clone(),
         rng: StdRng::seed_from_u64(options.seed),
         cache: HashMap::new(),
         stats: Default::default(),
@@ -85,7 +85,7 @@ fn reconstruct_components<F>(
     components: &[Component],
 ) -> Result<Fraction>
 where
-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
 {
     let f = ctx.field.clone();
     let mut known = initial.clone();
@@ -163,7 +163,7 @@ where
 
 fn verify_line<F>(ctx: &mut Context<'_, F>, direction: &[Element], line: &Fraction) -> Result<()>
 where
-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
 {
     let f = ctx.field.clone();
     let mut checked = 0;

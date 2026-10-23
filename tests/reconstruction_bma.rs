@@ -134,6 +134,7 @@ fn bma_retries_missing_geometric_samples_and_counts_the_budget() {
             },
             method,
             &ReconstructionOptions {
+                diagnostics_enabled: true,
                 max_probes: 5,
                 ..Default::default()
             },

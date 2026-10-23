@@ -285,6 +285,7 @@ fn homogeneous_degree_limit_includes_removed_factors() {
         |_, p| Some(n.replace_all(p)),
         CuytLeePruned,
         &ReconstructionOptions {
+            diagnostics_enabled: true,
             max_degree: 8,
             max_attempts: 1,
             ..Default::default()
@@ -521,6 +522,7 @@ fn bounded_failure_and_poles() {
             },
             method,
             &ReconstructionOptions {
+                diagnostics_enabled: true,
                 max_probes: 5,
                 ..Default::default()
             },
@@ -533,6 +535,7 @@ fn bounded_failure_and_poles() {
             |f, x| Some(f.pow(&x[0], 5)),
             method,
             &ReconstructionOptions {
+                diagnostics_enabled: true,
                 max_degree: 2,
                 ..Default::default()
             },
@@ -544,6 +547,7 @@ fn bounded_failure_and_poles() {
             |_, _| unreachable!(),
             method,
             &ReconstructionOptions {
+                diagnostics_enabled: true,
                 verification_points: 0,
                 ..Default::default()
             },
@@ -954,6 +958,7 @@ fn automatic_selection_validates_structure_and_preserves_probe_limits() {
             },
             Automatic,
             &ReconstructionOptions {
+                diagnostics_enabled: true,
                 max_probes: 5,
                 ..options
             },
