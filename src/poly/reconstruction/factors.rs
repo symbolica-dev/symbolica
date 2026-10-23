@@ -26,7 +26,7 @@ pub(super) fn common_factors(a: &Fraction, b: &Fraction, variable: usize) -> Fra
 
 impl<F> Context<'_, F>
 where
-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
 {
     pub(super) fn reconstruct_profile(
         &mut self,

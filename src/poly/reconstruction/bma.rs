@@ -182,7 +182,7 @@ fn recover(
     Some(result)
 }
 
-impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
+impl<F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>> Context<'_, F> {
     pub(super) fn bma_polynomial(
         &mut self,
         active: usize,
@@ -191,7 +191,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
     ) -> Result<Option<Fraction>> {
         let field = self.field.clone();
         let (alpha, factors) = parameters(&field)?;
-        let geometry = Geometry::new(&field, self.options, active, fixed, alpha)?;
+        let geometry = Geometry::new(&field, &self.options, active, fixed, alpha)?;
         let logs = Zp64DiscreteLogContext::new(&field, &alpha, field.get_prime() - 1, &factors);
         let mut point = fixed.to_vec();
         let mut samples = Vec::new();
@@ -283,7 +283,7 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
         let field = self.field.clone();
         let (alpha, factors) = parameters(&field)?;
-        let geometry = Geometry::new(&field, self.options, main, fixed, alpha)?;
+        let geometry = Geometry::new(&field, &self.options, main, fixed, alpha)?;
         let logs = Zp64DiscreteLogContext::new(&field, &alpha, field.get_prime() - 1, &factors);
         let mut point = fixed.to_vec();
         let mut rows = Vec::new();
@@ -292,11 +292,14 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         let mut powers = [Vec::new(), Vec::new()];
         // Every noninitial row requires at least one new sample except for
         // constant slices. The explicit row bound also covers that case.
-        for _ in 0..self
-            .options
-            .max_probes
-            .min((field.get_prime() - 1) as usize)
-        {
+        let distinct_points = usize::try_from(field.get_prime() - 1)
+            .map_err(|_| ReconstructionError::UnsupportedBmaGeometry)?;
+        let row_samples = if self.options.diagnostics_enabled {
+            self.options.max_probes.min(distinct_points)
+        } else {
+            distinct_points
+        };
+        for _ in 0..row_samples {
             let known = value(&slice, &point).ok_or(ReconstructionError::AttemptsExhausted)?;
             let mut row = if let Some(degrees) = degrees {
                 self.degree_row(main, &point, known, degrees, minimum, None, false, &powers)?
