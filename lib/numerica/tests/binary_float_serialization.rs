@@ -160,9 +160,17 @@ fn binary_comparison_matches_decoded_values_across_precisions_and_classes() {
 
 #[cfg(feature = "float-mpfr")]
 #[test]
-fn binary_mpfr_imports_exactly_across_native_unsigned_word_threshold() {
+fn binary_mpfr_imports_exactly_across_native_word_and_stack_thresholds() {
     let word_bytes = std::mem::size_of::<std::os::raw::c_ulong>();
-    for count in [word_bytes - 1, word_bytes, word_bytes + 1] {
+    let limb_bytes = std::mem::size_of::<gmp_mpfr_sys::gmp::limb_t>();
+    let mut counts = vec![word_bytes - 1, word_bytes, word_bytes + 1];
+    for limbs in 1..=4 {
+        let bytes = limbs * limb_bytes;
+        counts.extend([bytes - 1, bytes, bytes + 1]);
+    }
+    counts.sort_unstable();
+    counts.dedup();
+    for count in counts {
         let significand: Vec<_> = (0..count).map(|i| 0xa1 + i as u8).collect();
         let precision = 8 * count as u32;
         // A radix-two string supplies an independent exact-value reference.
@@ -189,6 +197,47 @@ fn binary_mpfr_imports_exactly_across_native_unsigned_word_threshold() {
             );
             assert_eq!(value.serialize(), bytes);
             assert!(Float::try_deserialize(&bytes, precision - 1).is_err());
+        }
+    }
+}
+
+#[cfg(feature = "float-mpfr")]
+#[test]
+fn binary_mpfr_stack_import_preserves_sparse_limbs_and_low_padding_bits() {
+    let limb_bytes = std::mem::size_of::<gmp_mpfr_sys::gmp::limb_t>();
+    for count in [limb_bytes + 1, 4 * limb_bytes, 4 * limb_bytes + 1] {
+        let mut significand = vec![0; count];
+        significand[0] = 0xa0;
+        significand[count - 1] = 0x80;
+        let bits = 8 * count as u32;
+        let precision = bits - 5;
+        let digits: String = significand
+            .iter()
+            .rev()
+            .map(|byte| format!("{byte:08b}"))
+            .collect();
+        for exponent in [-4000, 4000] {
+            let raw = rug::Float::parse_radix(digits.as_str(), 2).unwrap();
+            let expected =
+                Float::from_raw(rug::Float::with_val(precision, raw) << (exponent - bits as i32));
+            for negative in [false, true] {
+                let mut bytes = finite_fixture(exponent.into(), &significand);
+                if negative {
+                    bytes[0] = 2;
+                }
+                let value = Float::try_deserialize(&bytes, precision).unwrap();
+                assert_eq!(
+                    value,
+                    if negative {
+                        -expected.clone()
+                    } else {
+                        expected.clone()
+                    }
+                );
+                assert_eq!(value.serialize(), bytes);
+                assert_eq!(value.prec(), precision);
+                assert!(Float::try_deserialize(&bytes, precision - 1).is_err());
+            }
         }
     }
 }

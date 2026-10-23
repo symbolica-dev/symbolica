@@ -304,7 +304,7 @@ impl Float {
             } => {
                 #[cfg(feature = "float-mpfr")]
                 {
-                    use gmp_mpfr_sys::mpfr;
+                    use gmp_mpfr_sys::{gmp, mpfr};
                     let bits = significand
                         .len()
                         .checked_mul(8)
@@ -325,36 +325,65 @@ impl Float {
                         .try_into()
                         .map_err(|_| "Float exponent exceeds MPFR exp_t")?;
                     let mut value = rug::Float::new(precision);
-                    let rounded =
-                        if significand.len() <= std::mem::size_of::<std::os::raw::c_ulong>() {
-                            let mut bytes = [0; std::mem::size_of::<std::os::raw::c_ulong>()];
-                            bytes[..significand.len()].copy_from_slice(significand);
-                            let integer = std::os::raw::c_ulong::from_le_bytes(bytes);
-                            // SAFETY: value is initialized and exclusively borrowed.
-                            // Import with the final scale to avoid range loss in an
-                            // intermediate integer-valued float. No GMP integer is needed.
-                            unsafe {
-                                mpfr::set_ui_2exp(
-                                    value.as_raw_mut(),
-                                    integer,
-                                    scaled,
-                                    mpfr::rnd_t::RNDN,
-                                )
-                            }
-                        } else {
+                    let rounded = if significand.len()
+                        <= std::mem::size_of::<std::os::raw::c_ulong>()
+                    {
+                        let mut bytes = [0; std::mem::size_of::<std::os::raw::c_ulong>()];
+                        bytes[..significand.len()].copy_from_slice(significand);
+                        let integer = std::os::raw::c_ulong::from_le_bytes(bytes);
+                        // SAFETY: value is initialized and exclusively borrowed.
+                        // Import with the final scale to avoid range loss in an
+                        // intermediate integer-valued float. No GMP integer is needed.
+                        unsafe {
+                            mpfr::set_ui_2exp(
+                                value.as_raw_mut(),
+                                integer,
+                                scaled,
+                                mpfr::rnd_t::RNDN,
+                            )
+                        }
+                    } else if gmp::NAIL_BITS == 0
+                        && significand.len() <= 4 * std::mem::size_of::<gmp::limb_t>()
+                    {
+                        const LIMB_BYTES: usize = std::mem::size_of::<gmp::limb_t>();
+                        let mut limbs = [0; 4];
+                        for (limb, chunk) in limbs.iter_mut().zip(significand.chunks(LIMB_BYTES)) {
+                            let mut bytes = [0; LIMB_BYTES];
+                            bytes[..chunk.len()].copy_from_slice(chunk);
+                            *limb = gmp::limb_t::from_le_bytes(bytes);
+                        }
+                        let count = significand.len().div_ceil(LIMB_BYTES);
+                        // SAFETY: the aligned stack array contains `count`
+                        // initialized, nail-free limbs in least-significant
+                        // order. Canonical payloads have a nonzero top byte,
+                        // so the integer is normalized. GMP's read-only
+                        // initializer does not own or free the array. MPFR
+                        // reads it only during this call and copies the value
+                        // into the separately allocated destination.
+                        unsafe {
                             let integer =
-                                rug::Integer::from_digits(significand, rug::integer::Order::Lsf);
-                            // SAFETY: pointers reference initialized live GMP/MPFR
-                            // objects; the destination is exclusively borrowed.
-                            unsafe {
-                                mpfr::set_z_2exp(
-                                    value.as_raw_mut(),
-                                    integer.as_raw(),
-                                    scaled,
-                                    mpfr::rnd_t::RNDN,
-                                )
-                            }
-                        };
+                                gmp::MPZ_ROINIT_N(limbs.as_mut_ptr(), count as gmp::size_t);
+                            mpfr::set_z_2exp(
+                                value.as_raw_mut(),
+                                &integer,
+                                scaled,
+                                mpfr::rnd_t::RNDN,
+                            )
+                        }
+                    } else {
+                        let integer =
+                            rug::Integer::from_digits(significand, rug::integer::Order::Lsf);
+                        // SAFETY: pointers reference initialized live GMP/MPFR
+                        // objects; the destination is exclusively borrowed.
+                        unsafe {
+                            mpfr::set_z_2exp(
+                                value.as_raw_mut(),
+                                integer.as_raw(),
+                                scaled,
+                                mpfr::rnd_t::RNDN,
+                            )
+                        }
+                    };
                     if rounded != 0 || !value.is_normal() {
                         return Err("Float value is not exactly representable in MPFR".into());
                     }

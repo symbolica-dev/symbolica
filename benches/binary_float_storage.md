@@ -54,3 +54,23 @@ iteration count; the IO harness also accepts a revision label. The root example
 `examples/binary_coefficient_comparison.rs` measures full packed-coefficient
 comparison against the previous comparator, including its imaginary-component
 short circuit.
+
+## Medium MPFR allocation followup
+
+A subsequent codec-only comparison uses the same protocol and harness to test a
+read-only GMP integer backed by at most four stack limbs. This avoids the
+integer allocation for medium significands while retaining the native-unsigned
+fast path and the owned-integer fallback for larger values or GMP nail builds.
+All precision, range, canonicality and exactness checks remain in place.
+
+Dense 256-bit decode improved from 68.08 to 33.98 ns versus `aca302cf` (2.00 times
+faster), and from 63.68 to 34.14 ns versus the initial `9d1854f3` (1.87 times
+faster). Dense 4096-bit decode stayed within 1% of both baselines. Encoding versus
+`aca302cf` was broadly flat; versus the initial baseline reused encoding was
+11.4% slower at 256 bits and 7.3% slower at 4096 bits in this series. These are
+separate stage comparisons, not an attribution to the decode-only change.
+The [followup CSV](binary_float_io_mpfr_stack.csv) retains all ranges and hashes.
+Boundary tests cover each native limb boundary, partial words, sparse limbs,
+low padding bits, signs, exponents and the heap fallback immediately above the
+stack capacity. The raw read-only GMP lifetime and layout received an independent
+review.
