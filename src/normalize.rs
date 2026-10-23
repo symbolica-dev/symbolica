@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 
 use crate::{
     atom::{
-        AddView, Atom, AtomCore, AtomView, Fun, InlineVar, MulView, PowView, Symbol,
+        Add, AddView, Atom, AtomCore, AtomView, Fun, InlineVar, MulView, PowView, Symbol,
         representation::{FunView, InlineNum, ListIterator},
     },
     coefficient::{Coefficient, CoefficientView},
@@ -2010,11 +2010,17 @@ impl AtomView<'_> {
             let order = self.get_term_cmp_slice().cmp(rhs.get_term_cmp_slice());
             if order != Ordering::Equal {
                 // Canonical terms with distinct monomials need neither staging nor sorting.
-                let a = out.to_add();
-                if order == Ordering::Less {
-                    a.set_normalized_pair(self.get_data(), rhs.get_data());
+                let (left, right) = if order == Ordering::Less {
+                    (self.get_data(), rhs.get_data())
                 } else {
-                    a.set_normalized_pair(rhs.get_data(), self.get_data());
+                    (rhs.get_data(), self.get_data())
+                };
+                match out {
+                    Atom::Add(sum) => sum.set_normalized_pair(left, right),
+                    out => {
+                        let buffer = std::mem::replace(out, Atom::Zero).into_raw();
+                        *out = Atom::Add(Add::new_normalized_pair_into(left, right, buffer));
+                    }
                 }
                 return;
             }
