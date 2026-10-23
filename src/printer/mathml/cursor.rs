@@ -100,6 +100,11 @@ impl<'a> MathMlCursorCache<'a> {
         iter: ListIterator<'b>,
         start: usize,
     ) -> (ListIterator<'b>, usize) {
+        // An alias's single child is in a separate allocation, including its
+        // exhausted iterator cursor. It cannot use root-buffer bookmarks.
+        if matches!(node, AtomView::Alias(_)) {
+            return (iter, 0);
+        }
         let Some(node_range) = self.range(node.get_data()) else {
             return (iter, 0);
         };
@@ -134,6 +139,9 @@ impl<'a> MathMlCursorCache<'a> {
     }
 
     fn remember(&self, node: AtomView<'_>, index: usize, iter: &ListIterator<'_>) {
+        if matches!(node, AtomView::Alias(_)) {
+            return;
+        }
         let Some(node) = self.range(node.get_data()) else {
             return;
         };

@@ -12,6 +12,29 @@ use crate::{
     utils::Settable,
 };
 
+// Borrow only the alias chain needed for a structural decision. Unchanged
+// subexpressions retain their original compressed representation.
+#[inline]
+fn expansion_body(view: AtomView<'_>) -> AtomView<'_> {
+    if matches!(view, AtomView::Alias(_)) {
+        expansion_alias_body(view)
+    } else {
+        view
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn expansion_alias_body(mut view: AtomView<'_>) -> AtomView<'_> {
+    while let AtomView::Alias(alias) = view {
+        if alias.is_opaque() {
+            break;
+        }
+        view = alias.get_body();
+    }
+    view
+}
+
 impl AtomView<'_> {
     /// Expand an expression. The function [expand_via_poly] may be faster.
     pub(crate) fn expand(&self) -> Atom {
@@ -79,6 +102,8 @@ impl AtomView<'_> {
                     return false;
                 }
 
+                let base = expansion_body(base);
+                let exp = expansion_body(exp);
                 if let AtomView::Num(n) = exp
                     && let CoefficientView::Natural(n, 1, 0, 1) = n.get_coeff_view()
                     && n.unsigned_abs() <= u32::MAX as u64
@@ -95,8 +120,9 @@ impl AtomView<'_> {
                         return false;
                     }
 
-                    if matches!(arg, AtomView::Add(_)) {
-                        return var.map(|s| !arg.contains(s)).unwrap_or(false);
+                    let body = expansion_body(arg);
+                    if matches!(body, AtomView::Add(_)) && var.is_none_or(|s| body.contains(s)) {
+                        return false;
                     }
                 }
 
@@ -225,9 +251,11 @@ impl AtomView<'_> {
                 let changed = base_set.is_set() || exp_set.is_set();
                 let base = base_set.as_view_or(base);
                 let exp = exp_set.as_view_or(exp);
+                let structural_base = expansion_body(base);
+                let structural_exp = expansion_body(exp);
 
                 let (negative, num) = 'get_num: {
-                    if let AtomView::Num(n) = exp
+                    if let AtomView::Num(n) = structural_exp
                         && let CoefficientView::Natural(n, 1, 0, 1) = n.get_coeff_view()
                         && n.unsigned_abs() <= u32::MAX as u64
                     {
@@ -242,7 +270,7 @@ impl AtomView<'_> {
                     return;
                 };
 
-                if let AtomView::Add(a) = base {
+                if let AtomView::Add(a) = structural_base {
                     // expand (a+b+c+..)^n
                     let mut rest_buffer = workspace.new_atom();
                     let mut args: SmallVec<[AtomView; 10]> = SmallVec::with_capacity(a.get_nargs());
@@ -336,7 +364,7 @@ impl AtomView<'_> {
                     } else {
                         add_h.as_view().normalize(workspace, out);
                     }
-                } else if let AtomView::Mul(m) = base {
+                } else if let AtomView::Mul(m) = structural_base {
                     let mut mul_h = workspace.new_atom();
                     let mul = mul_h.to_mul();
 
@@ -372,10 +400,12 @@ impl AtomView<'_> {
                 for (factor_index, arg) in m.iter().enumerate() {
                     let mut arg_set = Settable::from(new_arg.deref_mut());
                     arg.expand_with_ws_into_settable(workspace, var, &mut arg_set);
-                    let arg = arg_set.as_view_or(arg);
-
-                    let expand_arg = matches!(arg, AtomView::Add(_))
-                        && var.is_none_or(|s| arg.contains_literally_or_as_symbol(s));
+                    let original_arg = arg_set.as_view_or(arg);
+                    let body = expansion_body(original_arg);
+                    let expand_arg = matches!(body, AtomView::Add(_))
+                        && var.is_none_or(|s| body.contains_literally_or_as_symbol(s));
+                    let borrowed_sum = expand_arg && matches!(original_arg, AtomView::Alias(_));
+                    let arg = if expand_arg { body } else { original_arg };
 
                     if !changed {
                         if !arg_set.is_set() && !expand_arg {
@@ -384,7 +414,7 @@ impl AtomView<'_> {
                         changed = true;
 
                         if factor_index == 0 {
-                            if arg_set.is_set() {
+                            if arg_set.is_set() && !borrowed_sum {
                                 std::mem::swap(&mut sum, &mut new_arg);
                             } else {
                                 sum.set_from_view(&arg);
@@ -541,7 +571,9 @@ impl AtomView<'_> {
                 }
 
                 if !mul_view.has_coefficient()
-                    || !mul_view.iter().any(|a| matches!(a, AtomView::Add(_)))
+                    || !mul_view
+                        .iter()
+                        .any(|a| matches!(expansion_body(a), AtomView::Add(_)))
                 {
                     return;
                 }
@@ -551,16 +583,17 @@ impl AtomView<'_> {
                 let mut num = None;
 
                 args.retain(|a| {
-                    if let AtomView::Add(_) = a {
+                    let body = expansion_body(*a);
+                    if let AtomView::Add(_) = body {
                         if sum.is_none() {
-                            sum = Some(*a);
+                            sum = Some(body);
                             false
                         } else {
                             true
                         }
-                    } else if let AtomView::Num(_) = a {
+                    } else if let AtomView::Num(_) = body {
                         if num.is_none() {
-                            num = Some(*a);
+                            num = Some(body);
                             false
                         } else {
                             true
@@ -623,7 +656,7 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use crate::atom::AtomCore;
+    use crate::atom::{Atom, AtomCore};
     use crate::{parse, symbol};
 
     #[test]
@@ -638,6 +671,152 @@ mod test {
         }
         let body = parse!("2*(x+y)");
         assert_eq!(body.alias(false).expand_num(), body.expand_num());
+    }
+
+    fn assert_alias_expands_like_plain(input: &Atom, plain: &Atom) {
+        let expected = plain.expand();
+        let mut result = parse!("stale_expansion_output");
+        assert!(input.expand_into::<Atom>(None, &mut result));
+        assert_eq!(result, expected);
+        assert_eq!(
+            result.inline_aliases(false).as_view().get_data(),
+            expected.as_view().get_data()
+        );
+    }
+
+    #[test]
+    fn expansion_resolves_aliased_power_shapes_and_exponents() {
+        for base in [parse!("x+y+1"), parse!("x*y*z")] {
+            let base_alias = base.alias(false).alias(false);
+            for exponent in [2, 3, -2] {
+                let number = Atom::num(exponent);
+                let exponent_alias = number.alias(false).alias(false);
+                for exp in [&number, &exponent_alias] {
+                    // Keep the compressed power even when normalization would
+                    // otherwise distribute a product base or expose its exponent.
+                    let mut input = Atom::new();
+                    input.to_pow(base_alias.as_view(), exp.as_view());
+                    assert!(!input.is_expanded::<Atom>(None));
+                    let mut plain = Atom::new();
+                    plain.to_pow(base.as_view(), number.as_view());
+                    assert_alias_expands_like_plain(&input, &plain);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expansion_distributes_aliased_sum_factors_at_every_position() {
+        let a = parse!("x+y");
+        let b = parse!("z+w");
+        let z = parse!("u");
+        let aliases = [a.alias(false), b.alias(false).alias(false)];
+        for order in [[0, 1, 2], [2, 0, 1], [0, 2, 1]] {
+            let factors = [&aliases[0], &aliases[1], &z];
+            let plain_factors = [&a, &b, &z];
+            let mut input = Atom::new();
+            let mul = input.to_mul();
+            for index in order {
+                mul.extend(factors[index].as_view());
+            }
+            let plain = Atom::mul_many(order.map(|index| plain_factors[index]));
+            assert!(!input.is_expanded::<Atom>(None));
+            assert_alias_expands_like_plain(&input, &plain);
+        }
+        let a = a.alias(false);
+        let input = (a.pow(2) + &z) * (a.pow(2) + parse!("v"));
+        let plain = (parse!("x+y").pow(2) + &z) * (parse!("x+y").pow(2) + parse!("v"));
+        assert_alias_expands_like_plain(&input, &plain);
+    }
+
+    #[test]
+    fn selective_expansion_checks_all_product_factors() {
+        let x = parse!("x");
+        let unrelated = parse!("z+w");
+        let relevant = parse!("x+y");
+        let mut input = Atom::new();
+        let mul = input.to_mul();
+        mul.extend(unrelated.as_view());
+        mul.extend(relevant.as_view());
+        assert!(!input.is_expanded(Some(&x)));
+        assert!(input.expand_in(&x).is_expanded(Some(&x)));
+    }
+
+    #[test]
+    fn selective_expansion_keeps_unrelated_sum_aliases() {
+        let x = parse!("x");
+        let relevant = parse!("x+y");
+        let unrelated = parse!("z+w");
+        let alias = unrelated.alias(false);
+        // An unrelated sum first must not hide a later expandable factor.
+        let mut input = Atom::new();
+        let mul = input.to_mul();
+        mul.extend(alias.as_view());
+        mul.extend(relevant.alias(false).as_view());
+        assert!(!input.is_expanded(Some(&x)));
+        let result = input.expand_in(&x);
+        assert_eq!(
+            result.inline_aliases(false),
+            ((&unrelated) * (&relevant)).expand_in(&x)
+        );
+        assert!(
+            result
+                .get_aliases()
+                .iter()
+                .any(|body| body.as_ref() == &unrelated)
+        );
+        assert!(result.is_expanded(Some(&x)));
+    }
+
+    #[test]
+    fn unchanged_and_opaque_alias_expansion_preserves_storage() {
+        for body in [parse!("x*y"), parse!("x+y"), parse!("f(x+y)")] {
+            let alias = body.alias(false);
+            let mut result = Atom::new();
+            assert!(!alias.expand_into::<Atom>(None, &mut result));
+            assert_eq!(result.as_view().get_data(), alias.as_view().get_data());
+            assert_eq!(
+                alias.expand_num().as_view().get_data(),
+                alias.as_view().get_data()
+            );
+        }
+        let opaque = parse!("x+y").alias(true);
+        for input in [opaque.pow(3), &opaque * parse!("z"), parse!("2") * &opaque] {
+            assert!(input.is_expanded::<Atom>(None));
+            assert_eq!(
+                input.expand().as_view().get_data(),
+                input.as_view().get_data()
+            );
+            assert_eq!(
+                input.expand_num().as_view().get_data(),
+                input.as_view().get_data()
+            );
+        }
+        let mut input = Atom::new();
+        input.to_pow(
+            parse!("x+y").alias(false).as_view(),
+            Atom::num(2).alias(true).as_view(),
+        );
+        assert!(input.is_expanded::<Atom>(None));
+        assert_eq!(
+            input.expand().as_view().get_data(),
+            input.as_view().get_data()
+        );
+    }
+
+    #[test]
+    fn expand_num_distributes_coefficients_over_aliased_sums() {
+        let a = parse!("x+y");
+        let b = parse!("z+w");
+        for input in [
+            parse!("2*u") * a.alias(false),
+            parse!("-3") * a.alias(false) * b.alias(false),
+        ] {
+            let plain = input.inline_aliases(false);
+            let result = input.expand_num();
+            assert_eq!(result.inline_aliases(false), plain.expand_num());
+            assert_ne!(result.as_view().get_data(), input.as_view().get_data());
+        }
     }
 
     #[test]
