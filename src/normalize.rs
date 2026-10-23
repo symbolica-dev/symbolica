@@ -519,7 +519,7 @@ impl Atom {
                     let len = slice.len();
 
                     // strip coefficient if it is 1 (can be float)
-                    if new_coeff.is_one() {
+                    if new_coeff.is_exact_one() {
                         if len == 1 {
                             // downgrade
                             self.set_from_view(&slice2.get(0));
@@ -692,7 +692,7 @@ impl AtomView<'_> {
                     mul
                 } else {
                     if let AtomView::Num(n) = a
-                        && n.is_one()
+                        && n.is_exact_one()
                     {
                         continue;
                     }
@@ -708,7 +708,7 @@ impl AtomView<'_> {
 
                 let Atom::Mul(mul) = handle.deref_mut() else {
                     if let AtomView::Num(n) = handle.as_view()
-                        && n.is_one()
+                        && n.is_exact_one()
                     {
                         continue;
                     }
@@ -720,7 +720,7 @@ impl AtomView<'_> {
 
             for c in mul.iter() {
                 if let AtomView::Num(n) = c
-                    && n.is_one()
+                    && n.is_exact_one()
                 {
                     continue;
                 }
@@ -761,7 +761,7 @@ impl AtomView<'_> {
                                 return;
                             }
 
-                            if !n.is_one() {
+                            if !n.is_exact_one() {
                                 if cur_len > 0 {
                                     // two factors created a number, e.g. 2^(1/2)*2^(1/2) = 2
                                     // we need a second pass to normalize the multiplication
@@ -810,7 +810,7 @@ impl AtomView<'_> {
                         return;
                     }
 
-                    if !n.is_one() {
+                    if !n.is_exact_one() {
                         out_mul.extend(v);
                         out_mul.set_has_coefficient(true);
 
@@ -1225,7 +1225,7 @@ impl AtomView<'_> {
                 return;
             }
 
-            let has_coeff = !coeff.is_one();
+            let has_coeff = !coeff.is_exact_one();
             if !has_coeff {
                 let single = match first {
                     AtomView::Mul(m) => {
@@ -2233,6 +2233,54 @@ mod test {
         printer::PrintOptions,
         state::Workspace,
     };
+
+    #[test]
+    fn floating_unit_preserves_laurent_coefficient_precision() {
+        use crate::domains::float::Float;
+        let epsilon = parse!("unit_precision_epsilon");
+        for bits in [24, 113] {
+            for power in [-2, 0, 3] {
+                let monomial = epsilon.pow(Atom::num(power));
+                let expression = Atom::num(Float::with_val(bits, 1)) * &monomial;
+                let coefficients = expression.coefficient_list::<i8>(&[&epsilon]);
+                assert_eq!(coefficients.len(), 1);
+                let coefficient = Float::try_from(&coefficients[0].1).unwrap_or_else(|error| {
+                    panic!("{error}: bits={bits}, power={power}, expression={expression}, coefficients={coefficients:?}")
+                });
+                assert_eq!(coefficient.prec(), bits);
+                assert_eq!(coefficient, Float::with_val(bits, 1));
+
+                // Exact identities retain their existing normalization behavior.
+                assert_eq!(Atom::num(1) * &monomial, monomial);
+                assert_eq!(&monomial * 2 - &monomial, monomial);
+            }
+        }
+    }
+
+    #[test]
+    fn merged_floating_unit_preserves_coefficient_precision() {
+        use crate::domains::float::Float;
+        for monomial in [parse!("unit_precision_x"), parse!("unit_precision_x*y")] {
+            let left = Atom::num(Float::with_val(80, 2)) * &monomial;
+            let right = Atom::num(Float::with_val(80, -1)) * &monomial;
+            let expected = Atom::num(Float::with_val(80, 1)) * &monomial;
+            assert_eq!(&left + &right, expected);
+
+            // Term merging and general sum normalization have separate unit paths.
+            let mut merged = left.clone();
+            assert!(merged.merge_terms(right.as_view(), &mut Atom::new()));
+            assert_eq!(merged, expected);
+            Workspace::get_local().with(|ws| {
+                let mut sum = Atom::new();
+                let add = sum.to_add();
+                add.extend(left.as_view());
+                add.extend(right.as_view());
+                let mut normalized = Atom::new();
+                sum.as_view().normalize(ws, &mut normalized);
+                assert_eq!(normalized, expected);
+            });
+        }
+    }
 
     // Build the reference one level at a time, so only the expression under test
     // has an entire chain of dirty children to normalize recursively.

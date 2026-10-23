@@ -48,6 +48,7 @@ mod zero_test;
 use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
+use once_cell::sync::OnceCell;
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
@@ -70,7 +71,6 @@ use std::{
     hash::Hash,
     io::{Read, Write},
     ops::DerefMut,
-    sync::OnceLock,
 };
 
 pub use self::alias::{AliasedAtom, AliasedAtomPrinter};
@@ -412,7 +412,9 @@ pub struct EvaluationInfo {
     /// A precision-aware evaluator for constants, where no numeric arguments exist to carry precision.
     constant_eval: Option<ErasedConstantEval>,
     /// A cached double-precision value for the constant evaluation, if the symbol has no tags.
-    constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
+    constant_eval_cache: OnceCell<Complex<Float>>,
+    /// A fallible evaluator preserving numerical uncertainty at fixed working precision.
+    tracked_eval: Option<TrackedEvalFn>,
     /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
     eval_fns: HashMap<TypeId, ErasedEvalFn>,
     /// C++ source, or a generator for tag-dependent C++ source.
@@ -423,6 +425,15 @@ pub struct EvaluationInfo {
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
 type ErasedConstantEval =
     Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
+type TrackedEvalFn = Box<
+    dyn Fn(
+            &[AtomView],
+            &[numerica::domains::float::TrackedComplex],
+            u32,
+        ) -> Result<numerica::domains::float::TrackedComplex, String>
+        + Send
+        + Sync,
+>;
 type ErasedTaggedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
 
 enum CppCode {
@@ -448,7 +459,8 @@ impl EvaluationInfo {
         Self {
             tag_count: 0,
             constant_eval: None,
-            constant_eval_cache: OnceLock::new(),
+            constant_eval_cache: OnceCell::new(),
+            tracked_eval: None,
             eval_fns: HashMap::default(),
             cpp: None,
         }
@@ -467,7 +479,8 @@ impl EvaluationInfo {
         Self {
             tag_count: 0,
             constant_eval: Some(Box::new(f)),
-            constant_eval_cache: OnceLock::new(),
+            constant_eval_cache: OnceCell::new(),
+            tracked_eval: None,
             eval_fns: HashMap::default(),
             cpp: None,
         }
@@ -483,7 +496,7 @@ impl EvaluationInfo {
     pub fn with_tags(mut self, num_tags: usize) -> Self {
         self.tag_count = num_tags;
         if num_tags > 0 {
-            self.constant_eval_cache = OnceLock::new();
+            self.constant_eval_cache = OnceCell::new();
         }
         self
     }
@@ -560,6 +573,53 @@ impl EvaluationInfo {
         self
     }
 
+    /// Register a fallible, precision-aware evaluator that retains numerical errors.
+    ///
+    /// The leading symbolic tags selected by [`Self::with_tags`] are passed
+    /// unchanged. The remaining arguments carry their own uncertainty; raising
+    /// the working precision must never erase it. This callback is used by
+    /// [`AtomCore::evaluate_tracked`] for both functions and constants, and is
+    /// independent of the ordinary center-only evaluation callbacks.
+    pub fn register_tracked(
+        mut self,
+        f: impl Fn(
+            &[AtomView],
+            &[numerica::domains::float::TrackedComplex],
+            u32,
+        ) -> Result<numerica::domains::float::TrackedComplex, String>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.tracked_eval = Some(Box::new(f));
+        self
+    }
+
+    /// Whether this symbol has an uncertainty-preserving numerical evaluator.
+    pub fn has_tracked_evaluator(&self) -> bool {
+        self.tracked_eval.is_some()
+    }
+
+    /// Evaluate with the registered tracked callback, without retrying precision.
+    pub fn evaluate_tracked(
+        &self,
+        tags: &[AtomView],
+        arguments: &[numerica::domains::float::TrackedComplex],
+        working_bits: u32,
+    ) -> Result<numerica::domains::float::TrackedComplex, String> {
+        crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
+        let result = self
+            .tracked_eval
+            .as_ref()
+            .ok_or_else(|| "No uncertainty-preserving evaluator registered".to_owned())?(
+            tags,
+            arguments,
+            working_bits,
+        )?;
+        crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
+        Ok(result)
+    }
+
     /// Register a tagged numeric implementation generator for type `T`.
     ///
     /// The generator receives the symbolic tags and must return the numeric callable
@@ -588,18 +648,30 @@ impl EvaluationInfo {
         tags: &[AtomView],
         precision: u32,
     ) -> Result<Complex<Float>, String> {
+        crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
         if precision == 53
             && self.tag_count == 0
             && let Some(eval) = &self.constant_eval
         {
-            return self
+            // Failed numerical requests can reflect a transient RAM/time
+            // budget. Cache only successful initialization; concurrent callers
+            // still share one successful value and errors leave the cell empty.
+            let result = self
                 .constant_eval_cache
-                .get_or_init(|| eval(&[], 53))
-                .clone();
+                .get_or_try_init(|| {
+                    let result = eval(&[], 53)?;
+                    crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
+                    Ok(result)
+                })
+                .cloned();
+            crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
+            return result;
         }
 
         if let Some(eval) = &self.constant_eval {
-            return eval(tags, precision);
+            let result = eval(tags, precision)?;
+            crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
+            return Ok(result);
         };
 
         Err("No precision-aware constant evaluator registered".to_owned())
