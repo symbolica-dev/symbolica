@@ -182,11 +182,12 @@ pub(crate) fn value_in_domain(value: &Atom, domain: SolveDomain) -> DomainMember
     }
 }
 
-pub(crate) fn rational_denominator<E: PositiveExponent + 'static>(
+pub(crate) fn rational_denominators<E: PositiveExponent + 'static>(
     expression: AtomView<'_>,
-) -> Option<Atom> {
-    // Preserve poles from the received expression before polynomial gcd
-    // cancellation removes them (e.g. (x^2-2*x+1)/(x-1)).
+) -> Vec<Atom> {
+    // Keep original pole bases independent: multiplying a nested base such as
+    // 1+1/a by its inner pole a would allow rational cancellation to lose a!=0.
+    // Inspect before polynomial gcd cancellation, as for (x-1)^2/(x-1).
     let mut bases = Vec::new();
     expression.visitor(&mut |atom| {
         if let AtomView::Pow(power) = atom {
@@ -200,12 +201,21 @@ pub(crate) fn rational_denominator<E: PositiveExponent + 'static>(
         }
         true
     });
-    if !bases.is_empty() {
-        return Some(bases.into_iter().fold(Atom::num(1), |a, b| a * b));
+    if bases.is_empty()
+        && let Ok(rational) = expression.try_to_rational_polynomial::<_, _, E>(&Q, &Z, None)
+        && !rational.denominator.is_one()
+    {
+        bases.push(rational.denominator.to_expression());
     }
-    let rational: RationalPolynomial<_, E> =
-        expression.try_to_rational_polynomial(&Q, &Z, None).ok()?;
-    (!rational.denominator.is_one()).then(|| rational.denominator.to_expression())
+    bases
+}
+
+pub(crate) fn rational_denominator<E: PositiveExponent + 'static>(
+    expression: AtomView<'_>,
+) -> Option<Atom> {
+    rational_denominators::<E>(expression)
+        .into_iter()
+        .reduce(|a, b| a * b)
 }
 
 impl std::error::Error for SolveError {}

@@ -3055,7 +3055,11 @@ impl ConvertibleToSolveInput {
             Condition::And(c) => { self.append_condition(&c.0)?; self.append_condition(&c.1)?; },
             Condition::Yield(relation @ Relation::Eq(..)) => {
                 let (a,b) = algebraic_operands(relation).ok_or_else(|| exceptions::PyTypeError::new_err("Solve requires concrete equations without wildcards or pattern predicates"))?;
-                self.denominators.extend([&a,&b].iter().filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view())));
+                self.denominators.extend(
+                    [&a, &b]
+                        .iter()
+                        .flat_map(|a| crate::solve::rational_denominators::<u16>(a.as_view())),
+                );
                 self.equations.push(a-b);
             }
             _ => return Err(solution::solve_error(crate::solve::SolveError::UnsupportedProblem("solve accepts equalities only; inequalities and general Boolean combinations are not supported".into()))),

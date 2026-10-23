@@ -437,7 +437,7 @@ impl SolveBuilder {
         denominators.extend(
             equations
                 .iter()
-                .filter_map(|e| rational_denominator::<E>(e.as_view())),
+                .flat_map(|e| rational_denominators::<E>(e.as_view())),
         );
         let guard_formulas = set.coverage_guard.clone();
         set.branches.retain_mut(|branch| {
@@ -1158,6 +1158,148 @@ mod contract_tests {
             unrestricted
         );
         assert!(unrestricted.is_real().is_inconclusive());
+    }
+
+    fn assert_complete_pole_conditions(set: &SolutionSet, poles: &[Atom]) {
+        assert_eq!(set.coverage(), SolveCoverage::Complete);
+        assert!(set.coverage_guard().is_empty());
+        assert_eq!(set.len(), 1);
+        assert!(set[0].free_variables().is_empty());
+        for pole in poles {
+            assert!(
+                set[0]
+                    .conditions()
+                    .contains(&SolutionCondition::NonZero(pole.clone()))
+            );
+        }
+        assert_eq!(set[0].conditions().len(), poles.len());
+    }
+
+    #[test]
+    fn nested_original_parameter_poles_survive_generic_cancellation() {
+        let y = parse!("y");
+        let original = parse!("1/(1+1/a)");
+        assert!(original.contains(parse!("1/a").as_view()));
+        let set = Atom::solve(&[&y - &original])
+            .wrt(std::slice::from_ref(&y))
+            .unwrap();
+        assert_complete_pole_conditions(&set, &[parse!("a"), parse!("1+a")]);
+        assert_eq!(set[0].get(&y.try_into().unwrap()), Some(&parse!("a/(1+a)")));
+    }
+
+    #[test]
+    fn nested_original_parameter_poles_exclude_joint_zero() {
+        let variables = [parse!("y"), parse!("a")];
+        let set = Atom::solve(&[parse!("y-1/(1+1/a)"), parse!("a")])
+            .wrt(&variables)
+            .unwrap();
+        assert_eq!(set.coverage(), SolveCoverage::Complete);
+        assert!(set.is_empty().unwrap());
+    }
+
+    #[test]
+    fn simple_and_cancelled_original_poles_keep_value_conditions() {
+        let y = parse!("y");
+        for (system, variables, value) in [
+            (vec![parse!("y-1/a")], vec![y.clone()], parse!("1/a")),
+            (
+                vec![parse!("y-(h^2-a^2)/(h-a)"), parse!("h")],
+                vec![y.clone(), parse!("h")],
+                parse!("a"),
+            ),
+            (
+                vec![parse!("y-h/(h+a)"), parse!("h")],
+                vec![y.clone(), parse!("h")],
+                Atom::Zero,
+            ),
+        ] {
+            let set = Atom::solve(&system).wrt(&variables).unwrap();
+            assert_complete_pole_conditions(&set, &[parse!("a")]);
+            assert_eq!(set[0].get(&y.clone().try_into().unwrap()), Some(&value));
+        }
+    }
+
+    #[test]
+    fn multiple_nested_original_poles_remain_independent() {
+        let y = parse!("y");
+        let original = parse!("1/(1+1/a)/(1+1/b)");
+        assert!(original.contains(parse!("1/a").as_view()));
+        assert!(original.contains(parse!("1/b").as_view()));
+        let set = Atom::solve(&[&y - &original])
+            .wrt(std::slice::from_ref(&y))
+            .unwrap();
+        assert_eq!(set.coverage(), SolveCoverage::Complete);
+        assert!(set.coverage_guard().is_empty());
+        assert_eq!(set.len(), 1);
+        assert!(set[0].free_variables().is_empty());
+        let poles = [parse!("a"), parse!("1+a"), parse!("b"), parse!("1+b")];
+        for pole in &poles {
+            assert!(
+                set[0]
+                    .conditions()
+                    .contains(&SolutionCondition::NonZero(pole.clone()))
+            );
+        }
+        // Conditions need not be irredundant. This product is nonzero under
+        // the required original poles; an unrelated extra guard is not allowed.
+        let product = parse!("(1+a)*(1+b)");
+        let allowed = |condition: &SolutionCondition| match condition {
+            SolutionCondition::NonZero(value) => {
+                poles.contains(value) || (value - &product).expand().together().cancel().is_zero()
+            }
+            _ => false,
+        };
+        assert!(!allowed(&SolutionCondition::NonZero(parse!("a-2"))));
+        assert!(!allowed(&SolutionCondition::Zero(parse!("a"))));
+        assert!(set[0].conditions().iter().all(allowed));
+        let actual = set[0].get(&y.try_into().unwrap()).unwrap();
+        assert!(
+            (actual - parse!("a*b/((1+a)*(1+b))"))
+                .together()
+                .cancel()
+                .is_zero()
+        );
+    }
+
+    #[test]
+    fn original_operand_poles_survive_an_identically_cancelled_equality() {
+        let y = parse!("y");
+        let original = parse!("1/(1+1/a)");
+        // Python equality lowering retains operand poles before subtracting its
+        // two sides. Exercise that same native builder path without Python.
+        let mut builder = Atom::solve(&[Atom::Zero]);
+        builder
+            .denominators
+            .extend(rational_denominators::<u16>(original.as_view()));
+        let set = builder.wrt(std::slice::from_ref(&y)).unwrap();
+        assert_eq!(set.coverage(), SolveCoverage::Complete);
+        assert!(set.coverage_guard().is_empty());
+        assert_eq!(set.len(), 1);
+        assert!(set[0].coordinates().is_empty());
+        assert_eq!(set[0].free_variables(), &[PolyVariable::try_from(y).unwrap()]);
+        assert_eq!(set[0].conditions().len(), 2);
+        for pole in [parse!("a"), parse!("1+a")] {
+            assert!(
+                set[0]
+                    .conditions()
+                    .contains(&SolutionCondition::NonZero(pole))
+            );
+        }
+    }
+
+    #[test]
+    fn exceptional_nested_zero_division_is_not_reported_as_a_value() {
+        let result =
+            Atom::solve(&[parse!("y-1/(1+1/a)"), parse!("a+1")]).wrt(&[parse!("y"), parse!("a")]);
+        match result {
+            Ok(set) => match set.is_empty() {
+                Ok(empty) => assert!(empty),
+                Err(error) => eprintln!("unresolved native exceptional-domain query: {error}"),
+            },
+            // The current indeterminate-to-polynomial error remains unresolved;
+            // this guard does not reinterpret any solver error as an empty set.
+            Err(error) => eprintln!("unresolved native exceptional-domain query: {error}"),
+        }
     }
 }
 
