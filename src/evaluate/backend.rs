@@ -598,8 +598,32 @@ fn translate_to_symjit(
     instructions: Vec<Instruction>,
     constants: Vec<symjit::Complex<f64>>,
     param_count: usize,
-    config: Config,
+    mut config: Config,
 ) -> Result<Translator, String> {
+    // Retained bodies are compiled through this same boundary. Reserve the
+    // actual call arity of each program, including hoisted constant arguments;
+    // the number of inputs of the caller does not determine its call storage.
+    let call_arity = instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::Fun(_, function, _) => Some(function.2.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if call_arity > config.num_args() as usize {
+        config
+            .set_option("num_args", &call_arity.to_string())
+            .map_err(|error| error.to_string())?;
+        // SymJIT clamps reservations to its supported capacity.
+        if call_arity > config.num_args() as usize {
+            return Err(format!(
+                "Evaluator requires {call_arity} call arguments including hoisted constants, \
+                 but SymJIT supports only {}",
+                config.num_args()
+            ));
+        }
+    }
     let mut translator = Translator::new(config);
     translator.set_num_params(param_count);
 
