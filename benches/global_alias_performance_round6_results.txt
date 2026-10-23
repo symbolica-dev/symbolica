@@ -1,0 +1,447 @@
+Global alias performance: pair construction, storage, and normalization — 2026-10-23
+=================================================================================
+
+Source and fair reference
+-------------------------
+Main source tree: 2667847cdef00a1a79504158bdd6dda91ce96885.
+Global source tree: 0852caf2659936e799f9134cfd5bc1a16813f289.
+Global includes this updated main. Merge 0852caf2 has no tree differences from
+its first parent: the shared changes were already applied on both branches.
+Binaries were built from these exact source contents before committing the
+normalization changes. Embedded version labels reflect the preceding commits
+(main 06e43802 and global 4c945cb2). Benchmark source hashes and binary hashes
+are retained with the raw results. Main's temporary benchmark sources were
+identical to global's and removed after building.
+
+Old-alias is the preserved round-four binary built at d35ad4c7. It predates
+this pass and intervening upstream main updates, so old-alias deltas measure
+the combined change, not a controlled ablation of one optimization.
+Main was updated through upstream 385e6211 and de433154. Shared optimizations
+are committed on main as 74bc4c87, 06e43802, and 2667847c. Resolved dependency versions match;
+the lockfile difference is only global's direct arc-swap dependency. The
+original user checkout was untouched.
+
+Implementation
+--------------
+Both branches now separate the small pair-add dispatch from the large sum-merge
+and general normalization paths. Distinct normalized terms are ordered once
+and written with one final-size reservation and one canonical packed header.
+The final constructor reuses an existing Add buffer directly or transfers the
+old output's raw buffer. It does not initialize an empty sum first. Assembly
+inspection confirmed that the earlier path reserved/wrote an empty header,
+then cleared it and reserved again for the pair. Equal terms, dirty operands,
+coefficients, and alias-bearing operands retain their appropriate normalizers.
+Canonical minimal header widths remain an invariant.
+
+Also shared: Add capacity growth now passes size-len to Vec::reserve (whose
+argument is additional capacity relative to length, not capacity). Owned Ord
+checks byte equality before constructing views; unequal global keys retain
+semantic alias comparison and metadata tie-breaking. AtomView::to_owned
+constructs a typed owned atom directly, avoiding a temporary Zero plus the
+general setter and its drop handling.
+
+Global AliasHandle stores its validated generation-aware packed token once.
+Ownership collection returns the decoded child boundary instead of parsing
+it again to skip the child, and recognizes consecutive repeated owners.
+Direct transparent-alias equality borrows the single retained owner's body
+before constructing full views. The chosen owner container stores one Arc
+inline in its sidecar and allocates a sorted Vec only for multiple distinct
+owners; it collects replacements before releasing old references and reuses
+an existing sidecar. Copying a child retains only owners actually referenced
+by that child. RawAtom's own Eq/Hash remain byte-oriented.
+
+Validation
+----------
+Final source contents passed:
+- Main: 1,104 tests (1,000 library, 103 integration, 1 build-script test).
+- Global: 1,229 tests (1,125 library, 103 integration, 1 build-script test).
+- Each has two existing ignored tests and no failures.
+- python_export,bincode checking on both branches.
+- full_fn_cmp: main normalization; global normalization 34, representation 27,
+  semantic keys 10, aliases 63, expansion 17. Representation has one ignored test.
+- All nine final release benchmark executables built successfully.
+
+The storage candidates separately passed representation, normalization,
+semantic-key, and alias tests before measurement. Coverage includes canonical
+short/wide pair headers, reused buffers and alias-owned outputs, generation
+reuse, retained owner lifetimes, singleton/multiple owner promotion and dedup,
+and detached raw-view ownership recovery.
+
+Measurement method
+------------------
+Final runs use six rounds, three samples per workload, 100 ms target, CPU 6
+(SMT sibling 18), adjacent variants with balanced rotated ordering. The storage
+ablation uses four balanced rounds and 70 ms targets; the product ablation uses
+six rounds and 80 ms targets. No own builds, tests, or
+profiles ran during timings. compare_alias_workloads.py --quiet gates each
+complete group on both CPUs below 15% busy over one second and no observed rustc.
+It retries the complete group if any run has process CPU/wall below 95%, sibling
+activity above 20%, or rustc before/after execution. Acceptance never depends on
+operation times. Rejected raw observations remain available.
+
+Times are medians of within-round medians; percentage changes are medians of
+within-round ratios and need not equal ratios of displayed times. Observed
+round ranges are not confidence intervals. Boost/frequency scaling and other
+machine activity remain uncontrolled; the checks reduce observable interference
+but cannot detect every short-lived background process.
+
+Pair addition measures x*y +2*x^2*y^2, including result allocation/destruction.
+Owned comparisons use separate buffers; view comparisons include construction
+of the views. Hash timings include creating/finishing seeded AHash. Registration
+is outside alias timing. These are operations, not map lookup benchmarks.
+Expansion uses the same four workloads on main, global plain inputs, and global
+aliased inputs; correctness checks compare actual expanded results.
+
+Product-normalization investigation
+-----------------------------------
+The sampled baseline ran normalize_product in approximately 1.44-1.48 us on
+main and 1.87-1.94 us on global. No observed rustc or lost samples occurred;
+SMT sibling activity was at most 3.3%. These are profiling runs, not final
+quiet timing results.
+
+Main AtomView is 24 bytes and compound views 16; global is 32 and 24 respectively.
+The ordinary owned Atom is 32 bytes on main and 40 on global. Main passes a
+power view's data/length in registers; global materializes its extra owner
+context and passes the24-byte view indirectly. get_base_exp returns 48 bytes
+on main and 64 on global. The global caller reloads wider aggregates across
+separate scalar return stores. Samples concentrate at those return/reload
+sites in merge_factors. This is consistent with register pressure and possibly
+store-forwarding costs; sampling does not prove a particular hardware stall.
+The inspected NumView getter and packed coefficient decoder have unchanged
+instruction sequences.
+
+Both branches originally used #[inline], but their measured optimized binaries
+still contained out-of-line get_base and get_base_exp calls. Forcing these two
+getters inline removes those calls and permits caller-side scalarization. The
+tradeoff is code size: merge_factors grows 47.8% on main and 28.1% on global;
+whole normalize grows 3.5% and 4.6%. It does not reduce the expression's byte size.
+Product normalization also moved a completed owned factor into SmallVec after
+filling a local buffer. Filling the final slot directly avoids that completed
+factor relocation. A recycled-buffer placement and expression-byte memcpy
+remain, so this does not claim to eliminate all copying.
+
+Six balanced ablation rounds,3 samples,80 ms target, CPU 6:
+Workload              main ns   padded main   inline main   global ns   inline global   direct-fill global
+normalize_product     1437.84       1584.63       1453.32     1855.05         1687.35              1732.42
+differentiate         5925.65       6098.34       5903.38     7458.84         7303.37              6970.51
+construct              921.40        939.91        913.74     1118.33         1111.54              1077.20
+add_pair                49.19         47.99         48.42       52.65           52.84                52.46
+expand_product      201528.46     213162.06     195079.34   239252.00       231369.72            236890.33
+
+Within-round changes (median; observed range, not confidence intervals):
+- Padded main/product: +10.56% (+8.41% to +13.99%).
+- Global inline/product: -8.56% (-12.03% to -7.21%).
+- Global direct-fill/product: -6.60% (-9.83% to -4.38%).
+- Global inline/differentiation: -2.44% (-3.05% to -1.64%).
+- Global direct-fill/differentiation: -6.86% (-9.45% to -4.72%).
+- Main inline/product: +1.54% (-0.42% to +4.44%).
+- Main inline/product expansion: -2.82% (-4.57% to -1.76%).
+
+The padded control adds an inert u64 to main compound views while preserving
+owned Atom size and ordinary algorithm/encoding. It reproduces a 64-byte
+return and some wider reloads, but LLVM eliminates its unused input padding:
+PowView still passes in two registers. It therefore provides evidence of view
+layout/codegen costs, not an exact isolation of the live owner pointer or all
+of the global branch overhead. Actual owned Atom growth, alias checks, and owner propagation are not
+modeled. The control also changes code layout; it does not isolate live-owner
+costs from those compiler/code-layout effects.
+
+Selected changes combine the two shared improvements on both branches. Global
+also scans the completed factor list once for alias presence, replacing up to two
+checks per merge attempt. Scanning only the original input would be incorrect:
+a child callback can introduce an alias. A new test exercises that callback,
+subsequent cancellation or retention, replacement of an aliased output, and
+owner release after thread-local workspace destruction. No change allows
+noncanonical packed headers or weakens transparent alias equality/hash.
+
+All 30 accepted groups/180 runs passed the quiet telemetry gates. One whole
+group (6 runs) was retried for sibling contention; raw rejected output is kept.
+Accepted process CPU/wall ranged99.47-99.67%. Source baselines were main 06e43802
+and global 4c945cb2; each control is an isolated patch. Baseline ablation gap was
++28.93% for normalization and+25.87% for differentiation. Final combined results
+below compare against main with the same shared improvements, not that older
+main. The earlier broad round-five final run was deliberately interrupted for
+this investigation and is diagnostic only; it is not included in final tables.
+
+
+Alias storage experiments
+-------------------------
+The selected storage change keeps byte vectors inline and stores one alias owner directly in the optional ownership sidecar. This is the `legacy` variant below, committed as 6bcf14b7. The compact Atom experiment was rejected after it slowed the tested ordinary paths despite reducing Atom's size. These measurements compare storage variants against the round-5 global-alias core at 5516b46d; they are not a comparison against main or measurements of subsequent pair-constructor changes.
+
+All sizes below are bytes on the tested 64-bit target. Main has Atom=32 and AtomView=24. Every global-alias variant retains AtomView=32: its ownership context is an 8-byte reference needed to borrow alias bodies safely.
+
+| Variant | Storage and owners | RawAtom | Atom | Alias sidecar | Allocations for singleton ownership |
+|---|---|---:|---:|---:|---:|
+| core | Inline Vec + Option<Box<Vec<Arc>>> | 32 | 40 | 24 | 2 |
+| compact | Plain(Vec) / Aliased(Box<{Vec, Vec<Arc>}>) | 24 | 32 | 48 | 2 |
+| inline | Compact storage + Single(Arc) / Many(Vec<Arc>) owners | 24 | 32 | 48 | 1 |
+| legacy (selected) | Inline Vec + Option<Box<Single/Many owners>> | 32 | 40 | 24 | 1 |
+
+Sidecar sizes exclude the expression-byte allocation, owner-vector element allocation, alias handle/body, and allocator overhead. Alias-free atoms allocate no ownership sidecar. The selected design starts collection with an inline Single owner, including when copying a one-owner child from a multi-owner parent, and allocates an owner vector only on the second distinct token. Borrowed contexts remain thin references; token ordering, generation identity, and selective retention of only referenced owners are preserved. Existing owner boxes can be reused when replacing an ownership context.
+
+The trial used four paired rounds, three samples per run, a 70 ms target, CPU 6, and rotated variant order. All 768 accepted samples (64 complete groups, 256 runs) were audited against raw output. Eight complete groups were rejected using telemetry alone. Accepted process CPU/wall was 99.45–99.67%; frequency scaling and boost remained enabled. Times are medians of round medians. Changes are medians of within-round ratios, so they need not equal ratios of the displayed times. Negative changes mean faster. Group figures are geometric means of the workloads' paired medians, not estimates of application-wide speedup.
+
+| Workload group | core | compact/core | inline/core | legacy/core |
+|---|---:|---:|---:|---:|
+| Ordinary arithmetic | baseline | +8.25% | +7.16% | +0.54% |
+| Ordinary keys | baseline | +39.27% | +41.12% | -2.53% |
+| Alias operations | baseline | +12.04% | +5.67% | -3.50% |
+| Alias keys | baseline | +1.43% | +3.08% | +0.16% |
+
+All measured workloads:
+
+| Workload | core ns/op | compact ns/op | inline ns/op | legacy ns/op | compact/core | inline/core | legacy/core |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| construct | 1,105.17 | 1,206.12 | 1,182.16 | 1,120.86 | +9.30% | +6.18% | +1.42% |
+| add_pair | 65.22 | 72.52 | 70.86 | 65.26 | +10.38% | +8.26% | -0.27% |
+| add_many | 3,513.39 | 3,897.14 | 3,837.35 | 3,539.76 | +9.13% | +9.32% | +0.29% |
+| normalize_product | 1,746.52 | 1,824.23 | 1,830.50 | 1,756.31 | +4.28% | +4.95% | +0.75% |
+| hash_small | 3.15 | 4.06 | 4.08 | 2.94 | +28.95% | +29.45% | -6.88% |
+| eq_small_equal | 3.15 | 5.39 | 5.61 | 2.93 | +70.90% | +78.01% | -6.87% |
+| eq_view_small_equal | 3.62 | 4.97 | 4.98 | 3.40 | +37.13% | +37.42% | -6.21% |
+| ord_owned_small_equal | 2.71 | 4.51 | 4.51 | 2.92 | +67.13% | +66.96% | +8.09% |
+| ord_owned_large_unequal_late | 146.09 | 151.63 | 152.94 | 144.68 | +3.73% | +5.85% | +0.07% |
+| copy_alias_power | 34.14 | 45.26 | 43.02 | 33.93 | +32.17% | +22.08% | -0.66% |
+| multiply_alias_powers | 384.51 | 406.36 | 383.55 | 358.33 | +5.66% | -0.21% | -6.80% |
+| copy_repeated_multi_aliases | 3,660.03 | 3,500.88 | 3,573.45 | 3,559.58 | -4.21% | -2.11% | -2.58% |
+| copy_alias_child_from_multi_owner | 81.84 | 96.20 | 85.57 | 79.25 | +17.78% | +4.57% | -3.84% |
+| eq_transparent_alias_plain | 72.74 | 78.38 | 78.22 | 72.38 | +7.77% | +7.68% | -0.30% |
+| eq_nested_alias_plain | 337.87 | 323.54 | 346.14 | 339.97 | -4.45% | +2.24% | +0.80% |
+| hash_nested_alias | 1,016.37 | 1,024.31 | 1,008.81 | 1,014.97 | +1.33% | -0.53% | -0.01% |
+
+The compact variants consistently lost on ordinary arithmetic: compact/core +8.25% and inline/core +7.16%. The smaller Atom also did not rescue small keys: owned equal Eq was +70.90% and +78.01%, respectively. Inline owners helped the compact alias operations versus compact alone (group -5.13%; multi-owner child copying -10.86%), but did not overcome its ordinary-path penalty.
+
+The selected legacy layout stayed close to core on the ordinary arithmetic group (+0.54%) and improved alias operations by -3.50%. Its alias-power multiplication gain was consistent across rounds: -6.80%, observed range [-7.22%, -6.63%]. Multi-owner child copying improved by a median -3.84%, but its range [-7.23%, +0.23%] crossed zero. Pair addition was effectively unchanged in this trial: -0.27%, range [-3.88%, +0.64%]. The selected layout did not win every case: small owned equal Ord regressed +8.09%, range [+7.34%, +8.32%]. Its small Hash median was -6.88%, but the range [-7.48%, +35.73%] was unstable. These ranges describe four observed rounds; they are not confidence intervals.
+
+The experiment shows that removing eight bytes from Atom was insufficient to improve these workloads. Compact storage also introduced a storage-kind decision for byte access and pointer indirection for aliased bytes, and changed layout and generated code more broadly. Those are plausible explanations for its penalties; this trial does not identify branch misses, cache misses, or any one mechanism as the cause. Likewise, singleton owner-vector allocation is structurally eliminated in the selected design, but its timing changes also include ownership-container and box-reuse code changes. We should not attribute every measured difference solely to one removed allocation.
+
+The selected layout is a measured compromise, not a claim of optimality. Atom remains 40 bytes and AtomView 32 bytes, compared with main's 32 and 24. Multi-owner atoms still allocate a vector and do selective token lookup; all alias-bearing owned atoms still need a sidecar. Possible future experiments include a shared immutable owner set with a compact subset representation for copied children (must avoid retaining unrelated owners), a custom tagged allocation/header layout that keeps byte access direct (requires a substantially more invasive representation and safety review), or a view API that separates ordinary views from ownership-bearing views (must preserve borrowed-body lifetimes and avoid making common callers pay conversion costs). None of these alternatives has been benchmarked here; the failed compact experiment argues for measuring byte-access cost as well as object size before adopting them.
+
+Full paired ranges and audit: /home/ben/.cache/symbolica-alias-performance/logs/round5-storage-ablation-audit.txt
+Raw accepted/rejected samples, binary hashes, telemetry, and summary: /home/ben/.codex/worktrees/global-alias-performance/symbolica/benches/results/round5-storage-ablation
+
+
+No-alias arithmetic
+-------------------
+Median ns/op. Percentage changes use paired rounds.
+
+Workload                 main   old-alias       alias  alias/main  alias/old-alias
+construct             908.732    1172.260    1082.294     +19.10%           -7.57%
+add_pair               47.099      83.838      52.820     +11.49%          -36.83%
+add_chain           10209.225   10964.864   10640.276      +3.80%           -2.64%
+add_many             3105.442    3478.490    3444.271     +10.82%           -0.20%
+normalize_product    1428.359    1789.262    1593.268     +11.92%          -10.95%
+expand_power       284504.982  342667.368  334647.027     +17.21%           -2.30%
+expand_product     197599.134  238225.168  228740.795     +15.08%           -4.76%
+differentiate        5586.790    7284.079    7001.435     +26.01%           -3.88%
+replace             20559.483   23513.208   22900.793     +12.36%           -2.78%
+
+Workload geometric means: alias/main +14.05%; alias/old-alias -8.73%.
+Observed paired ranges (min to max; not confidence intervals):
+  construct: alias/main +17.59% to +21.55%; alias/old-alias -10.64% to -6.21%
+  add_pair: alias/main +8.08% to +14.53%; alias/old-alias -38.35% to -35.63%
+  add_chain: alias/main -0.35% to +7.14%; alias/old-alias -4.83% to -1.77%
+  add_many: alias/main +6.91% to +13.13%; alias/old-alias -7.76% to +3.00%
+  normalize_product: alias/main +8.15% to +14.01%; alias/old-alias -12.65% to -9.46%
+  expand_power: alias/main +13.13% to +19.29%; alias/old-alias -5.38% to -1.54%
+  expand_product: alias/main +14.62% to +17.15%; alias/old-alias -8.64% to -2.34%
+  differentiate: alias/main +23.14% to +26.45%; alias/old-alias -5.40% to -1.02%
+  replace: alias/main +10.01% to +14.73%; alias/old-alias -6.20% to -1.39%
+
+No-alias expression keys
+------------------------
+Median ns/op. Percentage changes use paired rounds.
+
+Workload                         main  old-alias    alias  alias/main  alias/old-alias
+hash_small                      2.309      3.131    2.917     +26.65%           -6.81%
+hash_large                    177.893    181.448  180.255      +1.73%           -0.39%
+hash_view_small                 2.914      4.027    4.025     +38.13%           -0.05%
+hash_view_large               181.106    181.439  181.483      +0.27%           +0.04%
+eq_small_equal                  2.907      2.911    2.914      +0.31%           +0.05%
+eq_large_equal                 68.273     68.117   68.251      +0.16%           +0.48%
+eq_large_unequal_early          1.010      1.347    1.346     +33.32%           -0.22%
+eq_large_unequal_late          68.718     68.974   68.934      +0.34%           +0.14%
+eq_view_small_equal             2.966      4.271    3.394     +14.71%          -20.49%
+eq_view_large_equal            68.141     69.132   69.466      +1.98%           +0.53%
+ord_owned_small_equal           2.689      5.852    2.909      +8.23%          -50.23%
+ord_owned_large_equal          67.965     72.741   68.204      +0.37%           -6.33%
+ord_owned_large_unequal_late  141.754    144.772  145.305      +2.74%           -0.33%
+
+Workload geometric means: alias/main +9.18%; alias/old-alias -7.83%.
+Observed paired ranges (min to max; not confidence intervals):
+  hash_small: alias/main +24.20% to +27.90%; alias/old-alias -10.16% to -6.20%
+  hash_large: alias/main +0.75% to +2.50%; alias/old-alias -0.84% to +0.52%
+  hash_view_small: alias/main +37.99% to +38.50%; alias/old-alias -0.27% to +0.37%
+  hash_view_large: alias/main -0.35% to +2.51%; alias/old-alias -0.88% to +2.03%
+  eq_small_equal: alias/main +0.17% to +1.27%; alias/old-alias -0.17% to +1.44%
+  eq_large_equal: alias/main -5.63% to +6.50%; alias/old-alias -0.59% to +7.12%
+  eq_large_unequal_early: alias/main +32.97% to +33.70%; alias/old-alias -0.29% to +0.22%
+  eq_large_unequal_late: alias/main -0.02% to +1.35%; alias/old-alias -0.16% to +0.50%
+  eq_view_small_equal: alias/main +12.10% to +15.54%; alias/old-alias -21.15% to -19.42%
+  eq_view_large_equal: alias/main +0.93% to +2.92%; alias/old-alias -0.98% to +1.20%
+  ord_owned_small_equal: alias/main +7.74% to +8.62%; alias/old-alias -50.99% to -50.09%
+  ord_owned_large_equal: alias/main -0.09% to +0.93%; alias/old-alias -6.47% to -5.72%
+  ord_owned_large_unequal_late: alias/main +0.63% to +6.11%; alias/old-alias -1.79% to +3.53%
+
+Live-alias operations
+---------------------
+Median ns/op. Percentage changes use paired rounds.
+
+Workload                           old-alias     alias  alias/old-alias
+construct_with_live_alias           1118.897  1077.876           -3.50%
+copy_alias_power                      45.959    33.661          -26.70%
+add_alias_plain                      403.661   366.068           -9.99%
+multiply_alias_powers                387.745   325.134          -16.07%
+copy_large_alias_power                43.851    33.780          -22.54%
+multiply_large_alias_powers          389.606   320.547          -17.56%
+copy_repeated_multi_aliases         8390.840  3578.986          -57.36%
+copy_alias_child_from_multi_owner    109.827    76.828          -28.94%
+
+Workload geometric means: alias/old-alias -24.70%.
+Observed paired ranges (min to max; not confidence intervals):
+  construct_with_live_alias: alias/old-alias -4.64% to -2.24%
+  copy_alias_power: alias/old-alias -30.19% to -16.63%
+  add_alias_plain: alias/old-alias -14.02% to -6.51%
+  multiply_alias_powers: alias/old-alias -19.48% to -13.04%
+  copy_large_alias_power: alias/old-alias -28.49% to -18.09%
+  multiply_large_alias_powers: alias/old-alias -19.38% to -14.37%
+  copy_repeated_multi_aliases: alias/old-alias -57.60% to -57.23%
+  copy_alias_child_from_multi_owner: alias/old-alias -32.76% to -27.73%
+
+Transparent expression keys
+---------------------------
+Median ns/op. Percentage changes use paired rounds.
+
+Workload                    old-alias     alias  alias/old-alias
+hash_plain_body               180.132   179.901           -0.28%
+hash_transparent_alias        191.803   191.595           -0.18%
+hash_nested_plain             361.417   361.022           +0.04%
+hash_nested_alias            1004.668  1001.156           -0.37%
+eq_plain_body                  67.846    67.712           -0.15%
+eq_transparent_alias_plain     86.841    72.239          -16.77%
+eq_nested_plain               189.246   189.212           +0.58%
+eq_nested_alias_plain         335.088   331.839           -1.36%
+
+Workload geometric means: alias/old-alias -2.48%.
+Observed paired ranges (min to max; not confidence intervals):
+  hash_plain_body: alias/old-alias -1.26% to +0.32%
+  hash_transparent_alias: alias/old-alias -1.04% to +0.46%
+  hash_nested_plain: alias/old-alias -0.48% to +0.42%
+  hash_nested_alias: alias/old-alias -2.10% to -0.29%
+  eq_plain_body: alias/old-alias -0.35% to +0.04%
+  eq_transparent_alias_plain: alias/old-alias -16.94% to -16.55%
+  eq_nested_plain: alias/old-alias -0.69% to +2.96%
+  eq_nested_alias_plain: alias/old-alias -6.86% to +5.19%
+
+Matched expansion workloads
+---------------------------
+Median ns/op; plain and aliased use the global branch.
+
+Workload                             main       plain     aliased  plain/main  aliased/plain
+expand_power_small              282937.39   332041.93   341790.97     +17.54%         +2.26%
+expand_product_small            197145.29   225536.07   229406.19     +14.37%         +1.94%
+expand_power_large             2480770.38  2919561.84  2902803.27     +18.42%         -0.07%
+expand_product_large_repeated   754862.51   873506.96   884246.92     +15.43%         +1.62%
+
+expand_power_small: plain/main +16.83% to +19.49%; aliased/plain +0.28% to +4.03%
+expand_product_small: plain/main +13.02% to +15.55%; aliased/plain -0.53% to +3.90%
+expand_power_large: plain/main +14.28% to +19.13%; aliased/plain -1.81% to +1.08%
+expand_product_large_repeated: plain/main +13.68% to +16.49%; aliased/plain +0.48% to +1.95%
+
+Interpretation and remaining work
+---------------------------------
+The measured no-alias arithmetic geometric-mean gap is +14.05% against updated
+main. Product normalization is +11.92% (main 1428.359 ns, global 1593.268 ns),
+compared with +28.93% in the preceding isolated baseline experiment. This is a
+comparison across the two recorded runs, each with its own updated-main
+reference. Differentiation remains +26.01% against main (5586.790 vs 7001.435 ns):
+shared improvements speed up main as well. Its remaining gap is not closed by
+removing power-getter return copies alone.
+
+Small pair addition is now 52.820 ns versus main's 47.099 ns (+11.49% paired),
+compared with 83.838 ns on the saved old-alias branch. Ordinary owned equality
+is near parity; small view equality is +14.71% (3.394 vs 2.966 ns), small owned
+ordering +8.23% (2.909 vs 2.689 ns), and small owned hashing +26.65% (2.917 vs
+2.309 ns). These tiny operations retain appreciable relative overhead even
+where the absolute difference is below one nanosecond. Large owned equality
+is near parity and large hashing is +1.73% in this workload.
+
+Alias copying gains against the saved old-alias branch include repeated
+multi-owner copying -57.36%, copying a child from a multi-owner expression
+-28.94%, and small alias-power copying -26.70%. Alias/plain comparison -16.77%
+and alias-power multiplication -16.07% also improve. These cumulative deltas
+include the main updates and all optimizations since the old source.
+
+Matched native expansion produces the same encoded output sizes in all three
+variants and validates equivalent expanded results. Actual aliases add median
+paired overheads +2.26%, +1.94%, -0.07%, +1.62% over the same global branch with
+plain inputs. The no-alias branch-versus-main expansion gaps remain 14-18%.
+The near-zero large-power difference is within its observed range and is not
+evidence of a reliable alias speedup.
+
+Selected-source profiles confirm that out-of-line power-getter calls are gone.
+The remaining derivative profile spans normalization, temporary-buffer drops,
+buffer construction/extension, and derivative traversal. A separate static
+candidate forces the Indeterminate equality wrapper inline: main already
+inlines this comparison at recursive derivative entries while global emits a
+call. That helper accounts for only 0.71% of the two global derivative profiles,
+so it cannot by itself explain the remaining 26% gap. Argument-derivative
+entries are 40 bytes on main and 48 on global and still undergo copies. The
+identified tuple-push block accounts for roughly 0.12-0.34% of whole-workload
+samples; this is not the bulk of the remaining gap and does not count every
+view or owned-buffer copy elsewhere. This candidate
+and a guard to skip the completed-group alias scan for singleton products are
+kept in the cache for later controlled experiments, not applied to these results.
+
+Final sampled profiles observed no rustc before/after any run. Product profiles
+had at most 5.77% sibling activity. One main derivative recording had 14.02%
+sibling activity and an elevated first sample; the other main recording is the
+cleaner comparison. Profiling is diagnostic and does not replace the final
+paired timing tables. No specific hardware stall is claimed to be proven.
+
+Final timing audit
+------------------
+All 1,980 accepted CSV samples were checked against raw output; summary medians,
+paired ratios/ranges, and result sizes match. Ordinary/key/live suites accepted
+228 complete groups/588 runs and rejected 7 groups/17 runs. Matched expansion
+accepted 24 groups/72 runs and rejected 3 groups/9 runs. Rejections used CPU/SMT
+and compiler telemetry only; full rejected groups are retained. Accepted
+process CPU/wall was 99.52-99.71% for the first comparison and 99.48-99.67% for
+expansion. All accepted observations and pre-group checks met recorded limits.
+The first comparison spent 812.3 seconds waiting for quiet conditions, including
+one 467.3-second wait; expansion spent 27.7 seconds. Frequency/boost effects and
+very short background activity remain uncontrolled.
+
+Artifacts and reproduction
+--------------------------
+Runner: benches/compare_alias_workloads.py.
+Shared workloads: examples/alias_performance.rs, equality_hash_performance.rs,
+expansion_performance.rs and examples/support/expansion_workloads.rs.
+Alias workloads: examples/global_alias_performance.rs,
+alias_equality_hash_performance.rs, and alias_expansion_performance.rs.
+
+Raw accepted/rejected samples, binary hashes, source provenance, commands,
+telemetry and summaries (ignored local result directories):
+  benches/results/round6-product-ablation
+  benches/results/round6-final-comparison
+  benches/results/round6-final-expansion
+  benches/results/round5-storage-ablation
+
+Immutable measured binaries, full build/test logs, patches and diagnostic
+profiles are under /home/ben/.cache/symbolica-alias-performance:
+  bin/round6-final-*
+  logs/round6-selected-*
+  logs/round6-final-comparison-audit.txt
+  logs/round6-final-expansion-audit.txt
+  candidates/round6-final-provenance.json
+  candidates/round6-final-benchmark-commands.json
+  candidates/round6-view-codegen/findings.txt
+  candidates/round6-derivative-codegen/findings.txt
+  candidates/round6-derivative-codegen/profile-comparison.txt
+  profiles-round5-product
+  profiles-round6-product
+  profiles-round6-derivative
+
+The original user checkout was not changed. Main and global source changes
+were committed and pushed before this report; this report is a subsequent
+non-runtime documentation change.
