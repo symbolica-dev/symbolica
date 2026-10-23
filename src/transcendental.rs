@@ -4045,7 +4045,8 @@ fn polylog_jonquiere_integer(
 
     let first_convergence_check = order.checked_add(8)?;
     let max_terms = 32u32.checked_mul(binary_prec.max(16))?.checked_add(order)?;
-    for k in 0u32..max_terms {
+    // Keep the finite positive-zeta prefix and exceptional logarithmic term.
+    for k in 0u32..=order {
         let term = if k + 1 == order {
             mu_pow.clone() / Complex::new(factorial.clone(), zero.clone())
                 * Complex::new(
@@ -4059,20 +4060,44 @@ fn polylog_jonquiere_integer(
                 * zeta_integer_numeric_eval(order as i64 - k as i64, binary_prec)
         };
 
-        let term_size = complex_l1_norm(&term);
         sum += term;
-        // Zeta(-2n) vanishes identically. A structural zero is not a
-        // convergence estimate for the following nonzero term.
-        let trivial_zeta_zero = k > order && (k - order) % 2 == 0;
-        if k > first_convergence_check
-            && !trivial_zeta_zero
-            && term_size <= complex_l1_norm(&sum) * &threshold
-        {
-            return Some(sum);
-        }
-
         mu_pow *= mu.clone();
         factorial *= Float::with_val(binary_prec, k + 1);
+    }
+
+    // As in dilog_jonquiere, reflect negative odd zeta values before
+    // summation (DLMF 25.12.12, 25.6.2--25.6.3). For k=order+2*j-1,
+    // the remaining term is
+    //   2*zeta(2*j)*mu^(order-1)*[-mu^2/(2*pi)^2]^j*R_j,
+    // where R_1=1/(order+1)! and
+    //   R_(j+1)/R_j=(2*j)*(2*j+1)/[(2*j+order)*(2*j+order+1)].
+    // This avoids repeatedly computing large negative-integer zeta values
+    // and separately growing factors that cancel in their quotient.
+    let two_pi = Float::with_val(binary_prec, 2) * Float::with_val(binary_prec, Constant::Pi);
+    let scaled_mu = mu.clone() / two_pi.clone();
+    let step = -scaled_mu.clone() * scaled_mu;
+    let mut power = -mu_pow / (two_pi.clone() * two_pi);
+    let mut weight = Float::with_val(binary_prec, 1) / factorial;
+    for j in 1..=(max_terms - order) / 2 {
+        let twice_j = j.checked_mul(2)?;
+        let k = order.checked_add(twice_j)?.checked_sub(1)?;
+        let coefficient = zeta_integer_numeric_eval(i64::from(twice_j), binary_prec).re
+            * Float::with_val(binary_prec, 2)
+            * &weight;
+        let term = power.clone() * coefficient;
+        let term_size = complex_l1_norm(&term);
+        sum += term;
+        // The structural zeros are skipped exactly. The positive-zeta
+        // coefficients and R_j decrease, retaining the same ratio bound.
+        if k > first_convergence_check && term_size <= complex_l1_norm(&sum) * &threshold {
+            return Some(sum);
+        }
+        let next = order.checked_add(twice_j)?;
+        weight *= Float::with_val(binary_prec, twice_j)
+            * Float::with_val(binary_prec, twice_j.checked_add(1)?)
+            / (Float::with_val(binary_prec, next)
+                * Float::with_val(binary_prec, next.checked_add(1)?));
+        power *= step.clone();
     }
 
     None
@@ -5741,6 +5766,94 @@ mod tests {
                 let expected = Complex::new(expected.re.clone(), expected.im.clone() * sign);
                 assert_precision_complex(&actual, &expected, bits, "Li3(+/-i)");
             }
+        }
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn polylog_higher_integer_continuation_matches_defining_series() {
+        for bits in [128, 1024] {
+            let argument = Complex::new(
+                Float::with_val(bits, 1) / Float::with_val(bits, 2),
+                Float::with_val(bits, 1) / Float::with_val(bits, 3),
+            );
+            for order in 3u32..=6 {
+                let expected = polylog_series_integer(order, &argument, bits, 64).unwrap();
+                let actual =
+                    super::polylog_jonquiere_integer(order, &argument.log(), bits).unwrap();
+                assert_precision_complex(&actual, &expected, bits, "defining power series");
+            }
+        }
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn polylog_higher_integer_thousand_digit_root_of_unity_identities() {
+        const BITS: u32 = 3456;
+        let argument = Complex::new(
+            Float::with_val(BITS, 1) / Float::with_val(BITS, 2),
+            Float::with_val(BITS, 3).sqrt() / Float::with_val(BITS, 2),
+        );
+        let conjugate = Complex::new(argument.re.clone(), -argument.im.clone());
+        for order in 3u32..=6 {
+            let value = polylog_integer_numeric_eval(i64::from(order), &argument, BITS, 0).unwrap();
+            let negative =
+                polylog_integer_numeric_eval(i64::from(order), &(-argument.clone()), BITS, 0)
+                    .unwrap();
+            let squared = polylog_integer_numeric_eval(
+                i64::from(order),
+                &(argument.clone() * argument.clone()),
+                BITS,
+                0,
+            )
+            .unwrap();
+            let expected = squared / Float::with_val(BITS, 2).pow(u64::from(order - 1));
+            assert_precision_complex(
+                &(value.clone() + negative),
+                &expected,
+                BITS,
+                "root of unity duplication",
+            );
+            let reflected =
+                polylog_integer_numeric_eval(i64::from(order), &conjugate, BITS, 0).unwrap();
+            assert_precision_complex(
+                &reflected,
+                &Complex::new(value.re, -value.im),
+                BITS,
+                "root of unity conjugation",
+            );
+        }
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn polylog_higher_integer_cut_sides() {
+        const BITS: u32 = 512;
+        let tiny = Float::parse("1e-200", Some(BITS)).unwrap();
+        let pi = Float::with_val(BITS, Constant::Pi);
+        let logarithm = Float::with_val(BITS, 2).log();
+        for order in 3u32..=6 {
+            let expected_imaginary = pi.clone() * logarithm.clone().pow(u64::from(order - 1))
+                / super::factorial_float(order - 1, BITS);
+            for sign in [-1, 1] {
+                let argument = Complex::new(Float::with_val(BITS, 2), tiny.clone() * sign);
+                let value =
+                    polylog_integer_numeric_eval(i64::from(order), &argument, BITS, 0).unwrap();
+                assert_precision_complex(
+                    &Complex::new(value.im, Float::new(BITS)),
+                    &Complex::new(expected_imaginary.clone() * sign, Float::new(BITS)),
+                    BITS,
+                    "higher integer cut side",
+                );
+            }
+            let argument = Complex::new(Float::with_val(BITS, 2), Float::new(BITS));
+            let value = polylog_integer_numeric_eval(i64::from(order), &argument, BITS, 0).unwrap();
+            assert_precision_complex(
+                &Complex::new(value.im, Float::new(BITS)),
+                &Complex::new(-expected_imaginary, Float::new(BITS)),
+                BITS,
+                "higher integer exact-real branch",
+            );
         }
     }
 
