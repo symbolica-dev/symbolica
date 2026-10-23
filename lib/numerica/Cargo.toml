@@ -17,7 +17,7 @@ integer-malachite = [
     "dep:malachite-base",
     "dep:malachite-nz",
 ]
-float-mpfr = ["dep:rug"]
+float-mpfr = ["dep:rug", "dep:gmp-mpfr-sys"]
 float-astro = ["dep:astro-float", "dep:malachite-q"]
 # import/export objects that do not depend on the state using serde
 serde = [
@@ -65,3 +65,4 @@ rayon = "1.11"
 
 [dev-dependencies]
 rand_xoshiro = "0.7"
+serde_json = "1.0"

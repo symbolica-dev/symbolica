@@ -8,11 +8,14 @@ use std::{
 use rand::Rng;
 use xprec::{CompensatedArithmetic, Df64};
 
+#[cfg(feature = "float-mpfr")]
+use crate::domains::backend::float::CompleteRound;
+
 use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
 use crate::domains::{
     InternalOrdering,
     backend::float::{
-        Assign, CompleteRound, Constant, MultiPrecisionFloat, MultiPrecisionFloatInteger,
+        Assign, Constant, MultiPrecisionFloat, MultiPrecisionFloatInteger,
         MultiPrecisionFloatRational, MultiPrecisionFloatRounding, Pow, RoundingDirection,
     },
     integer::Integer,
@@ -26,9 +29,23 @@ use crate::domains::{
 ///
 /// Floating point output with less than five significant binary digits
 /// should be considered unreliable.
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub struct Float(MultiPrecisionFloat);
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Float {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&(self.prec(), self.serialize()), serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Float {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (precision, bytes): (u32, Vec<u8>) = serde::Deserialize::deserialize(deserializer)?;
+        Self::try_deserialize(&bytes, precision).map_err(serde::de::Error::custom)
+    }
+}
 
 #[cfg(feature = "bincode")]
 impl bincode::Encode for Float {
@@ -37,7 +54,7 @@ impl bincode::Encode for Float {
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
         self.0.prec().encode(encoder)?;
-        self.0.to_string_radix(16, None).encode(encoder)
+        self.serialize().encode(encoder)
     }
 }
 
@@ -49,11 +66,8 @@ impl<Context> bincode::Decode<Context> for Float {
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
         let prec = u32::decode(decoder)?;
-        let r = String::decode(decoder)?;
-        let val = MultiPrecisionFloat::parse_radix(&r, 16)
-            .map_err(|_| bincode::error::DecodeError::Other("Failed to parse float from string"))?
-            .complete(prec);
-        Ok(Float(val))
+        let data = Vec::<u8>::decode(decoder)?;
+        Self::try_deserialize(&data, prec).map_err(bincode::error::DecodeError::OtherString)
     }
 }
 
@@ -829,22 +843,6 @@ impl Float {
         } else {
             Err(format!("Invalid binary precision {prec}"))
         }
-    }
-
-    pub fn serialize(&self) -> Vec<u8> {
-        if self.0 == 0 {
-            // serialize 0 and -0 as '0'
-            vec![48]
-        } else {
-            self.0.to_string_radix(16, None).into_bytes()
-        }
-    }
-
-    pub fn deserialize(d: &[u8], prec: u32) -> Float {
-        MultiPrecisionFloat::parse_radix(d, 16)
-            .unwrap()
-            .complete(prec)
-            .into()
     }
 
     pub fn to_rational(&self) -> Rational {

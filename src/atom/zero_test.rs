@@ -185,15 +185,8 @@ impl AtomView<'_> {
                 match n.get_coeff_view() {
                     CoefficientView::Natural(..) | CoefficientView::Large(..) => {}
                     CoefficientView::Float(re, im) => {
-                        // The serialized mantissa of a finite float contains no
-                        // 'i' or 'n'; avoid decoding an ordinary numeric leaf.
-                        for part in [re.0, im.0] {
-                            if part[4..]
-                                .iter()
-                                .any(|b| matches!(b.to_ascii_lowercase(), b'i' | b'n'))
-                            {
-                                return None;
-                            }
+                        if !re.is_finite() || !im.is_finite() {
+                            return None;
                         }
                     }
                     _ => return None,
@@ -2055,6 +2048,39 @@ mod tests {
                     "({text})+1, p={}",
                     sample.prime
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn binary_float_components_keep_structural_zero_checks() {
+        use crate::domains::float::{Complex, Float};
+
+        for precision in [53, 128, 512] {
+            for imaginary_precision in [precision, precision + 17] {
+                // The finite binary significands include bytes spelling 'i' and
+                // 'n', which must not be mistaken for the old text specials.
+                for center in [0, 1, 0x800069, 0x80006e] {
+                    let atom = Atom::num(Complex::new(
+                        Float::with_val(precision, center),
+                        Float::with_val(imaginary_precision, 0),
+                    ));
+                    assert_eq!(
+                        atom.as_view().structural_zero(0, &mut 1),
+                        Some(if center == 0 {
+                            Structural::Zero
+                        } else {
+                            Structural::Nonzero
+                        })
+                    );
+                }
+                for center in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+                    let atom = Atom::num(Complex::new(
+                        Float::with_val(precision, center),
+                        Float::with_val(imaginary_precision, 0),
+                    ));
+                    assert_eq!(atom.as_view().structural_zero(0, &mut 1), None);
+                }
             }
         }
     }

@@ -22,12 +22,14 @@ use super::{
     Atom, AtomOrView, AtomView, SliceType, Symbol,
     coefficient::{
         PackedRationalNumberReader, PackedRationalNumberWriter, read_packed_denominator,
-        read_packed_numerator, read_packed_pair, skip_packed_function, skip_packed_list,
+        read_packed_numerator, read_packed_pair, read_packed_pair_checked, skip_packed_function,
+        skip_packed_list, validate_packed_coefficient,
     },
 };
 
 /// The current export format identifier for atom data.
-const ATOM_EXPORT_FORMAT: u8 = 1;
+// Versions 2–4 are reserved for historical error-tracking coefficient layouts.
+const ATOM_EXPORT_FORMAT: u8 = 5;
 
 const NUM_ID: u8 = 1;
 const VAR_ID: u8 = 2;
@@ -154,6 +156,85 @@ fn check_atom_format(format: u8) -> Result<(), std::io::Error> {
             std::io::ErrorKind::InvalidData,
             format!("Unsupported atom storage format {format}; expected {ATOM_EXPORT_FORMAT}"),
         ));
+    }
+    Ok(())
+}
+
+/// Check node boundaries and float payloads before constructing trusted views.
+/// The explicit stack bounds nesting by input length without recursive calls.
+fn validate_atom_data(data: &[u8]) -> Result<(), std::string::String> {
+    struct Frame {
+        end: usize,
+        remaining: u64,
+        exact_end: bool,
+    }
+    let mut frames = vec![Frame {
+        end: data.len(),
+        remaining: 1,
+        exact_end: true,
+    }];
+    let mut position = 0;
+    while let Some(frame) = frames.last_mut() {
+        if frame.remaining == 0 {
+            if frame.exact_end && position != frame.end {
+                return Err("Atom payload length does not match its children".to_owned());
+            }
+            frames.pop();
+            continue;
+        }
+        frame.remaining -= 1;
+        let end = frame.end;
+        let (&tag, rest) = data
+            .get(position..end)
+            .and_then(|source| source.split_first())
+            .ok_or_else(|| "Truncated atom node".to_owned())?;
+        position += 1;
+        match tag & TYPE_MASK {
+            NUM_ID => {
+                position = end - validate_packed_coefficient(rest)?.len();
+            }
+            VAR_ID => {
+                position = end - read_packed_pair_checked(rest)?.2.len();
+            }
+            POW_ID => frames.push(Frame {
+                end,
+                remaining: 2,
+                exact_end: false,
+            }),
+            FUN_ID | MUL_ID | ADD_ID => {
+                if tag & TYPE_MASK == FUN_ID && !matches!(rest.first(), Some(1..=4)) {
+                    return Err("Invalid function size header".to_owned());
+                }
+                let (first, second, rest) = read_packed_pair_checked(rest)?;
+                position = end - rest.len();
+                let (size, mut count) = if tag & TYPE_MASK == FUN_ID {
+                    if second != 1 {
+                        return Err("Invalid function size header".to_owned());
+                    }
+                    (first, 0)
+                } else {
+                    (second, first)
+                };
+                let size = usize::try_from(size)
+                    .map_err(|_| "Atom payload length does not fit in usize".to_owned())?;
+                let payload_end = position
+                    .checked_add(size)
+                    .filter(|&payload_end| payload_end <= end)
+                    .ok_or_else(|| "Truncated atom container".to_owned())?;
+                if tag & TYPE_MASK == FUN_ID {
+                    let (_, arguments, rest) =
+                        read_packed_pair_checked(&data[position..payload_end])?;
+                    count = arguments;
+                    position = payload_end - rest.len();
+                }
+                frames.push(Frame {
+                    end: payload_end,
+                    remaining: count,
+                    exact_end: true,
+                });
+            }
+            _ => return Err("Unknown atom node type".to_owned()),
+        }
     }
     Ok(())
 }
@@ -645,6 +726,7 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
 
             dest.resize(n_size, 0);
             source.read(&mut dest)?;
+            validate_atom_data(&dest).map_err(bincode::error::DecodeError::OtherString)?;
 
             unsafe {
                 match dest[0] & TYPE_MASK {
@@ -682,6 +764,8 @@ impl Atom {
 
         dest.resize(n_size, 0);
         source.read_exact(&mut dest)?;
+        validate_atom_data(&dest)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
 
         unsafe {
             match dest[0] & TYPE_MASK {
@@ -2903,6 +2987,186 @@ mod tests {
             fresh.set_has_coefficient(true);
             assert_eq!(product.as_view(), fresh.as_view());
         }
+    }
+
+    #[test]
+    fn rejects_previous_atom_formats_before_reading_payload() {
+        for format in [0, 1, 2, 3, 4, u8::MAX] {
+            let mut atom = Atom::num(42);
+            let mut bytes = &[format][..];
+            let error = atom.read(&mut bytes).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_eq!(atom, Atom::num(42));
+
+            #[cfg(feature = "bincode")]
+            assert!(
+                bincode::decode_from_slice_with_context::<_, Atom, _>(
+                    &[format],
+                    bincode::config::standard(),
+                    StateMap::default()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn imports_reject_malformed_binary_floats_before_traversal() {
+        let component = |precision: u32, value: &[u8]| {
+            let mut bytes = precision.to_le_bytes().to_vec();
+            bytes.extend_from_slice(value);
+            bytes
+        };
+        let coefficient = |real: &[u8], imaginary: &[u8]| {
+            let mut bytes = vec![NUM_ID, 11]; // Compact floating coefficient.
+            (real.len() as u64, imaginary.len() as u64).write_packed(&mut bytes);
+            bytes.extend_from_slice(real);
+            bytes.extend_from_slice(imaginary);
+            bytes
+        };
+        let finite = |exponent: i64| {
+            let mut bytes = vec![1];
+            let mut encoded = ((exponent as u64) << 1) ^ ((exponent >> 63) as u64);
+            while encoded >= 128 {
+                bytes.push(encoded as u8 | 128);
+                encoded >>= 7;
+            }
+            bytes.push(encoded as u8);
+            bytes.push(128);
+            bytes
+        };
+        let valid = component(128, &[0]);
+        let mut invalid = vec![
+            coefficient(&component(0, &[0]), &[]),
+            coefficient(&128u32.to_le_bytes(), &[]), // A real component cannot be implicit.
+            coefficient(&valid, &0u32.to_le_bytes()),
+            coefficient(&valid, &[0; 3]),
+            coefficient(&valid, &[0; 5]),
+            coefficient(&valid, &component(128, &[7])),
+            // An exact zero either inherits the real precision or stores only
+            // its distinct precision; full zero payloads are never canonical.
+            coefficient(&valid, &128u32.to_le_bytes()),
+            coefficient(&valid, &component(128, &[0])),
+            coefficient(&valid, &component(256, &[0])),
+        ];
+        for header in [
+            vec![0x91, valid.len() as u8, 0], // Unsigned lengths cannot have a sign bit.
+            vec![0x12, valid.len() as u8, 0, 0], // A wider real length is redundant.
+            vec![0x21, valid.len() as u8, 0, 0], // A wider imaginary length is redundant.
+        ] {
+            let mut raw = vec![NUM_ID, 11];
+            raw.extend_from_slice(&header);
+            raw.extend_from_slice(&valid);
+            invalid.push(raw);
+        }
+        let mut fixed = vec![NUM_ID, 9];
+        for part in [&valid, &valid] {
+            fixed.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            fixed.extend_from_slice(part);
+        }
+        invalid.push(fixed);
+        #[cfg(feature = "float-mpfr")]
+        invalid.push(coefficient(
+            // MPFR cannot preserve 72 significant bits at precision 64;
+            // Astro can preserve a larger actual value and a precision hint.
+            &component(64, &[1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 128]),
+            &[],
+        ));
+        #[cfg(feature = "float-mpfr")]
+        invalid.push(coefficient(
+            // Astro's finite exponent range extends beyond the default MPFR range.
+            &component(128, &finite(i64::from(i32::MAX) - 64)),
+            &[],
+        ));
+        for value in [
+            vec![],
+            vec![6], // NaN has one canonical tag, regardless of its original sign.
+            vec![7],
+            vec![0, 0],
+            vec![3, 0],
+            vec![1],
+            vec![1, 0],
+            vec![1, 0, 127],      // The significand must be normalized.
+            vec![1, 0, 0, 128],   // Low zero bytes must be omitted.
+            vec![1, 128, 0, 128], // Noncanonical exponent varint.
+            finite(i64::MAX),
+            finite(i64::MIN),
+        ] {
+            invalid.push(coefficient(&component(128, &value), &[]));
+        }
+        let mut truncated = vec![NUM_ID, 11];
+        (u64::MAX, 0).write_packed(&mut truncated);
+        invalid.push(truncated);
+
+        let mut state = Vec::new();
+        State::export_partial(&mut state, Default::default()).unwrap();
+        state.write_u64::<LittleEndian>(1).unwrap();
+        for raw in invalid {
+            let mut sum = vec![ADD_ID];
+            (1u64, raw.len() as u64).write_packed(&mut sum);
+            sum.extend_from_slice(&raw);
+            let mut power = vec![POW_ID];
+            power.extend_from_slice(&raw);
+            power.extend_from_slice(&ZERO_DATA);
+            let mut metadata = Vec::new();
+            (0u64, 1).write_packed(&mut metadata);
+            let mut function = vec![FUN_ID];
+            ((metadata.len() + raw.len()) as u64, 1).write_packed(&mut function);
+            function.extend_from_slice(&metadata);
+            function.extend_from_slice(&raw);
+            for raw in [raw, sum, power, function] {
+                let mut stream = vec![ATOM_EXPORT_FORMAT];
+                stream.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+                stream.extend_from_slice(&raw);
+                let mut atom = Atom::new();
+                assert_eq!(
+                    atom.read(&mut stream.as_slice()).unwrap_err().kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                let mut exported = state.clone();
+                exported.extend_from_slice(&stream);
+                assert_eq!(
+                    Atom::import(&mut exported.as_slice(), None)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                #[cfg(feature = "bincode")]
+                assert!(
+                    bincode::decode_from_slice_with_context::<_, Atom, _>(
+                        &stream,
+                        bincode::config::standard(),
+                        StateMap::default()
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn import_validation_checks_boundaries_without_recursive_descent() {
+        for data in [
+            vec![],
+            vec![0],
+            vec![NUM_ID],
+            vec![NUM_ID, 0],
+            vec![VAR_ID, 0],
+            vec![ADD_ID, 0x11, 0, 1],
+            vec![ADD_ID, 0x11, 1, 0],
+            vec![FUN_ID, 0x11, 0, 1],
+            vec![POW_ID, NUM_ID, 1, 0],
+        ] {
+            assert!(validate_atom_data(&data).is_err(), "{data:?}");
+        }
+        let mut nested = vec![POW_ID; 10_000];
+        nested.extend_from_slice(&ZERO_DATA);
+        for _ in 0..10_000 {
+            nested.extend_from_slice(&ZERO_DATA);
+        }
+        assert!(validate_atom_data(&nested).is_ok());
+        nested.pop();
+        assert!(validate_atom_data(&nested).is_err());
     }
 
     #[test]
