@@ -259,3 +259,66 @@ fn finite_values_that_overflow_during_reprecision_are_rejected() {
     let inputs = HashMap::from([(variable.clone(), input)]);
     assert!(variable.evaluate_tracked(&inputs, 4).is_err());
 }
+
+// Construct normalized unary nodes directly, so these regressions exercise
+// evaluation and diagnostic formatting rather than normalization traversal.
+fn deep_error_input(identity: Symbol, outer: Symbol) -> Atom {
+    let mut expression = Atom::num(1);
+    for symbol in std::iter::repeat_n(identity, 1536).chain([outer]) {
+        let mut next = Atom::new();
+        let function = next.to_fun(symbol);
+        function.add_arg(expression.as_view());
+        function.set_normalized(true);
+        expression = next;
+    }
+    expression
+}
+
+#[test]
+fn deep_missing_evaluator_errors_keep_function_identity_without_recursive_formatting() {
+    use crate::{atom::EvaluationInfo, evaluate::EvaluationError};
+    let identity = crate::symbol!(
+        "error_missing_identity",
+        eval = EvaluationInfo::new().register_tracked(|_, args, _| Ok(args[0].clone()))
+    );
+    let outer = crate::symbol!("error_missing_outer");
+    let expression = deep_error_input(identity, outer);
+    let error = expression
+        .evaluate_tracked(&HashMap::<Atom, TrackedComplex>::new(), 80)
+        .unwrap_err();
+    assert!(
+        matches!(&error, EvaluationError::MissingEvaluator { expression: stored, .. } if stored == &expression)
+    );
+    for text in [error.to_string(), format!("{error:?}")] {
+        assert!(text.contains("error_missing_outer"));
+        assert!(text.contains("TrackedComplex"));
+        assert!(text.len() < 512);
+    }
+}
+
+#[test]
+fn deep_callback_errors_keep_reason_and_shallow_context_without_recursive_formatting() {
+    use crate::{atom::EvaluationInfo, evaluate::EvaluationError};
+    let identity = crate::symbol!(
+        "error_callback_identity",
+        eval = EvaluationInfo::new().register_tracked(|_, args, _| Ok(args[0].clone()))
+    );
+    let outer = crate::symbol!(
+        "error_callback_outer",
+        eval = EvaluationInfo::new()
+            .register_tracked(|_, _, _| Err("sentinel: unsupported callback operation".into()))
+    );
+    let inputs = HashMap::<Atom, TrackedComplex>::new();
+    let expression = deep_error_input(identity, outer);
+    let error = expression.evaluate_tracked(&inputs, 80).unwrap_err();
+    assert!(
+        matches!(&error, EvaluationError::EvaluationFailed { expression: stored, .. } if stored == &expression)
+    );
+    for text in [error.to_string(), format!("{error:?}")] {
+        assert!(text.contains("error_callback_outer"));
+        assert!(text.contains("sentinel: unsupported callback operation"));
+        assert!(text.len() < 512);
+    }
+    let shallow = outer.call(3).evaluate_tracked(&inputs, 80).unwrap_err();
+    assert!(shallow.to_string().contains("error_callback_outer(3)"));
+}
