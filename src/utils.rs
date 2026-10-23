@@ -1,5 +1,7 @@
 //! Utility traits and structures.
 
+pub mod resources;
+
 use std::{
     cmp::Ordering,
     ops::{Deref, DerefMut},
