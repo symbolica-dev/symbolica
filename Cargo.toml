@@ -156,7 +156,8 @@ xmlparser = { version = "0.13.6", optional = true }
 wolfram-library-link = { version = "0.2.9", optional = true }
 bincode-trait-derive = { version = "0.1.0", optional = true }
 pyo3-log = { version = "0.13", optional = true }
-symjit = { version = "2.27.3", optional = true }
+# Range-safe complex reciprocals and integer powers: siravan/symjit#18.
+symjit = { git = "https://github.com/siravan/symjit", rev = "440fbac996dd7c366a4d28b091e28bb5c555c085", optional = true }
 divan = { version = "0.1.21", optional = true }
 flint3-sys = { version = "3.6.1", optional = true, features = ["gmp-mpfr-sys"] }
 
