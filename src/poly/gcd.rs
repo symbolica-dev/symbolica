@@ -9,34 +9,1602 @@ use std::mem;
 use std::ops::Add;
 use tracing::{debug, instrument};
 
-use crate::domains::algebraic_number::{AlgebraicExtension, GaloisField};
+use crate::domains::algebraic::{AlgebraicExtension, GaloisField};
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, PrimeIteratorU64,
-    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64,
+    SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64, Zp64DiscreteLogContext,
+    ZpDiscreteLogContext,
 };
 use crate::domains::float::{FloatField, SingleFloat};
-use crate::domains::integer::{FromFiniteField, Integer, IntegerRing, SMALL_PRIMES, Z};
+use crate::domains::integer::{
+    FromFiniteField, Integer, IntegerRing, MultiPrecisionInteger, SMALL_PRIMES, Z,
+};
 use crate::domains::rational::{Q, Rational, RationalField};
-use crate::domains::{EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set};
+use crate::domains::{
+    EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set, UniformlySampleableRing,
+};
+use crate::kernels::{DensePolynomialMulRequest, GeometricSequenceStepRequest};
 use crate::poly::INLINED_EXPONENTS;
-use crate::poly::factor::Factorize;
 use crate::tensors::matrix::{Matrix, MatrixError};
 use crate::{GLOBAL_SETTINGS, warn};
 
 use super::PositiveExponent;
-use super::polynomial::MultivariatePolynomial;
+use super::polynomial::{
+    IntegerPolynomialCrtContext, LastVariableEvaluationContext, LastVariablePowerWorkspace,
+    MultivariatePolynomial, WordCrt,
+};
+use super::univariate::{DenseFiniteFieldRootContext, DenseRootPrimeField};
+
+#[cfg(feature = "binary_size")]
+type ModularGcdFieldWorkspace = u64;
+#[cfg(not(feature = "binary_size"))]
+type ModularGcdFieldWorkspace = u32;
+type ModularGcdField = FiniteField<ModularGcdFieldWorkspace>;
 
 /// The maximum power of a variable that is cached
 pub(crate) const POW_CACHE_SIZE: usize = 1000;
 pub(crate) const INITIAL_POW_MAP_SIZE: usize = 1000;
 
-/// The upper bound of the range to be sampled during the computation of multiple gcds
-pub(crate) const MAX_RNG_PREFACTOR: u32 = 50000;
+/// Largest univariate image degree for which all GCD variable bounds are sampled together.
+/// Larger images use the sparse per-variable sampler to avoid allocating dense coefficient rows.
+const FUSED_GCD_BOUND_MAX_DEGREE: usize = 9999;
+
+/// Largest dense coefficient buffer used for a sampled univariate GCD.
+const DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS: usize = 4096;
+
+/// Maximum coefficient-buffer length relative to the number of stored input terms.
+const DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO: usize = 8;
+
+/// Minimum divisor length for recovering a balanced checked quotient from both endpoints.
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_COEFFICIENTS: usize = 64;
+
+/// Minimum stored-term density admitted for a balanced two-ended checked dividend.
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR: usize = 3;
+const DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR: usize = 4;
+
+/// Largest direct degree-to-shape table used during Zippel interpolation.
+const ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN: usize = 4096;
+
+/// Maximum direct-table length relative to the number of GCD shape coefficients.
+const ZIPPEL_SHAPE_INDEX_MAX_SPARSITY_RATIO: usize = 32;
+
+/// Maximum estimated coefficient size produced during recursive integer-heuristic substitution.
+const HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS: u64 = 32 * 1024;
+
+/// Estimated scalar images above this size use word-prime univariate GCDs. The estimate combines
+/// coefficient height and degree, which are the two main costs of the Horner/GMP path.
+const UNIVARIATE_MODULAR_GCD_MIN_EVALUATION_BITS: u64 = 8 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnivariateIntegerGcdAlgorithm {
+    Scalar,
+    Modular,
+}
+
+/// Chooses between one large scalar image and a sequence of word-prime images.
+fn select_univariate_integer_gcd(
+    scalar_heuristic_allowed: bool,
+    estimated_evaluation_bits: u64,
+) -> UnivariateIntegerGcdAlgorithm {
+    if !scalar_heuristic_allowed
+        || estimated_evaluation_bits >= UNIVARIATE_MODULAR_GCD_MIN_EVALUATION_BITS
+    {
+        UnivariateIntegerGcdAlgorithm::Modular
+    } else {
+        UnivariateIntegerGcdAlgorithm::Scalar
+    }
+}
+
+/// Reuses evaluation points, power tables, and dense univariate images while sampling every
+/// active variable bound of a polynomial pair.
+struct GcdBoundSamplingContext<F: Field> {
+    ring: F,
+    sampled_variables: SmallVec<[usize; INLINED_EXPONENTS]>,
+    retained_variables: SmallVec<[usize; INLINED_EXPONENTS]>,
+    points: Vec<F::Element>,
+    inverse_points: Vec<F::Element>,
+    powers: Vec<Vec<F::Element>>,
+    inverse_powers: Vec<Vec<F::Element>>,
+    left_images: Vec<Vec<F::Element>>,
+    right_images: Vec<Vec<F::Element>>,
+}
+
+impl<F: Field> GcdBoundSamplingContext<F> {
+    /// Creates dense images for variables that occur in both input polynomials.
+    fn new<E: PositiveExponent>(
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+        variables: &[usize],
+    ) -> Option<Self> {
+        let retained_variables = variables
+            .iter()
+            .copied()
+            .filter(|variable| {
+                left.degree(*variable) > E::zero() && right.degree(*variable) > E::zero()
+            })
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+
+        if retained_variables.len() < 3 {
+            return None;
+        }
+
+        let mut maximum_degrees = vec![0usize; left.nvars()];
+        for variable in variables {
+            let maximum_degree =
+                left.degree(*variable).max(right.degree(*variable)).to_u32() as usize;
+            if maximum_degree > FUSED_GCD_BOUND_MAX_DEGREE {
+                return None;
+            }
+            maximum_degrees[*variable] = maximum_degree;
+        }
+
+        let ring = left.ring().clone();
+        let points = vec![ring.one(); left.nvars()];
+        let inverse_points = points.clone();
+        let mut powers = (0..left.nvars()).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut inverse_powers = powers.clone();
+        for variable in variables {
+            let cache_length = (maximum_degrees[*variable] + 1).min(POW_CACHE_SIZE);
+            powers[*variable] = vec![ring.one(); cache_length];
+            inverse_powers[*variable] = vec![ring.one(); cache_length];
+        }
+
+        let left_images = retained_variables
+            .iter()
+            .map(|variable| vec![ring.zero(); left.degree(*variable).to_u32() as usize + 1])
+            .collect();
+        let right_images = retained_variables
+            .iter()
+            .map(|variable| vec![ring.zero(); right.degree(*variable).to_u32() as usize + 1])
+            .collect();
+
+        Some(Self {
+            ring,
+            sampled_variables: variables.iter().copied().collect(),
+            retained_variables,
+            points,
+            inverse_points,
+            powers,
+            inverse_powers,
+            left_images,
+            right_images,
+        })
+    }
+
+    /// Sets one nonzero evaluation point and fills its direct and inverse power tables.
+    fn set_point(&mut self, variable: usize, point: F::Element) {
+        debug_assert!(!self.ring.is_zero(&point));
+        let inverse_point = self.ring.inv(&point);
+        self.points[variable] = point.clone();
+        self.inverse_points[variable] = inverse_point.clone();
+
+        let mut power = self.ring.one();
+        for cached_power in &mut self.powers[variable] {
+            *cached_power = power.clone();
+            self.ring.mul_assign(&mut power, &point);
+        }
+
+        let mut inverse_power = self.ring.one();
+        for cached_power in &mut self.inverse_powers[variable] {
+            *cached_power = inverse_power.clone();
+            self.ring.mul_assign(&mut inverse_power, &inverse_point);
+        }
+    }
+
+    /// Samples one nonzero point per variable and prepares its power tables.
+    fn sample_points(&mut self, rng: &mut impl rand::RngCore)
+    where
+        F: UniformlySampleableRing,
+    {
+        for index in 0..self.sampled_variables.len() {
+            let variable = self.sampled_variables[index];
+            let point = self.ring.sample_uniform_nonzero(rng);
+            self.set_point(variable, point);
+        }
+    }
+
+    /// Builds every univariate image in one pass over each input polynomial.
+    fn fill_images<E: PositiveExponent>(
+        &mut self,
+        polynomial: &MultivariatePolynomial<F, E>,
+        left: bool,
+    ) {
+        let images = if left {
+            &mut self.left_images
+        } else {
+            &mut self.right_images
+        };
+        for image in &mut *images {
+            image.fill(self.ring.zero());
+        }
+
+        for term in polynomial {
+            let mut full_evaluation = term.coefficient.clone();
+            for variable in &self.sampled_variables {
+                let exponent = term.exponents[*variable].to_u32() as usize;
+                if exponent == 0 {
+                    continue;
+                }
+                if let Some(power) = self.powers[*variable].get(exponent) {
+                    self.ring.mul_assign(&mut full_evaluation, power);
+                } else {
+                    self.ring.mul_assign(
+                        &mut full_evaluation,
+                        &self.ring.pow(&self.points[*variable], exponent as u64),
+                    );
+                }
+            }
+
+            for (image, variable) in images.iter_mut().zip(&self.retained_variables) {
+                let exponent = term.exponents[*variable].to_u32() as usize;
+                let mut coefficient = full_evaluation.clone();
+                if exponent > 0 {
+                    if let Some(inverse_power) = self.inverse_powers[*variable].get(exponent) {
+                        self.ring.mul_assign(&mut coefficient, inverse_power);
+                    } else {
+                        self.ring.mul_assign(
+                            &mut coefficient,
+                            &self
+                                .ring
+                                .pow(&self.inverse_points[*variable], exponent as u64),
+                        );
+                    }
+                }
+                self.ring.add_assign(&mut image[exponent], &coefficient);
+            }
+        }
+    }
+
+    /// Returns whether every sampled image retains the input degree of its free variable.
+    fn degrees_are_preserved(&self) -> bool {
+        self.left_images
+            .iter()
+            .chain(&self.right_images)
+            .all(|image| {
+                image
+                    .last()
+                    .is_some_and(|coefficient| !self.ring.is_zero(coefficient))
+            })
+    }
+
+    /// Converts an ascending dense coefficient row into a univariate multivariate polynomial.
+    fn image_polynomial<E: PositiveExponent>(
+        ring: &F,
+        template: &MultivariatePolynomial<F, E>,
+        variable: usize,
+        coefficients: Vec<F::Element>,
+    ) -> MultivariatePolynomial<F, E> {
+        let mut image = template.zero_with_capacity(coefficients.len());
+        let mut exponents = vec![E::zero(); template.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !ring.is_zero(&coefficient) {
+                exponents[variable] = E::from_u32(degree as u32);
+                image.append_monomial_back(coefficient, &exponents);
+            }
+        }
+        image
+    }
+
+    /// Computes the GCD degree of each pair of currently filled univariate images.
+    fn bounds_from_images<E: PositiveExponent>(
+        self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> SmallVec<[E; INLINED_EXPONENTS]> {
+        let mut bounds = (0..left.nvars())
+            .map(|_| E::zero())
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        for ((variable, left_coefficients), right_coefficients) in self
+            .retained_variables
+            .into_iter()
+            .zip(self.left_images)
+            .zip(self.right_images)
+        {
+            let left_image = Self::image_polynomial(&self.ring, left, variable, left_coefficients);
+            let right_image =
+                Self::image_polynomial(&self.ring, right, variable, right_coefficients);
+            bounds[variable] = left_image.univariate_gcd(&right_image).ldegree_max();
+        }
+        bounds
+    }
+
+    /// Computes all sampled GCD degree bounds, or returns `None` when a shared good sample point
+    /// cannot be found quickly enough for the coefficient field.
+    fn sample_bounds<E: PositiveExponent>(
+        mut self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> Option<SmallVec<[E; INLINED_EXPONENTS]>>
+    where
+        F: UniformlySampleableRing,
+    {
+        let mut rng = rand::rng();
+        let mut fail_count = 0;
+        loop {
+            self.sample_points(&mut rng);
+            self.fill_images(left, true);
+            self.fill_images(right, false);
+            if self.degrees_are_preserved() {
+                return Some(self.bounds_from_images(left, right));
+            }
+
+            if let Some(size) = self.ring.size()
+                && fail_count * 2 > size
+            {
+                return None;
+            }
+            fail_count += 1;
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 enum GCDError {
     BadOriginalImage,
     BadCurrentImage,
+}
+
+/// Per-variable exponent bounds for one input to a multivariate GCD operation.
+///
+/// The bounds identify the monomial shift of the input, its degree after that
+/// shift is removed, and which variables remain in the shifted polynomial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GcdInputMetadata<E: PositiveExponent> {
+    variables: SmallVec<[GcdVariableMetadata<E>; INLINED_EXPONENTS]>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct GcdVariableMetadata<E: PositiveExponent> {
+    min_degree: E,
+    max_degree: E,
+}
+
+impl<E: PositiveExponent> GcdInputMetadata<E> {
+    fn scan<R: Ring>(polynomial: &MultivariatePolynomial<R, E>) -> Self {
+        debug_assert!(!polynomial.is_zero());
+
+        let mut variables: SmallVec<[GcdVariableMetadata<E>; INLINED_EXPONENTS]> = polynomial
+            .exponents(0)
+            .iter()
+            .map(|exponent| GcdVariableMetadata {
+                min_degree: *exponent,
+                max_degree: *exponent,
+            })
+            .collect();
+        for exponents in polynomial.exponents_iter().skip(1) {
+            for (metadata, exponent) in variables.iter_mut().zip(exponents) {
+                metadata.min_degree = metadata.min_degree.min(*exponent);
+                metadata.max_degree = metadata.max_degree.max(*exponent);
+            }
+        }
+
+        Self { variables }
+    }
+
+    #[inline]
+    fn shifted_degree(&self, variable: usize) -> E {
+        self.variables[variable].max_degree - self.variables[variable].min_degree
+    }
+
+    #[inline]
+    fn occurs_after_shift(&self, variable: usize) -> bool {
+        self.variables[variable].min_degree != self.variables[variable].max_degree
+    }
+
+    /// Removes the input's monomial factor from all of its terms.
+    fn remove_monomial_shift<R: Ring>(
+        &self,
+        polynomial: &mut Cow<'_, MultivariatePolynomial<R, E>>,
+    ) {
+        if self
+            .variables
+            .iter()
+            .all(|metadata| metadata.min_degree == E::zero())
+        {
+            return;
+        }
+
+        for exponents in polynomial.to_mut().exponents_iter_mut() {
+            for (exponent, metadata) in exponents.iter_mut().zip(&self.variables) {
+                *exponent = *exponent - metadata.min_degree;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HuMonaganAnchor {
+    Left,
+    Right,
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum HuMonaganBivariateImageKind {
+    GcdMultiple,
+    CofactorMultiple,
+}
+
+enum HuMonaganBivariatePrimeResult<P> {
+    Accepted {
+        previous_reconstruction: P,
+        samples_used: usize,
+    },
+    RetryWithNewImage,
+    RetryWithNewKroneckerMap,
+}
+
+impl HuMonaganAnchor {
+    /// Selects the smaller input whose cofactor is interpolated alongside the GCD.
+    fn from_inputs<E: PositiveExponent>(
+        left: &MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> Self {
+        if left.nterms() <= right.nterms() {
+            Self::Left
+        } else {
+            Self::Right
+        }
+    }
+
+    /// Returns the anchored input first and the other GCD input second.
+    fn order_inputs<'a, E: PositiveExponent>(
+        self,
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+    ) -> (
+        &'a MultivariatePolynomial<IntegerRing, E>,
+        &'a MultivariatePolynomial<IntegerRing, E>,
+    ) {
+        match self {
+            Self::Left => (left, right),
+            Self::Right => (right, left),
+        }
+    }
+}
+
+/// Checks that Hu-Monagan has a main variable and at least two interpolation variables.
+fn hu_monagan_has_minimum_geometry<E: PositiveExponent>(vars: &[usize], bounds: &[E]) -> bool {
+    vars.len() >= 3
+        && vars
+            .first()
+            .and_then(|variable| bounds.get(*variable))
+            .is_some_and(|bound| *bound > E::zero())
+        && bounds.get(vars[1]).is_some_and(|bound| *bound > E::zero())
+        && bounds.get(vars[2]).is_some_and(|bound| *bound > E::zero())
+}
+
+/// Tests whether a variable order has sufficiently sparse interpolation geometry for Hu-Monagan.
+fn hu_monagan_plan_is_applicable<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    anchor: HuMonaganAnchor,
+) -> bool {
+    let (anchored_input, _) = anchor.order_inputs(a, b);
+    hu_monagan_plan_is_applicable_with_degree(a, b, vars, bounds, |variable| {
+        anchored_input.degree(variable)
+    })
+}
+
+/// Tests Hu-Monagan interpolation geometry using degrees already known by GCD planning.
+fn hu_monagan_plan_is_applicable_with_degrees<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    anchored_degrees: &[E],
+) -> bool {
+    debug_assert_eq!(anchored_degrees.len(), a.nvars());
+    debug_assert_eq!(a.nvars(), b.nvars());
+    hu_monagan_plan_is_applicable_with_degree(a, b, vars, bounds, |variable| {
+        anchored_degrees[variable]
+    })
+}
+
+/// Tests Hu-Monagan interpolation geometry with a supplied anchored-input degree lookup.
+fn hu_monagan_plan_is_applicable_with_degree<E, F>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    mut anchored_degree: F,
+) -> bool
+where
+    E: PositiveExponent,
+    F: FnMut(usize) -> E,
+{
+    if !hu_monagan_has_minimum_geometry(vars, bounds) {
+        return false;
+    }
+
+    let nterms = a.nterms() + b.nterms();
+    const SPARSITY_MARGIN: u32 = 8;
+
+    let mut box_size_u128 = Some(1u128);
+    let mut cofactor_box_size_u128 = Some(1u128);
+    for variable in vars.iter().copied().skip(1) {
+        let bound = bounds[variable].to_u32();
+        box_size_u128 = box_size_u128.and_then(|size| size.checked_mul(u128::from(bound) + 1));
+        let cofactor_degree = anchored_degree(variable).to_u32().checked_sub(bound);
+        cofactor_box_size_u128 = cofactor_box_size_u128
+            .zip(cofactor_degree)
+            .and_then(|(size, degree)| size.checked_mul(u128::from(degree) + 1));
+    }
+    if let (Some(box_size), Some(cofactor_box_size)) = (box_size_u128, cofactor_box_size_u128) {
+        let largest_sparse_size = (box_size - 1) / u128::from(SPARSITY_MARGIN);
+        return cofactor_box_size <= largest_sparse_size || nterms as u128 <= largest_sparse_size;
+    }
+
+    let mut box_size = Integer::from(1);
+    let mut cofactor_box_size = Integer::from(1);
+    for v in vars.iter().skip(1) {
+        let bound = bounds[*v].to_u32();
+        box_size *= bound + 1;
+        cofactor_box_size *= Integer::from(anchored_degree(*v).to_u32()) - bound + 1;
+    }
+
+    cofactor_box_size * SPARSITY_MARGIN < box_size
+        || Integer::from(nterms) * SPARSITY_MARGIN < box_size
+}
+
+fn should_use_hu_monagan_with_anchor<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+    anchor: HuMonaganAnchor,
+) -> bool {
+    vars.first() == Some(&0) && hu_monagan_plan_is_applicable(a, b, vars, bounds, anchor)
+}
+
+fn should_use_hu_monagan<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    vars: &[usize],
+    bounds: &[E],
+) -> bool {
+    should_use_hu_monagan_with_anchor(a, b, vars, bounds, HuMonaganAnchor::from_inputs(a, b))
+}
+
+/// Minimum row reduction that removes two levels from Hu's geometric sample schedule.
+const HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION: usize = 4;
+
+/// Safety factor applied to the full input-box density admitted by bivariate Hu-Monagan.
+const HU_MONAGAN_BIVARIATE_SPARSITY_MARGIN: u128 = 8;
+
+/// Number of bivariate images computed before the first sparse reconstruction attempt.
+const HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES: usize = 4;
+
+/// Number of modular images targeted when Hu-Monagan chooses a reconstruction prime size.
+const HU_MONAGAN_TARGET_CRT_IMAGES: u64 = 8;
+
+/// Additional equal reconstruction needed to certify that CRT coefficients have stabilized.
+const HU_MONAGAN_CRT_STABILIZATION_IMAGES: u64 = 1;
+
+/// Maximum projected support density admitted for the reconstructed GCD or cofactor.
+const HU_MONAGAN_BIVARIATE_PROJECTION_MARGIN: u128 = 4;
+
+/// Minimum projected interpolation work relative to the retained bivariate input box.
+const HU_MONAGAN_BIVARIATE_IMAGE_AMORTIZATION_MARGIN: u128 = 2;
+
+/// Maximum input-support ratio for evaluating both operands in every automatic bivariate image.
+const HU_MONAGAN_BIVARIATE_INPUT_BALANCE_MARGIN: u128 = 2;
+
+/// Scale used by FLINT's two-main-variable score to make large leading rows affect degree ties.
+const HU_MONAGAN_BIVARIATE_LEADING_ROW_SCALE: u128 = 256;
+
+/// Work limits used when bivariate Hu-Monagan is selected automatically.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct HuMonaganBivariateAutomaticBudget {
+    sample_limit: usize,
+    prime_attempt_limit: usize,
+}
+
+/// Selects the two main variables from their input degrees and leading-row sizes.
+fn hu_monagan_bivariate_main_variables<E: PositiveExponent>(
+    variables: &[usize],
+    left_degrees: &[E],
+    right_degrees: &[E],
+    left_leading_rows: &[usize],
+    right_leading_rows: &[usize],
+) -> Option<[usize; 2]> {
+    let mut candidates: SmallVec<[_; INLINED_EXPONENTS]> = variables
+        .iter()
+        .copied()
+        .filter(|variable| {
+            *variable < left_degrees.len()
+                && *variable < right_degrees.len()
+                && *variable < left_leading_rows.len()
+                && *variable < right_leading_rows.len()
+        })
+        .collect();
+    if candidates.len() != variables.len() || candidates.len() < 2 {
+        return None;
+    }
+
+    candidates.sort_unstable_by_key(|variable| {
+        let degree = left_degrees[*variable]
+            .max(right_degrees[*variable])
+            .to_u32();
+        let leading_row = left_leading_rows[*variable].min(right_leading_rows[*variable]);
+        (
+            u128::from(degree) + leading_row as u128 / HU_MONAGAN_BIVARIATE_LEADING_ROW_SCALE,
+            *variable,
+        )
+    });
+    Some([candidates[0], candidates[1]])
+}
+
+/// Counts terms on the maximum exponent row of every requested variable.
+fn hu_monagan_leading_row_counts<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variables: &[usize],
+    degrees: &[E],
+) -> Option<SmallVec<[usize; INLINED_EXPONENTS]>> {
+    if degrees.len() != polynomial.nvars()
+        || variables
+            .iter()
+            .any(|variable| *variable >= polynomial.nvars())
+    {
+        return None;
+    }
+
+    let mut counts = smallvec![0usize; polynomial.nvars()];
+    for exponents in polynomial.exponents_iter() {
+        for variable in variables.iter().copied() {
+            if exponents[variable] == degrees[variable] {
+                counts[variable] += 1;
+            }
+        }
+    }
+    Some(counts)
+}
+
+/// Plans a bivariate Hu-Monagan GCD from normalized input geometry.
+struct HuMonaganBivariatePlanningContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    variables: &'a [usize],
+    bounds: &'a [E],
+    left_degrees: &'a [E],
+    right_degrees: &'a [E],
+}
+
+impl<'a, E: PositiveExponent> HuMonaganBivariatePlanningContext<'a, E> {
+    /// Uses degrees already computed by generic GCD preprocessing.
+    fn new_with_degrees(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        left_degrees: &'a [E],
+        right_degrees: &'a [E],
+    ) -> Self {
+        Self {
+            left,
+            right,
+            variables,
+            bounds,
+            left_degrees,
+            right_degrees,
+        }
+    }
+
+    /// Chooses the two main variables using exact leading-row counts.
+    fn main_variables(&self) -> Option<[usize; 2]> {
+        let left_leading_rows =
+            hu_monagan_leading_row_counts(self.left, self.variables, self.left_degrees)?;
+        let right_leading_rows =
+            hu_monagan_leading_row_counts(self.right, self.variables, self.right_degrees)?;
+        hu_monagan_bivariate_main_variables(
+            self.variables,
+            self.left_degrees,
+            self.right_degrees,
+            &left_leading_rows,
+            &right_leading_rows,
+        )
+    }
+
+    /// Checks the bivariate interpolation geometry and derives automatic work limits.
+    fn automatic_budget(
+        &self,
+        main_variables: [usize; 2],
+    ) -> Option<HuMonaganBivariateAutomaticBudget> {
+        if self.variables.len() < 3
+            || self.bounds.len() != self.left.nvars()
+            || self.left_degrees.len() != self.left.nvars()
+            || self.right_degrees.len() != self.right.nvars()
+            || self.left.nvars() != self.right.nvars()
+            || main_variables[0] == main_variables[1]
+            || main_variables
+                .iter()
+                .any(|variable| !self.variables.contains(variable))
+            || main_variables
+                .iter()
+                .any(|variable| self.bounds[*variable] == E::zero())
+        {
+            return None;
+        }
+
+        let checked_box = |degrees: &[E]| {
+            self.variables
+                .iter()
+                .copied()
+                .try_fold(1u128, |size, variable| {
+                    size.checked_mul(u128::from(degrees[variable].to_u32()) + 1)
+                })
+        };
+        let left_box = checked_box(self.left_degrees)?;
+        let right_box = checked_box(self.right_degrees)?;
+        let density_sum = (self.left.nterms() as u128)
+            .checked_mul(right_box)
+            .and_then(|left| {
+                (self.right.nterms() as u128)
+                    .checked_mul(left_box)
+                    .and_then(|right| left.checked_add(right))
+            })?;
+        let density_lhs = density_sum
+            .checked_mul(self.variables.len() as u128)
+            .and_then(|value| value.checked_mul(HU_MONAGAN_BIVARIATE_SPARSITY_MARGIN))?;
+        let density_rhs = left_box.checked_mul(right_box)?;
+        if density_lhs > density_rhs {
+            return None;
+        }
+
+        let pair_area = main_variables
+            .iter()
+            .copied()
+            .try_fold(1u128, |size, variable| {
+                let degree = self.left_degrees[variable]
+                    .max(self.right_degrees[variable])
+                    .to_u32();
+                size.checked_mul(u128::from(degree) + 1)
+            })?;
+        let minimum_image_work =
+            pair_area.checked_mul(HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES as u128)?;
+        let input_terms = (self.left.nterms() as u128).checked_add(self.right.nterms() as u128)?;
+        if minimum_image_work > input_terms {
+            return None;
+        }
+        let smaller_input_terms = self.left.nterms().min(self.right.nterms()) as u128;
+        let larger_input_terms = self.left.nterms().max(self.right.nterms()) as u128;
+        // A much smaller operand gives one-main-variable Hu a cheap cofactor target; bivariate Hu
+        // would still evaluate the larger operand and compute a bivariate GCD at every sample.
+        if larger_input_terms
+            > smaller_input_terms.checked_mul(HU_MONAGAN_BIVARIATE_INPUT_BALANCE_MARGIN)?
+        {
+            return None;
+        }
+
+        let mut kronecker_range = 1u64;
+        let mut gcd_projection = 1u128;
+        let mut left_cofactor_projection = 1u128;
+        let mut right_cofactor_projection = 1u128;
+        for variable in self.variables.iter().copied() {
+            if main_variables.contains(&variable) {
+                continue;
+            }
+
+            let bound = self.bounds[variable].to_u32();
+            let left_degree = self.left_degrees[variable].to_u32();
+            let right_degree = self.right_degrees[variable].to_u32();
+            let left_cofactor_degree = left_degree.checked_sub(bound)?;
+            let right_cofactor_degree = right_degree.checked_sub(bound)?;
+            let radix = left_degree.max(right_degree).max(bound).checked_add(1)?;
+            kronecker_range = kronecker_range.checked_mul(u64::from(radix))?;
+            gcd_projection = gcd_projection.checked_mul(u128::from(bound) + 1)?;
+            left_cofactor_projection =
+                left_cofactor_projection.checked_mul(u128::from(left_cofactor_degree) + 1)?;
+            right_cofactor_projection =
+                right_cofactor_projection.checked_mul(u128::from(right_cofactor_degree) + 1)?;
+        }
+
+        let interpolation_bound = kronecker_range.checked_mul(2)?;
+        if SMOOTH_PRIMES
+            .last()
+            .is_none_or(|prime| interpolation_bound > prime.0)
+        {
+            return None;
+        }
+
+        let left_target = gcd_projection.min(left_cofactor_projection);
+        let right_target = gcd_projection.min(right_cofactor_projection);
+        let projected_target = match self.left.nterms().cmp(&self.right.nterms()) {
+            Ordering::Less => left_target,
+            Ordering::Greater => right_target,
+            Ordering::Equal => left_target.max(right_target),
+        };
+        // A bivariate GCD is paid for at every sample. When its retained degree box is much larger
+        // than the complete projected interpolation target, ordinary sparse Zippel has too little
+        // interpolation work for that per-image cost to be amortized.
+        if projected_target.checked_mul(HU_MONAGAN_BIVARIATE_IMAGE_AMORTIZATION_MARGIN)? < pair_area
+        {
+            return None;
+        }
+        let projected_work =
+            projected_target.checked_mul(HU_MONAGAN_BIVARIATE_PROJECTION_MARGIN)?;
+        if projected_work > u128::from(kronecker_range) {
+            return None;
+        }
+
+        let sample_limit = projected_target
+            .checked_add(1)?
+            .checked_mul(2)?
+            .max(HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES as u128);
+        // Cap the projected number of sampled images by the combined input support. The support
+        // learned from the first accepted image normally lowers this limit for later primes.
+        if sample_limit > input_terms {
+            return None;
+        }
+        let sample_limit = usize::try_from(sample_limit).ok()?;
+
+        let failed_image_allowance = (input_terms / minimum_image_work).max(1);
+        let prime_attempt_limit = failed_image_allowance
+            .checked_add(u128::from(HU_MONAGAN_TARGET_CRT_IMAGES))?
+            .checked_add(u128::from(HU_MONAGAN_CRT_STABILIZATION_IMAGES))?;
+        let prime_attempt_limit = usize::try_from(prime_attempt_limit).ok()?;
+
+        Some(HuMonaganBivariateAutomaticBudget {
+            sample_limit,
+            prime_attempt_limit,
+        })
+    }
+
+    /// Reports whether the selector admits this main-variable pair.
+    #[cfg(test)]
+    fn is_applicable(&self, main_variables: [usize; 2]) -> bool {
+        self.automatic_budget(main_variables).is_some()
+    }
+
+    /// Permutes an admitted pair into the first two coordinates.
+    fn prepare(&self) -> Option<PreparedHuMonaganBivariateGcd<E>> {
+        let main_variables = self.main_variables()?;
+        let budget = self.automatic_budget(main_variables)?;
+
+        let mut order: SmallVec<[_; INLINED_EXPONENTS]> =
+            SmallVec::with_capacity(self.left.nvars());
+        order.extend(main_variables);
+        order.extend(
+            self.variables
+                .iter()
+                .copied()
+                .filter(|variable| !main_variables.contains(variable)),
+        );
+        for variable in 0..self.left.nvars() {
+            if !order.contains(&variable) {
+                order.push(variable);
+            }
+        }
+        if order.len() != self.left.nvars() {
+            return None;
+        }
+
+        let left = self.left.rearrange_impl(&order, false, false);
+        let right = self.right.rearrange_impl(&order, false, false);
+        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> = smallvec![E::zero(); self.bounds.len()];
+        for (new_variable, old_variable) in order.iter().copied().enumerate() {
+            bounds[new_variable] = self.bounds[old_variable];
+        }
+
+        Some(PreparedHuMonaganBivariateGcd {
+            left,
+            right,
+            bounds,
+            order,
+            budget,
+        })
+    }
+}
+
+/// Plans the main-variable change for one Hu-Monagan GCD operation.
+struct HuMonaganPlanningContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    variables: &'a [usize],
+    bounds: &'a [E],
+    anchor: HuMonaganAnchor,
+    anchored_degrees: SmallVec<[E; INLINED_EXPONENTS]>,
+    other_degrees: SmallVec<[E; INLINED_EXPONENTS]>,
+    maximum_row_supports: SmallVec<[usize; INLINED_EXPONENTS]>,
+}
+
+impl<'a, E: PositiveExponent> HuMonaganPlanningContext<'a, E> {
+    /// Computes the input degrees and coefficient-row supports used by the plan.
+    #[cfg(test)]
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        anchor: HuMonaganAnchor,
+    ) -> Self {
+        let left_degrees = polynomial_degrees(left);
+        let right_degrees = polynomial_degrees(right);
+        Self::new_with_degrees(
+            left,
+            right,
+            variables,
+            bounds,
+            anchor,
+            &left_degrees,
+            &right_degrees,
+        )
+    }
+
+    /// Computes coefficient-row supports using degrees from the generic GCD input scan.
+    fn new_with_degrees(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variables: &'a [usize],
+        bounds: &'a [E],
+        anchor: HuMonaganAnchor,
+        left_degrees: &[E],
+        right_degrees: &[E],
+    ) -> Self {
+        debug_assert_eq!(left_degrees.len(), left.nvars());
+        debug_assert_eq!(right_degrees.len(), right.nvars());
+        let (anchored_input, _) = anchor.order_inputs(left, right);
+        let (anchored_degrees, other_degrees) = match anchor {
+            HuMonaganAnchor::Left => (left_degrees, right_degrees),
+            HuMonaganAnchor::Right => (right_degrees, left_degrees),
+        };
+        let anchored_degrees: SmallVec<[E; INLINED_EXPONENTS]> =
+            anchored_degrees.iter().copied().collect();
+        let other_degrees: SmallVec<[E; INLINED_EXPONENTS]> =
+            other_degrees.iter().copied().collect();
+
+        // `usize::MAX` marks variables whose row support is already proven too large.
+        let mut maximum_row_supports: SmallVec<[usize; INLINED_EXPONENTS]> =
+            smallvec![usize::MAX; anchored_input.nvars()];
+        if let Some(current_variable) = variables.first().copied() {
+            let current_support = maximum_coefficient_row_support_bounded(
+                anchored_input,
+                current_variable,
+                usize::MAX,
+            )
+            .unwrap();
+            maximum_row_supports[current_variable] = current_support;
+            let maximum_candidate_support =
+                current_support / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION;
+
+            if maximum_candidate_support > 0 {
+                let current_image_work = hu_monagan_main_image_work(
+                    &anchored_degrees,
+                    &other_degrees,
+                    current_variable,
+                    current_support,
+                );
+                let current_range = hu_monagan_kronecker_range(
+                    variables,
+                    bounds,
+                    &anchored_degrees,
+                    &other_degrees,
+                    current_variable,
+                );
+                let maximum_modulus = SMOOTH_PRIMES.last().map(|prime| prime.0);
+
+                for variable in variables.iter().copied().skip(1) {
+                    if bounds[variable] == E::zero() {
+                        continue;
+                    }
+
+                    // With degree d, N terms occupy at most d + 1 exponent rows, so the
+                    // pigeonhole principle gives a lower bound on the largest row.
+                    let row_count = u128::from(anchored_degrees[variable].to_u32()) + 1;
+                    let minimum_support = (anchored_input.nterms() as u128).div_ceil(row_count);
+                    if minimum_support > maximum_candidate_support as u128
+                        || hu_monagan_main_image_work(
+                            &anchored_degrees,
+                            &other_degrees,
+                            variable,
+                            minimum_support as usize,
+                        ) > current_image_work
+                    {
+                        continue;
+                    }
+
+                    let range_is_feasible = hu_monagan_kronecker_range(
+                        variables,
+                        bounds,
+                        &anchored_degrees,
+                        &other_degrees,
+                        variable,
+                    )
+                    .is_some_and(|candidate_range| {
+                        current_range.is_none_or(|range| candidate_range <= range)
+                            && candidate_range.checked_mul(2).is_some_and(|bound| {
+                                maximum_modulus.is_some_and(|modulus| bound <= modulus)
+                            })
+                    });
+                    if !range_is_feasible {
+                        continue;
+                    }
+
+                    if let Some(support) = maximum_coefficient_row_support_bounded(
+                        anchored_input,
+                        variable,
+                        maximum_candidate_support,
+                    ) {
+                        maximum_row_supports[variable] = support;
+                    }
+                }
+            }
+        }
+
+        Self {
+            left,
+            right,
+            variables,
+            bounds,
+            anchor,
+            anchored_degrees,
+            other_degrees,
+            maximum_row_supports,
+        }
+    }
+
+    /// Orders the active variables with `main_variable` first and the interpolation variables by
+    /// descending GCD degree bound.
+    fn variable_order(&self, main_variable: usize) -> SmallVec<[usize; INLINED_EXPONENTS]> {
+        let mut order: SmallVec<[_; INLINED_EXPONENTS]> = self.variables.iter().copied().collect();
+        let main_index = order
+            .iter()
+            .position(|variable| *variable == main_variable)
+            .expect("Hu main variable is active");
+        order.swap(0, main_index);
+        order[1..].sort_by(|left, right| self.bounds[*right].cmp(&self.bounds[*left]));
+        order
+    }
+
+    /// Estimates the univariate image work for one main variable.
+    fn main_image_work(&self, variable: usize) -> u128 {
+        hu_monagan_main_image_work(
+            &self.anchored_degrees,
+            &self.other_degrees,
+            variable,
+            self.maximum_row_supports[variable],
+        )
+    }
+
+    /// Returns the mixed-radix range used to encode all variables except the main variable.
+    fn kronecker_range(&self, main_variable: usize) -> Option<u64> {
+        hu_monagan_kronecker_range(
+            self.variables,
+            self.bounds,
+            &self.anchored_degrees,
+            &self.other_degrees,
+            main_variable,
+        )
+    }
+
+    /// Selects a main variable with a substantially smaller row and a strictly smaller
+    /// mixed-radix interpolation range.
+    fn alternative_main_variable(&self) -> Option<usize> {
+        let current_variable = *self.variables.first()?;
+        let current_support = self.maximum_row_supports[current_variable];
+        let maximum_candidate_support = current_support / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION;
+        let current_image_work = self.main_image_work(current_variable);
+        let current_range = self.kronecker_range(current_variable);
+        let maximum_modulus = SMOOTH_PRIMES.last()?.0;
+
+        self.variables
+            .iter()
+            .copied()
+            .filter(|variable| {
+                *variable != current_variable
+                    && self.bounds[*variable] > E::zero()
+                    && self.maximum_row_supports[*variable] <= maximum_candidate_support
+                    && self.main_image_work(*variable) <= current_image_work
+            })
+            .filter(|variable| {
+                self.kronecker_range(*variable)
+                    .is_some_and(|candidate_range| {
+                        current_range.is_none_or(|range| candidate_range < range)
+                            && candidate_range
+                                .checked_mul(2)
+                                .is_some_and(|bound| bound <= maximum_modulus)
+                    })
+            })
+            .min_by_key(|variable| self.maximum_row_supports[*variable])
+    }
+
+    /// Extracts content in the selected main variable and prepares the permuted Hu inputs.
+    fn prepare(&self, main_variable: usize) -> Option<PreparedHuMonaganGcd<E>> {
+        let left_content = self.left.univariate_content(main_variable);
+        let right_content = self.right.univariate_content(main_variable);
+        let content = left_content.gcd(&right_content);
+
+        let left_primitive = if left_content.is_one() {
+            Cow::Borrowed(self.left)
+        } else {
+            Cow::Owned(self.left / &left_content)
+        };
+        let right_primitive = if right_content.is_one() {
+            Cow::Borrowed(self.right)
+        } else {
+            Cow::Owned(self.right / &right_content)
+        };
+
+        let order = self.variable_order(main_variable);
+        let left = left_primitive.rearrange_impl(&order, false, false);
+        let right = right_primitive.rearrange_impl(&order, false, false);
+        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> = smallvec![E::zero(); self.bounds.len()];
+        for (new_variable, old_variable) in order.iter().copied().enumerate() {
+            bounds[new_variable] = self.bounds[old_variable];
+        }
+        let variables = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(variable, bound)| (*bound > E::zero()).then_some(variable))
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        if variables.len() < 3 || variables.first() != Some(&0) {
+            return None;
+        }
+
+        let (anchored_input, _) = self.anchor.order_inputs(&left, &right);
+        let selected_support = maximum_coefficient_row_support(anchored_input, 0);
+        // Candidate content can change its row geometry. Retain the plan only if the selected
+        // primitive input still has the required advantage over the original current row.
+        if selected_support
+            > self.maximum_row_supports[self.variables[0]] / HU_MONAGAN_MAIN_VARIABLE_ROW_REDUCTION
+        {
+            return None;
+        }
+
+        Some(PreparedHuMonaganGcd {
+            left,
+            right,
+            bounds,
+            order,
+            content,
+            anchor: self.anchor,
+        })
+    }
+}
+
+/// Estimates the cost of the univariate images for one main variable.
+fn hu_monagan_main_image_work<E: PositiveExponent>(
+    anchored_degrees: &[E],
+    other_degrees: &[E],
+    variable: usize,
+    row_support: usize,
+) -> u128 {
+    let degree_span = u128::from(anchored_degrees[variable].to_u32())
+        + u128::from(other_degrees[variable].to_u32())
+        + 2;
+    degree_span * row_support as u128
+}
+
+/// Returns the mixed-radix range for every active variable except `main_variable`.
+fn hu_monagan_kronecker_range<E: PositiveExponent>(
+    variables: &[usize],
+    bounds: &[E],
+    anchored_degrees: &[E],
+    other_degrees: &[E],
+    main_variable: usize,
+) -> Option<u64> {
+    let mut range = 1u64;
+    for variable in variables.iter().copied() {
+        if variable == main_variable {
+            continue;
+        }
+
+        let radix = anchored_degrees[variable]
+            .max(other_degrees[variable])
+            .max(bounds[variable])
+            .to_u32()
+            .checked_add(1)?;
+        range = range.checked_mul(u64::from(radix))?;
+    }
+    Some(range)
+}
+
+/// Returns the largest number of terms that share one exponent in `variable`.
+fn maximum_coefficient_row_support<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+) -> usize {
+    maximum_coefficient_row_support_bounded(polynomial, variable, usize::MAX).unwrap()
+}
+
+/// Returns the largest row, or `None` as soon as one exponent row exceeds `maximum` terms.
+fn maximum_coefficient_row_support_bounded<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+    maximum: usize,
+) -> Option<usize> {
+    let mut rows = CoefficientRowCounter::default();
+    for exponents in polynomial.exponents_iter() {
+        if rows.increment(exponents[variable].to_u32(), polynomial.nterms()) > maximum {
+            return None;
+        }
+    }
+    Some(rows.largest)
+}
+
+/// Counts low exponent indices densely and switches to a map when the dense span would exceed the
+/// polynomial's term count.
+#[derive(Default)]
+struct CoefficientRowCounter {
+    dense: Vec<usize>,
+    sparse: Option<HashMap<u32, usize>>,
+    largest: usize,
+}
+
+impl CoefficientRowCounter {
+    /// Increments one exponent row while keeping the number of stored counters O(term count).
+    fn increment(&mut self, exponent: u32, term_count: usize) -> usize {
+        let count = if let Some(sparse) = &mut self.sparse {
+            sparse.entry(exponent).or_insert(0)
+        } else if let Ok(index) = usize::try_from(exponent)
+            && index < term_count
+        {
+            if self.dense.len() <= index {
+                self.dense.resize(index + 1, 0);
+            }
+            &mut self.dense[index]
+        } else {
+            let mut sparse = HashMap::<u32, usize>::default();
+            for (index, count) in std::mem::take(&mut self.dense).into_iter().enumerate() {
+                if count != 0 {
+                    sparse.insert(index as u32, count);
+                }
+            }
+            self.sparse = Some(sparse);
+            self.sparse.as_mut().unwrap().entry(exponent).or_insert(0)
+        };
+        *count += 1;
+        self.largest = self.largest.max(*count);
+        *count
+    }
+}
+
+/// Computes every variable degree in one traversal of the exponent matrix.
+#[cfg(test)]
+fn polynomial_degrees<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+) -> SmallVec<[E; INLINED_EXPONENTS]> {
+    let mut degrees: SmallVec<[E; INLINED_EXPONENTS]> = smallvec![E::zero(); polynomial.nvars()];
+    for exponents in polynomial.exponents_iter() {
+        for (degree, exponent) in degrees.iter_mut().zip(exponents) {
+            *degree = (*degree).max(*exponent);
+        }
+    }
+    degrees
+}
+
+/// Primitive, permuted inputs for one Hu-Monagan main-variable plan.
+struct PreparedHuMonaganGcd<E: PositiveExponent> {
+    left: MultivariatePolynomial<IntegerRing, E>,
+    right: MultivariatePolynomial<IntegerRing, E>,
+    bounds: SmallVec<[E; INLINED_EXPONENTS]>,
+    order: SmallVec<[usize; INLINED_EXPONENTS]>,
+    content: MultivariatePolynomial<IntegerRing, E>,
+    anchor: HuMonaganAnchor,
+}
+
+impl<E: PositiveExponent> PreparedHuMonaganGcd<E> {
+    /// Runs Hu in the selected coordinates, restores the original variables, and restores content.
+    fn run(self) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let mut gcd = self.left.gcd_hu_monagan_with_preapproved_plan(
+            &self.right,
+            &self.bounds,
+            self.anchor,
+        )?;
+        gcd = gcd.rearrange_impl(&self.order, true, false);
+        if !self.content.is_one() {
+            gcd = gcd * &self.content;
+        }
+        Some(<IntegerRing as PolynomialGCD<E>>::normalize(gcd))
+    }
+}
+
+/// Inputs and coordinate map for an admitted bivariate Hu-Monagan GCD.
+struct PreparedHuMonaganBivariateGcd<E: PositiveExponent> {
+    left: MultivariatePolynomial<IntegerRing, E>,
+    right: MultivariatePolynomial<IntegerRing, E>,
+    bounds: SmallVec<[E; INLINED_EXPONENTS]>,
+    order: SmallVec<[usize; INLINED_EXPONENTS]>,
+    budget: HuMonaganBivariateAutomaticBudget,
+}
+
+impl<E: PositiveExponent> PreparedHuMonaganBivariateGcd<E> {
+    /// Runs bivariate Hu-Monagan and restores the original coordinate order.
+    fn run(self) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let mut gcd = self.left.gcd_hu_monagan_bivariate_with_budget(
+            &self.right,
+            &self.bounds,
+            Some(self.budget),
+        )?;
+        gcd = gcd.rearrange_impl(&self.order, true, false);
+        Some(<IntegerRing as PolynomialGCD<E>>::normalize(gcd))
+    }
+}
+
+/// Returns the minimum modulus for a Hu-Monagan interpolation image.
+///
+/// The Kronecker range bound keeps the encoded exponents distinct in the
+/// multiplicative group. When twice the largest input coefficient fits below
+/// `2^32`, the same modulus also preserves its symmetric integer
+/// representative. Larger coefficients are reconstructed by CRT; the
+/// coefficient-height bound chooses word primes large enough to target at
+/// most eight images without exceeding the usable `u64` field range.
+fn hu_monagan_prime_lower_bound(
+    kronecker_range: u64,
+    delta: u32,
+    twice_largest_coefficient: &Integer,
+) -> u64 {
+    let interpolation_bound = kronecker_range.saturating_mul(2u64.saturating_pow(delta));
+    if twice_largest_coefficient < &(1i64 << 32) {
+        interpolation_bound.max(twice_largest_coefficient.to_u64().unwrap())
+    } else {
+        const MAX_TARGET_PRIME_BITS: u64 = 63;
+        let target_prime_bits = twice_largest_coefficient
+            .significant_bits()
+            .div_ceil(HU_MONAGAN_TARGET_CRT_IMAGES)
+            .min(MAX_TARGET_PRIME_BITS);
+        let coefficient_height_bound = 1u64 << target_prime_bits;
+        interpolation_bound.max(coefficient_height_bound)
+    }
+}
+
+/// Mixed-radix Kronecker map used to encode the variables sampled by Hu-Monagan interpolation.
+///
+/// If the active radices are `r_s, ..., r_n`, the evaluation powers are
+/// `r_s, r_s r_(s+1), ...`, and an exponent vector is encoded as
+/// `e_s + r_s e_(s+1) + ...`. Interpolation recovers that encoded exponent as a `u64`; `decode`
+/// expands it directly into the polynomial's exponent type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HuMonaganKroneckerMap {
+    start_index: usize,
+    radices: Vec<u32>,
+    powers: Vec<u64>,
+    range: u64,
+}
+
+impl HuMonaganKroneckerMap {
+    fn new(radices: &[u32], start_index: usize) -> Option<Self> {
+        let radices = radices.get(start_index..)?;
+        let mut product = 1u64;
+        let mut powers = Vec::with_capacity(radices.len());
+        for radix in radices {
+            if *radix == 0 {
+                return None;
+            }
+            product = product.checked_mul(*radix as u64)?;
+            powers.push(product);
+        }
+
+        Some(Self {
+            start_index,
+            radices: radices.to_vec(),
+            powers,
+            range: product,
+        })
+    }
+
+    fn powers(&self) -> &[u64] {
+        &self.powers
+    }
+
+    fn range(&self) -> u64 {
+        self.range
+    }
+
+    fn decode<E: PositiveExponent>(&self, mut encoded: u64, exponents: &mut [E]) -> Option<()> {
+        if encoded >= self.range {
+            return None;
+        }
+
+        let decoded = exponents.get_mut(self.start_index..)?;
+        if decoded.len() != self.radices.len() {
+            return None;
+        }
+
+        for (exponent, radix) in decoded.iter_mut().zip(&self.radices) {
+            *exponent = E::from_u32((encoded % *radix as u64) as u32);
+            encoded /= *radix as u64;
+        }
+
+        (encoded == 0).then_some(())
+    }
+}
+
+trait ModularGcdWorkspace: FiniteFieldWorkspace + WordCrt {
+    fn first_prime() -> u64;
+}
+
+/// Use 64-bit modular images once the reconstruction scale or input coefficient height is large
+/// enough that halving the number of CRT images outweighs the slower arithmetic in each image.
+#[cfg(not(feature = "binary_size"))]
+const U64_ZIPPEL_HEIGHT_BITS: u64 = 512;
+
+/// Returns whether any coefficient reaches the given significant-bit threshold.
+#[cfg(not(feature = "binary_size"))]
+#[inline]
+fn has_coefficient_with_bits<E: PositiveExponent>(
+    polynomial: &MultivariatePolynomial<IntegerRing, E>,
+    bits: u64,
+) -> bool {
+    polynomial
+        .coefficients
+        .iter()
+        .any(|coefficient| coefficient.significant_bits() >= bits)
+}
+
+/// Selects 64-bit modular images when the GCD scale or both input coefficient heights predict a
+/// long CRT reconstruction.
+#[cfg(not(feature = "binary_size"))]
+#[inline]
+fn should_use_u64_zippel<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+    gamma: &Integer,
+) -> bool {
+    gamma.significant_bits() >= U64_ZIPPEL_HEIGHT_BITS
+        || (has_coefficient_with_bits(a, U64_ZIPPEL_HEIGHT_BITS)
+            && has_coefficient_with_bits(b, U64_ZIPPEL_HEIGHT_BITS))
+}
+
+impl ModularGcdWorkspace for u32 {
+    fn first_prime() -> u64 {
+        u32::get_large_prime() as u64
+    }
+}
+
+/// Consecutive 64-bit primes used for univariate modular reconstruction before searching for
+/// further primes.
+const UNIVARIATE_U64_MODULAR_GCD_PRIMES: &[u64] = &[
+    18_346_744_073_709_552_031,
+    18_346_744_073_709_552_043,
+    18_346_744_073_709_552_047,
+    18_346_744_073_709_552_049,
+    18_346_744_073_709_552_353,
+    18_346_744_073_709_552_491,
+    18_346_744_073_709_552_521,
+    18_346_744_073_709_552_601,
+    18_346_744_073_709_552_673,
+    18_346_744_073_709_552_691,
+    18_346_744_073_709_552_701,
+    18_346_744_073_709_552_811,
+    18_346_744_073_709_552_829,
+    18_346_744_073_709_552_841,
+    18_346_744_073_709_552_857,
+    18_346_744_073_709_552_863,
+    18_346_744_073_709_552_923,
+    18_346_744_073_709_552_929,
+    18_346_744_073_709_552_973,
+    18_346_744_073_709_552_989,
+    18_346_744_073_709_553_009,
+    18_346_744_073_709_553_133,
+    18_346_744_073_709_553_169,
+    18_346_744_073_709_553_171,
+    18_346_744_073_709_553_199,
+    18_346_744_073_709_553_253,
+    18_346_744_073_709_553_309,
+    18_346_744_073_709_553_321,
+    18_346_744_073_709_553_331,
+    18_346_744_073_709_553_417,
+    18_346_744_073_709_553_451,
+    18_346_744_073_709_553_459,
+];
+
+impl ModularGcdWorkspace for u64 {
+    fn first_prime() -> u64 {
+        UNIVARIATE_U64_MODULAR_GCD_PRIMES[0]
+    }
+}
+
+/// Discrete logarithms used to decode Hu-Monagan's Kronecker exponents.
+trait HuMonaganDiscreteLog<UField: FiniteFieldWorkspace> {
+    fn discrete_log(&self, value: &FiniteFieldElement<UField>) -> u64;
+}
+
+impl HuMonaganDiscreteLog<u32> for ZpDiscreteLogContext<'_> {
+    fn discrete_log(&self, value: &FiniteFieldElement<u32>) -> u64 {
+        self.discrete_log(value)
+    }
+}
+
+impl HuMonaganDiscreteLog<u64> for Zp64DiscreteLogContext<'_> {
+    fn discrete_log(&self, value: &FiniteFieldElement<u64>) -> u64 {
+        self.discrete_log(value)
+    }
+}
+
+/// Fixed-width prime words supported by bivariate Hu-Monagan interpolation.
+trait HuMonaganWorkspace: ModularGcdWorkspace {
+    type DiscreteLogContext<'a>: HuMonaganDiscreteLog<Self>
+    where
+        Self: 'a;
+
+    fn discrete_log_context<'a>(
+        field: &'a FiniteField<Self>,
+        base: &FiniteFieldElement<Self>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a>
+    where
+        FiniteField<Self>: FiniteFieldCore<Self> + Set<Element = FiniteFieldElement<Self>>;
+}
+
+impl HuMonaganWorkspace for u32 {
+    type DiscreteLogContext<'a> = ZpDiscreteLogContext<'a>;
+
+    fn discrete_log_context<'a>(
+        field: &'a Zp,
+        base: &FiniteFieldElement<u32>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a> {
+        ZpDiscreteLogContext::new(field, base, totient, totient_primes)
+    }
+}
+
+impl HuMonaganWorkspace for u64 {
+    type DiscreteLogContext<'a> = Zp64DiscreteLogContext<'a>;
+
+    fn discrete_log_context<'a>(
+        field: &'a Zp64,
+        base: &FiniteFieldElement<u64>,
+        totient: u64,
+        totient_primes: &[(u64, u32)],
+    ) -> Self::DiscreteLogContext<'a> {
+        Zp64DiscreteLogContext::new(field, base, totient, totient_primes)
+    }
+}
+
+/// Yields prevalidated primes for univariate modular reconstruction, discovering further primes
+/// after the fixed sequence is exhausted.
+fn univariate_modular_gcd_prime_iterator() -> impl Iterator<Item = u64> {
+    let last = *UNIVARIATE_U64_MODULAR_GCD_PRIMES
+        .last()
+        .expect("univariate modular GCD prime table must not be empty");
+    UNIVARIATE_U64_MODULAR_GCD_PRIMES
+        .iter()
+        .copied()
+        .chain(PrimeIteratorU64::new(last))
+}
+
+/// Yields a known modular GCD prime first, followed by its consecutive successors.
+struct ModularGcdPrimeIterator {
+    first: Option<u64>,
+    successors: PrimeIteratorU64,
+}
+
+impl ModularGcdPrimeIterator {
+    fn for_workspace<UField: ModularGcdWorkspace>() -> Self {
+        let first = UField::first_prime();
+        Self {
+            first: Some(first),
+            successors: PrimeIteratorU64::new(first),
+        }
+    }
+}
+
+impl Iterator for ModularGcdPrimeIterator {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.first.take().or_else(|| self.successors.next())
+    }
+}
+
+fn modular_gcd_prime_iterator() -> ModularGcdPrimeIterator {
+    ModularGcdPrimeIterator::for_workspace::<ModularGcdFieldWorkspace>()
+}
+
+fn next_modular_gcd_prime(
+    primes: &mut ModularGcdPrimeIterator,
+    context: &str,
+) -> ModularGcdFieldWorkspace {
+    let Some(p) = primes.next().and_then(|p| {
+        <ModularGcdFieldWorkspace as FiniteFieldWorkspace>::try_from_integer(p.into())
+    }) else {
+        panic!("Ran out of primes for {context}");
+    };
+    p
 }
 
 impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
@@ -47,20 +1615,20 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
         r: &[(usize, R::Element)],
         cache: &mut [Vec<R::Element>],
     ) -> Vec<R::Element> {
-        let mut eval = vec![self.ring.one(); self.nterms()];
+        let mut eval = vec![self.ring().one(); self.nterms()];
         for (c, t) in eval.iter_mut().zip(self) {
             // evaluate each exponent
             for (n, v) in r {
                 let exp = t.exponents[*n].to_u32() as usize;
                 if exp > 0 {
                     if exp < cache[*n].len() {
-                        if self.ring.is_zero(&cache[*n][exp]) {
-                            cache[*n][exp] = self.ring.pow(v, exp as u64);
+                        if self.ring().is_zero(&cache[*n][exp]) {
+                            cache[*n][exp] = self.ring().pow(v, exp as u64);
                         }
 
-                        self.ring.mul_assign(c, &cache[*n][exp]);
+                        self.ring().mul_assign(c, &cache[*n][exp]);
                     } else {
-                        self.ring.mul_assign(c, &self.ring.pow(v, exp as u64));
+                        self.ring().mul_assign(c, &self.ring().pow(v, exp as u64));
                     }
                 }
             }
@@ -68,75 +1636,434 @@ impl<R: Ring, E: PositiveExponent> MultivariatePolynomial<R, E> {
         eval
     }
 
-    /// Evaluate a polynomial using the evaluation of the exponent of every monomial.
+    /// Build a univariate polynomial from coefficient-weighted monomial evaluations and advance
+    /// every geometric sequence by one step.
+    ///
+    /// `current_evals[i]` already includes the coefficient of term `i`, while
+    /// `term_evals[i]` is its geometric ratio. This lets the bulk kernel update each term with one
+    /// multiplication per sample instead of multiplying by both the ratio and the coefficient.
     #[inline(always)]
-    pub(crate) fn evaluate_using_exponents(
+    pub(crate) fn evaluate_and_advance_weighted_terms(
         &self,
-        exp_evals: &[R::Element],
+        current_evals: &mut [R::Element],
+        term_evals: &[R::Element],
         main_var: usize,
+        rows: &[(E, usize, usize)],
         out: &mut MultivariatePolynomial<R, E>,
     ) {
         out.clear();
-        let mut c = self.ring.zero();
         let mut new_exp = vec![E::zero(); self.nvars()];
-        for (aa, e) in self.into_iter().zip(exp_evals) {
-            if aa.exponents[main_var] != new_exp[main_var] {
-                if !self.ring.is_zero(&c) {
-                    out.coefficients.push(c);
-                    out.exponents.extend_from_slice(&new_exp);
+        let geometric_sequence_kernels = self.ring().kernels().geometric_sequences();
+        for (exponent, start, end) in rows {
+            let current_row = &mut current_evals[*start..*end];
+            let term_row = &term_evals[*start..*end];
+            let coefficient = geometric_sequence_kernels
+                .and_then(|kernels| {
+                    kernels.try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                        current: &mut *current_row,
+                        ratios: term_row,
+                    })
+                })
+                .unwrap_or_else(|| {
+                    let mut coefficient = self.ring().zero();
+                    for (current, term_eval) in current_row.iter_mut().zip(term_row) {
+                        self.ring().add_assign(&mut coefficient, &*current);
+                        self.ring().mul_assign(current, term_eval);
+                    }
+                    coefficient
+                });
 
-                    c = self.ring.zero();
-                }
-
-                new_exp[main_var] = aa.exponents[main_var];
+            if !self.ring().is_zero(&coefficient) {
+                new_exp[main_var] = *exponent;
+                out.coefficients.push(coefficient);
+                out.exponents.extend_from_slice(&new_exp);
             }
+        }
+    }
 
-            self.ring.add_mul_assign(&mut c, aa.coefficient, e);
+    /// Find the contiguous ranges belonging to each exponent of `main_var`.
+    fn univariate_row_ranges(&self, main_var: usize) -> Vec<(E, usize, usize)> {
+        let mut rows = Vec::new();
+        let mut exponents = self.exponents.chunks(self.nvars());
+        let Some(first) = exponents.next() else {
+            return rows;
+        };
+
+        let mut row_exponent = first[main_var];
+        let mut row_start = 0;
+        for (index, exponents) in exponents.enumerate() {
+            let term_index = index + 1;
+            if exponents[main_var] != row_exponent {
+                rows.push((row_exponent, row_start, term_index));
+                row_exponent = exponents[main_var];
+                row_start = term_index;
+            }
+        }
+        rows.push((row_exponent, row_start, self.nterms()));
+        rows
+    }
+}
+
+/// Dense coefficient storage for the Euclidean GCDs used by modular images.
+///
+/// Each input is converted once. Remainders reuse the two coefficient buffers, and only the final
+/// monic GCD is converted back to a multivariate polynomial.
+struct DenseUnivariateGcdContext<'a, F: Field, E: PositiveExponent> {
+    prototype: &'a MultivariatePolynomial<F, E>,
+    variable: Option<usize>,
+}
+
+/// Supplies repeated evaluations of a polynomial pair in their last active variable.
+///
+/// Calls that require several images cache row boundaries, powers, and output buffers. A single
+/// image is evaluated directly because it cannot amortize the metadata scan.
+struct RepeatedLastVariableEvaluationContext<'a, F: Field, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<F, E>,
+    right: &'a MultivariatePolynomial<F, E>,
+    variable: usize,
+    cached: Option<(
+        LastVariableEvaluationContext<'a, F, E>,
+        LastVariableEvaluationContext<'a, F, E>,
+        LastVariablePowerWorkspace<F>,
+    )>,
+}
+
+impl<'a, F: Field, E: PositiveExponent> RepeatedLastVariableEvaluationContext<'a, F, E> {
+    fn new(
+        left: &'a MultivariatePolynomial<F, E>,
+        right: &'a MultivariatePolynomial<F, E>,
+        variable: usize,
+        expected_evaluations: usize,
+    ) -> Self {
+        let mut context = Self {
+            left,
+            right,
+            variable,
+            cached: None,
+        };
+        if expected_evaluations > 1 {
+            context.enable_reuse();
+        }
+        context
+    }
+
+    /// Prepare cached row metadata and buffers before an interpolation needs multiple images.
+    fn enable_reuse(&mut self) {
+        if self.cached.is_some() {
+            return;
         }
 
-        if !self.ring.is_zero(&c) {
-            out.coefficients.push(c);
-            out.exponents.extend_from_slice(&new_exp);
+        let left_context = LastVariableEvaluationContext::new(self.left, self.variable);
+        let right_context = LastVariableEvaluationContext::new(self.right, self.variable);
+        let maximum_degree = left_context
+            .maximum_degree()
+            .max(right_context.maximum_degree());
+        let powers = LastVariablePowerWorkspace::new(self.left.ring(), maximum_degree);
+        self.cached = Some((left_context, right_context, powers));
+    }
+
+    /// Evaluate both inputs at `value` and pass the results to `operation`.
+    fn with_evaluations<T>(
+        &mut self,
+        value: &F::Element,
+        operation: impl FnOnce(&MultivariatePolynomial<F, E>, &MultivariatePolynomial<F, E>) -> T,
+    ) -> T {
+        if let Some((left, right, powers)) = &mut self.cached {
+            powers.start_value(value);
+            let left = left.evaluate(powers);
+            let right = right.evaluate(powers);
+            operation(left, right)
+        } else {
+            let left = self.left.replace_last(self.variable, value);
+            let right = self.right.replace_last(self.variable, value);
+            operation(&left, &right)
         }
     }
 }
 
-impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
-    /// Compute the univariate GCD using Euclid's algorithm. The result is normalized to 1.
-    pub fn univariate_gcd(&self, b: &Self) -> Self {
-        if self.is_zero() {
-            return b.clone();
-        }
-        if b.is_zero() {
-            return self.clone();
-        }
+/// Maps a sampled univariate degree to its coefficient in the known GCD shape.
+enum ZippelShapeIndex<E: PositiveExponent> {
+    Dense {
+        minimum_degree: usize,
+        indices: Vec<Option<usize>>,
+    },
+    Sparse(Vec<E>),
+}
 
-        let mut c = self.clone();
-        let mut d = b.clone();
-        if self.ldegree_max() < b.ldegree_max() {
-            mem::swap(&mut c, &mut d);
-        }
-
-        // TODO: there exists an efficient algorithm for univariate poly
-        // division in a finite field using FFT
-        let mut r = c.quot_rem_univariate(&mut d).1;
-        while !r.is_zero() {
-            c = d;
-            d = r;
-            r = c.quot_rem_univariate(&mut d).1;
-        }
-
-        // normalize the gcd
-        if let Some(l) = d.coefficients.last()
-            && !d.ring.is_one(l)
+impl<E: PositiveExponent> ZippelShapeIndex<E> {
+    fn new(degrees: impl IntoIterator<Item = E>) -> Self {
+        let degrees = degrees.into_iter().collect::<Vec<_>>();
+        let minimum_degree = degrees
+            .iter()
+            .map(|degree| degree.to_u32() as usize)
+            .min()
+            .expect("a GCD image must have at least one term");
+        let maximum_degree = degrees
+            .iter()
+            .map(|degree| degree.to_u32() as usize)
+            .max()
+            .unwrap();
+        let degree_span = maximum_degree - minimum_degree + 1;
+        if degree_span > ZIPPEL_SHAPE_INDEX_MAX_DEGREE_SPAN
+            || degree_span
+                > degrees
+                    .len()
+                    .saturating_mul(ZIPPEL_SHAPE_INDEX_MAX_SPARSITY_RATIO)
         {
-            let i = d.ring.inv(l);
-            for x in &mut d.coefficients {
-                d.ring.mul_assign(x, &i);
+            return Self::Sparse(degrees);
+        }
+
+        let mut indices = vec![None; degree_span];
+        for (index, degree) in degrees.into_iter().enumerate() {
+            let slot = &mut indices[degree.to_u32() as usize - minimum_degree];
+            debug_assert!(slot.is_none());
+            *slot = Some(index);
+        }
+        Self::Dense {
+            minimum_degree,
+            indices,
+        }
+    }
+
+    fn get(&self, degree: E) -> Option<usize> {
+        match self {
+            Self::Dense {
+                minimum_degree,
+                indices,
+            } => (degree.to_u32() as usize)
+                .checked_sub(*minimum_degree)
+                .and_then(|degree| indices.get(degree))
+                .and_then(|index| *index),
+            Self::Sparse(degrees) => degrees
+                .iter()
+                .position(|shape_degree| *shape_degree == degree),
+        }
+    }
+}
+
+impl<'a, F: Field, E: PositiveExponent> DenseUnivariateGcdContext<'a, F, E> {
+    fn new(left: &'a MultivariatePolynomial<F, E>, right: &MultivariatePolynomial<F, E>) -> Self {
+        let variable = left
+            .last_exponents()
+            .iter()
+            .position(|exponent| !exponent.is_zero())
+            .or_else(|| {
+                right
+                    .last_exponents()
+                    .iter()
+                    .position(|exponent| !exponent.is_zero())
+            });
+
+        debug_assert!(
+            left.exponents_iter()
+                .chain(right.exponents_iter())
+                .all(
+                    |exponents| exponents.iter().enumerate().all(|(index, exponent)| {
+                        exponent.is_zero() || variable.is_some_and(|variable| index == variable)
+                    })
+                )
+        );
+
+        Self {
+            prototype: left,
+            variable,
+        }
+    }
+
+    /// Return whether dense storage remains bounded for this polynomial pair.
+    fn storage_is_bounded(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> bool {
+        let Some(variable) = self.variable else {
+            return true;
+        };
+        let coefficient_count = left.last_exponents()[variable]
+            .max(right.last_exponents()[variable])
+            .to_u32() as usize
+            + 1;
+        coefficient_count <= DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+            && coefficient_count
+                <= (left.nterms() + right.nterms())
+                    .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+    }
+
+    /// Compute the monic GCD when at least one input consists of one monomial.
+    fn gcd_with_monomial(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> MultivariatePolynomial<F, E> {
+        let Some(variable) = self.variable else {
+            return self.prototype.one();
+        };
+        let degree = left.exponents(0)[variable].min(right.exponents(0)[variable]);
+        if degree.is_zero() {
+            return self.prototype.one();
+        }
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        exponents[variable] = degree;
+        self.prototype
+            .monomial(self.prototype.ring().one(), exponents)
+    }
+
+    /// Copy a sparse univariate polynomial into a degree-indexed coefficient buffer.
+    fn coefficients(&self, polynomial: &MultivariatePolynomial<F, E>) -> Vec<F::Element> {
+        let Some(variable) = self.variable else {
+            return vec![polynomial.coefficients[0].clone()];
+        };
+        let degree = polynomial.last_exponents()[variable].to_u32() as usize;
+        let mut coefficients = vec![polynomial.ring().zero(); degree + 1];
+        for term in polynomial {
+            coefficients[term.exponents[variable].to_u32() as usize] = term.coefficient.clone();
+        }
+        coefficients
+    }
+
+    /// Scale a nonzero dense polynomial so its leading coefficient is one.
+    fn make_monic(&self, polynomial: &mut [F::Element]) {
+        let Some(leading_coefficient) = polynomial.last() else {
+            return;
+        };
+        if self.prototype.ring().is_one(leading_coefficient) {
+            return;
+        }
+        let inverse = self.prototype.ring().inv(leading_coefficient);
+        for coefficient in polynomial {
+            self.prototype.ring().mul_assign(coefficient, &inverse);
+        }
+    }
+
+    /// Replace `dividend` by its remainder modulo the monic `divisor`.
+    fn rem_monic(&self, dividend: &mut Vec<F::Element>, divisor: &[F::Element]) {
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(self.prototype.ring().is_one(divisor.last().unwrap()));
+        if dividend.len() < divisor.len() {
+            return;
+        }
+        if divisor.len() == 1 {
+            dividend.clear();
+            return;
+        }
+
+        let divisor_degree = divisor.len() - 1;
+        for degree in (divisor_degree..dividend.len()).rev() {
+            let leading_coefficient =
+                std::mem::replace(&mut dividend[degree], self.prototype.ring().zero());
+            if self.prototype.ring().is_zero(&leading_coefficient) {
+                continue;
+            }
+
+            let shift = degree - divisor_degree;
+            for (coefficient, divisor_coefficient) in dividend[shift..degree]
+                .iter_mut()
+                .zip(&divisor[..divisor_degree])
+            {
+                self.prototype.ring().sub_mul_assign(
+                    coefficient,
+                    divisor_coefficient,
+                    &leading_coefficient,
+                );
             }
         }
 
-        d
+        dividend.truncate(divisor_degree);
+        while dividend
+            .last()
+            .is_some_and(|coefficient| self.prototype.ring().is_zero(coefficient))
+        {
+            dividend.pop();
+        }
+    }
+
+    /// Convert a dense coefficient buffer back to the original polynomial representation.
+    fn polynomial(&self, coefficients: Vec<F::Element>) -> MultivariatePolynomial<F, E> {
+        let mut result = self.prototype.zero_with_capacity(coefficients.len());
+        let Some(variable) = self.variable else {
+            return result.add_constant(coefficients.into_iter().next().unwrap());
+        };
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !self.prototype.ring().is_zero(&coefficient) {
+                exponents[variable] = E::from_u32(degree as u32);
+                result.append_monomial_back(coefficient, &exponents);
+            }
+        }
+        result
+    }
+
+    /// Compute a monic GCD while retaining all intermediate remainders in dense storage.
+    fn gcd(
+        &self,
+        left: &MultivariatePolynomial<F, E>,
+        right: &MultivariatePolynomial<F, E>,
+    ) -> MultivariatePolynomial<F, E> {
+        let mut left = self.coefficients(left);
+        let mut right = self.coefficients(right);
+        if left.len() < right.len() {
+            mem::swap(&mut left, &mut right);
+        }
+        self.make_monic(&mut right);
+
+        while !right.is_empty() {
+            if right.len() == 1 {
+                return self.prototype.one();
+            }
+            self.rem_monic(&mut left, &right);
+            mem::swap(&mut left, &mut right);
+            self.make_monic(&mut right);
+        }
+
+        self.polynomial(left)
+    }
+}
+
+impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
+    /// Compute the univariate GCD using Euclid's algorithm. A nonzero result is monic.
+    pub fn univariate_gcd(&self, b: &Self) -> Self {
+        if self.is_zero() && b.is_zero() {
+            return self.clone();
+        }
+        if self.is_zero() {
+            return b.clone().make_monic();
+        }
+        if b.is_zero() {
+            return self.clone().make_monic();
+        }
+
+        let dense = DenseUnivariateGcdContext::new(self, b);
+        if self.nterms() == 1 || b.nterms() == 1 {
+            return dense.gcd_with_monomial(self, b);
+        }
+        if dense.storage_is_bounded(self, b) {
+            return dense.gcd(self, b);
+        }
+
+        // Use the existing polynomial-buffer division path when exponent gaps would make the
+        // dedicated dense workspace disproportionately large.
+        let mut left = self.clone();
+        let mut right = b.clone();
+        if self.ldegree_max() < b.ldegree_max() {
+            mem::swap(&mut left, &mut right);
+        }
+        let mut remainder = left.quot_rem_univariate(&mut right).1;
+        while !remainder.is_zero() {
+            left = right;
+            right = remainder;
+            remainder = left.quot_rem_univariate(&mut right).1;
+        }
+
+        if let Some(leading_coefficient) = right.coefficients.last()
+            && !right.ring().is_one(leading_coefficient)
+        {
+            let inverse = right.ring().inv(leading_coefficient);
+            let (ring, coefficients) = right.ring_and_coefficients_mut();
+            for coefficient in coefficients {
+                ring.mul_assign(coefficient, &inverse);
+            }
+        }
+        right
     }
 
     /// Replace all variables except `v` in the polynomial by elements from
@@ -154,26 +2081,27 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 let exp = mv.exponents[*n].to_u32() as usize;
                 if exp > 0 {
                     if exp < cache[*n].len() {
-                        if self.ring.is_zero(&cache[*n][exp]) {
-                            cache[*n][exp] = self.ring.pow(vv, exp as u64);
+                        if self.ring().is_zero(&cache[*n][exp]) {
+                            cache[*n][exp] = self.ring().pow(vv, exp as u64);
                         }
 
-                        self.ring.mul_assign(&mut c, &cache[*n][exp]);
+                        self.ring().mul_assign(&mut c, &cache[*n][exp]);
                     } else {
-                        self.ring.mul_assign(&mut c, &self.ring.pow(vv, exp as u64));
+                        self.ring()
+                            .mul_assign(&mut c, &self.ring().pow(vv, exp as u64));
                     }
                 }
             }
 
             tm.entry(mv.exponents[v])
-                .and_modify(|e| self.ring.add_assign(e, &c))
+                .and_modify(|e| self.ring().add_assign(e, &c))
                 .or_insert(c);
         }
 
         let mut res = self.zero();
         let mut e = vec![E::zero(); self.nvars()];
         for (k, c) in tm.drain() {
-            if !self.ring.is_zero(&c) {
+            if !self.ring().is_zero(&c) {
                 e[v] = k;
                 res.append_monomial(c, &e);
                 e[v] = E::zero();
@@ -188,14 +2116,17 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// substituting all variables except `var`. This
     /// upper bound could be too tight due to an unfortunate
     /// sample point, but this is rare.
-    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E {
+    fn get_gcd_var_bound(ap: &Self, bp: &Self, vars: &[usize], var: usize) -> E
+    where
+        F: UniformlySampleableRing,
+    {
         let mut rng = rand::rng();
 
         // store a table for variables raised to a certain power
         let mut cache = (0..ap.nvars())
             .map(|i| {
                 vec![
-                    ap.ring.zero();
+                    ap.ring().zero();
                     min(
                         max(ap.degree(i), bp.degree(i)).to_u32() as usize + 1,
                         POW_CACHE_SIZE
@@ -215,13 +2146,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         let (_, a1, b1) = loop {
             for v in &mut cache {
                 for vi in v {
-                    *vi = ap.ring.zero();
+                    *vi = ap.ring().zero();
                 }
             }
 
             let r: Vec<_> = vars
                 .iter()
-                .map(|i| (*i, ap.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| (*i, ap.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let a1 = ap.sample_polynomial(var, &r, &mut cache, &mut tm);
@@ -231,7 +2162,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 break (r, a1, b1);
             }
 
-            if let Some(size) = ap.ring.size()
+            if let Some(size) = ap.ring().size()
                 && fail_count * 2 > size
             {
                 debug!("Field is too small to find a good sample point");
@@ -248,6 +2179,34 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let g1 = a1.univariate_gcd(&b1);
         g1.ldegree_max()
+    }
+
+    /// Samples each variable bound independently. This is used for coefficient fields or degree
+    /// ranges for which the fused dense sampler is not suitable.
+    fn get_gcd_var_bounds_separately(
+        ap: &Self,
+        bp: &Self,
+        vars: &[usize],
+    ) -> SmallVec<[E; INLINED_EXPONENTS]>
+    where
+        F: UniformlySampleableRing,
+    {
+        let mut bounds = (0..ap.nvars())
+            .map(|_| E::zero())
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        for var in vars {
+            if ap.degree(*var) == E::zero() || bp.degree(*var) == E::zero() {
+                continue;
+            }
+
+            let sampled_variables = vars
+                .iter()
+                .filter(|variable| *variable != var)
+                .copied()
+                .collect::<SmallVec<[usize; INLINED_EXPONENTS]>>();
+            bounds[*var] = Self::get_gcd_var_bound(ap, bp, &sampled_variables, *var);
+        }
+        bounds
     }
 
     fn solve_vandermonde(
@@ -284,53 +2243,79 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         match x.len() {
             0 => vec![],
-            1 => vec![self.ring.div(&rhs[0], &x[0])],
+            1 => vec![self.ring().div(&rhs[0], &x[0])],
             len => {
-                let mut master = vec![self.ring.zero(); len + 1];
-                master[0] = self.ring.one();
+                let mut master = vec![self.ring().zero(); len + 1];
+                master[0] = self.ring().one();
 
                 for (i, x) in x.iter().enumerate() {
                     let first = &mut master[0];
                     let mut old_last = first.clone();
-                    self.ring.mul_assign(first, &self.ring.neg(x));
+                    self.ring().mul_assign(first, &self.ring().neg(x));
                     for m in &mut master[1..=i] {
                         let ov = m.clone();
-                        self.ring.mul_assign(m, &self.ring.neg(x));
-                        self.ring.add_assign(m, &old_last);
+                        self.ring().mul_assign(m, &self.ring().neg(x));
+                        self.ring().add_assign(m, &old_last);
                         old_last = ov;
                     }
-                    master[i + 1] = self.ring.one();
+                    master[i + 1] = self.ring().one();
                 }
 
                 let mut sol = Vec::with_capacity(len);
+                let mut denominators = Vec::with_capacity(len);
                 for (i, s) in x.iter().enumerate() {
                     // sample master/(1-s_i) by using the factorized form
-                    let mut norm = self.ring.one();
+                    let mut norm = self.ring().one();
                     for (j, l) in x.iter().enumerate() {
                         if j != i {
-                            let diff = self.ring.sub(s, l);
-                            if self.ring.is_zero(&diff) {
+                            let diff = self.ring().sub(s, l);
+                            if self.ring().is_zero(&diff) {
                                 panic!("Vandermonde matrix has duplicate entries");
                             }
-                            self.ring.mul_assign(&mut norm, &diff);
+                            self.ring().mul_assign(&mut norm, &diff);
                         }
                     }
 
                     // divide out 1-s_i
-                    let mut coeff = self.ring.zero();
-                    let mut last_q = self.ring.zero();
+                    let mut coeff = self.ring().zero();
+                    let mut last_q = self.ring().zero();
                     for (m, rhs) in master.iter().skip(1).zip(rhs).rev() {
-                        last_q = self.ring.add(m, &self.ring.mul(s, &last_q));
-                        self.ring.add_mul_assign(&mut coeff, &last_q, rhs);
+                        last_q = self.ring().add(m, &self.ring().mul(s, &last_q));
+                        self.ring().add_mul_assign(&mut coeff, &last_q, rhs);
                     }
 
-                    self.ring.div_assign(&mut coeff, &norm);
-
-                    // Convert from the ordinary transposed Vandermonde basis
-                    // sample_generators[i]^k to the shifted basis sample_generators[i]^(k+1).
-                    self.ring.div_assign(&mut coeff, &x[i]);
-
+                    // Multiplying by x[i] converts the ordinary transposed Vandermonde
+                    // denominator for powers k into the shifted denominator for powers k + 1.
+                    self.ring().mul_assign(&mut norm, &x[i]);
+                    denominators.push(norm);
                     sol.push(coeff);
+                }
+
+                if self.ring().size().is_some() {
+                    // In a finite field, recover every reciprocal from one inversion and a pair
+                    // of prefix/suffix multiplication passes.
+                    let mut prefixes = Vec::with_capacity(len);
+                    prefixes.push(self.ring().one());
+                    let mut product = denominators[0].clone();
+                    for denominator in &denominators[1..] {
+                        prefixes.push(product.clone());
+                        self.ring().mul_assign(&mut product, denominator);
+                    }
+
+                    let mut inverse_suffix = self.ring().inv(&product);
+                    for index in (1..len).rev() {
+                        let inverse_denominator =
+                            self.ring().mul(&prefixes[index], &inverse_suffix);
+                        self.ring()
+                            .mul_assign(&mut sol[index], &inverse_denominator);
+                        self.ring()
+                            .mul_assign(&mut inverse_suffix, &denominators[index]);
+                    }
+                    self.ring().mul_assign(&mut sol[0], &inverse_suffix);
+                } else {
+                    for (coefficient, denominator) in sol.iter_mut().zip(&denominators) {
+                        self.ring().div_assign(coefficient, denominator);
+                    }
                 }
 
                 sol
@@ -345,16 +2330,16 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         u: &[MultivariatePolynomial<F, E>],
         x: usize, // the variable index to extend the polynomial by
     ) -> MultivariatePolynomial<F, E> {
-        let field = &u[0].ring;
+        let field = &u[0].ring();
 
         // compute inverses
         let mut gammas = Vec::with_capacity(a.len());
         for k in 1..a.len() {
             let mut pr = field.sub(&a[k], &a[0]);
             for i in 1..k {
-                u[0].ring.mul_assign(&mut pr, &field.sub(&a[k], &a[i]));
+                u[0].ring().mul_assign(&mut pr, &field.sub(&a[k], &a[i]));
             }
-            gammas.push(u[0].ring.inv(&pr));
+            gammas.push(u[0].ring().inv(&pr));
         }
 
         // compute Newton coefficients
@@ -383,6 +2368,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 
     #[instrument(level = "trace", fields(%a, %b))]
+    #[inline(never)]
     fn construct_new_image_single_scale(
         a: &MultivariatePolynomial<F, E>,
         b: &MultivariatePolynomial<F, E>,
@@ -393,7 +2379,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: UniformlySampleableRing,
+    {
         if vars.is_empty() {
             // return gcd divided by the single scale factor
             let g = a.univariate_gcd(b);
@@ -423,7 +2412,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             let (_, d) = &shape[single_scale];
             for t in &g {
                 if t.exponents[main_var] == *d {
-                    let scale_factor = a.ring.neg(&a.ring.inv(t.coefficient)); // TODO: why -1?
+                    let scale_factor = a.ring().neg(&a.ring().inv(t.coefficient)); // TODO: why -1?
                     return Ok(g.mul_coeff(scale_factor));
                 }
             }
@@ -437,16 +2426,28 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
         let mut failure_count = 0;
 
-        // store a table for variables raised to a certain power
-        let mut cache = (0..a.nvars())
-            .map(|i| {
-                vec![
-                    a.ring.zero();
-                    min(
-                        max(a.degree(i), b.degree(i)).to_u32() as usize + 1,
-                        POW_CACHE_SIZE
-                    )
-                ]
+        let shape_index_by_degree =
+            ZippelShapeIndex::new(shape.iter().map(|(_, exponent)| *exponent));
+
+        // Store powers only for the variables evaluated at this recursion level. Scan both
+        // exponent arrays once to find their required cache sizes.
+        let mut evaluated_degrees = vec![E::zero(); a.nvars()];
+        for polynomial in [a, b] {
+            for exponents in polynomial.exponents_iter() {
+                for &variable in vars {
+                    evaluated_degrees[variable] =
+                        evaluated_degrees[variable].max(exponents[variable]);
+                }
+            }
+        }
+        let mut cache = evaluated_degrees
+            .into_iter()
+            .map(|degree| {
+                if degree == E::zero() {
+                    Vec::new()
+                } else {
+                    vec![a.ring().zero(); (degree.to_u32() as usize + 1).min(POW_CACHE_SIZE)]
+                }
             })
             .collect::<Vec<_>>();
 
@@ -454,13 +2455,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         let (row_sample_values, samples) = 'find_root_sample: loop {
             for v in &mut cache {
                 for vi in v {
-                    *vi = a.ring.zero();
+                    *vi = a.ring().zero();
                 }
             }
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -472,18 +2473,18 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
                 for t in c {
                     // evaluate each exponent
-                    let mut c = a.ring.one();
+                    let mut c = a.ring().one();
                     for (n, v) in &r_orig {
                         let exp = t.exponents[*n].to_u32() as usize;
                         if exp > 0 {
                             if exp < cache[*n].len() {
-                                if a.ring.is_zero(&cache[*n][exp]) {
-                                    cache[*n][exp] = a.ring.pow(v, exp as u64);
+                                if a.ring().is_zero(&cache[*n][exp]) {
+                                    cache[*n][exp] = a.ring().pow(v, exp as u64);
                                 }
 
-                                a.ring.mul_assign(&mut c, &cache[*n][exp]);
+                                a.ring().mul_assign(&mut c, &cache[*n][exp]);
                             } else {
-                                a.ring.mul_assign(&mut c, &a.ring.pow(v, exp as u64));
+                                a.ring().mul_assign(&mut c, &a.ring().pow(v, exp as u64));
                             }
                         }
                     }
@@ -499,36 +2500,58 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 row_sample_values.push(row);
             }
 
+            debug_assert_eq!(row_sample_values[single_scale].len(), 1);
+            let scale_ratio = row_sample_values[single_scale][0].clone();
+            let mut scale_value = scale_ratio.clone();
+
             let mut samples = vec![Vec::with_capacity(samples_needed); shape.len()];
             let mut r = r_orig.clone();
 
             let a_eval = a.evaluate_exponents(&r_orig, &mut cache);
             let b_eval = b.evaluate_exponents(&r_orig, &mut cache);
 
-            let mut a_current = Cow::Borrowed(&a_eval);
-            let mut b_current = Cow::Borrowed(&b_eval);
+            let mut a_current = a
+                .coefficients
+                .iter()
+                .zip(&a_eval)
+                .map(|(coefficient, eval)| a.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let mut b_current = b
+                .coefficients
+                .iter()
+                .zip(&b_eval)
+                .map(|(coefficient, eval)| b.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let a_rows = a.univariate_row_ranges(main_var);
+            let b_rows = b.univariate_row_ranges(main_var);
 
-            let mut a_poly = a.zero_with_capacity(a.degree(main_var).to_u32() as usize + 1);
-            let mut b_poly = b.zero_with_capacity(b.degree(main_var).to_u32() as usize + 1);
+            let mut a_poly = a.zero_with_capacity(a_ldegree.to_u32() as usize + 1);
+            let mut b_poly = b.zero_with_capacity(b_ldegree.to_u32() as usize + 1);
+            let mut sampled_term_by_shape = vec![None; shape.len()];
 
             for sample_index in 0..samples_needed {
                 // sample at r^i
                 if sample_index > 0 {
                     for (c, rr) in r.iter_mut().zip(&r_orig) {
-                        *c = (c.0, a.ring.mul(&c.1, &rr.1));
-                    }
-
-                    for (c, e) in a_current.to_mut().iter_mut().zip(&a_eval) {
-                        a.ring.mul_assign(c, e);
-                    }
-                    for (c, e) in b_current.to_mut().iter_mut().zip(&b_eval) {
-                        b.ring.mul_assign(c, e);
+                        *c = (c.0, a.ring().mul(&c.1, &rr.1));
                     }
                 }
 
                 // now construct the univariate polynomials from the current evaluated monomials
-                a.evaluate_using_exponents(&a_current, main_var, &mut a_poly);
-                b.evaluate_using_exponents(&b_current, main_var, &mut b_poly);
+                a.evaluate_and_advance_weighted_terms(
+                    &mut a_current,
+                    &a_eval,
+                    main_var,
+                    &a_rows,
+                    &mut a_poly,
+                );
+                b.evaluate_and_advance_weighted_terms(
+                    &mut b_current,
+                    &b_eval,
+                    main_var,
+                    &b_rows,
+                    &mut b_poly,
+                );
 
                 if a_poly.ldegree(main_var) != a_ldegree || b_poly.ldegree(main_var) != b_ldegree {
                     continue 'find_root_sample;
@@ -555,7 +2578,11 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         // p is likely unlucky
                         debug!(
                             "Bad current image: gcd({},{}) mod {} under {:?} = {}",
-                            a, b, a.ring, r, g
+                            a,
+                            b,
+                            a.ring(),
+                            r,
+                            g
                         );
                         return Err(GCDError::BadCurrentImage);
                     }
@@ -563,63 +2590,40 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                     continue 'find_root_sample;
                 }
 
-                // construct the scaling coefficient
-                let mut scale_factor = a.ring.one();
-                let mut coeff = a.ring.one();
-                let (c, d) = &shape[single_scale];
-                for (n, v) in r.iter() {
-                    // TODO: can be taken from row?
-                    a.ring.mul_assign(
-                        &mut coeff,
-                        &a.ring.pow(v, c.exponents(0)[*n].to_u32() as u64),
-                    );
-                }
-
-                let mut found = false;
-                for t in &g {
-                    if t.exponents[main_var] == *d {
-                        scale_factor = g.ring.div(&coeff, t.coefficient);
-                        found = true;
-                        break;
-                    }
-                }
-
-                if !found {
-                    // the scaling term is missing, so the assumed form is wrong
-                    debug!("Bad original image");
-                    return Err(GCDError::BadOriginalImage);
-                }
-
-                // check if all the monomials of the image appear in the shape
-                // if not, the original shape is bad
-                for m in g.into_iter() {
-                    if shape.iter().all(|(_, pow)| *pow != m.exponents[main_var]) {
+                sampled_term_by_shape.fill(None);
+                for (term_index, term) in (&g).into_iter().enumerate() {
+                    let Some(shape_index) = shape_index_by_degree.get(term.exponents[main_var])
+                    else {
                         debug!("Bad shape: terms missing");
                         return Err(GCDError::BadOriginalImage);
-                    }
+                    };
+                    sampled_term_by_shape[shape_index] = Some(term_index);
                 }
 
+                // Normalize the sampled image by the monomial coefficient chosen in the first
+                // image. Its value follows the same geometric sequence as the sample points.
+                let Some(scale_term) = sampled_term_by_shape[single_scale] else {
+                    debug!("Bad original image");
+                    return Err(GCDError::BadOriginalImage);
+                };
+                let coefficient = scale_value.clone();
+                a.ring().mul_assign(&mut scale_value, &scale_ratio);
+                let scale_factor = g.ring().div(&coefficient, &g.coefficients[scale_term]);
+
                 // construct the right-hand side
-                'rhs: for (i, (rhs, (shape_part, exp))) in samples.iter_mut().zip(shape).enumerate()
-                {
+                for (i, (rhs, (shape_part, _))) in samples.iter_mut().zip(shape).enumerate() {
                     // we may not need all terms
                     if rhs.len() == shape_part.nterms() {
                         continue;
                     }
 
-                    // find the associated term in the sample, trying the usual place first
-                    if i < g.nterms() && g.exponents(i)[main_var] == *exp {
-                        rhs.push(a.ring.neg(&a.ring.mul(&g.coefficients[i], &scale_factor)));
+                    if let Some(term_index) = sampled_term_by_shape[i] {
+                        rhs.push(
+                            a.ring()
+                                .neg(&a.ring().mul(&g.coefficients[term_index], &scale_factor)),
+                        );
                     } else {
-                        // find the matching term if it exists
-                        for m in g.into_iter() {
-                            if m.exponents[main_var] == *exp {
-                                rhs.push(a.ring.neg(&a.ring.mul(m.coefficient, &scale_factor)));
-                                continue 'rhs;
-                            }
-                        }
-
-                        rhs.push(a.ring.zero());
+                        rhs.push(a.ring().zero());
                     }
                 }
             }
@@ -635,6 +2639,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     /// Gaussian elimination. Then, we are back in the single term case and we use a Vandermonde
     /// matrix to solve for every coefficient.
     #[instrument(level = "trace", fields(%a, %b))]
+    #[inline(never)]
     fn construct_new_image_multiple_scales(
         a: &MultivariatePolynomial<F, E>,
         b: &MultivariatePolynomial<F, E>,
@@ -644,7 +2649,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         vars: &[usize],
         main_var: usize,
         shape: &[(MultivariatePolynomial<F, E>, E)],
-    ) -> Result<MultivariatePolynomial<F, E>, GCDError> {
+    ) -> Result<MultivariatePolynomial<F, E>, GCDError>
+    where
+        F: UniformlySampleableRing,
+    {
         let mut rng = rand::rng();
 
         let mut failure_count = 0;
@@ -653,7 +2661,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         let mut cache = (0..a.nvars())
             .map(|i| {
                 vec![
-                    a.ring.zero();
+                    a.ring().zero();
                     min(
                         max(a.degree(i), b.degree(i)).to_u32() as usize + 1,
                         POW_CACHE_SIZE
@@ -674,13 +2682,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
         let (row_sample_values, samples) = 'find_root_sample: loop {
             for v in &mut cache {
                 for vi in v {
-                    *vi = a.ring.zero();
+                    *vi = a.ring().zero();
                 }
             }
 
             let r_orig: SmallVec<[_; INLINED_EXPONENTS]> = vars
                 .iter()
-                .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                 .collect();
 
             let mut row_sample_values = Vec::with_capacity(shape.len()); // coefficients for the linear system
@@ -692,18 +2700,18 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
 
                 for t in c {
                     // evaluate each exponent
-                    let mut c = a.ring.one();
+                    let mut c = a.ring().one();
                     for (n, v) in &r_orig {
                         let exp = t.exponents[*n].to_u32() as usize;
                         if exp > 0 {
                             if exp < cache[*n].len() {
-                                if a.ring.is_zero(&cache[*n][exp]) {
-                                    cache[*n][exp] = a.ring.pow(v, exp as u64);
+                                if a.ring().is_zero(&cache[*n][exp]) {
+                                    cache[*n][exp] = a.ring().pow(v, exp as u64);
                                 }
 
-                                a.ring.mul_assign(&mut c, &cache[*n][exp]);
+                                a.ring().mul_assign(&mut c, &cache[*n][exp]);
                             } else {
-                                a.ring.mul_assign(&mut c, &a.ring.pow(v, exp as u64));
+                                a.ring().mul_assign(&mut c, &a.ring().pow(v, exp as u64));
                             }
                         }
                     }
@@ -725,8 +2733,20 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
             let a_eval = a.evaluate_exponents(&r_orig, &mut cache);
             let b_eval = b.evaluate_exponents(&r_orig, &mut cache);
 
-            let mut a_current = Cow::Borrowed(&a_eval);
-            let mut b_current = Cow::Borrowed(&b_eval);
+            let mut a_current = a
+                .coefficients
+                .iter()
+                .zip(&a_eval)
+                .map(|(coefficient, eval)| a.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let mut b_current = b
+                .coefficients
+                .iter()
+                .zip(&b_eval)
+                .map(|(coefficient, eval)| b.ring().mul(coefficient, eval))
+                .collect::<Vec<_>>();
+            let a_rows = a.univariate_row_ranges(main_var);
+            let b_rows = b.univariate_row_ranges(main_var);
 
             let mut a_poly = a.zero_with_capacity(a.degree(main_var).to_u32() as usize + 1);
             let mut b_poly = b.zero_with_capacity(b.degree(main_var).to_u32() as usize + 1);
@@ -742,20 +2762,25 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 // sample at r^i
                 if sample_index > 0 {
                     for (c, rr) in r.iter_mut().zip(&r_orig) {
-                        *c = (c.0, a.ring.mul(&c.1, &rr.1));
-                    }
-
-                    for (c, e) in a_current.to_mut().iter_mut().zip(&a_eval) {
-                        a.ring.mul_assign(c, e);
-                    }
-                    for (c, e) in b_current.to_mut().iter_mut().zip(&b_eval) {
-                        b.ring.mul_assign(c, e);
+                        *c = (c.0, a.ring().mul(&c.1, &rr.1));
                     }
                 }
 
                 // now construct the univariate polynomials from the current evaluated monomials
-                a.evaluate_using_exponents(&a_current, main_var, &mut a_poly);
-                b.evaluate_using_exponents(&b_current, main_var, &mut b_poly);
+                a.evaluate_and_advance_weighted_terms(
+                    &mut a_current,
+                    &a_eval,
+                    main_var,
+                    &a_rows,
+                    &mut a_poly,
+                );
+                b.evaluate_and_advance_weighted_terms(
+                    &mut b_current,
+                    &b_eval,
+                    main_var,
+                    &b_rows,
+                    &mut b_poly,
+                );
 
                 if a_poly.ldegree(main_var) != a_ldegree || b_poly.ldegree(main_var) != b_ldegree {
                     continue 'find_root_sample;
@@ -782,7 +2807,11 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         // p is likely unlucky
                         debug!(
                             "Bad current image: gcd({},{}) mod {} under {:?} = {}",
-                            a, b, a.ring, r, g
+                            a,
+                            b,
+                            a.ring(),
+                            r,
+                            g
                         );
                         return Err(GCDError::BadCurrentImage);
                     }
@@ -804,7 +2833,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 let mut found = false;
                 for t in &g {
                     if t.exponents[main_var] == *d {
-                        let scale_factor = g.ring.inv(t.coefficient);
+                        let scale_factor = g.ring().inv(t.coefficient);
                         g = g.mul_coeff(scale_factor);
                         found = true;
                         break;
@@ -840,7 +2869,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                             }
                         }
 
-                        rhs.push(a.ring.zero());
+                        rhs.push(a.ring().zero());
                     }
                 }
 
@@ -865,21 +2894,21 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         let row_eval_first = &row_sample_values[shape_map[0]];
 
                         // assume first constant is 1, which will form the rhs of our equation
-                        let actual_rhs = a.ring.mul(
+                        let actual_rhs = a.ring().mul(
                             rhs_sec,
-                            &a.ring.pow(&row_eval_first[0], sample_index as u64 + 1),
+                            &a.ring().pow(&row_eval_first[0], sample_index as u64 + 1),
                         );
 
                         for aa in row_eval_sec {
-                            gfm.push(a.ring.pow(aa, sample_index as u64 + 1));
+                            gfm.push(a.ring().pow(aa, sample_index as u64 + 1));
                         }
 
                         // place the scaling term variables at the end
                         for aa in &row_eval_first[1..] {
                             gfm.push(
-                                a.ring.neg(
-                                    &a.ring
-                                        .mul(rhs_sec, &a.ring.pow(aa, sample_index as u64 + 1)),
+                                a.ring().neg(
+                                    &a.ring()
+                                        .mul(rhs_sec, &a.ring().pow(aa, sample_index as u64 + 1)),
                                 ),
                             );
                         }
@@ -891,7 +2920,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                     // that yielded underdetermined systems
                     for extra_relations in &scaling_var_relations {
                         for _ in 0..vars_second {
-                            gfm.push(a.ring.zero());
+                            gfm.push(a.ring().zero());
                         }
 
                         for v in &extra_relations[..vars_scale] {
@@ -904,10 +2933,10 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         gfm,
                         rows as u32,
                         samples_needed as u32,
-                        a.ring.clone(),
+                        a.ring().clone(),
                     )
                     .unwrap();
-                    let rhs = Matrix::new_vec(new_rhs, a.ring.clone());
+                    let rhs = Matrix::new_vec(new_rhs, a.ring().clone());
 
                     match m.solve(&rhs) {
                         Ok(r) => {
@@ -936,8 +2965,8 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                             );
 
                             for x in row_reduced_augmented_matrix.row_iter() {
-                                if x[..vars_second].iter().all(|x| a.ring.is_zero(x))
-                                    && x.iter().any(|y| !a.ring.is_zero(y))
+                                if x[..vars_second].iter().all(|x| a.ring().is_zero(x))
+                                    && x.iter().any(|y| !a.ring().is_zero(y))
                                 {
                                     scaling_var_relations.push(x[vars_second..].to_vec());
                                 }
@@ -971,6 +3000,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                         }
                         Err(
                             MatrixError::NotSquare
+                            | MatrixError::FieldMismatch
                             | MatrixError::ShapeMismatch
                             | MatrixError::RightHandSideIsNotVector
                             | MatrixError::Singular
@@ -988,21 +3018,21 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 for sample_index in 0..max_terms {
                     let row_eval_first = &row_sample_values[shape_map[0]];
                     let mut scaling_factor =
-                        a.ring.pow(&row_eval_first[0], sample_index as u64 + 1); // coeff eval is 1
+                        a.ring().pow(&row_eval_first[0], sample_index as u64 + 1); // coeff eval is 1
                     for (exp_eval, coeff_eval) in
                         row_sample_values[shape_map[0]][1..].iter().zip(&r)
                     {
-                        a.ring.add_mul_assign(
+                        a.ring().add_mul_assign(
                             &mut scaling_factor,
                             coeff_eval,
-                            &a.ring.pow(exp_eval, sample_index as u64 + 1),
+                            &a.ring().pow(exp_eval, sample_index as u64 + 1),
                         );
                     }
 
                     debug!(
                         "Scaling fac {}: {}",
                         sample_index,
-                        a.ring.printer(&scaling_factor)
+                        a.ring().printer(&scaling_factor)
                     );
                     lcoeff_cache.push(scaling_factor);
                 }
@@ -1010,7 +3040,7 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
                 for ((c, _), rhs) in shape.iter().zip(&mut samples) {
                     rhs.truncate(c.nterms()); // drop unneeded samples
                     for (r, scale) in rhs.iter_mut().zip(&lcoeff_cache) {
-                        a.ring.mul_assign(r, scale);
+                        a.ring().mul_assign(r, scale);
                     }
                 }
             } else {
@@ -1028,10 +3058,13 @@ impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E> {
     }
 }
 
-impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F, E> {
+impl<F: Field + PolynomialGCD<E> + UniformlySampleableRing, E: PositiveExponent>
+    MultivariatePolynomial<F, E>
+{
     /// Compute the gcd shape of two polynomials in a finite field by filling in random
     /// numbers.
     #[instrument(level = "debug", skip_all)]
+    #[inline(never)]
     fn gcd_shape_modular(
         a: &Self,
         b: &Self,
@@ -1041,6 +3074,10 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
     ) -> Option<Self> {
         let lastvar = *vars.last().unwrap();
         debug!("GCD shape modular: vars={vars:?} bounds={bounds:?}");
+        debug_assert!(
+            (lastvar + 1..a.nvars())
+                .all(|variable| a.degree(variable).is_zero() && b.degree(variable).is_zero())
+        );
 
         // if we are in the univariate case, return the univariate gcd
         // TODO: this is a modification of the algorithm!
@@ -1064,7 +3101,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
             debug!("Content in last variable is not 1, but {}", c);
             // TODO: we assume that a content of -1 is also allowed
             // like in the special case gcd_(-x0*x1,-x0-x0*x1)
-            if c.nterms() != 1 || c.coefficients[0] != a.ring.neg(&a.ring.one()) {
+            if c.nterms() != 1 || c.coefficients[0] != a.ring().neg(&a.ring().one()) {
                 return None;
             }
         }
@@ -1072,6 +3109,11 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
         let gamma = a
             .lcoeff_last_varorder(vars)
             .univariate_gcd(&b.lcoeff_last_varorder(vars));
+        let expected_evaluations = (tight_bounds[lastvar].to_u32() as usize)
+            .saturating_add(gamma.ldegree_max().to_u32() as usize)
+            .saturating_add(1);
+        let mut evaluation_context =
+            RepeatedLastVariableEvaluationContext::new(a, b, lastvar, expected_evaluations);
 
         let mut rng = rand::rng();
 
@@ -1086,10 +3128,16 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                     lastvar, tight_bounds[lastvar], bounds[lastvar]
                 );
                 tight_bounds[lastvar] = bounds[lastvar];
+                let relaxed_evaluations = (tight_bounds[lastvar].to_u32() as usize)
+                    .saturating_add(gamma.ldegree_max().to_u32() as usize)
+                    .saturating_add(1);
+                if relaxed_evaluations > 1 {
+                    evaluation_context.enable_reuse();
+                }
             }
             failure_count += 1;
 
-            if let Some(size) = a.ring.size()
+            if let Some(size) = a.ring().size()
                 && failure_count * 2 > size
             {
                 debug!("Cannot find unique sampling points: prime field is likely too small");
@@ -1097,14 +3145,15 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
             }
 
             let mut sample_fail_count = 0i64;
-            let v = loop {
-                let r = a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
-                if !gamma.replace(lastvar, &r).is_zero() {
-                    break r;
+            let (v, gamma_value) = loop {
+                let r = a.ring().sample_uniform_nonzero(&mut rng);
+                let gamma_value = gamma.evaluate_univariate_horner(lastvar, &r);
+                if !gamma.ring().is_zero(&gamma_value) {
+                    break (r, gamma_value);
                 }
 
                 sample_fail_count += 1;
-                if let Some(size) = a.ring.size()
+                if let Some(size) = a.ring().size()
                     && sample_fail_count * 2 > size
                 {
                     debug!("Cannot find unique sampling points: prime field is likely too small");
@@ -1112,36 +3161,36 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 }
             };
 
-            debug!("Chosen variable: {}", a.ring.printer(&v));
-            let av = a.replace(lastvar, &v);
-            let bv = b.replace(lastvar, &v);
+            debug!("Chosen variable: {}", a.ring().printer(&v));
 
             // performance dense reconstruction
-            let mut gv = if vars.len() > 2 {
-                MultivariatePolynomial::gcd_shape_modular(
-                    &av,
-                    &bv,
-                    &vars[..vars.len() - 1],
-                    bounds,
-                    tight_bounds,
-                )?
-            } else {
-                let gg = av.univariate_gcd(&bv);
-                if gg.degree(vars[0]) > bounds[vars[0]] {
-                    debug!(
-                        "Unexpectedly high GCD bound: {} vs {}",
-                        gg.degree(vars[0]),
-                        bounds[vars[0]]
-                    );
-                    return None;
+            let mut gv = evaluation_context.with_evaluations(&v, |av, bv| {
+                if vars.len() > 2 {
+                    MultivariatePolynomial::gcd_shape_modular(
+                        av,
+                        bv,
+                        &vars[..vars.len() - 1],
+                        bounds,
+                        tight_bounds,
+                    )
+                } else {
+                    let gg = av.univariate_gcd(bv);
+                    if gg.degree(vars[0]) > bounds[vars[0]] {
+                        debug!(
+                            "Unexpectedly high GCD bound: {} vs {}",
+                            gg.degree(vars[0]),
+                            bounds[vars[0]]
+                        );
+                        return None;
+                    }
+                    bounds[vars[0]] = gg.degree(vars[0]); // update degree bound
+                    Some(gg)
                 }
-                bounds[vars[0]] = gg.degree(vars[0]); // update degree bound
-                gg
-            };
+            })?;
 
             debug!(
                 "GCD shape suggestion for sample point {} and gamma {}: {}",
-                a.ring.printer(&v),
+                a.ring().printer(&v),
                 gamma,
                 gv
             );
@@ -1176,13 +3225,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 
             let mut lc = gv.lcoeff_varorder(vars);
 
-            let mut gseq = vec![
-                gv.clone().mul_coeff(
-                    gamma
-                        .ring
-                        .div(&gamma.replace(lastvar, &v).coefficients[0], &lc),
-                ),
-            ];
+            let mut gseq = vec![gv.clone().mul_coeff(gamma.ring().div(&gamma_value, &lc))];
             let mut vseq = vec![v];
 
             // sparse reconstruction
@@ -1198,17 +3241,18 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                     break;
                 }
 
-                let v = loop {
-                    let v = a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64));
-                    if !gamma.replace(lastvar, &v).is_zero() {
+                let (v, gamma_value) = loop {
+                    let v = a.ring().sample_uniform_nonzero(&mut rng);
+                    let gamma_value = gamma.evaluate_univariate_horner(lastvar, &v);
+                    if !gamma.ring().is_zero(&gamma_value) {
                         // we need unique sampling points
                         if !vseq.contains(&v) {
-                            break v;
+                            break (v, gamma_value);
                         }
                     }
 
                     sample_fail_count += 1;
-                    if let Some(size) = a.ring.size()
+                    if let Some(size) = a.ring().size()
                         && sample_fail_count * 2 > size
                     {
                         debug!(
@@ -1218,36 +3262,35 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                     }
                 };
 
-                let av = a.replace(lastvar, &v);
-                let bv = b.replace(lastvar, &v);
-
-                let rec = if let Some(single_scale) = single_scale {
-                    Self::construct_new_image_single_scale(
-                        &av,
-                        &bv,
-                        av.degree(vars[0]),
-                        bv.degree(vars[0]),
-                        bounds,
-                        single_scale,
-                        &vars[1..vars.len() - 1],
-                        vars[0],
-                        &gfu,
-                    )
-                } else {
-                    Self::construct_new_image_multiple_scales(
-                        &av,
-                        &bv,
-                        // NOTE: different from paper where they use a.degree(..)
-                        // it could be that the degree in av is lower than that of a
-                        // which means the sampling will never terminate
-                        av.degree(vars[0]),
-                        bv.degree(vars[0]),
-                        bounds,
-                        &vars[1..vars.len() - 1],
-                        vars[0],
-                        &gfu,
-                    )
-                };
+                let rec = evaluation_context.with_evaluations(&v, |av, bv| {
+                    if let Some(single_scale) = single_scale {
+                        Self::construct_new_image_single_scale(
+                            av,
+                            bv,
+                            av.degree(vars[0]),
+                            bv.degree(vars[0]),
+                            bounds,
+                            single_scale,
+                            &vars[1..vars.len() - 1],
+                            vars[0],
+                            &gfu,
+                        )
+                    } else {
+                        Self::construct_new_image_multiple_scales(
+                            av,
+                            bv,
+                            // NOTE: different from paper where they use a.degree(..)
+                            // it could be that the degree in av is lower than that of a
+                            // which means the sampling will never terminate
+                            av.degree(vars[0]),
+                            bv.degree(vars[0]),
+                            bounds,
+                            &vars[1..vars.len() - 1],
+                            vars[0],
+                            &gfu,
+                        )
+                    }
+                });
 
                 match rec {
                     Ok(r) => {
@@ -1261,7 +3304,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                         debug!("Bad current image");
                         sample_fail_count += 1;
 
-                        if let Some(size) = a.ring.size()
+                        if let Some(size) = a.ring().size()
                             && sample_fail_count * 2 > size
                         {
                             debug!("Too many bad current images: prime field is likely too small");
@@ -1274,13 +3317,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 
                 lc = gv.lcoeff_varorder(vars);
 
-                gseq.push(
-                    gv.clone().mul_coeff(
-                        gamma
-                            .ring
-                            .div(&gamma.replace(lastvar, &v).coefficients[0], &lc),
-                    ),
-                );
+                gseq.push(gv.clone().mul_coeff(gamma.ring().div(&gamma_value, &lc)));
                 vseq.push(v);
             }
 
@@ -1299,7 +3336,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 let mut cache = (0..a.nvars())
                     .map(|i| {
                         vec![
-                            a.ring.zero();
+                            a.ring().zero();
                             min(
                                 max(a.degree(i), b.degree(i)).to_u32() as usize + 1,
                                 POW_CACHE_SIZE
@@ -1311,7 +3348,7 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
                 let r: Vec<_> = vars
                     .iter()
                     .skip(1)
-                    .map(|i| (*i, a.ring.sample(&mut rng, (1, MAX_RNG_PREFACTOR as i64))))
+                    .map(|i| (*i, a.ring().sample_uniform_nonzero(&mut rng)))
                     .collect();
 
                 let g1 = gc.replace_except(vars[0], &r, &mut cache);
@@ -1337,6 +3374,80 @@ impl<F: Field + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<F,
 }
 
 impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePolynomial<R, E> {
+    /// Returns the scalar GCD of two polynomials when degree-preserving images prove that no
+    /// polynomial variable occurs in their common divisor.
+    fn try_constant_gcd_from_bounds(
+        left: &Self,
+        right: &Self,
+        variables: &[usize],
+    ) -> Option<Self> {
+        let bounds = R::get_gcd_var_bounds(left, right, variables);
+        if variables
+            .iter()
+            .any(|variable| !bounds[*variable].is_zero())
+        {
+            return None;
+        }
+
+        let content = left.ring().gcd(&left.content(), &right.content());
+        Some(PolynomialGCD::normalize(left.constant(content)))
+    }
+
+    /// Estimates whether testing the full polynomial GCD for constantness is cheaper than
+    /// recursively computing the two coefficient layers of a linear input.
+    fn should_screen_before_linear_content(
+        left: &Self,
+        right: &Self,
+        left_metadata: &GcdInputMetadata<E>,
+        right_metadata: &GcdInputMetadata<E>,
+        base_degrees: &[Option<E>],
+        variables: &[usize],
+    ) -> bool {
+        if variables.len() < 3 {
+            return false;
+        }
+
+        let normalized_degree = |metadata: &GcdInputMetadata<E>, variable: usize| {
+            let degree = metadata.shifted_degree(variable);
+            base_degrees[variable].map_or(degree, |base| degree / base)
+        };
+        if variables.iter().any(|variable| {
+            normalized_degree(left_metadata, *variable).to_u32() as usize
+                > FUSED_GCD_BOUND_MAX_DEGREE
+                || normalized_degree(right_metadata, *variable).to_u32() as usize
+                    > FUSED_GCD_BOUND_MAX_DEGREE
+        }) {
+            return false;
+        }
+
+        let mut coefficient_gcd_work = None;
+        for (polynomial, metadata) in [(left, left_metadata), (right, right_metadata)] {
+            if let Some(variable) =
+                (0..polynomial.nvars()).find(|v| normalized_degree(metadata, *v) == E::one())
+            {
+                let leading_terms = polynomial.terms_with_max_degree(variable);
+                let trailing_terms = polynomial.nterms().saturating_sub(leading_terms);
+                coefficient_gcd_work =
+                    Some((leading_terms as u128).saturating_mul(trailing_terms as u128));
+                break;
+            }
+        }
+        let Some(coefficient_gcd_work) = coefficient_gcd_work.filter(|work| *work > 0) else {
+            return false;
+        };
+
+        let scan_width = variables.len().saturating_mul(2).saturating_add(1) as u128;
+        let scan_work =
+            (left.nterms().saturating_add(right.nterms()) as u128).saturating_mul(scan_width);
+        let dense_image_work = variables.iter().fold(0u128, |work, variable| {
+            let left_degree = normalized_degree(left_metadata, *variable).to_u32() as u128 + 1;
+            let right_degree = normalized_degree(right_metadata, *variable).to_u32() as u128 + 1;
+            work.saturating_add(left_degree.saturating_mul(right_degree))
+        });
+        let bound_work = scan_work.saturating_add(dense_image_work);
+        coefficient_gcd_work >= bound_work
+    }
+
     /// Get the content of a multivariate polynomial viewed as a
     /// univariate polynomial in `x`.
     pub fn univariate_content(&self, x: usize) -> MultivariatePolynomial<R, E> {
@@ -1479,8 +3590,8 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         if self.is_constant() {
             let mut gcd = self.coefficients[0].clone();
             for c in &b.coefficients {
-                gcd = self.ring.gcd(&gcd, c);
-                if R::one_is_gcd_unit() && self.ring.is_one(&gcd) {
+                gcd = self.ring().gcd(&gcd, c);
+                if R::one_is_gcd_unit() && self.ring().is_one(&gcd) {
                     break;
                 }
             }
@@ -1490,8 +3601,8 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         if b.is_constant() {
             let mut gcd = b.coefficients[0].clone();
             for c in &self.coefficients {
-                gcd = self.ring.gcd(&gcd, c);
-                if R::one_is_gcd_unit() && self.ring.is_one(&gcd) {
+                gcd = self.ring().gcd(&gcd, c);
+                if R::one_is_gcd_unit() && self.ring().is_one(&gcd) {
                     break;
                 }
             }
@@ -1503,87 +3614,74 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
 
     /// Compute the gcd of two multivariate polynomials.
     #[instrument(skip_all)]
+    #[inline]
     pub fn gcd(&self, b: &MultivariatePolynomial<R, E>) -> MultivariatePolynomial<R, E> {
         debug!("gcd of {} and {}", self, b);
 
         if let Some(g) = self.simple_gcd(b) {
             debug!("Simple {} ", g);
-            return g;
+            return PolynomialGCD::normalize(g);
         }
 
+        self.gcd_impl(b)
+    }
+
+    // Keep the simple-GCD path inlineable; share the full multivariate algorithm.
+    #[inline(never)]
+    fn gcd_impl(&self, b: &MultivariatePolynomial<R, E>) -> MultivariatePolynomial<R, E> {
         // a and b are only copied when needed
         let mut a = Cow::Borrowed(self);
         let mut b = Cow::Borrowed(b);
 
-        if self.variables != b.variables {
+        if self.variables() != b.variables() {
             a.to_mut().unify_variables(b.to_mut());
         }
 
-        // determine the maximum shared power of every variable
-        let mut shared_degree: SmallVec<[E; INLINED_EXPONENTS]> = a.exponents(0).into();
-        for p in [&a, &b] {
-            for e in p.exponents_iter() {
-                for (md, v) in shared_degree.iter_mut().zip(e) {
-                    *md = (*md).min(*v);
-                }
-            }
-        }
+        let a_metadata = GcdInputMetadata::scan(&a);
+        let b_metadata = GcdInputMetadata::scan(&b);
 
-        // divide out the common factors
-        if shared_degree.iter().any(|d| *d != E::zero()) {
-            let aa = a.to_mut();
-            for e in aa.exponents_iter_mut() {
-                for (v, d) in e.iter_mut().zip(&shared_degree) {
-                    *v = *v - *d;
-                }
-            }
-
-            let bb = b.to_mut();
-            for e in bb.exponents_iter_mut() {
-                for (v, d) in e.iter_mut().zip(&shared_degree) {
-                    *v = *v - *d;
-                }
-            }
-        };
-
-        // remove superfluous shifts: all variables should occur with exponent 1
-        for v in 0..a.nvars() {
-            let exp = a.degree_bounds(v).0;
-            if exp > E::zero() {
-                let pp = a.to_mut();
-                for e in pp.exponents_iter_mut() {
-                    e[v] = e[v] - exp;
-                }
-            }
-
-            let exp = b.degree_bounds(v).0;
-            if exp > E::zero() {
-                let pp = b.to_mut();
-                for e in pp.exponents_iter_mut() {
-                    e[v] = e[v] - exp;
-                }
-            }
-        }
+        // Retain the common part of the two monomial factors for the result,
+        // then remove each input's complete monomial factor before computing
+        // the polynomial part of the GCD.
+        let shared_degree: SmallVec<[E; INLINED_EXPONENTS]> = a_metadata
+            .variables
+            .iter()
+            .zip(&b_metadata.variables)
+            .map(|(left, right)| left.min_degree.min(right.min_degree))
+            .collect();
+        a_metadata.remove_monomial_shift(&mut a);
+        b_metadata.remove_monomial_shift(&mut b);
 
         let mut base_degree: SmallVec<[Option<E>; INLINED_EXPONENTS]> = smallvec![None; a.nvars()];
 
         if let Some(g) = MultivariatePolynomial::simple_gcd(&a, &b) {
-            return rescale_gcd(g, &shared_degree, &base_degree, &a.constant(a.ring.one()));
+            return rescale_gcd(g, &shared_degree, &base_degree, &a.constant(a.ring().one()));
         }
 
-        // check if the polynomial are functions of x^n, n > 1
-        for p in [&a, &b] {
+        // check if the polynomials are functions of x^n, n > 1
+        let mut unresolved_base_degrees = a.nvars();
+        'base_degrees: for p in [&a, &b] {
             for t in p.into_iter() {
                 for (md, v) in base_degree.iter_mut().zip(t.exponents) {
                     if !v.is_zero() {
                         if let Some(mm) = md.as_mut() {
                             if *mm != E::one() {
                                 *mm = mm.gcd(v);
+                                if *mm == E::one() {
+                                    unresolved_base_degrees -= 1;
+                                }
                             }
                         } else {
                             *md = Some(*v);
+                            if *v == E::one() {
+                                unresolved_base_degrees -= 1;
+                            }
                         }
                     }
+                }
+
+                if unresolved_base_degrees == 0 {
+                    break 'base_degrees;
                 }
             }
         }
@@ -1649,21 +3747,17 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                 gcd.0,
                 &shared_degree,
                 &base_degree,
-                &a.constant(a.ring.one()),
+                &a.constant(a.ring().one()),
             );
         }
 
         // store which variables appear in which expression
-        let mut scratch: SmallVec<[i32; INLINED_EXPONENTS]> = smallvec![0i32; a.nvars()];
-        for (p, inc) in [(&a, 1), (&b, 2)] {
-            for t in p.into_iter() {
-                for (e, ee) in scratch.iter_mut().zip(t.exponents) {
-                    if !ee.is_zero() {
-                        *e |= inc;
-                    }
-                }
-            }
-        }
+        let scratch: SmallVec<[i32; INLINED_EXPONENTS]> = (0..a.nvars())
+            .map(|variable| {
+                i32::from(a_metadata.occurs_after_shift(variable))
+                    | i32::from(b_metadata.occurs_after_shift(variable)) << 1
+            })
+            .collect();
 
         if a == b {
             debug!("Equal {} ", a);
@@ -1699,6 +3793,24 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             );
         }
 
+        let mut vars: SmallVec<[_; INLINED_EXPONENTS]> = scratch
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| if *v == 3 { Some(i) } else { None })
+            .collect();
+
+        if Self::should_screen_before_linear_content(
+            &a,
+            &b,
+            &a_metadata,
+            &b_metadata,
+            &base_degree,
+            &vars,
+        ) && let Some(gcd) = Self::try_constant_gcd_from_bounds(&a, &b, &vars)
+        {
+            return rescale_gcd(gcd, &shared_degree, &base_degree, &a.one());
+        }
+
         // try if b divides a or vice versa, doing a heuristical length check first
         if a.nterms() >= b.nterms() && a.try_div(&b).is_some() {
             return rescale_gcd(b.into_owned(), &shared_degree, &base_degree, &a.one());
@@ -1708,15 +3820,23 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         }
 
         // check if the polynomial is linear in a variable and compute the gcd using the univariate content
-        for (p1, p2) in [(&a, &b), (&b, &a)] {
-            if let Some(var) = (0..p1.nvars()).find(|v| p1.degree(*v) == E::one()) {
+        for (p1, p2, metadata) in [(&a, &b, &a_metadata), (&b, &a, &b_metadata)] {
+            if let Some(var) = (0..p1.nvars()).find(|v| {
+                let degree = metadata.shifted_degree(*v);
+                base_degree[*v].is_some_and(|base| degree / base == E::one())
+            }) {
                 let mut cont = p1.univariate_content(var);
 
                 let p1_prim = p1.as_ref() / &cont;
 
                 if !cont.is_one() || !R::one_is_gcd_unit() {
-                    let cont_p2 = p2.univariate_content(var);
-                    cont = cont.gcd(&cont_p2);
+                    if cont.is_constant() {
+                        let scalar_content = p2.ring().gcd(&cont.get_constant(), &p2.content());
+                        cont = cont.constant(scalar_content);
+                    } else {
+                        let cont_p2 = p2.univariate_content(var);
+                        cont = cont.gcd(&cont_p2);
+                    }
                 }
 
                 if p2.try_div(&p1_prim).is_some() {
@@ -1726,17 +3846,11 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                         cont,
                         &shared_degree,
                         &base_degree,
-                        &p1.constant(p1.ring.one()),
+                        &p1.constant(p1.ring().one()),
                     );
                 }
             }
         }
-
-        let mut vars: SmallVec<[_; INLINED_EXPONENTS]> = scratch
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| if *v == 3 { Some(i) } else { None })
-            .collect();
 
         // find upper bounds for all variables
         let mut bounds = R::get_gcd_var_bounds(&a, &b, &vars);
@@ -1744,7 +3858,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         // if all bounds are 0, the gcd is a constant
         if bounds.iter().all(|x| x.is_zero()) {
             return rescale_gcd(
-                a.constant(a.ring.gcd(&a.content(), &b.content())),
+                a.constant(a.ring().gcd(&a.content(), &b.content())),
                 &shared_degree,
                 &base_degree,
                 &a.one(),
@@ -1757,7 +3871,7 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
                 .iter()
                 .enumerate()
                 .filter_map(|(i, v)| {
-                    if *v == E::zero() && a.degree(i) > E::zero() {
+                    if *v == E::zero() && a_metadata.occurs_after_shift(i) {
                         Some(i)
                     } else {
                         None
@@ -1795,6 +3909,31 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
         vars[1..].sort_by(|&i, &j| bounds[j].cmp(&bounds[i])); // sort descending
         debug!("Order: {:?}", vars);
 
+        let normalized_degrees = |metadata: &GcdInputMetadata<E>| {
+            metadata
+                .variables
+                .iter()
+                .zip(&base_degree)
+                .map(|(variable, base)| {
+                    base.map_or(variable.max_degree - variable.min_degree, |base| {
+                        (variable.max_degree - variable.min_degree) / base
+                    })
+                })
+                .collect::<SmallVec<[E; INLINED_EXPONENTS]>>()
+        };
+        let a_degrees = normalized_degrees(&a_metadata);
+        let b_degrees = normalized_degrees(&b_metadata);
+        if let Some(g) = PolynomialGCD::gcd_with_precontent_plan(
+            a.as_ref(),
+            b.as_ref(),
+            &vars,
+            &bounds,
+            &a_degrees,
+            &b_degrees,
+        ) {
+            return rescale_gcd(g, &shared_degree, &base_degree, &a.one());
+        }
+
         // strip the gcd of the univariate contents wrt the new first variable
         let content = if vars.len() > 1 {
             let c_a = a.univariate_content(vars[0]);
@@ -1828,13 +3967,13 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
             // get the integer content for univariate polynomials
             let uca = a.content();
             let ucb = b.content();
-            let content = a.ring.gcd(&a.content(), &b.content());
+            let content = a.ring().gcd(&a.content(), &b.content());
             let p = a.zero_with_capacity(1);
 
-            if !a.ring.is_one(&uca) {
+            if !a.ring().is_one(&uca) {
                 a = Cow::Owned(a.into_owned().div_coeff(&uca));
             }
-            if !a.ring.is_one(&ucb) {
+            if !a.ring().is_one(&ucb) {
                 b = Cow::Owned(b.into_owned().div_coeff(&ucb));
             }
 
@@ -1877,76 +4016,1256 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> MultivariatePol
 /// An error that can occur during the heuristic GCD algorithm.
 #[derive(Debug)]
 pub enum HeuristicGCDError {
+    /// The heuristic evaluation would exceed its permitted integer size.
     MaxSizeExceeded,
+    /// The reconstructed candidate could not be certified as a GCD.
     BadReconstruction,
 }
 
+#[inline]
+fn ceil_log2_usize(value: usize) -> u64 {
+    if value <= 1 {
+        0
+    } else {
+        (usize::BITS - (value - 1).leading_zeros()) as u64
+    }
+}
+
+/// Bounds the largest coefficient produced by recursively substituting every shared variable.
+fn estimated_heuristic_gcd_evaluation_bits<E: PositiveExponent>(
+    a: &MultivariatePolynomial<IntegerRing, E>,
+    b: &MultivariatePolynomial<IntegerRing, E>,
+) -> u64 {
+    let statistics = |polynomial: &MultivariatePolynomial<IntegerRing, E>| {
+        let mut coefficient_bits = 0u64;
+        let mut degrees = vec![0u64; polynomial.nvars()];
+        for term in polynomial {
+            coefficient_bits = coefficient_bits.max(term.coefficient.significant_bits());
+            for (degree, exponent) in degrees.iter_mut().zip(term.exponents) {
+                *degree = (*degree).max(exponent.to_u32() as u64);
+            }
+        }
+        (
+            coefficient_bits,
+            degrees,
+            ceil_log2_usize(polynomial.nterms()),
+        )
+    };
+    let (mut a_bits, a_degrees, a_sum_bits) = statistics(a);
+    let (mut b_bits, b_degrees, b_sum_bits) = statistics(b);
+
+    for (a_degree, b_degree) in a_degrees.into_iter().zip(b_degrees) {
+        if a_degree == 0 || b_degree == 0 {
+            continue;
+        }
+
+        // `xi = 2*min(max_coeff(a), max_coeff(b)) + 29`; two extra bits bound the
+        // addition, including the small-coefficient case.
+        let xi_bits = a_bits.min(b_bits).saturating_add(2).max(6);
+        a_bits = a_bits
+            .saturating_add(xi_bits.saturating_mul(a_degree))
+            .saturating_add(a_sum_bits);
+        b_bits = b_bits
+            .saturating_add(xi_bits.saturating_mul(b_degree))
+            .saturating_add(b_sum_bits);
+    }
+
+    a_bits.max(b_bits)
+}
+
+/// Computes a normalized univariate GCD image in a dense `Zp64` coefficient workspace.
+struct DenseZp64UnivariateGcdImage<'a, E: PositiveExponent> {
+    field: &'a Zp64,
+    prototype: &'a MultivariatePolynomial<IntegerRing, E>,
+    variable: usize,
+    left: Vec<FiniteFieldElement<u64>>,
+    right: Vec<FiniteFieldElement<u64>>,
+}
+
+impl<'a, E: PositiveExponent> DenseZp64UnivariateGcdImage<'a, E> {
+    /// Converts both integer polynomials directly to bounded degree-indexed field coefficients.
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+        field: &'a Zp64,
+    ) -> Option<Self> {
+        if left.is_zero()
+            || right.is_zero()
+            || left.nvars() != right.nvars()
+            || variable >= left.nvars()
+            || left
+                .exponents_iter()
+                .chain(right.exponents_iter())
+                .any(|exponents| {
+                    exponents
+                        .iter()
+                        .enumerate()
+                        .any(|(index, exponent)| index != variable && !exponent.is_zero())
+                })
+        {
+            return None;
+        }
+
+        let coefficient_count =
+            left.degree(variable).max(right.degree(variable)).to_u32() as usize + 1;
+        if coefficient_count > DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+            || coefficient_count
+                > left
+                    .nterms()
+                    .saturating_add(right.nterms())
+                    .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+        {
+            return None;
+        }
+
+        let coefficients = |polynomial: &MultivariatePolynomial<IntegerRing, E>| {
+            let degree = polynomial.degree(variable).to_u32() as usize;
+            let mut coefficients = vec![field.zero(); degree + 1];
+            for term in polynomial {
+                coefficients[term.exponents[variable].to_u32() as usize] =
+                    term.coefficient.to_finite_field(field);
+            }
+            coefficients
+        };
+        let left_coefficients = coefficients(left);
+        let right_coefficients = coefficients(right);
+        if left_coefficients
+            .last()
+            .is_none_or(|coefficient| field.is_zero(coefficient))
+            || right_coefficients
+                .last()
+                .is_none_or(|coefficient| field.is_zero(coefficient))
+        {
+            return None;
+        }
+
+        Some(Self {
+            field,
+            prototype: left,
+            variable,
+            left: left_coefficients,
+            right: right_coefficients,
+        })
+    }
+
+    /// Computes the Montgomery inverse used for the leading coefficient in dense division.
+    #[inline]
+    fn inverse_leading(
+        field: &Zp64,
+        coefficient: &FiniteFieldElement<u64>,
+    ) -> FiniteFieldElement<u64> {
+        debug_assert!(!field.is_zero(coefficient));
+
+        let raw_one = FiniteFieldElement::from_inner(1);
+        let residue = *field
+            .mul(&field.mul(coefficient, &raw_one), &raw_one)
+            .inner();
+        let modulus = field.get_prime();
+
+        // These are the Euclidean state after the known initial zero-quotient step for
+        // `residue < modulus`. The coefficient magnitudes alternate signs at every step.
+        let mut u1 = 0u64;
+        let mut v1 = 1u64;
+        let mut u3 = modulus;
+        let mut v3 = residue;
+        let mut u1_is_positive = false;
+
+        while v3 != 0 {
+            debug_assert!(u3 > v3);
+            let first_remainder = u3 - v3;
+            let (next_coefficient, remainder) = if first_remainder < v3 {
+                (u1 + v1, first_remainder)
+            } else {
+                let second_remainder = first_remainder - v3;
+                if second_remainder < v3 {
+                    (u1 + 2 * v1, second_remainder)
+                } else {
+                    let third_remainder = second_remainder - v3;
+                    if third_remainder < v3 {
+                        (u1 + 3 * v1, third_remainder)
+                    } else {
+                        let quotient = u3 / v3;
+                        (u1 + quotient * v1, u3 - quotient * v3)
+                    }
+                }
+            };
+
+            u1 = v1;
+            v1 = next_coefficient;
+            u3 = v3;
+            v3 = remainder;
+            u1_is_positive = !u1_is_positive;
+        }
+
+        debug_assert_eq!(u3, 1);
+        FiniteFieldElement::from_inner(if u1_is_positive { u1 } else { modulus - u1 })
+    }
+
+    /// Replaces `dividend` by its remainder and returns the inverse of the divisor leading term.
+    fn remainder(
+        field: &Zp64,
+        dividend: &mut Vec<FiniteFieldElement<u64>>,
+        divisor: &[FiniteFieldElement<u64>],
+    ) -> FiniteFieldElement<u64> {
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(dividend.len() >= divisor.len());
+        let divisor_degree = divisor.len() - 1;
+        let inverse_leading = Self::inverse_leading(field, divisor.last().unwrap());
+
+        for degree in (divisor_degree..dividend.len()).rev() {
+            let leading = std::mem::replace(&mut dividend[degree], field.zero());
+            if field.is_zero(&leading) {
+                continue;
+            }
+
+            let quotient = field.mul(&leading, &inverse_leading);
+            let shift = degree - divisor_degree;
+            for (coefficient, divisor_coefficient) in dividend[shift..degree]
+                .iter_mut()
+                .zip(&divisor[..divisor_degree])
+            {
+                field.sub_mul_assign(coefficient, divisor_coefficient, &quotient);
+            }
+        }
+
+        dividend.truncate(divisor_degree);
+        while dividend
+            .last()
+            .is_some_and(|coefficient| field.is_zero(coefficient))
+        {
+            dividend.pop();
+        }
+        inverse_leading
+    }
+
+    /// Encodes dense coefficients as a polynomial in the retained input variable.
+    fn polynomial(
+        &self,
+        coefficients: Vec<FiniteFieldElement<u64>>,
+    ) -> MultivariatePolynomial<Zp64, E> {
+        let capacity = coefficients
+            .iter()
+            .filter(|coefficient| !self.field.is_zero(coefficient))
+            .count();
+        let mut result = MultivariatePolynomial::new(
+            self.field,
+            Some(capacity),
+            self.prototype.variables().clone(),
+        );
+        let mut exponents = vec![E::zero(); self.prototype.nvars()];
+        for (degree, coefficient) in coefficients.into_iter().enumerate() {
+            if !self.field.is_zero(&coefficient) {
+                exponents[self.variable] = E::from_u32(degree as u32);
+                result.append_monomial_back(coefficient, &exponents);
+            }
+        }
+        result
+    }
+
+    /// Runs Euclid's algorithm and gives the result the requested leading coefficient.
+    fn run(
+        mut self,
+        leading_coefficient: FiniteFieldElement<u64>,
+    ) -> MultivariatePolynomial<Zp64, E> {
+        debug_assert!(!self.field.is_zero(&leading_coefficient));
+        if self.left.len() < self.right.len() {
+            mem::swap(&mut self.left, &mut self.right);
+        }
+
+        loop {
+            if self.right.len() == 1 {
+                return self.polynomial(vec![leading_coefficient]);
+            }
+
+            let inverse_leading = Self::remainder(self.field, &mut self.left, &self.right);
+            if self.left.is_empty() {
+                let scale = self.field.mul(&leading_coefficient, &inverse_leading);
+                for coefficient in &mut self.right {
+                    self.field.mul_assign(coefficient, &scale);
+                }
+                let coefficients = mem::take(&mut self.right);
+                return self.polynomial(coefficients);
+            }
+            mem::swap(&mut self.left, &mut self.right);
+        }
+    }
+}
+
+/// Outcome of an optional checked dense-division strategy.
+enum DenseUnivariateCheckedDivision<T> {
+    Unavailable,
+    Inexact,
+    Exact(T),
+}
+
+/// Dense integer long division used to certify a reconstructed univariate GCD.
+struct DenseUnivariateIntegerDivisionContext<'a> {
+    variable: usize,
+    coefficients: Vec<MultiPrecisionInteger>,
+    degrees: Vec<usize>,
+    dense_coefficients: Option<&'a [Integer]>,
+    dense_indices: Vec<u32>,
+    degree: usize,
+    division_remainder: MultiPrecisionInteger,
+}
+
+impl<'a> DenseUnivariateIntegerDivisionContext<'a> {
+    /// Returns the quotient length when both endpoint solves fit inside the divisor.
+    ///
+    /// The two-ended certificate splits the quotient into low and high parts. Each part must be no
+    /// longer than the divisor slice that determines its endpoint equations. The admitted shapes
+    /// have equal divisor and quotient lengths, or differ by one coefficient after a monomial
+    /// shift. These near-balanced products replace classical long division by two triangular
+    /// solves and one packed product.
+    fn two_ended_quotient_len(divisor_len: usize, dividend_len: usize) -> Option<usize> {
+        let quotient_len = dividend_len.checked_sub(divisor_len)?.checked_add(1)?;
+        (quotient_len <= divisor_len && divisor_len.saturating_sub(quotient_len) <= 1)
+            .then_some(quotient_len)
+    }
+
+    /// Construct a dense division workspace for a divisor and the two inputs it must divide.
+    fn new<E: PositiveExponent>(
+        divisor: &'a MultivariatePolynomial<IntegerRing, E>,
+        left: &MultivariatePolynomial<IntegerRing, E>,
+        right: &MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+    ) -> Option<Self> {
+        if variable >= divisor.nvars()
+            || divisor.variables() != left.variables()
+            || divisor.variables() != right.variables()
+        {
+            return None;
+        }
+
+        fn dense_coefficient_count<E: PositiveExponent>(
+            polynomial: &MultivariatePolynomial<IntegerRing, E>,
+            variable: usize,
+        ) -> Option<usize> {
+            if polynomial.is_zero()
+                || polynomial.exponents_iter().any(|exponents| {
+                    exponents
+                        .iter()
+                        .enumerate()
+                        .any(|(index, exponent)| index != variable && !exponent.is_zero())
+                })
+            {
+                return None;
+            }
+
+            let coefficient_count = polynomial.degree(variable).to_u32() as usize + 1;
+            if coefficient_count > DENSE_UNIVARIATE_GCD_MAX_COEFFICIENTS
+                || coefficient_count
+                    > polynomial
+                        .nterms()
+                        .saturating_mul(DENSE_UNIVARIATE_GCD_MAX_SPARSITY_RATIO)
+            {
+                return None;
+            }
+            Some(coefficient_count)
+        }
+
+        let divisor_coefficient_count = dense_coefficient_count(divisor, variable)?;
+        let left_coefficient_count = dense_coefficient_count(left, variable)?;
+        let right_coefficient_count = dense_coefficient_count(right, variable)?;
+
+        let degrees = divisor
+            .exponents_iter()
+            .map(|exponents| exponents[variable].to_u32() as usize)
+            .collect::<Vec<_>>();
+        let degree = *degrees.last()?;
+        let coefficients = divisor
+            .coefficients
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect();
+        let balanced_dense_input = |polynomial: &MultivariatePolynomial<IntegerRing, E>,
+                                    coefficient_count: usize| {
+            Self::two_ended_quotient_len(divisor_coefficient_count, coefficient_count).is_some()
+                && coefficient_count
+                    .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
+                    <= polynomial
+                        .nterms()
+                        .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
+        };
+        let use_two_ended = cfg!(feature = "integer-gmp")
+            && divisor_coefficient_count >= DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_COEFFICIENTS
+            && divisor.nterms() == divisor_coefficient_count
+            && (balanced_dense_input(left, left_coefficient_count)
+                || balanced_dense_input(right, right_coefficient_count));
+        let dense_coefficients = use_two_ended.then_some(divisor.coefficients.as_slice());
+        let dense_indices = if use_two_ended {
+            (0..divisor_coefficient_count)
+                .map(|index| index as u32)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(Self {
+            variable,
+            coefficients,
+            degrees,
+            dense_coefficients,
+            dense_indices,
+            degree,
+            division_remainder: MultiPrecisionInteger::default(),
+        })
+    }
+
+    /// Recover a quotient from the leading half of a balanced division problem.
+    ///
+    /// `high_dividend` contains the `n` leading coefficient equations of a conceptual dividend of
+    /// length `2n - 1`, and `divisor` has length `n`. Only products that can affect those retained
+    /// equations are subtracted. A non-exact pivot division proves that the complete polynomial
+    /// division is inexact; the omitted low coefficients are checked later by full product
+    /// comparison.
+    fn triangular_quotient(
+        high_dividend: &[Integer],
+        divisor: &[MultiPrecisionInteger],
+        division_remainder: &mut MultiPrecisionInteger,
+    ) -> Option<Vec<Integer>> {
+        debug_assert_eq!(high_dividend.len(), divisor.len());
+        debug_assert!(!divisor.is_empty());
+        debug_assert!(!divisor.last().unwrap().is_zero());
+
+        let mut high_remainder = high_dividend
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect::<Vec<_>>();
+        let mut quotient = (0..divisor.len())
+            .map(|_| Integer::zero())
+            .collect::<Vec<_>>();
+        let divisor_degree = divisor.len() - 1;
+
+        for shift in (0..divisor.len()).rev() {
+            let leading_remainder = mem::take(&mut high_remainder[shift]);
+            if leading_remainder.is_zero() {
+                continue;
+            }
+
+            let quotient_coefficient = leading_remainder
+                .div_rem_owned_ref_assign(&divisor[divisor_degree], division_remainder);
+            if !division_remainder.is_zero() {
+                return None;
+            }
+
+            let first_retained_divisor_degree = divisor_degree - shift;
+            for divisor_coefficient_degree in first_retained_divisor_degree..divisor_degree {
+                let target = shift + divisor_coefficient_degree - divisor_degree;
+                high_remainder[target]
+                    .sub_mul_assign(&quotient_coefficient, &divisor[divisor_coefficient_degree]);
+            }
+            quotient[shift] = Integer::from(quotient_coefficient);
+        }
+
+        Some(quotient)
+    }
+
+    /// Recover the low quotient coefficients from the same number of low dividend equations.
+    ///
+    /// Coefficient `k` of a product depends only on divisor and quotient coefficients through
+    /// degree `k`. Solving these equations from the constant term therefore recovers a low
+    /// quotient prefix without multiplying it by the unused high divisor coefficients.
+    fn low_triangular_quotient(
+        low_dividend: &[Integer],
+        divisor: &[MultiPrecisionInteger],
+        division_remainder: &mut MultiPrecisionInteger,
+    ) -> Option<Vec<Integer>> {
+        debug_assert!(!low_dividend.is_empty());
+        debug_assert!(low_dividend.len() <= divisor.len());
+        debug_assert!(!divisor.first().unwrap().is_zero());
+
+        let mut low_remainder = low_dividend
+            .iter()
+            .cloned()
+            .map(Integer::to_multi_prec)
+            .collect::<Vec<_>>();
+        let mut quotient = Vec::with_capacity(low_dividend.len());
+
+        for shift in 0..low_dividend.len() {
+            let constant_remainder = mem::take(&mut low_remainder[shift]);
+            if constant_remainder.is_zero() {
+                quotient.push(Integer::zero());
+                continue;
+            }
+
+            let quotient_coefficient =
+                constant_remainder.div_rem_owned_ref_assign(&divisor[0], division_remainder);
+            if !division_remainder.is_zero() {
+                return None;
+            }
+
+            let retained_divisor_len = low_dividend.len() - shift;
+            for divisor_degree in 1..retained_divisor_len {
+                low_remainder[shift + divisor_degree]
+                    .sub_mul_assign(&quotient_coefficient, &divisor[divisor_degree]);
+            }
+            quotient.push(Integer::from(quotient_coefficient));
+        }
+
+        Some(quotient)
+    }
+
+    /// Multiply two contiguous dense integer coefficient vectors.
+    ///
+    /// The integer-domain kernel handles bounded and packed products. The fused generic loop is
+    /// used when the kernel declines the size or coefficient representation.
+    fn multiply_dense(dense_indices: &[u32], left: &[Integer], right: &[Integer]) -> Vec<Integer> {
+        if left.is_empty() || right.is_empty() {
+            return Vec::new();
+        }
+        let output_len = left.len() + right.len() - 1;
+        debug_assert!(left.len() <= dense_indices.len());
+        debug_assert!(right.len() <= dense_indices.len());
+
+        if let Some(coefficients) = Z.kernels().polynomial().and_then(|kernels| {
+            kernels.try_dense_mul(DensePolynomialMulRequest {
+                output_len,
+                left_coefficients: left,
+                left_indices: &dense_indices[..left.len()],
+                right_coefficients: right,
+                right_indices: &dense_indices[..right.len()],
+            })
+        }) {
+            let mut product = vec![Integer::zero(); output_len];
+            for (degree, coefficient) in coefficients {
+                product[degree as usize] = coefficient;
+            }
+            return product;
+        }
+
+        let mut product = vec![Integer::zero(); output_len];
+        for (left_degree, left_coefficient) in left.iter().enumerate() {
+            if left_coefficient.is_zero() {
+                continue;
+            }
+            for (right_degree, right_coefficient) in right.iter().enumerate() {
+                if right_coefficient.is_zero() {
+                    continue;
+                }
+                Z.add_mul_assign(
+                    &mut product[left_degree + right_degree],
+                    left_coefficient,
+                    right_coefficient,
+                );
+            }
+        }
+        product
+    }
+
+    /// Certify a near-balanced dense division by recovering the quotient from both endpoints.
+    ///
+    /// The low product equations determine the low quotient half without using high divisor
+    /// coefficients, and the high equations independently determine the high half. One complete
+    /// dense product then verifies every coefficient, including the middle equations omitted by
+    /// both triangular solves.
+    fn try_div_balanced_two_ended<E: PositiveExponent>(
+        &mut self,
+        dividend: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> DenseUnivariateCheckedDivision<MultivariatePolynomial<IntegerRing, E>> {
+        let divisor_len = self.degree + 1;
+        let dividend_len = dividend.degree(self.variable).to_u32() as usize + 1;
+        let Some(dense_divisor) = self.dense_coefficients else {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        };
+        let Some(quotient_len) = Self::two_ended_quotient_len(divisor_len, dividend_len) else {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        };
+        if dividend_len.saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_NUMERATOR)
+            > dividend
+                .nterms()
+                .saturating_mul(DENSE_UNIVARIATE_CHECKED_TWO_ENDED_MIN_DENSITY_DENOMINATOR)
+        {
+            return DenseUnivariateCheckedDivision::Unavailable;
+        }
+
+        let mut dense_dividend = vec![Integer::zero(); dividend_len];
+        for (coefficient, exponents) in dividend.coefficients.iter().zip(dividend.exponents_iter())
+        {
+            debug_assert!(
+                exponents
+                    .iter()
+                    .enumerate()
+                    .all(|(index, exponent)| index == self.variable || exponent.is_zero())
+            );
+            dense_dividend[exponents[self.variable].to_u32() as usize] = coefficient.clone();
+        }
+
+        let low_len = quotient_len / 2;
+        let high_len = quotient_len - low_len;
+        let mut quotient = match Self::low_triangular_quotient(
+            &dense_dividend[..low_len],
+            &self.coefficients,
+            &mut self.division_remainder,
+        ) {
+            Some(quotient) => quotient,
+            None => return DenseUnivariateCheckedDivision::Inexact,
+        };
+        let high_dividend_start = dividend_len - high_len;
+        let high_divisor_start = divisor_len - high_len;
+        let high_quotient = match Self::triangular_quotient(
+            &dense_dividend[high_dividend_start..],
+            &self.coefficients[high_divisor_start..],
+            &mut self.division_remainder,
+        ) {
+            Some(quotient) => quotient,
+            None => return DenseUnivariateCheckedDivision::Inexact,
+        };
+        quotient.extend(high_quotient);
+
+        let product = Self::multiply_dense(&self.dense_indices, dense_divisor, &quotient);
+        if product != dense_dividend {
+            return DenseUnivariateCheckedDivision::Inexact;
+        }
+
+        let capacity = quotient
+            .iter()
+            .filter(|coefficient| !coefficient.is_zero())
+            .count();
+        let mut result = dividend.zero_with_capacity(capacity);
+        let mut exponents = vec![E::zero(); dividend.nvars()];
+        for (degree, coefficient) in quotient.into_iter().enumerate() {
+            if coefficient.is_zero() {
+                continue;
+            }
+            exponents[self.variable] = E::from_u32(degree as u32);
+            result.append_monomial_back(coefficient, &exponents);
+        }
+        DenseUnivariateCheckedDivision::Exact(result)
+    }
+
+    /// Divide one input and return its quotient only when every coefficient division is exact.
+    fn try_div<E: PositiveExponent>(
+        &mut self,
+        dividend: &MultivariatePolynomial<IntegerRing, E>,
+    ) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        let dividend_degree = dividend.degree(self.variable).to_u32() as usize;
+        let divisor_degree = self.degree;
+        if dividend_degree < divisor_degree {
+            return None;
+        }
+
+        match self.try_div_balanced_two_ended(dividend) {
+            DenseUnivariateCheckedDivision::Exact(quotient) => return Some(quotient),
+            DenseUnivariateCheckedDivision::Inexact => return None,
+            DenseUnivariateCheckedDivision::Unavailable => {}
+        }
+
+        let mut remainder = (0..=dividend_degree)
+            .map(|_| MultiPrecisionInteger::default())
+            .collect::<Vec<_>>();
+        for (coefficient, exponents) in dividend.coefficients.iter().zip(dividend.exponents_iter())
+        {
+            remainder[exponents[self.variable].to_u32() as usize] =
+                coefficient.clone().to_multi_prec();
+        }
+
+        let leading_divisor = self.coefficients.last().unwrap();
+        let mut quotient = Vec::with_capacity(dividend_degree - divisor_degree + 1);
+        for degree in (divisor_degree..=dividend_degree).rev() {
+            let leading_remainder = mem::take(&mut remainder[degree]);
+            if leading_remainder.is_zero() {
+                continue;
+            }
+
+            let coefficient = leading_remainder
+                .div_rem_owned_ref_assign(leading_divisor, &mut self.division_remainder);
+            if !self.division_remainder.is_zero() {
+                return None;
+            }
+
+            let shift = degree - divisor_degree;
+            for (&divisor_degree, divisor_coefficient) in self.degrees[..self.degrees.len() - 1]
+                .iter()
+                .zip(&self.coefficients[..self.coefficients.len() - 1])
+            {
+                let target = shift + divisor_degree;
+                debug_assert!(target < degree);
+                remainder[target].sub_mul_assign(&coefficient, divisor_coefficient);
+            }
+            quotient.push((shift, coefficient));
+        }
+        if remainder[..divisor_degree]
+            .iter()
+            .any(|coefficient| !coefficient.is_zero())
+        {
+            return None;
+        }
+
+        let mut result = dividend.zero_with_capacity(quotient.len());
+        let mut exponents = vec![E::zero(); dividend.nvars()];
+        for (degree, coefficient) in quotient.into_iter().rev() {
+            exponents[self.variable] = E::from_u32(degree as u32);
+            result.append_monomial_back(Integer::from(coefficient), &exponents);
+        }
+        Some(result)
+    }
+}
+
+/// Selects an integer coefficient that fixes the scale of every modular GCD image.
+enum UnivariateGcdProjectiveNormalization {
+    Leading(Integer),
+    Constant { constant: Integer, leading: Integer },
+}
+
+impl UnivariateGcdProjectiveNormalization {
+    /// Return the integer value assigned to the selected coefficient in every modular image.
+    fn coefficient(&self) -> &Integer {
+        match self {
+            Self::Leading(coefficient) => coefficient,
+            Self::Constant { constant, .. } => constant,
+        }
+    }
+
+    /// Return the leading projective-coordinate value used by the fallback reconstruction.
+    fn leading_coefficient(&self) -> &Integer {
+        match self {
+            Self::Leading(leading) | Self::Constant { leading, .. } => leading,
+        }
+    }
+
+    /// Return whether modular images are normalized by their constant coefficient.
+    fn uses_constant(&self) -> bool {
+        matches!(self, Self::Constant { .. })
+    }
+}
+
+/// Reconstructs a primitive univariate integer GCD from normalized 64-bit modular images.
+struct UnivariateModularGcdContext<'a, E: PositiveExponent> {
+    left: &'a MultivariatePolynomial<IntegerRing, E>,
+    right: &'a MultivariatePolynomial<IntegerRing, E>,
+    primitive_left: Cow<'a, MultivariatePolynomial<IntegerRing, E>>,
+    primitive_right: Cow<'a, MultivariatePolynomial<IntegerRing, E>>,
+    variable: usize,
+    content_gcd: Integer,
+    normalization: UnivariateGcdProjectiveNormalization,
+    reconstruction_start_bits: u64,
+    input_values_at_one: [Integer; 2],
+}
+
+impl<'a, E: PositiveExponent> UnivariateModularGcdContext<'a, E> {
+    /// Evaluates every polynomial variable at one by summing the coefficients.
+    fn value_at_one(polynomial: &MultivariatePolynomial<IntegerRing, E>) -> Integer {
+        let mut value = Integer::zero();
+        for coefficient in &polynomial.coefficients {
+            value += coefficient;
+        }
+        value
+    }
+
+    /// Tests the necessary integer divisibility condition induced by evaluation at one.
+    fn passes_one_evaluation(&self, candidate: &MultivariatePolynomial<IntegerRing, E>) -> bool {
+        let candidate_value = Self::value_at_one(candidate);
+        if candidate_value.is_zero() {
+            return self.input_values_at_one.iter().all(Integer::is_zero);
+        }
+
+        self.input_values_at_one
+            .iter()
+            .all(|input_value| (input_value % &candidate_value).is_zero())
+    }
+
+    /// Removes the input contents and determines when coefficient reconstruction should start.
+    fn new(
+        left: &'a MultivariatePolynomial<IntegerRing, E>,
+        right: &'a MultivariatePolynomial<IntegerRing, E>,
+        variable: usize,
+    ) -> Self {
+        let left_content = left.content();
+        let right_content = right.content();
+        let content_gcd = Z.gcd(&left_content, &right_content);
+        let primitive_left = if Z.is_one(&left_content) {
+            Cow::Borrowed(left)
+        } else {
+            Cow::Owned(left.clone().div_coeff(&left_content))
+        };
+        let primitive_right = if Z.is_one(&right_content) {
+            Cow::Borrowed(right)
+        } else {
+            Cow::Owned(right.clone().div_coeff(&right_content))
+        };
+
+        let leading_gcd = Z.gcd(&primitive_left.lcoeff(), &primitive_right.lcoeff());
+        let probe_images = |coefficient: &Integer| {
+            coefficient
+                .significant_bits()
+                .saturating_add(2)
+                .saturating_add(u64::BITS as u64 - 1)
+                / u64::BITS as u64
+        };
+        let leading_probe_images = probe_images(&leading_gcd);
+        let constant_gcd = if leading_probe_images > 1 {
+            Z.gcd(
+                &primitive_left.get_constant(),
+                &primitive_right.get_constant(),
+            )
+        } else {
+            Integer::zero()
+        };
+        let normalization =
+            if !constant_gcd.is_zero() && probe_images(&constant_gcd) < leading_probe_images {
+                UnivariateGcdProjectiveNormalization::Constant {
+                    constant: constant_gcd,
+                    leading: leading_gcd,
+                }
+            } else {
+                UnivariateGcdProjectiveNormalization::Leading(leading_gcd)
+            };
+        let reconstruction_start_bits = normalization
+            .coefficient()
+            .significant_bits()
+            .saturating_add(2);
+        let input_values_at_one = [Self::value_at_one(left), Self::value_at_one(right)];
+
+        Self {
+            left,
+            right,
+            primitive_left,
+            primitive_right,
+            variable,
+            content_gcd,
+            normalization,
+            reconstruction_start_bits,
+            input_values_at_one,
+        }
+    }
+
+    /// Removes the projective integer scale and restores the common input content.
+    fn reconstructed_candidate(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        degree: E,
+    ) -> Option<MultivariatePolynomial<IntegerRing, E>> {
+        if reconstruction.is_zero() || reconstruction.degree(self.variable) != degree {
+            return None;
+        }
+
+        let content = reconstruction.content();
+        if content.is_zero() {
+            return None;
+        }
+
+        let mut candidate = reconstruction.clone().div_coeff(&content);
+        if candidate.lcoeff().is_negative() {
+            candidate = -candidate;
+        }
+        Some(candidate.mul_coeff(self.content_gcd.clone()))
+    }
+
+    /// Certify a reconstructed GCD by exact division into both original inputs.
+    fn certified_reconstruction(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        degree: E,
+    ) -> Option<(
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+    )> {
+        let candidate = self.reconstructed_candidate(reconstruction, degree)?;
+        if !self.passes_one_evaluation(&candidate) {
+            return None;
+        }
+        let exact_cofactors = match DenseUnivariateIntegerDivisionContext::new(
+            &candidate,
+            self.left,
+            self.right,
+            self.variable,
+        ) {
+            Some(mut division) => match division.try_div(self.left) {
+                Some(left_cofactor) => division
+                    .try_div(self.right)
+                    .map(|right_cofactor| (left_cofactor, right_cofactor)),
+                None => None,
+            },
+            None => self.left.try_div(&candidate).and_then(|left_cofactor| {
+                self.right
+                    .try_div(&candidate)
+                    .map(|right_cofactor| (left_cofactor, right_cofactor))
+            }),
+        }?;
+        Some((candidate, exact_cofactors.0, exact_cofactors.1))
+    }
+
+    /// Rescale a constant-normalized CRT polynomial to the leading-coordinate representative.
+    fn leading_reconstruction(
+        &self,
+        reconstruction: &MultivariatePolynomial<IntegerRing, E>,
+        modulus: &Integer,
+    ) -> MultivariatePolynomial<IntegerRing, E> {
+        let leading = reconstruction.lcoeff();
+        debug_assert!(Z.is_one(&Z.gcd(&leading, modulus)));
+        let scale = (self
+            .normalization
+            .leading_coefficient()
+            .clone()
+            .symmetric_mod(modulus)
+            * leading.mod_inverse(modulus))
+        .symmetric_mod(modulus);
+        reconstruction.map_coeff(
+            |coefficient| (coefficient * &scale).symmetric_mod(modulus),
+            Z,
+        )
+    }
+
+    /// Merges modular GCD images until the reconstructed polynomial divides both inputs.
+    fn run(
+        self,
+    ) -> Option<(
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+        MultivariatePolynomial<IntegerRing, E>,
+    )> {
+        let mut primes = univariate_modular_gcd_prime_iterator();
+        let mut gcd_degree = None;
+        let mut reconstruction = self.left.zero();
+        let mut modulus = Integer::one();
+        let mut next_reconstruction_bits = self.reconstruction_start_bits;
+        let mut failed_probe_image_gap = 1u64;
+        let leading_reconstruction_start_bits = self
+            .normalization
+            .leading_coefficient()
+            .significant_bits()
+            .saturating_add(2);
+        let mut next_leading_reconstruction_bits = self
+            .normalization
+            .uses_constant()
+            .then_some(leading_reconstruction_start_bits);
+        let mut failed_leading_probe_image_gap = 1u64;
+
+        loop {
+            let prime = primes.next()?;
+            let field = Zp64::new(prime);
+            let normalization_image = self.normalization.coefficient().to_finite_field(&field);
+            if field.is_zero(&normalization_image) {
+                continue;
+            }
+
+            let left_leading_image = self.primitive_left.lcoeff().to_finite_field(&field);
+            let right_leading_image = self.primitive_right.lcoeff().to_finite_field(&field);
+            if field.is_zero(&left_leading_image) || field.is_zero(&right_leading_image) {
+                continue;
+            }
+
+            let normalize_constant = self.normalization.uses_constant();
+            let requested_leading = if normalize_constant {
+                field.one()
+            } else {
+                normalization_image
+            };
+            let mut image = if let Some(dense_image) = DenseZp64UnivariateGcdImage::new(
+                self.primitive_left.as_ref(),
+                self.primitive_right.as_ref(),
+                self.variable,
+                &field,
+            ) {
+                dense_image.run(requested_leading)
+            } else {
+                let left_image = self.primitive_left.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                let right_image = self.primitive_right.map_coeff(
+                    |coefficient| coefficient.to_finite_field(&field),
+                    field.clone(),
+                );
+                debug_assert_eq!(
+                    left_image.degree(self.variable),
+                    self.primitive_left.degree(self.variable)
+                );
+                debug_assert_eq!(
+                    right_image.degree(self.variable),
+                    self.primitive_right.degree(self.variable)
+                );
+                left_image
+                    .univariate_gcd(&right_image)
+                    .mul_coeff(requested_leading)
+            };
+            if normalize_constant {
+                let constant_image = image.get_constant();
+                if field.is_zero(&constant_image) {
+                    continue;
+                }
+                let constant_inverse =
+                    DenseZp64UnivariateGcdImage::<E>::inverse_leading(&field, &constant_image);
+                image = image.mul_coeff(field.mul(&normalization_image, &constant_inverse));
+            }
+            let image_degree = image.degree(self.variable);
+            if image_degree.is_zero() {
+                let candidate = self.left.constant(self.content_gcd.clone());
+                let left_cofactor = self.left.clone().div_coeff(&self.content_gcd);
+                let right_cofactor = self.right.clone().div_coeff(&self.content_gcd);
+                return Some((candidate, left_cofactor, right_cofactor));
+            }
+
+            match gcd_degree {
+                Some(degree) if image_degree > degree => continue,
+                Some(degree) if image_degree == degree => {
+                    IntegerPolynomialCrtContext::new(&modulus, &field)
+                        .expect("univariate modular GCD prime repeated during CRT")
+                        .merge_assign(&mut reconstruction, &image);
+                    modulus *= prime;
+                }
+                _ => {
+                    debug!(
+                        "Starting univariate modular GCD reconstruction at degree {} modulo {}",
+                        image_degree, prime
+                    );
+                    gcd_degree = Some(image_degree);
+                    reconstruction =
+                        image.map_coeff(|coefficient| field.to_symmetric_integer(coefficient), Z);
+                    modulus = Integer::from(prime);
+                    next_reconstruction_bits = self.reconstruction_start_bits;
+                    failed_probe_image_gap = 1;
+                    next_leading_reconstruction_bits = self
+                        .normalization
+                        .uses_constant()
+                        .then_some(leading_reconstruction_start_bits);
+                    failed_leading_probe_image_gap = 1;
+                }
+            }
+
+            let modulus_bits = modulus.significant_bits();
+            let selected_reconstruction_due = modulus_bits >= next_reconstruction_bits;
+            let leading_reconstruction_due =
+                next_leading_reconstruction_bits.is_some_and(|next_bits| modulus_bits >= next_bits);
+            if !selected_reconstruction_due && !leading_reconstruction_due {
+                continue;
+            }
+
+            let degree = gcd_degree.unwrap();
+            let image_bits = Integer::from(prime).significant_bits();
+            if selected_reconstruction_due {
+                if let Some(result) = self.certified_reconstruction(&reconstruction, degree) {
+                    // Nonzero input leading terms preserve the characteristic-zero GCD degree.
+                    // Exact divisibility at that degree certifies the complete GCD.
+                    return Some(result);
+                }
+
+                // The selected projective coordinate provides a cheap first probe point, not a
+                // coefficient bound. Geometric backoff limits exact divisions of incomplete CRT
+                // reconstructions.
+                next_reconstruction_bits =
+                    modulus_bits.saturating_add(image_bits.saturating_mul(failed_probe_image_gap));
+                failed_probe_image_gap = failed_probe_image_gap.saturating_mul(2);
+            }
+
+            if leading_reconstruction_due {
+                let leading_reconstruction = self.leading_reconstruction(&reconstruction, &modulus);
+                if (!selected_reconstruction_due || leading_reconstruction != reconstruction)
+                    && let Some(result) =
+                        self.certified_reconstruction(&leading_reconstruction, degree)
+                {
+                    return Some(result);
+                }
+
+                next_leading_reconstruction_bits = Some(
+                    modulus_bits
+                        .saturating_add(image_bits.saturating_mul(failed_leading_probe_image_gap)),
+                );
+                failed_leading_probe_image_gap = failed_leading_probe_image_gap.saturating_mul(2);
+            }
+        }
+    }
+}
+
 impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
+    /// Reconstruct an integer polynomial from the symmetric digits of `value` in base `xi`.
+    fn interpolate_univariate_integer(
+        &self,
+        mut value: Integer,
+        variable: usize,
+        xi: &Integer,
+    ) -> Self {
+        let xi_half = xi / &Integer::Single(2);
+        let mut result = self.zero();
+        let mut exponents = vec![E::zero(); self.nvars()];
+        let mut exponent = 0u32;
+
+        while !value.is_zero() {
+            let (mut quotient, mut digit) = value.quot_rem(xi);
+            if digit > xi_half {
+                digit -= xi;
+                quotient += 1i64;
+            }
+
+            if !digit.is_zero() {
+                exponents[variable] = E::from_u32(exponent);
+                result.append_monomial_back(digit, &exponents);
+            }
+
+            value = quotient;
+            exponent += 1;
+        }
+
+        result
+    }
+
+    /// Run the integer heuristic directly when both inputs depend on one variable.
+    fn heuristic_gcd_univariate(
+        &self,
+        b: &Self,
+        variable: usize,
+    ) -> Result<(Self, Self, Self), HeuristicGCDError> {
+        let content_gcd = self.ring().gcd(&self.content(), &b.content());
+        let mut a = Cow::Borrowed(self);
+        let mut b = Cow::Borrowed(b);
+        if !a.ring().is_one(&content_gcd) {
+            a = Cow::Owned(a.into_owned().div_coeff(&content_gcd));
+            b = Cow::Owned(b.into_owned().div_coeff(&content_gcd));
+        }
+
+        let max_a = a
+            .coefficients
+            .iter()
+            .max_by(|left, right| left.abs_cmp(right))
+            .unwrap_or(&Integer::Single(0));
+        let max_b = b
+            .coefficients
+            .iter()
+            .max_by(|left, right| left.abs_cmp(right))
+            .unwrap_or(&Integer::Single(0));
+        let minimum_maximum = if max_a.abs_cmp(max_b) == Ordering::Greater {
+            max_b.abs()
+        } else {
+            max_a.abs()
+        };
+        let mut xi = &(&minimum_maximum * &Integer::Single(2)) + &Integer::Single(29);
+
+        for retry in 0..6 {
+            debug!("univariate round {}, xi={}", retry, xi);
+            let evaluation_bits = |polynomial: &Self, maximum_coefficient: &Integer| {
+                maximum_coefficient
+                    .significant_bits()
+                    .saturating_add(
+                        xi.significant_bits()
+                            .saturating_mul(polynomial.degree(variable).to_u32() as u64),
+                    )
+                    .saturating_add(ceil_log2_usize(polynomial.nterms()))
+            };
+            let estimated_bits = evaluation_bits(&a, max_a).max(evaluation_bits(&b, max_b));
+            if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+                return Err(HeuristicGCDError::MaxSizeExceeded);
+            }
+
+            let evaluated_a = a.evaluate_univariate_horner(variable, &xi);
+            let evaluated_b = b.evaluate_univariate_horner(variable, &xi);
+            let evaluated_gcd = Z.gcd(&evaluated_a, &evaluated_b);
+
+            let candidate = a.interpolate_univariate_integer(evaluated_gcd, variable, &xi);
+            let candidate_content = candidate.content();
+            let primitive_candidate = candidate.div_coeff(&candidate_content);
+            if let Some(a_cofactor) = a.try_div(&primitive_candidate)
+                && let Some(b_cofactor) = b.try_div(&primitive_candidate)
+            {
+                return Ok((
+                    primitive_candidate.mul_coeff(content_gcd),
+                    a_cofactor,
+                    b_cofactor,
+                ));
+            }
+
+            let evaluated_gcd = Z.gcd(&evaluated_a, &evaluated_b);
+            let evaluated_a_cofactor = Z.exact_div_owned(evaluated_a, &evaluated_gcd);
+            let a_cofactor = a.interpolate_univariate_integer(evaluated_a_cofactor, variable, &xi);
+            if let Some(candidate) = a.try_div(&a_cofactor)
+                && let Some(b_cofactor) = b.try_div(&candidate)
+            {
+                return Ok((candidate.mul_coeff(content_gcd), a_cofactor, b_cofactor));
+            }
+
+            let evaluated_b_cofactor = Z.exact_div_owned(evaluated_b, &evaluated_gcd);
+            let b_cofactor = b.interpolate_univariate_integer(evaluated_b_cofactor, variable, &xi);
+            if let Some(candidate) = b.try_div(&b_cofactor)
+                && let Some(a_cofactor) = a.try_div(&candidate)
+            {
+                return Ok((candidate.mul_coeff(content_gcd), a_cofactor, b_cofactor));
+            }
+
+            xi = Z
+                .quot_rem(&(&xi * &Integer::Single(73794)), &Integer::Single(27011))
+                .0;
+        }
+
+        Err(HeuristicGCDError::BadReconstruction)
+    }
+
     /// Perform a heuristic GCD algorithm.
     #[instrument(level = "debug", skip_all)]
     pub fn heuristic_gcd(&self, b: &Self) -> Result<(Self, Self, Self), HeuristicGCDError> {
         fn interpolate<E: PositiveExponent>(
-            mut gamma: MultivariatePolynomial<IntegerRing, E>,
+            gamma: MultivariatePolynomial<IntegerRing, E>,
             var: usize,
             xi: &Integer,
         ) -> MultivariatePolynomial<IntegerRing, E> {
-            let mut g = gamma.zero();
-            let mut i = 0;
             let xi_half = xi / &Integer::Single(2);
-            while !gamma.is_zero() {
-                // create xi-adic representation using the symmetric modulus
-                let mut g_i = gamma.zero_with_capacity(gamma.nterms());
-                for m in &gamma {
-                    let mut c = Z.quot_rem(m.coefficient, xi).1;
+            let mut coefficients = Vec::with_capacity(gamma.nterms());
+            let mut exponents = Vec::with_capacity(gamma.exponents.len());
 
-                    if c > xi_half {
-                        c -= xi;
+            // Each coefficient is an independent symmetric xi-adic integer. Decode it directly
+            // instead of constructing and subtracting a polynomial for every radix digit.
+            for term in &gamma {
+                debug_assert!(term.exponents[var].is_zero());
+                let mut coefficient = term.coefficient.clone();
+                let mut exponent = 0u32;
+                while !coefficient.is_zero() {
+                    let (mut quotient, mut digit) = coefficient.quot_rem(xi);
+                    if digit > xi_half {
+                        digit -= xi;
+                        quotient += 1i64;
                     }
 
-                    if !c.is_zero() {
-                        g_i.append_monomial(c, m.exponents);
+                    if !digit.is_zero() {
+                        coefficients.push(digit);
+                        exponents.extend_from_slice(term.exponents);
+                        let exponent_index = exponents.len() - gamma.nvars() + var;
+                        exponents[exponent_index] = E::from_u32(exponent);
                     }
+
+                    coefficient = quotient;
+                    exponent += 1;
                 }
-
-                for c in &mut g_i.coefficients {
-                    *c = Z.quot_rem(c, xi).1;
-
-                    if *c > xi_half {
-                        *c -= xi;
-                    }
-                }
-
-                // multiply with var^i
-                let mut g_i_2 = g_i.clone();
-                let nvars = g_i_2.nvars();
-                for x in g_i_2.exponents.chunks_mut(nvars) {
-                    x[var] = E::from_u32(i);
-                }
-
-                g = g.add(g_i_2);
-
-                gamma = (gamma - g_i).div_coeff(xi);
-                i += 1;
             }
-            g
+
+            if coefficients.is_empty() {
+                return gamma.zero();
+            }
+
+            MultivariatePolynomial::from_coefficient_list(
+                coefficients,
+                exponents,
+                gamma.variables().clone(),
+                gamma.ring(),
+            )
         }
 
         debug!("a={}; b={}", self, b);
 
         // do integer GCD
-        let content_gcd = self.ring.gcd(&self.content(), &b.content());
+        let content_gcd = self.ring().gcd(&self.content(), &b.content());
 
         debug!("content={}", content_gcd);
 
         let mut a = Cow::Borrowed(self);
         let mut b = Cow::Borrowed(b);
 
-        if !a.ring.is_one(&content_gcd) {
+        if !a.ring().is_one(&content_gcd) {
             a = Cow::Owned(a.into_owned().div_coeff(&content_gcd));
             b = Cow::Owned(b.into_owned().div_coeff(&content_gcd));
         }
 
         debug!("a_red={}; b_red={}", a, b);
+
+        let estimated_bits = estimated_heuristic_gcd_evaluation_bits(&a, &b);
+        if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+            debug!(
+                "Estimated recursive heuristic evaluation coefficient is {} bits",
+                estimated_bits
+            );
+            return Err(HeuristicGCDError::MaxSizeExceeded);
+        }
 
         if let Some(var) =
             (0..a.nvars()).find(|x| a.degree(*x) > E::zero() && b.degree(*x) > E::zero())
@@ -1973,15 +5292,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             for retry in 0..6 {
                 debug!("round {}, xi={}", retry, xi);
-                match &xi * &Integer::Single(a.degree(var).max(b.degree(var)).to_u32() as i64) {
-                    Integer::Single(_) => {}
-                    Integer::Double(_) => {}
-                    Integer::Large(r) => {
-                        if u64::from(r.significant_bits()) > 4 * u64::from(usize::BITS) {
-                            debug!("big num {}", r);
-                            return Err(HeuristicGCDError::MaxSizeExceeded);
-                        }
-                    }
+                let evaluation_bits = |polynomial: &Self, max_coefficient: &Integer| {
+                    max_coefficient
+                        .significant_bits()
+                        .saturating_add(
+                            xi.significant_bits()
+                                .saturating_mul(polynomial.degree(var).to_u32() as u64),
+                        )
+                        .saturating_add(ceil_log2_usize(polynomial.nterms()))
+                };
+                let estimated_bits = evaluation_bits(&a, max_a).max(evaluation_bits(&b, max_b));
+                if estimated_bits > HEURISTIC_GCD_MAX_EVALUATED_COEFFICIENT_BITS {
+                    debug!(
+                        "Estimated heuristic evaluation coefficient is {} bits",
+                        estimated_bits
+                    );
+                    return Err(HeuristicGCDError::MaxSizeExceeded);
                 }
 
                 let aa = a.replace(var, &xi);
@@ -2048,13 +5374,70 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Compute the gcd of multiple polynomials efficiently.
-    /// `gcd(f0,f1,f2,...)=gcd(f0,f1+k2*f(2)+k3*f(3))`
-    /// with high likelihood.
+    /// Returns the exact GCD of a polynomial collection when a partial collection GCD is a
+    /// monomial.
+    ///
+    /// Every common divisor of the collection divides the partial GCD. When that candidate has one
+    /// term, only its coefficient content and monomial exponents can remain common. Intersecting
+    /// those values with the other entries therefore determines the complete collection GCD.
+    fn try_gcd_multiple_from_monomial_candidate(
+        candidate: &Self,
+        remaining: &[Self],
+    ) -> Option<Self> {
+        if remaining
+            .iter()
+            .any(|polynomial| polynomial.variables() != candidate.variables())
+        {
+            return None;
+        }
+        if candidate.is_one() {
+            return Some(candidate.one());
+        }
+        if candidate.nterms() != 1 {
+            return None;
+        }
+
+        let mut content = candidate.content();
+        let mut exponents = candidate.exponents(0).to_vec();
+        for polynomial in remaining {
+            content = polynomial.ring().gcd(&content, &polynomial.content());
+            let metadata = GcdInputMetadata::scan(polynomial);
+            for (exponent, variable) in exponents.iter_mut().zip(metadata.variables) {
+                *exponent = (*exponent).min(variable.min_degree);
+            }
+
+            if polynomial.ring().is_one(&content)
+                && exponents.iter().all(|exponent| exponent.is_zero())
+            {
+                break;
+            }
+        }
+
+        Some(PolynomialGCD::normalize(
+            candidate.monomial(content, exponents),
+        ))
+    }
+
+    /// Computes the GCD of a nonempty collection of polynomials.
+    ///
+    /// When the sparsest entries are much smaller than the sampled aggregate, a bounded sequence
+    /// of exact GCDs is used to detect whether the collection GCD is a monomial. Otherwise, the
+    /// first candidate is obtained from `gcd(f0, f1 + k2*f2 + k3*f3 + ...)`. Every nontrivial
+    /// candidate is checked against the remaining entries, and the process is repeated until it
+    /// divides the full collection.
     pub fn gcd_multiple(
         mut f: Vec<MultivariatePolynomial<IntegerRing, E>>,
     ) -> MultivariatePolynomial<IntegerRing, E> {
         assert!(!f.is_empty());
+        let zero = f[0].zero();
+        let had_zero = f.iter().any(MultivariatePolynomial::is_zero);
+        f.retain(|polynomial| !polynomial.is_zero());
+        if f.is_empty() {
+            return zero;
+        }
+        if had_zero && f.len() == 1 {
+            return PolynomialGCD::normalize(f.swap_remove(0));
+        }
 
         let mut prime_index = 1; // skip prime 2
         let mut loop_counter = 0;
@@ -2071,11 +5454,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             if let Some(n) = f.iter().find(|x| x.is_constant()) {
                 let mut gcd = n.content();
                 for x in f.iter() {
-                    if x.ring.is_one(&gcd) {
+                    if x.ring().is_one(&gcd) {
                         break;
                     }
 
-                    gcd = x.ring.gcd(&gcd, &x.content());
+                    gcd = x.ring().gcd(&gcd, &x.content());
                 }
                 return n.constant(gcd);
             }
@@ -2083,20 +5466,54 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             f.sort_unstable_by(|a, b| b.nterms().cmp(&a.nterms())); // sort in decreasing order
 
             let a = f.pop().unwrap();
+            let sampled_term_bound = f.iter().rev().take(20).map(|x| x.nterms()).sum::<usize>();
+            let largest_sampled_entry = f.iter().rev().take(20).map(|x| x.nterms()).max().unwrap();
 
-            // add all other polynomials
-            let term_bound = f.iter().map(|x| x.nterms()).sum();
-            let mut b = a.zero_with_capacity(term_bound);
+            // Repeatedly intersect the sparsest entry with a prefix whose input support is at most
+            // one quarter of the sampled aggregate. A monomial candidate confines the collection
+            // GCD to that monomial, so intersecting its exponents and content with the other
+            // entries completes the GCD. Stop if the intermediate GCD itself becomes too large;
+            // if the bounded prefix stays multi-term, use the aggregate candidate below.
+            if f.last()
+                .is_some_and(|b| b.nterms().saturating_mul(4) <= largest_sampled_entry)
+            {
+                let mut probed_terms = 0usize;
+                let mut candidate: Option<Self> = None;
+                for (probe_index, polynomial) in f.iter().rev().take(20).enumerate() {
+                    let next_probed_terms = probed_terms.saturating_add(polynomial.nterms());
+                    if next_probed_terms.saturating_mul(4) > sampled_term_bound {
+                        break;
+                    }
+                    probed_terms = next_probed_terms;
 
-            // prevent sampling f[i] and f[i+prime_len] with the same
-            // prefactor every iteration
+                    let next_candidate = match candidate.take() {
+                        Some(candidate) => candidate.gcd(polynomial),
+                        None => a.gcd(polynomial),
+                    };
+                    let candidate_ref = candidate.insert(next_candidate);
+
+                    if let Some(gcd) = Self::try_gcd_multiple_from_monomial_candidate(
+                        candidate_ref,
+                        &f[..f.len() - probe_index - 1],
+                    ) {
+                        return gcd;
+                    }
+                    if candidate_ref.nterms().saturating_mul(4) > sampled_term_bound {
+                        break;
+                    }
+                }
+            }
+
+            let mut b = a.zero_with_capacity(sampled_term_bound);
+
+            // Prevent sampling f[i] and f[i+prime_len] with the same prefactor every iteration.
             let num_primes = if f.len().is_multiple_of(SMALL_PRIMES.len()) {
                 SMALL_PRIMES.len() - 1
             } else {
                 SMALL_PRIMES.len()
             };
 
-            // try the 20 smallest chunks
+            // Try the 20 smallest chunks.
             for p in f.iter().rev().take(20) {
                 let k = Integer::Single(SMALL_PRIMES[prime_index % num_primes]);
                 prime_index += 1;
@@ -2118,7 +5535,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
             f.retain(|x| {
                 if x.try_div(&gcd).is_some() {
-                    content_gcd = gcd.ring.gcd(&content_gcd, &x.content());
+                    content_gcd = gcd.ring().gcd(&content_gcd, &x.content());
                     false
                 } else {
                     true
@@ -2147,18 +5564,87 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Compute the gcd of two multivariate polynomials using Zippel's algorithm.
+    /// Lift projectively normalized CRT coefficients with a reconstructed common denominator.
+    ///
+    /// If the modular coefficients represent `g_i / g_pivot`, multiplying them by the common
+    /// denominator makes every coefficient integral. A symmetric lift followed by removal of the
+    /// integer content then recovers the primitive GCD candidate. The caller verifies the result
+    /// by exact division because one reconstructed coefficient can expose only a proper divisor of
+    /// the full common denominator.
+    fn lift_projective_gcd(
+        modular_gcd: &Self,
+        modulus: &Integer,
+        denominator: &Integer,
+    ) -> Option<Self> {
+        let mut candidate = modular_gcd.clone();
+        for coefficient in &mut candidate.coefficients {
+            let lifted = (coefficient.clone() * denominator).symmetric_mod(modulus);
+            if lifted.is_zero() {
+                return None;
+            }
+            *coefficient = lifted;
+        }
+
+        let content = candidate.content();
+        if content.is_zero() {
+            return None;
+        }
+        candidate = candidate.div_coeff(&content);
+        if candidate.lcoeff().is_negative() {
+            candidate = candidate.mul_coeff(Integer::from(-1));
+        }
+        Some(candidate)
+    }
+
+    /// Compute the gcd of two multivariate polynomials using Zippel's algorithm with a selected
+    /// modular word size.
+    fn gcd_zippel_auto(
+        &self,
+        b: &Self,
+        vars: &[usize],
+        bounds: &mut [E],
+        tight_bounds: &mut [E],
+    ) -> Self {
+        let gamma = self
+            .ring()
+            .gcd(&self.lcoeff_varorder(vars), &b.lcoeff_varorder(vars));
+        debug!(
+            "gamma {} ({} significant bits)",
+            gamma,
+            gamma.significant_bits()
+        );
+
+        #[cfg(feature = "binary_size")]
+        {
+            Self::gcd_zippel::<u64>(self, b, vars, bounds, tight_bounds, &gamma)
+        }
+
+        #[cfg(not(feature = "binary_size"))]
+        {
+            if should_use_u64_zippel(self, b, &gamma) {
+                debug!("Using 64-bit modular images for Zippel GCD");
+                Self::gcd_zippel::<u64>(self, b, vars, bounds, tight_bounds, &gamma)
+            } else {
+                debug!("Using 32-bit modular images for Zippel GCD");
+                Self::gcd_zippel::<u32>(self, b, vars, bounds, tight_bounds, &gamma)
+            }
+        }
+    }
+
+    /// Compute the gcd using Zippel's algorithm and the supplied modular workspace.
     /// TODO: provide a parallel implementation?
     #[instrument(level = "debug", skip_all)]
-    fn gcd_zippel<UField: FiniteFieldWorkspace + 'static>(
+    #[inline(never)]
+    fn gcd_zippel<UField: ModularGcdWorkspace>(
         &self,
         b: &Self,
         vars: &[usize], // variables
         bounds: &mut [E],
         tight_bounds: &mut [E],
+        gamma: &Integer,
     ) -> Self
     where
-        FiniteField<UField>: FiniteFieldCore<UField>,
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
         <FiniteField<UField> as Set>::Element: Copy,
         Integer: ToFiniteField<UField> + FromFiniteField<UField>,
     {
@@ -2169,18 +5655,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             b.check_consistency();
         }
 
-        // compute scaling factor in Z
-        let gamma = self
-            .ring
-            .gcd(&self.lcoeff_varorder(vars), &b.lcoeff_varorder(vars));
-        debug!("gamma {}", gamma);
-
-        let mut primes =
-            PrimeIteratorU64::new(UField::get_large_prime().to_u64().unwrap_or(1 << 63));
-
-        for _ in 0..100 {
-            let _ = primes.next();
-        }
+        let mut primes = ModularGcdPrimeIterator::for_workspace::<UField>();
 
         'newfirstprime: loop {
             let Some(p) = primes.next() else {
@@ -2250,8 +5725,29 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 debug!("Multiple scaling case: sample {} times", nx);
             }
 
-            let gpc = gp.lcoeff_varorder(vars);
-            let lcoeff_factor = gp.ring.div(&gammap, &gpc);
+            // Reconstruct the gcd projectively. Scaling every modular image by a coefficient of
+            // the gcd itself avoids the potentially much larger `gamma / lc(g)` multiplier used
+            // by classical integer CRT. Prefer the constant term: it is often small, and then
+            // rational reconstruction needs roughly the height of the gcd instead of the height
+            // of the input leading coefficients.
+            let pivot_index = gp
+                .exponents_iter()
+                .position(|exponents| exponents.iter().all(|exponent| *exponent == E::zero()))
+                .unwrap_or_else(|| {
+                    gp.exponents_iter()
+                        .enumerate()
+                        .min_by_key(|(_, exponents)| {
+                            exponents
+                                .iter()
+                                .map(|exponent| exponent.to_u32() as u64)
+                                .sum::<u64>()
+                        })
+                        .map(|(index, _)| index)
+                        .unwrap_or(0)
+                });
+            let pivot_exponents = gp.exponents(pivot_index).to_vec();
+            let pivot_inverse = gp.ring().inv(&gp.coefficients[pivot_index]);
+            gp = gp.mul_coeff(pivot_inverse);
 
             // construct the gcd suggestion in Z
             let mut gm = self.zero_with_capacity(gp.nterms());
@@ -2259,35 +5755,143 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             gm.coefficients = gp
                 .coefficients
                 .iter()
-                .map(|x| {
-                    gp.ring
-                        .to_symmetric_integer(&gp.ring.mul(x, &lcoeff_factor))
-                })
+                .map(|coefficient| gp.ring().to_symmetric_integer(coefficient))
                 .collect();
 
             let mut m = Integer::from_prime(&finite_field); // size of finite field
 
-            debug!("GCD suggestion with gamma: {} mod {} ", gm, p);
-
-            let mut old_gm = self.zero();
+            debug!("Projective GCD suggestion: {} mod {} ", gm, p);
+            let mut reconstruction_probe = (pivot_index != 0)
+                .then_some(0)
+                .unwrap_or_else(|| if gp.nterms() > 1 { 1 } else { 0 });
+            let mut accepted_images = 1usize;
+            let mut next_reconstruction_image = 1usize;
+            let mut consecutive_probe_failures = 0usize;
+            let mut failed_full_reconstruction_probe = None;
 
             // add new primes until we can reconstruct the full gcd
             'newprime: loop {
-                if gm == old_gm {
-                    // divide by integer content
-                    let gmc = gm.content();
-                    let gc = gm.clone().div_coeff(&gmc);
-
-                    debug!("Final suggested gcd: {}", gc);
-                    if gc.is_one() || (self.try_div(&gc).is_some() && b.try_div(&gc).is_some()) {
-                        return gc;
+                // A prime dividing `gamma` was rejected above, so reduction preserves the true
+                // GCD's leading multidegree. The lifted candidate retains every nonzero term of
+                // the modular GCD. If it divides both integer inputs, its multidegree is therefore
+                // both at least and at most that of the true GCD, which certifies the full GCD.
+                // Probe one coefficient first so that insufficient moduli do not trigger a full
+                // reconstruction attempt.
+                'reconstruction_attempt: {
+                    if accepted_images < next_reconstruction_image {
+                        break 'reconstruction_attempt;
                     }
 
-                    // if it does not divide, we need more primes
-                    debug!("Does not divide: more primes needed");
-                }
+                    let reconstructed_probe = Rational::maximal_quotient_reconstruction(
+                        &gm.coefficients[reconstruction_probe],
+                        &m,
+                        None,
+                    );
 
-                old_gm = gm.clone();
+                    let reconstructed_probe = match reconstructed_probe {
+                        Ok(coefficient) if !Q.is_zero(&coefficient) => coefficient,
+                        _ => {
+                            consecutive_probe_failures += 1;
+                            failed_full_reconstruction_probe = None;
+                            next_reconstruction_image = accepted_images
+                                + if consecutive_probe_failures >= 2 {
+                                    2
+                                } else {
+                                    1
+                                };
+                            break 'reconstruction_attempt;
+                        }
+                    };
+
+                    consecutive_probe_failures = 0;
+
+                    // The reduced projective coefficient denominators all divide the primitive
+                    // pivot coefficient. When the probe exposes that common denominator, it can
+                    // lift the entire candidate without reconstructing every coefficient.
+                    if let Some(gc) =
+                        Self::lift_projective_gcd(&gm, &m, reconstructed_probe.denominator_ref())
+                    {
+                        debug!("Common-denominator GCD suggestion: {}", gc);
+                        if gc.is_one() || (self.try_div(&gc).is_some() && b.try_div(&gc).is_some())
+                        {
+                            return gc;
+                        }
+                    }
+
+                    let stable_after_failed_full_reconstruction = failed_full_reconstruction_probe
+                        .as_ref()
+                        .is_none_or(|previous| previous == &reconstructed_probe);
+                    if !stable_after_failed_full_reconstruction {
+                        failed_full_reconstruction_probe = Some(reconstructed_probe);
+                        next_reconstruction_image = accepted_images + 1;
+                    } else {
+                        failed_full_reconstruction_probe = None;
+                        let mut rational_coefficients = Vec::with_capacity(gm.nterms());
+                        let mut failed_coefficient = None;
+
+                        for (coefficient_index, coefficient) in gm.coefficients.iter().enumerate() {
+                            let reconstructed = if coefficient_index == reconstruction_probe {
+                                Ok(reconstructed_probe.clone())
+                            } else {
+                                Rational::maximal_quotient_reconstruction(coefficient, &m, None)
+                            };
+                            let Ok(coefficient) = reconstructed else {
+                                failed_coefficient = Some(coefficient_index);
+                                break;
+                            };
+                            if Q.is_zero(&coefficient) {
+                                failed_coefficient = Some(coefficient_index);
+                                break;
+                            }
+                            rational_coefficients.push(coefficient);
+                        }
+
+                        if let Some(coefficient_index) = failed_coefficient {
+                            // Probe the first coefficient that blocked the full sweep after the
+                            // next modular image has been accumulated.
+                            reconstruction_probe = coefficient_index;
+                            next_reconstruction_image = accepted_images + 1;
+                        } else {
+                            let hardest_coefficient = rational_coefficients
+                                .iter()
+                                .enumerate()
+                                .max_by_key(|(_, coefficient)| {
+                                    coefficient.numerator_ref().significant_bits()
+                                        + coefficient.denominator_ref().significant_bits()
+                                })
+                                .map(|(index, _)| index)
+                                .unwrap_or(reconstruction_probe);
+
+                            let rational_gcd = MultivariatePolynomial::from_parts(
+                                rational_coefficients,
+                                gm.exponents.clone(),
+                                Q,
+                                gm.variables().clone(),
+                            );
+                            let content = rational_gcd.content();
+                            let mut gc = rational_gcd.map_coeff(
+                                |coefficient| Q.div(coefficient, &content).numerator(),
+                                Z,
+                            );
+                            if gc.lcoeff().is_negative() {
+                                gc = gc.mul_coeff(Integer::from(-1));
+                            }
+
+                            debug!("Final projective GCD suggestion: {}", gc);
+                            if gc.is_one()
+                                || (self.try_div(&gc).is_some() && b.try_div(&gc).is_some())
+                            {
+                                return gc;
+                            }
+
+                            reconstruction_probe = hardest_coefficient;
+                            failed_full_reconstruction_probe =
+                                Some(rational_gcd.coefficients[hardest_coefficient].clone());
+                            next_reconstruction_image = accepted_images + 1;
+                            debug!("Projective reconstruction does not divide: more primes needed");
+                        }
+                    }
+                }
 
                 loop {
                     let Some(p) = primes.next() else {
@@ -2373,116 +5977,101 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
                 }
 
-                // scale the new image
-                let gpc = gp.lcoeff_varorder(vars);
-                gp = gp.mul_coeff(ap.ring.div(&gammap, &gpc));
-                debug!("gp: {} mod {}", gp, gp.ring.get_prime());
+                // Use the same projective normalization as the first image. A missing pivot means
+                // this prime is unlucky for the assumed support.
+                let Some(pivot_coefficient) = gp
+                    .into_iter()
+                    .find(|term| term.exponents == pivot_exponents)
+                    .map(|term| *term.coefficient)
+                else {
+                    continue 'newprime;
+                };
+                gp = gp.mul_coeff(ap.ring().inv(&pivot_coefficient));
+                debug!("gp: {} mod {}", gp, gp.ring().get_prime());
 
-                let gp_i = gp.map_coeff(|c| gp.ring.to_integer(c), self.ring);
-                gm = gm.chinese_remainder(&gp_i, &m, &gp.ring.get_prime().to_integer());
+                let crt = IntegerPolynomialCrtContext::new(&m, gp.ring())
+                    .expect("modular GCD prime repeated during CRT reconstruction");
+                crt.merge_assign(&mut gm, &gp);
 
-                self.ring.mul_assign(&mut m, &Integer::from_prime(&gp.ring));
+                self.ring()
+                    .mul_assign(&mut m, &Integer::from_prime(&gp.ring()));
+                accepted_images += 1;
 
                 debug!("gm: {} from ring {}", gm, m);
             }
         }
     }
 
-    /// Evaluate the polynomial at the given beta points and return the total number of expected terms,
-    /// and a list of term indices and evaluations.
+    /// Prepare the coefficient-free ratios and coefficient-weighted starting values for geometric
+    /// evaluation of `poly`.
     fn evaluate_terms<PE: PositiveExponent>(
         p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
-        betas: &[FiniteFieldElement<u64>],
-    ) -> (usize, Vec<(usize, FiniteFieldElement<u64>)>) {
-        let mut unique_indices = vec![];
-        let mut index_map = HashMap::default();
-        for p in poly.exponents_iter() {
-            index_map.entry(p[0]).or_insert_with(|| {
-                unique_indices.push(p[0]);
-                0
-            });
+        term_bases: &[FiniteFieldElement<u64>],
+        shifted_bases: &[FiniteFieldElement<u64>],
+        term_powers: &[Vec<FiniteFieldElement<u64>>],
+        shifted_powers: &[Vec<FiniteFieldElement<u64>>],
+    ) -> (
+        Vec<(PE, usize, usize)>,
+        Vec<FiniteFieldElement<u64>>,
+        Vec<FiniteFieldElement<u64>>,
+    ) {
+        debug_assert_eq!(term_bases.len(), poly.nvars() - 1);
+        debug_assert_eq!(shifted_bases.len(), poly.nvars() - 1);
+        debug_assert_eq!(term_powers.len(), term_bases.len());
+        debug_assert_eq!(shifted_powers.len(), shifted_bases.len());
+        let rows = poly.univariate_row_ranges(0);
+        let mut term_evals = Vec::with_capacity(poly.nterms());
+        let mut current_evals = Vec::with_capacity(poly.nterms());
+        for (coefficient, exponents) in poly
+            .coefficients
+            .iter()
+            .zip(poly.exponents.chunks(poly.nvars()))
+        {
+            let mut term_eval = p.one();
+            let mut current_eval = *coefficient;
+            for (variable, exponent) in exponents.iter().skip(1).enumerate() {
+                let exponent = exponent.to_u32() as usize;
+                if exponent > 0 {
+                    let term_power = term_powers[variable]
+                        .get(exponent)
+                        .copied()
+                        .unwrap_or_else(|| p.pow(&term_bases[variable], exponent as u64));
+                    let shifted_power = shifted_powers[variable]
+                        .get(exponent)
+                        .copied()
+                        .unwrap_or_else(|| p.pow(&shifted_bases[variable], exponent as u64));
+                    p.mul_assign(&mut term_eval, &term_power);
+                    p.mul_assign(&mut current_eval, &shifted_power);
+                }
+            }
+            term_evals.push(term_eval);
+            current_evals.push(current_eval);
         }
-        unique_indices.sort();
-        for (index, e) in unique_indices.iter().enumerate() {
-            index_map.insert(*e, index);
-        }
-
-        (
-            unique_indices.len(),
-            poly.exponents
-                .chunks(poly.nvars())
-                .map(|ee| {
-                    let mut eval = p.one();
-                    for (e, beta) in ee.iter().skip(1).zip(betas) {
-                        if *e > PE::zero() {
-                            p.mul_assign(&mut eval, &p.pow(beta, e.to_u32() as u64));
-                        }
-                    }
-                    (index_map[&ee[0]], eval)
-                })
-                .collect(),
-        )
+        (rows, term_evals, current_evals)
     }
 
     /// Evaluate the geometric image of the polynomial at the given beta points and return the result as a polynomial.
     fn eval_geometric_image<PE: PositiveExponent>(
-        p: &Zp64,
         poly: &MultivariatePolynomial<Zp64, PE>,
-        term_count: usize,
-        term_evals: &[(usize, FiniteFieldElement<u64>)],
+        rows: &[(PE, usize, usize)],
+        term_evals: &[FiniteFieldElement<u64>],
         current_evals: &mut [FiniteFieldElement<u64>],
     ) -> MultivariatePolynomial<Zp64, PE> {
-        let mut coefficients = vec![p.zero(); term_count];
-        let mut exp = vec![PE::zero(); poly.nvars() * term_count];
-
-        for (((c, ee), (index, term_eval)), current_eval) in poly
-            .coefficients
-            .iter()
-            .zip(poly.exponents.chunks(poly.nvars()))
-            .zip(term_evals)
-            .zip(current_evals)
-        {
-            exp[index * poly.nvars()] = ee[0];
-
-            let c = p.mul(c, current_eval);
-            p.mul_assign(current_eval, term_eval);
-
-            p.add_assign(&mut coefficients[*index], c);
-        }
-
-        // remove zeros
-        let mut current_index = 0;
-        for i in 0..coefficients.len() {
-            if current_index != i {
-                coefficients[current_index] = coefficients[i];
-                exp.copy_within(
-                    (i * poly.nvars())..(i + 1) * poly.nvars(),
-                    current_index * poly.nvars(),
-                );
-            }
-
-            if !p.is_zero(&coefficients[i]) {
-                current_index += 1;
-            }
-        }
-        coefficients.truncate(current_index);
-        exp.truncate(current_index * poly.nvars());
-
-        MultivariatePolynomial {
-            coefficients,
-            exponents: exp,
-            ring: p.clone(),
-            variables: poly.variables.clone(),
-            _phantom: std::marker::PhantomData,
-        }
+        let mut image = poly.zero_with_capacity(rows.len());
+        poly.evaluate_and_advance_weighted_terms(current_evals, term_evals, 0, rows, &mut image);
+        image
     }
 
-    fn evaluate_terms_bivariate<PE: PositiveExponent>(
-        p: &Zp64,
-        poly: &MultivariatePolynomial<Zp64, PE>,
-        betas: &[FiniteFieldElement<u64>],
-    ) -> (usize, Vec<(usize, FiniteFieldElement<u64>)>) {
+    fn evaluate_terms_bivariate<UField: FiniteFieldWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        poly: &MultivariatePolynomial<FiniteField<UField>, PE>,
+        betas: &[FiniteFieldElement<UField>],
+    ) -> (Vec<(PE, PE)>, Vec<(usize, FiniteFieldElement<UField>)>)
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy,
+    {
         let mut unique_indices = vec![];
         let mut index_map = HashMap::default();
         for p in poly.exponents_iter() {
@@ -2498,7 +6087,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
 
         (
-            unique_indices.len(),
+            unique_indices,
             poly.exponents
                 .chunks(poly.nvars())
                 .map(|ee| {
@@ -2514,31 +6103,28 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         )
     }
 
-    fn evaluate_geometric_image_bivariate<PE: PositiveExponent>(
-        p: &Zp64,
-        poly: &MultivariatePolynomial<Zp64, PE>,
-        term_count: usize,
-        term_evals: &[(usize, FiniteFieldElement<u64>)],
-        current_evals: &mut [FiniteFieldElement<u64>],
-    ) -> MultivariatePolynomial<Zp64, u32> {
-        let mut coefficients = vec![p.zero(); term_count];
-        let mut exp = vec![0; poly.nvars() * term_count];
-
-        for (((c, ee), (index, term_eval)), current_eval) in poly
-            .coefficients
-            .iter()
-            .zip(poly.exponents.chunks(poly.nvars()))
-            .zip(term_evals)
-            .zip(current_evals)
-        {
+    fn evaluate_geometric_image_bivariate<UField: FiniteFieldWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        poly: &MultivariatePolynomial<FiniteField<UField>, PE>,
+        row_exponents: &[(PE, PE)],
+        term_evals: &[(usize, FiniteFieldElement<UField>)],
+        current_evals: &mut [FiniteFieldElement<UField>],
+    ) -> MultivariatePolynomial<FiniteField<UField>, u32>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy,
+    {
+        let mut coefficients = vec![p.zero(); row_exponents.len()];
+        let mut exp = vec![0; poly.nvars() * row_exponents.len()];
+        for (index, (exponent0, exponent1)) in row_exponents.iter().enumerate() {
             let exp_offset = index * poly.nvars();
-            exp[exp_offset] = ee[0].to_u32();
-            exp[exp_offset + 1] = ee[1].to_u32();
+            exp[exp_offset] = exponent0.to_u32();
+            exp[exp_offset + 1] = exponent1.to_u32();
+        }
 
-            let c = p.mul(c, current_eval);
+        for ((index, term_eval), current_eval) in term_evals.iter().zip(current_evals) {
+            p.add_assign(&mut coefficients[*index], &*current_eval);
             p.mul_assign(current_eval, term_eval);
-
-            p.add_assign(&mut coefficients[*index], c);
         }
 
         // remove zeros
@@ -2559,13 +6145,42 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         coefficients.truncate(current_index);
         exp.truncate(current_index * poly.nvars());
 
-        MultivariatePolynomial {
-            coefficients,
-            exponents: exp,
-            ring: p.clone(),
-            variables: poly.variables.clone(),
-            _phantom: std::marker::PhantomData,
+        MultivariatePolynomial::from_parts(coefficients, exp, p.clone(), poly.variables().clone())
+    }
+
+    /// Recover the distinct nonzero roots of a Hu recurrence polynomial.
+    fn hu_monagan_recurrence_roots<F: DenseRootPrimeField>(
+        p: &F,
+        coefficients: &[F::Element],
+    ) -> Option<Vec<F::Element>>
+    where
+        F::Element: Copy + PartialEq,
+    {
+        DenseFiniteFieldRootContext::new(p).find_distinct_nonzero_roots(coefficients)
+    }
+
+    /// Recover roots with 32-bit arithmetic when a surrounding 64-bit field uses a small prime.
+    fn hu_monagan_recurrence_roots_wide(
+        p: &Zp64,
+        coefficients: &[FiniteFieldElement<u64>],
+    ) -> Option<Vec<FiniteFieldElement<u64>>> {
+        if let Ok(prime) = u32::try_from(p.get_prime()) {
+            let small_field = Zp::new(prime);
+            let small_coefficients = coefficients
+                .iter()
+                .map(|coefficient| small_field.to_element(p.from_element(coefficient) as u32))
+                .collect::<Vec<_>>();
+            return Self::hu_monagan_recurrence_roots(&small_field, &small_coefficients).map(
+                |roots| {
+                    roots
+                        .iter()
+                        .map(|root| p.to_element(small_field.from_element(root) as u64))
+                        .collect()
+                },
+            );
         }
+
+        Self::hu_monagan_recurrence_roots(p, coefficients)
     }
 
     fn hu_monagan_sparse_interpolate<PE: PositiveExponent>(
@@ -2573,32 +6188,23 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         images: &[MultivariatePolynomial<Zp64, PE>],
         sample_points: &[FiniteFieldElement<u64>],
         alpha: &FiniteFieldElement<u64>,
-        totient_primes: &[(u64, u32)],
-        ri_prod: u64,
+        discrete_log_context: &Zp64DiscreteLogContext<'_>,
+        kronecker: &HuMonaganKroneckerMap,
         d_0: PE,
-    ) -> Option<MultivariatePolynomial<Zp64, u32>> {
+    ) -> Option<MultivariatePolynomial<Zp64, PE>> {
         if images.len() < 4 || !images.len().is_multiple_of(2) {
             return None;
         }
 
-        let zero_u32 = MultivariatePolynomial {
-            coefficients: vec![],
-            exponents: vec![],
-            ring: p.clone(),
-            variables: images[0].variables.clone(),
-            _phantom: std::marker::PhantomData,
-        };
-
         let l = images.len() / 2;
-        let mut res = zero_u32.clone();
-        let mut exp = vec![PE::zero(); images[0].nvars()];
-        let mut exp_u32 = vec![0; images[0].nvars()];
-
+        let mut res = images[0].zero();
+        let mut image_exp = vec![PE::zero(); images[0].nvars()];
+        let mut result_exp = vec![PE::zero(); images[0].nvars()];
         for i in 0..=d_0.to_u32() {
-            exp[0] = PE::from_u32(i);
+            image_exp[0] = PE::from_u32(i);
             let row = images
                 .iter()
-                .map(|x| x.coefficient(&exp).unwrap_or(p.zero()))
+                .map(|x| x.coefficient(&image_exp).unwrap_or(p.zero()))
                 .collect::<Vec<_>>();
 
             if row.iter().all(|x| p.is_zero(x)) {
@@ -2615,35 +6221,24 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 return None;
             }
 
-            let mut bma_poly = res.zero();
-            let mut bma_exp = vec![0; images[0].nvars()];
-            for (j, cs) in recurrence.iter().rev().enumerate() {
-                if !p.is_zero(cs) {
-                    bma_exp[0] = j as u32;
-                    bma_poly.append_monomial(p.neg(cs), &bma_exp);
-                }
-            }
-            bma_exp[0] = t as u32;
-            bma_poly.append_monomial(p.one(), &bma_exp);
-
-            let mut factors = bma_poly.factor();
-            factors.retain(|(f, _)| !f.is_constant());
-            if factors.len() != t {
-                debug!("Failed to factorize BMA poly at x^{}: {:?}", i, bma_poly);
+            // The recurrence roots are the distinct monomial evaluations alpha^e. The prime
+            // and Kronecker range checks above guarantee that these are distinct, so the
+            // polynomial is already square-free and completely split into linear factors.
+            let mut bma_coefficients = recurrence
+                .iter()
+                .rev()
+                .map(|coefficient| p.neg(coefficient))
+                .collect::<Vec<_>>();
+            bma_coefficients.push(p.one());
+            let Some(roots) = Self::hu_monagan_recurrence_roots_wide(p, &bma_coefficients) else {
+                debug!("Failed to recover BMA roots at x^{}", i);
                 return None;
-            }
+            };
 
             let mut monomials = Vec::with_capacity(t);
-            for (f, _) in factors {
-                if f.degree(0) != 1 {
-                    debug!("Factor not deg 1: {}", f);
-                    return None;
-                }
-
-                let m = p.neg(&f.get_constant());
-                let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
-                let ee = p.from_element(&e);
-                if ee >= ri_prod || ee > u32::MAX as u64 {
+            for m in roots {
+                let ee = discrete_log_context.discrete_log(&m);
+                if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
                 }
@@ -2666,20 +6261,27 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 p.div_assign(coeff, &initial_power);
             }
 
-            let mut row_poly = res.zero();
-            for (coeff, e) in sol.into_iter().zip(&monomials) {
-                exp_u32[0] = i;
-                exp_u32[1] = *e as u32;
-                row_poly.append_monomial(coeff, &exp_u32);
-                exp_u32[1] = 0;
-            }
-
             for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                let evaluated = row_poly.replace(1, sample_point);
-                if evaluated.coefficient(&exp_u32).unwrap_or(p.zero()) != *expected {
+                // Evaluate the encoded exponent directly so values above the signed exponent
+                // range are not truncated by a polynomial substitution.
+                let mut evaluated = p.zero();
+                for (coefficient, exponent) in sol.iter().zip(&monomials) {
+                    p.add_assign(
+                        &mut evaluated,
+                        &p.mul(coefficient, &p.pow(sample_point, *exponent)),
+                    );
+                }
+                if evaluated != *expected {
                     debug!("Sparse interpolation row at x^{} failed sample check", i);
                     return None;
                 }
+            }
+
+            let mut row_poly = res.zero();
+            for (coeff, e) in sol.into_iter().zip(&monomials) {
+                result_exp[0] = PE::from_u32(i);
+                kronecker.decode(*e, &mut result_exp)?;
+                row_poly.append_monomial(coeff, &result_exp);
             }
 
             res = res + row_poly;
@@ -2688,16 +6290,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         Some(res)
     }
 
-    fn hu_monagan_sparse_interpolate_bivariate(
-        p: &Zp64,
-        images: &[MultivariatePolynomial<Zp64, u32>],
-        sample_points: &[FiniteFieldElement<u64>],
-        alpha: &FiniteFieldElement<u64>,
-        totient_primes: &[(u64, u32)],
-        ri_prod: u64,
+    fn hu_monagan_sparse_interpolate_bivariate<UField: HuMonaganWorkspace, PE: PositiveExponent>(
+        p: &FiniteField<UField>,
+        images: &[MultivariatePolynomial<FiniteField<UField>, u32>],
+        sample_points: &[FiniteFieldElement<UField>],
+        alpha: &FiniteFieldElement<UField>,
+        discrete_log_context: &UField::DiscreteLogContext<'_>,
+        kronecker: &HuMonaganKroneckerMap,
         d_0_1: (u32, u32),
-    ) -> Option<MultivariatePolynomial<Zp64, u32>> {
-        if images.len() < 4 || !images.len().is_multiple_of(2) {
+    ) -> Option<MultivariatePolynomial<FiniteField<UField>, PE>>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField>
+            + DenseRootPrimeField<Element = FiniteFieldElement<UField>>
+            + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+    {
+        if images.len() < HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES || !images.len().is_multiple_of(2) {
             return None;
         }
 
@@ -2716,15 +6324,19 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let mut rows = rows.into_iter().collect::<Vec<_>>();
         rows.sort_unstable();
 
-        let mut res = images[0].zero();
-        let mut exp = vec![0; images[0].nvars()];
-
+        let mut res = MultivariatePolynomial::<FiniteField<UField>, PE>::new(
+            p,
+            None,
+            images[0].variables().clone(),
+        );
+        let mut image_exp = vec![0; images[0].nvars()];
+        let mut result_exp = vec![PE::zero(); images[0].nvars()];
         for (e0, e1) in rows {
-            exp[0] = e0;
-            exp[1] = e1;
+            image_exp[0] = e0;
+            image_exp[1] = e1;
             let row = images
                 .iter()
-                .map(|x| x.coefficient(&exp).unwrap_or(p.zero()))
+                .map(|x| x.coefficient(&image_exp).unwrap_or(p.zero()))
                 .collect::<Vec<_>>();
 
             let (recurrence, stable_count) = p.find_linear_recurrence_relation(&row);
@@ -2737,38 +6349,24 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 return None;
             }
 
-            let mut bma_poly = images[0].zero();
-            let mut bma_exp = vec![0u32; images[0].nvars()];
-            for (j, cs) in recurrence.iter().rev().enumerate() {
-                if !p.is_zero(cs) {
-                    bma_exp[0] = j as u32;
-                    bma_poly.append_monomial(p.neg(cs), &bma_exp);
-                }
-            }
-            bma_exp[0] = t as u32;
-            bma_poly.append_monomial(p.one(), &bma_exp);
-
-            let mut factors = bma_poly.factor();
-            factors.retain(|(f, _)| !f.is_constant());
-            if factors.len() != t {
+            let mut bma_coefficients = recurrence
+                .iter()
+                .rev()
+                .map(|coefficient| p.neg(coefficient))
+                .collect::<Vec<_>>();
+            bma_coefficients.push(p.one());
+            let Some(roots) = Self::hu_monagan_recurrence_roots(p, &bma_coefficients) else {
                 debug!(
-                    "Failed to factorize BMA poly at bivariate row x^{} y^{}: {:?}",
-                    e0, e1, bma_poly
+                    "Failed to recover BMA roots at bivariate row x^{} y^{}",
+                    e0, e1
                 );
                 return None;
-            }
+            };
 
             let mut monomials = Vec::with_capacity(t);
-            for (f, _) in factors {
-                if f.degree(0) != 1 {
-                    debug!("Factor not deg 1: {}", f);
-                    return None;
-                }
-
-                let m = p.neg(&f.get_constant());
-                let e = p.discrete_log(alpha, &m, p.get_prime() - 1, totient_primes);
-                let ee = p.from_element(&e);
-                if ee >= ri_prod || ee > u32::MAX as u64 {
+            for m in roots {
+                let ee = discrete_log_context.discrete_log(&m);
+                if ee >= kronecker.range() {
                     debug!("Factor too large: {}", ee);
                     return None;
                 }
@@ -2791,20 +6389,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 p.div_assign(coeff, &initial_power);
             }
 
-            let mut row_poly = images[0].zero();
-            for (coeff, e) in sol.into_iter().zip(&monomials) {
-                exp[0] = e0;
-                exp[1] = e1;
-                exp[2] = *e as u32;
-                row_poly.append_monomial(coeff, &exp);
-                exp[2] = 0;
-            }
-
-            exp[0] = e0;
-            exp[1] = e1;
             for (sample_point, expected) in sample_points.iter().zip(&row).skip(t) {
-                let evaluated = row_poly.replace(2, sample_point);
-                if evaluated.coefficient(&exp).unwrap_or(p.zero()) != *expected {
+                // Evaluate the encoded exponent directly so values above the signed exponent
+                // range are not truncated by a polynomial substitution.
+                let mut evaluated = p.zero();
+                for (coefficient, exponent) in sol.iter().zip(&monomials) {
+                    p.add_assign(
+                        &mut evaluated,
+                        &p.mul(coefficient, &p.pow(sample_point, *exponent)),
+                    );
+                }
+                if evaluated != *expected {
                     debug!(
                         "Sparse interpolation bivariate row x^{} y^{} failed sample check",
                         e0, e1
@@ -2813,16 +6408,23 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 }
             }
 
+            let mut row_poly = res.zero();
+            for (coeff, e) in sol.into_iter().zip(&monomials) {
+                result_exp[0] = PE::from_u32(e0);
+                result_exp[1] = PE::from_u32(e1);
+                kronecker.decode(*e, &mut result_exp)?;
+                row_poly.append_monomial(coeff, &result_exp);
+            }
+
             res = res + row_poly;
-            exp[0] = 0;
-            exp[1] = 0;
         }
 
         Some(res)
     }
 
-    /// Compute the gcd using the Hu-Monagan algorithm that
-    /// interpolates the gcd and a cofactor at the same time.
+    /// Compute the gcd using the Hu-Monagan algorithm that interpolates the gcd and a cofactor at
+    /// the same time. Dense supports are handed to the known-shape Zippel kernel, since recovering
+    /// thousands of Hu recurrence roots is substantially more expensive than reusing their shape.
     ///
     /// The polynomials must be primitive in the main variable.
     ///
@@ -2831,6 +6433,37 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
     /// - "A fast parallel sparse polynomial GCD algorithm" by Jiaxiong Hu and Michael Monagan
     #[instrument(level = "debug", skip_all)]
     pub fn gcd_hu_monagan(&self, b: &Self, bounds: &[E]) -> Option<Self> {
+        self.gcd_hu_monagan_with_anchor(b, bounds, HuMonaganAnchor::from_inputs(self, b))
+    }
+
+    /// Runs Hu-Monagan while interpolating the cofactor of the selected input.
+    fn gcd_hu_monagan_with_anchor(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+    ) -> Option<Self> {
+        self.gcd_hu_monagan_with_plan(b, bounds, anchor, false)
+    }
+
+    /// Runs a main-variable plan whose coefficient-row reduction was checked after content removal.
+    fn gcd_hu_monagan_with_preapproved_plan(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+    ) -> Option<Self> {
+        self.gcd_hu_monagan_with_plan(b, bounds, anchor, true)
+    }
+
+    /// Executes Hu-Monagan with an explicit anchor and an optional preapproved sparse-row plan.
+    fn gcd_hu_monagan_with_plan(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        anchor: HuMonaganAnchor,
+        plan_is_preapproved: bool,
+    ) -> Option<Self> {
         debug!(
             "Hu-Monagan gcd of {} and {} with bounds {:?}",
             self, b, bounds
@@ -2838,24 +6471,33 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         assert!(bounds[0] > E::zero());
         assert!(self.nvars() > 1);
 
+        let vars = (0..self.nvars())
+            .filter(|&variable| bounds[variable] > E::zero())
+            .collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        if !plan_is_preapproved
+            && !should_use_hu_monagan_with_anchor(self, b, &vars, bounds, anchor)
+        {
+            let mut bounds = bounds.to_vec();
+            let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> =
+                bounds.iter().copied().collect();
+
+            return Some(MultivariatePolynomial::gcd_zippel_auto(
+                self,
+                b,
+                &vars,
+                &mut bounds,
+                &mut tight_bounds,
+            ));
+        }
+
         #[derive(Debug, PartialEq, Eq, Copy, Clone)]
         enum ImageKind {
             GcdMultiple,
             CofactorMultiple,
         }
 
-        let (a, b) = if self.nterms() <= b.nterms() {
-            (self, b)
-        } else {
-            (b, self)
-        };
-        let h_zero = MultivariatePolynomial::<_, u32> {
-            coefficients: Vec::new(),
-            exponents: Vec::new(),
-            ring: IntegerRing,
-            variables: a.variables.clone(),
-            _phantom: std::marker::PhantomData,
-        };
+        let (a, b) = anchor.order_inputs(self, b);
+        let h_zero = MultivariatePolynomial::<_, E>::new(&IntegerRing, None, a.variables().clone());
 
         let largest_coeff = a
             .coefficients
@@ -2872,7 +6514,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
         let delta = 1u32;
         let mut d_0 = bounds[0];
-        let mut smooth_prime_index = 240;
+        let mut smooth_prime_index = 0;
         let mut rng = rand::rng();
 
         'kronecker_prime: loop {
@@ -2880,18 +6522,18 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 *rr += 1;
             }
 
-            let mut powers = vec![r[1]];
-            for (i, r) in r.iter().skip(1).enumerate().skip(1) {
-                powers.push(powers[i - 1] * r);
-            }
-            let ri_prod = *powers.last().unwrap() as u64;
+            let Some(kronecker) = HuMonaganKroneckerMap::new(&r, 1) else {
+                debug!("Hu-Monagan Kronecker range does not fit in u64; using Zippel");
+                return None;
+            };
 
             let mut h = h_zero.clone();
             let mut m = Integer::one();
             let mut image_kind = None;
 
             'new_image: loop {
-                let prime_bound = ri_prod.saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound =
+                    hu_monagan_prime_lower_bound(kronecker.range(), delta, &largest_coeff);
 
                 let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
@@ -2904,9 +6546,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                     smooth_prime_index += 1;
 
-                    if *p < prime_bound
-                        || largest_coeff < 1i64 << 32 && *p < largest_coeff.to_u64().unwrap()
-                    {
+                    if *p < prime_bound {
                         continue;
                     }
 
@@ -2929,46 +6569,75 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     let alpha = field.to_element(*alpha as u64);
                     break (field, totient_primes, alpha, a_p, b_p);
                 };
+                let discrete_log_context =
+                    Zp64DiscreteLogContext::new(&p, &alpha, p.get_prime() - 1, &totient_primes);
 
                 let mut betas = Vec::with_capacity(a.nvars() - 1);
                 betas.push(alpha);
-                for power in powers.iter().take(a.nvars().saturating_sub(2)) {
-                    betas.push(p.pow(&alpha, power.to_u32() as u64));
+                for power in kronecker.powers().iter().take(a.nvars().saturating_sub(2)) {
+                    betas.push(p.pow(&alpha, *power));
                 }
 
-                let (univ_len_a, a_term_evals) = Self::evaluate_terms(&p, &a_p, &betas);
-                let (univ_len_b, b_term_evals) = Self::evaluate_terms(&p, &b_p, &betas);
+                let shift = p.from_element(&p.sample_small_integer(&mut rng, 0..=i64::MAX - 1));
+                let shifted_betas = betas
+                    .iter()
+                    .map(|beta| p.pow(beta, shift))
+                    .collect::<Vec<_>>();
+                let mut term_powers = Vec::with_capacity(betas.len());
+                let mut shifted_powers = Vec::with_capacity(betas.len());
+                for ((beta, shifted_beta), radix) in betas.iter().zip(&shifted_betas).zip(&r[1..]) {
+                    let mut term_power = p.one();
+                    let mut shifted_power = p.one();
+                    let cache_len = (*radix as usize).min(POW_CACHE_SIZE);
+                    let mut variable_term_powers = Vec::with_capacity(cache_len);
+                    let mut variable_shifted_powers = Vec::with_capacity(cache_len);
+                    for _ in 0..cache_len {
+                        variable_term_powers.push(term_power);
+                        variable_shifted_powers.push(shifted_power);
+                        p.mul_assign(&mut term_power, beta);
+                        p.mul_assign(&mut shifted_power, shifted_beta);
+                    }
+                    term_powers.push(variable_term_powers);
+                    shifted_powers.push(variable_shifted_powers);
+                }
 
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
-                let mut a_current_evals = a_term_evals
-                    .iter()
-                    .map(|(_, x)| p.pow(x, shift))
-                    .collect::<Vec<_>>();
-                let mut b_current_evals = b_term_evals
-                    .iter()
-                    .map(|(_, x)| p.pow(x, shift))
-                    .collect::<Vec<_>>();
+                let (a_rows, a_term_evals, mut a_current_evals) = Self::evaluate_terms(
+                    &p,
+                    &a_p,
+                    &betas,
+                    &shifted_betas,
+                    &term_powers,
+                    &shifted_powers,
+                );
+                let (b_rows, b_term_evals, mut b_current_evals) = Self::evaluate_terms(
+                    &p,
+                    &b_p,
+                    &betas,
+                    &shifted_betas,
+                    &term_powers,
+                    &shifted_powers,
+                );
 
                 let mut gcd_images = Vec::new();
                 let mut cofactor_images = Vec::new();
                 let mut sample_points = Vec::new();
                 let mut next_num_samples = 4usize;
+                let mut sample_point = p.pow(&alpha, shift);
 
                 let selected_image = 'new_sample: loop {
                     for _ in 0..2 {
-                        let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
+                        let current_sample_point = sample_point;
+                        p.mul_assign(&mut sample_point, &alpha);
 
                         let a_j = Self::eval_geometric_image(
-                            &p,
                             &a_p,
-                            univ_len_a,
+                            &a_rows,
                             &a_term_evals,
                             &mut a_current_evals,
                         );
                         let b_j = Self::eval_geometric_image(
-                            &p,
                             &b_p,
-                            univ_len_b,
+                            &b_rows,
                             &b_term_evals,
                             &mut b_current_evals,
                         );
@@ -2999,14 +6668,22 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                         gcd_images.push(g_j * &lc_a_j);
                         cofactor_images.push(a_cofactor_j);
 
-                        sample_points.push(sample_point);
+                        sample_points.push(current_sample_point);
                     }
 
                     if gcd_images.len() < next_num_samples {
                         continue 'new_sample;
                     }
 
-                    next_num_samples = (next_num_samples * 5) / 4;
+                    // Doubling is useful while the recurrence is small, but it can oversample
+                    // substantially after a failed 64-point reconstruction. Continue in
+                    // quarter-size increments so moderately sparse images do not pay for the
+                    // next full power of two.
+                    next_num_samples += if next_num_samples < 64 {
+                        next_num_samples
+                    } else {
+                        next_num_samples / 4
+                    };
 
                     if image_kind.is_none() || image_kind == Some(ImageKind::GcdMultiple) {
                         let gcd_image = Self::hu_monagan_sparse_interpolate(
@@ -3014,8 +6691,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &gcd_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
-                            ri_prod,
+                            &discrete_log_context,
+                            &kronecker,
                             d_0,
                         );
 
@@ -3031,8 +6708,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                             &cofactor_images,
                             &sample_points,
                             &alpha,
-                            &totient_primes,
-                            ri_prod,
+                            &discrete_log_context,
+                            &kronecker,
                             a_p.degree(0) - d_0,
                         );
 
@@ -3043,14 +6720,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     }
                 };
 
-                let hz = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                 let old_h = h.clone();
 
                 if m == 1 {
-                    h = hz;
+                    h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
                     m = p.get_prime().into();
                 } else {
-                    h = h.chinese_remainder(&hz, &m, &p.get_prime().into());
+                    let crt = IntegerPolynomialCrtContext::new(&m, &p)
+                        .expect("Hu-Monagan prime repeated during CRT reconstruction");
+                    crt.merge_assign(&mut h, &selected_image);
                     m *= p.get_prime();
                 }
 
@@ -3058,7 +6736,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                     continue 'new_image;
                 }
 
-                let hm = h.kronecker_inv_map(&powers, 1).map_exp(|e| E::from_u32(*e));
+                let hm = h.clone();
                 let content = hm.univariate_content(0);
                 let primitive = hm / &content;
 
@@ -3093,15 +6771,293 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         }
     }
 
-    /// Compute the gcd using the Hu-Monagan algorithm that
-    /// uses a bivariate image and interpolates the gcd and a cofactor
-    /// at the same time.
-    #[instrument(level = "debug", skip_all)]
+    /// Computes a sampled bivariate GCD using supplied characteristic-zero degree bounds.
+    ///
+    /// Hu produces many polynomials in only the first two variables. The finite-field shape
+    /// routine avoids repeating the public GCD entry point's variable scans, bound sampling, and
+    /// coordinate planning for every sample while retaining its unlucky-image checks.
+    fn hu_monagan_bivariate_image_gcd<UField: HuMonaganWorkspace>(
+        left: &MultivariatePolynomial<FiniteField<UField>, u32>,
+        right: &MultivariatePolynomial<FiniteField<UField>, u32>,
+        degree_bound: (u32, u32),
+    ) -> Option<MultivariatePolynomial<FiniteField<UField>, u32>>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField> + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+    {
+        let left_content = left.univariate_content(0);
+        let right_content = right.univariate_content(0);
+        let content_gcd = left_content.univariate_gcd(&right_content);
+        let left_primitive = if left_content.is_one() {
+            Cow::Borrowed(left)
+        } else {
+            Cow::Owned(left / &left_content)
+        };
+        let right_primitive = if right_content.is_one() {
+            Cow::Borrowed(right)
+        } else {
+            Cow::Owned(right / &right_content)
+        };
+
+        let primitive_second_degree_bound = degree_bound.1.checked_sub(content_gcd.degree(1))?;
+        let mut bounds: SmallVec<[u32; INLINED_EXPONENTS]> = smallvec![0u32; left.nvars()];
+        bounds[0] = degree_bound.0;
+        bounds[1] = primitive_second_degree_bound;
+        let mut tight_bounds = bounds.clone();
+        let primitive_gcd = MultivariatePolynomial::gcd_shape_modular(
+            &left_primitive,
+            &right_primitive,
+            &[0, 1],
+            &mut bounds,
+            &mut tight_bounds,
+        )?;
+        Some((primitive_gcd * &content_gcd).make_monic())
+    }
+
+    /// Computes and merges one bivariate Hu-Monagan image over a fixed-width prime field.
+    fn hu_monagan_bivariate_prime_image<UField: HuMonaganWorkspace>(
+        a: &Self,
+        b: &Self,
+        p: FiniteField<UField>,
+        alpha: FiniteFieldElement<UField>,
+        totient_primes: &[(u64, u32)],
+        kronecker: &HuMonaganKroneckerMap,
+        start_exp: usize,
+        d_0_1: &mut (u32, u32),
+        sample_limit: Option<usize>,
+        rng: &mut impl rand::RngCore,
+        image_kind: &mut Option<HuMonaganBivariateImageKind>,
+        h: &mut Self,
+        m: &mut Integer,
+    ) -> HuMonaganBivariatePrimeResult<Self>
+    where
+        FiniteField<UField>: FiniteFieldCore<UField>
+            + DenseRootPrimeField<Element = FiniteFieldElement<UField>>
+            + Set<Element = FiniteFieldElement<UField>>,
+        FiniteFieldElement<UField>: Copy + PartialEq,
+        Integer: ToFiniteField<UField>,
+    {
+        let a_p = a.map_coeff(|c| c.to_finite_field(&p), p.clone());
+        let b_p = b.map_coeff(|c| c.to_finite_field(&p), p.clone());
+
+        let a_degrees = (a.degree(0), a.degree(1));
+        let b_degrees = (b.degree(0), b.degree(1));
+        if a_p.is_zero()
+            || b_p.is_zero()
+            || a_p.degree(0) < a_degrees.0
+            || a_p.degree(1) < a_degrees.1
+            || b_p.degree(0) < b_degrees.0
+            || b_p.degree(1) < b_degrees.1
+        {
+            debug!("Bad prime {}", p.get_prime());
+            return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+        }
+        let a_p_degrees = (a_p.degree(0).to_u32(), a_p.degree(1).to_u32());
+        let b_p_degrees = (b_p.degree(0).to_u32(), b_p.degree(1).to_u32());
+
+        let discrete_log_context = UField::discrete_log_context(
+            &p,
+            &alpha,
+            p.get_prime().to_u64().expect("word prime fits in u64") - 1,
+            totient_primes,
+        );
+
+        let mut betas = Vec::with_capacity(a.nvars() - start_exp);
+        betas.push(alpha);
+        for power in kronecker
+            .powers()
+            .iter()
+            .take(a.nvars().saturating_sub(start_exp + 1))
+        {
+            betas.push(p.pow(&alpha, *power));
+        }
+
+        let (a_row_exponents, a_term_evals) = Self::evaluate_terms_bivariate(&p, &a_p, &betas);
+        let (b_row_exponents, b_term_evals) = Self::evaluate_terms_bivariate(&p, &b_p, &betas);
+
+        let shift = p
+            .from_element(&p.sample_small_integer(rng, 0..=i64::MAX - 1))
+            .to_u64()
+            .expect("word field representative fits in u64");
+        let mut a_current_evals = a_term_evals
+            .iter()
+            .zip(&a_p.coefficients)
+            .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
+            .collect::<Vec<_>>();
+        let mut b_current_evals = b_term_evals
+            .iter()
+            .zip(&b_p.coefficients)
+            .map(|((_, x), coefficient)| p.mul(coefficient, &p.pow(x, shift)))
+            .collect::<Vec<_>>();
+
+        let mut gcd_images = Vec::new();
+        let mut cofactor_images = Vec::new();
+        let mut sample_points = Vec::new();
+        let mut next_num_samples = HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES;
+
+        let selected_image = 'new_sample: loop {
+            for _ in 0..2 {
+                let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
+
+                let a_j = Self::evaluate_geometric_image_bivariate(
+                    &p,
+                    &a_p,
+                    &a_row_exponents,
+                    &a_term_evals,
+                    &mut a_current_evals,
+                );
+                let b_j = Self::evaluate_geometric_image_bivariate(
+                    &p,
+                    &b_p,
+                    &b_row_exponents,
+                    &b_term_evals,
+                    &mut b_current_evals,
+                );
+
+                if a_j.is_zero()
+                    || b_j.is_zero()
+                    || a_j.degree(0) < a_p_degrees.0
+                    || a_j.degree(1) < a_p_degrees.1
+                    || b_j.degree(0) < b_p_degrees.0
+                    || b_j.degree(1) < b_p_degrees.1
+                {
+                    debug!("Bad bivariate Kronecker image, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                }
+
+                let Some(g_j) = Self::hu_monagan_bivariate_image_gcd(&a_j, &b_j, *d_0_1) else {
+                    debug!("Failed to compute a bounded bivariate GCD image");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                };
+                let g_degree = (g_j.degree(0), g_j.degree(1));
+                if g_degree.0 < d_0_1.0 || g_degree.1 < d_0_1.1 {
+                    debug!(
+                        "Unlucky bivariate degree bound: {:?} vs {:?}",
+                        g_degree, d_0_1
+                    );
+                    *d_0_1 = (g_degree.0.min(d_0_1.0), g_degree.1.min(d_0_1.1));
+                    return HuMonaganBivariatePrimeResult::RetryWithNewKroneckerMap;
+                }
+                if g_degree.0 > d_0_1.0 || g_degree.1 > d_0_1.1 {
+                    debug!("Unlucky bivariate evaluation point, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                }
+
+                let lc_a_j = a_j.bivariate_lcoeff();
+                let Some(a_cofactor_j) = a_j.try_div(&g_j) else {
+                    debug!("Bivariate image division failed for a, trying new prime");
+                    return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+                };
+
+                gcd_images.push(g_j * &lc_a_j);
+                cofactor_images.push(a_cofactor_j);
+                sample_points.push(sample_point);
+            }
+
+            if gcd_images.len() < next_num_samples {
+                continue 'new_sample;
+            }
+
+            if image_kind.is_none()
+                || *image_kind == Some(HuMonaganBivariateImageKind::CofactorMultiple)
+            {
+                let a_deg = (a_p.degree(0), a_p.degree(1));
+                let cofactor_image = Self::hu_monagan_sparse_interpolate_bivariate(
+                    &p,
+                    &cofactor_images,
+                    &sample_points,
+                    &alpha,
+                    &discrete_log_context,
+                    kronecker,
+                    (
+                        a_deg.0.to_u32().saturating_sub(d_0_1.0),
+                        a_deg.1.to_u32().saturating_sub(d_0_1.1),
+                    ),
+                );
+
+                if let Some(cofactor_image) = cofactor_image {
+                    *image_kind = Some(HuMonaganBivariateImageKind::CofactorMultiple);
+                    break 'new_sample cofactor_image;
+                }
+            }
+
+            if image_kind.is_none() || *image_kind == Some(HuMonaganBivariateImageKind::GcdMultiple)
+            {
+                let gcd_image = Self::hu_monagan_sparse_interpolate_bivariate(
+                    &p,
+                    &gcd_images,
+                    &sample_points,
+                    &alpha,
+                    &discrete_log_context,
+                    kronecker,
+                    *d_0_1,
+                );
+
+                if let Some(gcd_image) = gcd_image {
+                    *image_kind = Some(HuMonaganBivariateImageKind::GcdMultiple);
+                    break 'new_sample gcd_image;
+                }
+            }
+
+            if sample_limit.is_some_and(|limit| gcd_images.len() >= limit) {
+                debug!("Bivariate sparse interpolation exceeded the automatic sample budget");
+                return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+            }
+            let Some(doubled_samples) = next_num_samples.checked_mul(2) else {
+                return HuMonaganBivariatePrimeResult::RetryWithNewImage;
+            };
+            next_num_samples =
+                sample_limit.map_or(doubled_samples, |limit| doubled_samples.min(limit));
+        };
+
+        let samples_used = gcd_images.len();
+
+        let previous_reconstruction = h.clone();
+        if *m == 1 {
+            *h = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
+            *m = p.get_prime().to_integer();
+        } else {
+            let crt = IntegerPolynomialCrtContext::new(m, &p)
+                .expect("Hu-Monagan prime repeated during CRT reconstruction");
+            crt.merge_assign(h, &selected_image);
+            *m *= p.get_prime().to_integer();
+        }
+
+        HuMonaganBivariatePrimeResult::Accepted {
+            previous_reconstruction,
+            samples_used,
+        }
+    }
+
+    /// Computes a GCD with bivariate Hu-Monagan interpolation.
+    ///
+    /// Every sampled image retains the first two variables and evaluates the remaining variables
+    /// on a geometric sequence. The method reconstructs whichever of the GCD and an input
+    /// cofactor has the smaller sampled support, then certifies the result by exact division.
+    ///
+    /// Both operands must be nonzero, use the same variable layout, and contain more than two
+    /// variables. `bounds` must contain one characteristic-zero GCD-degree bound per variable,
+    /// with positive bounds for the first two variables. The method returns `None` when an image
+    /// is unlucky or sparse reconstruction cannot be certified.
     pub fn gcd_hu_monagan_bivariate(&self, b: &Self, bounds: &[E]) -> Option<Self> {
+        self.gcd_hu_monagan_bivariate_with_budget(b, bounds, None)
+    }
+
+    /// Runs bivariate Hu-Monagan with optional limits for an automatically selected plan.
+    #[instrument(level = "debug", skip_all)]
+    fn gcd_hu_monagan_bivariate_with_budget(
+        &self,
+        b: &Self,
+        bounds: &[E],
+        automatic_budget: Option<HuMonaganBivariateAutomaticBudget>,
+    ) -> Option<Self> {
         debug!(
             "Bivariate Hu-Monagan2 gcd of {} and {} with bounds {:?}",
             self, b, bounds
         );
+        assert!(!self.is_zero() && !b.is_zero());
+        assert_eq!(self.variables(), b.variables());
+        assert_eq!(bounds.len(), self.nvars());
         assert!(bounds[0] > E::zero());
         assert!(bounds[1] > E::zero());
         assert!(self.nvars() > 2);
@@ -3109,8 +7065,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
         let a_content = self.bivariate_content(0, 1);
         let b_content = b.bivariate_content(0, 1);
         if !a_content.is_one() || !b_content.is_one() {
-            if let Some(g) = (self / &a_content).gcd_hu_monagan_bivariate(&(b / &b_content), bounds)
-            {
+            if let Some(g) = (self / &a_content).gcd_hu_monagan_bivariate_with_budget(
+                &(b / &b_content),
+                bounds,
+                automatic_budget,
+            ) {
                 let content = a_content.gcd(&b_content);
                 return Some(content * &g);
             } else {
@@ -3118,24 +7077,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             }
         }
 
-        #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-        enum ImageKind {
-            GcdMultiple,
-            CofactorMultiple,
-        }
-
         let (a, b) = if self.nterms() <= b.nterms() {
             (self, b)
         } else {
             (b, self)
         };
-        let h_zero = MultivariatePolynomial::<_, u32> {
-            coefficients: Vec::new(),
-            exponents: Vec::new(),
-            ring: IntegerRing,
-            variables: a.variables.clone(),
-            _phantom: std::marker::PhantomData,
-        };
+        let h_zero = MultivariatePolynomial::<_, E>::new(&IntegerRing, None, a.variables().clone());
 
         let largest_coeff = a
             .coefficients
@@ -3152,34 +7099,32 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
             .collect();
 
         let delta = 1u32;
-        let mut d_0_1 = (
-            bounds[0].to_u32(),
-            bounds[1]
-                .to_u32()
-                .max(a.degree(1).min(b.degree(1)).to_u32()),
-        );
-        let mut smooth_prime_index = 204;
+        let mut d_0_1 = (bounds[0].to_u32(), bounds[1].to_u32());
+        let mut smooth_prime_index = 0;
         let mut rng = rand::rng();
+        let mut remaining_prime_attempts =
+            automatic_budget.map(|budget| budget.prime_attempt_limit);
 
         'kronecker_prime: loop {
             for rr in &mut r {
                 *rr += 1;
             }
 
-            let mut powers = vec![r[start_exp]];
-            for (i, r) in r.iter().skip(start_exp).enumerate().skip(1) {
-                powers.push(powers[i - 1] * r);
-            }
-            let ri_prod = *powers.last().unwrap() as u64;
+            let Some(kronecker) = HuMonaganKroneckerMap::new(&r, start_exp) else {
+                debug!("Bivariate Hu-Monagan Kronecker range does not fit in u64; using Zippel");
+                return None;
+            };
 
             let mut h = h_zero.clone();
             let mut m = Integer::one();
             let mut image_kind = None;
+            let mut learned_sample_limit = None;
 
             'new_image: loop {
-                let prime_bound = ri_prod.saturating_mul(2u64.saturating_pow(delta));
+                let prime_bound =
+                    hu_monagan_prime_lower_bound(kronecker.range(), delta, &largest_coeff);
 
-                let (p, totient_primes, alpha, a_p, b_p) = 'new_prime: loop {
+                let (prime, alpha, factors) = loop {
                     let Some((p, alpha, fs)) = SMOOTH_PRIMES.get(smooth_prime_index) else {
                         warn!(
                             "Ran out of smooth primes for bivariate Hu-Monagan2 GCD.\ngcd({},{})",
@@ -3190,195 +7135,136 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
                     smooth_prime_index += 1;
 
-                    if *p < prime_bound
-                        || largest_coeff < 1i64 << 32 && *p < largest_coeff.to_u64().unwrap()
-                    {
+                    if *p < prime_bound {
                         continue;
                     }
 
-                    let field = Zp64::new(*p);
-                    let a_p = a.map_coeff(|c| c.to_finite_field(&field), field.clone());
-                    let b_p = b.map_coeff(|c| c.to_finite_field(&field), field.clone());
-
-                    let a_deg = a.bivariate_deg();
-                    let b_deg = b.bivariate_deg();
-                    if a_p.bivariate_deg() < a_deg || b_p.bivariate_deg() < b_deg {
-                        debug!("Bad prime {}", p);
-                        continue 'new_prime;
-                    }
-
-                    let mut totient_primes = vec![];
-                    for (f, prime) in fs.iter().zip(&SMOOTH_PRIME_BASE) {
-                        if *f > 0 {
-                            totient_primes.push((*prime, *f as u32));
-                        }
-                    }
-
-                    let alpha = field.to_element(*alpha as u64);
-                    break (field, totient_primes, alpha, a_p, b_p);
+                    break (*p, *alpha, *fs);
                 };
+                let totient_primes = factors
+                    .iter()
+                    .zip(&SMOOTH_PRIME_BASE)
+                    .filter_map(|(exponent, factor)| {
+                        (*exponent > 0).then_some((*factor, *exponent as u32))
+                    })
+                    .collect::<Vec<_>>();
 
-                let mut betas = Vec::with_capacity(a.nvars() - start_exp);
-                betas.push(alpha);
-                for power in powers.iter().take(a.nvars().saturating_sub(start_exp + 1)) {
-                    betas.push(p.pow(&alpha, power.to_u32() as u64));
+                if let Some(remaining) = &mut remaining_prime_attempts {
+                    if *remaining == 0 {
+                        debug!("Bivariate Hu-Monagan exhausted its automatic prime-image budget");
+                        return None;
+                    }
+                    *remaining -= 1;
                 }
 
-                let (bivar_len_a, a_term_evals) = Self::evaluate_terms_bivariate(&p, &a_p, &betas);
-                let (bivar_len_b, b_term_evals) = Self::evaluate_terms_bivariate(&p, &b_p, &betas);
-
-                let shift = p.from_element(&p.sample(&mut rng, (0, i64::MAX)));
-                let mut a_current_evals = a_term_evals
-                    .iter()
-                    .map(|(_, x)| p.pow(x, shift))
-                    .collect::<Vec<_>>();
-                let mut b_current_evals = b_term_evals
-                    .iter()
-                    .map(|(_, x)| p.pow(x, shift))
-                    .collect::<Vec<_>>();
-
-                let mut gcd_images = Vec::new();
-                let mut cofactor_images = Vec::new();
-                let mut sample_points = Vec::new();
-                let mut next_num_samples = 4usize;
-
-                let selected_image = 'new_sample: loop {
-                    for _ in 0..2 {
-                        let sample_point = p.pow(&alpha, shift + gcd_images.len() as u64);
-
-                        let a_j = Self::evaluate_geometric_image_bivariate(
-                            &p,
-                            &a_p,
-                            bivar_len_a,
-                            &a_term_evals,
-                            &mut a_current_evals,
-                        );
-                        let b_j = Self::evaluate_geometric_image_bivariate(
-                            &p,
-                            &b_p,
-                            bivar_len_b,
-                            &b_term_evals,
-                            &mut b_current_evals,
-                        );
-
-                        let a_p_deg = a_p.bivariate_deg();
-                        let b_p_deg = b_p.bivariate_deg();
-                        if a_j.bivariate_deg() < (a_p_deg.0.to_u32(), a_p_deg.1.to_u32())
-                            || b_j.bivariate_deg() < (b_p_deg.0.to_u32(), b_p_deg.1.to_u32())
-                        {
-                            debug!("Bad bivariate Kronecker image, trying new prime");
-                            continue 'new_image;
-                        }
-
-                        let g_j = a_j.gcd(&b_j);
-                        let g_degree = (g_j.degree(0), g_j.degree(1));
-                        if g_degree.0 < d_0_1.0 || g_degree.1 < d_0_1.1 {
-                            debug!(
-                                "Unlucky bivariate degree bound: {:?} vs {:?}",
-                                g_degree, d_0_1
-                            );
-                            d_0_1 = (g_degree.0.min(d_0_1.0), g_degree.1.min(d_0_1.1));
-                            continue 'kronecker_prime;
-                        }
-                        if g_degree.0 > d_0_1.0 || g_degree.1 > d_0_1.1 {
-                            debug!("Unlucky bivariate evaluation point, trying new prime");
-                            continue 'new_image;
-                        }
-
-                        let lc_a_j = a_j.bivariate_lcoeff();
-                        let Some(a_cofactor_j) = a_j.try_div(&g_j) else {
-                            debug!("Bivariate image division failed for a, trying new prime");
-                            continue 'new_image;
-                        };
-
-                        gcd_images.push(g_j * &lc_a_j);
-                        cofactor_images.push(a_cofactor_j);
-                        sample_points.push(sample_point);
-                    }
-
-                    if gcd_images.len() < next_num_samples {
-                        continue 'new_sample;
-                    }
-
-                    next_num_samples = (next_num_samples * 5) / 4;
-
-                    if image_kind.is_none() || image_kind == Some(ImageKind::CofactorMultiple) {
-                        let a_deg = (a_p.degree(0), a_p.degree(1));
-                        let cofactor_image = Self::hu_monagan_sparse_interpolate_bivariate(
-                            &p,
-                            &cofactor_images,
-                            &sample_points,
-                            &alpha,
-                            &totient_primes,
-                            ri_prod,
-                            (
-                                a_deg.0.to_u32().saturating_sub(d_0_1.0),
-                                a_deg.1.to_u32().saturating_sub(d_0_1.1),
-                            ),
-                        );
-
-                        if let Some(cofactor_image) = cofactor_image {
-                            image_kind = Some(ImageKind::CofactorMultiple);
-                            break 'new_sample cofactor_image;
-                        }
-                    }
-
-                    if image_kind.is_none() || image_kind == Some(ImageKind::GcdMultiple) {
-                        let gcd_image = Self::hu_monagan_sparse_interpolate_bivariate(
-                            &p,
-                            &gcd_images,
-                            &sample_points,
-                            &alpha,
-                            &totient_primes,
-                            ri_prod,
-                            d_0_1,
-                        );
-
-                        if let Some(gcd_image) = gcd_image {
-                            image_kind = Some(ImageKind::GcdMultiple);
-                            break 'new_sample gcd_image;
-                        }
-                    }
-                };
-
-                let hz = selected_image.map_coeff(|c| p.to_symmetric_integer(c), Z);
-                let old_h = h.clone();
-
-                if m == 1 {
-                    h = hz;
-                    m = p.get_prime().into();
+                #[cfg(not(feature = "binary_size"))]
+                let prime_result = if let Ok(prime) = u32::try_from(prime) {
+                    let field = Zp::new(prime);
+                    let alpha = field.to_element(u32::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
                 } else {
-                    h = h.chinese_remainder(&hz, &m, &p.get_prime().into());
-                    m *= p.get_prime();
-                }
+                    let field = Zp64::new(prime);
+                    let alpha = field.to_element(u64::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
+                };
+
+                #[cfg(feature = "binary_size")]
+                let prime_result = {
+                    let field = Zp64::new(prime);
+                    let alpha = field.to_element(u64::from(alpha));
+                    Self::hu_monagan_bivariate_prime_image(
+                        a,
+                        b,
+                        field,
+                        alpha,
+                        &totient_primes,
+                        &kronecker,
+                        start_exp,
+                        &mut d_0_1,
+                        learned_sample_limit.or(automatic_budget.map(|budget| budget.sample_limit)),
+                        &mut rng,
+                        &mut image_kind,
+                        &mut h,
+                        &mut m,
+                    )
+                };
+
+                let old_h = match prime_result {
+                    HuMonaganBivariatePrimeResult::Accepted {
+                        previous_reconstruction,
+                        samples_used,
+                    } => {
+                        if automatic_budget.is_some() && learned_sample_limit.is_none() {
+                            learned_sample_limit = Some(samples_used);
+                        }
+                        previous_reconstruction
+                    }
+                    HuMonaganBivariatePrimeResult::RetryWithNewImage => continue 'new_image,
+                    HuMonaganBivariatePrimeResult::RetryWithNewKroneckerMap => {
+                        continue 'kronecker_prime;
+                    }
+                };
 
                 if h != old_h && !old_h.is_zero() {
                     continue 'new_image;
                 }
 
-                let image_poly = h
-                    .kronecker_inv_map(&powers, start_exp)
-                    .map_exp(|e| E::from_u32(*e));
+                let image_poly = h.clone();
                 let content = image_poly.bivariate_content(0, 1);
                 let primitive = image_poly / &content;
 
-                let gcd_candidate = match image_kind.unwrap() {
-                    ImageKind::GcdMultiple => PolynomialGCD::normalize(primitive),
-                    ImageKind::CofactorMultiple => {
+                let (gcd_candidate, a_already_certified) = match image_kind.unwrap() {
+                    HuMonaganBivariateImageKind::GcdMultiple => {
+                        (PolynomialGCD::normalize(primitive), false)
+                    }
+                    HuMonaganBivariateImageKind::CofactorMultiple => {
                         let cofactor_candidate = PolynomialGCD::normalize(primitive);
                         if let Some(q) = a.try_div(&cofactor_candidate) {
-                            PolynomialGCD::normalize(q)
+                            (PolynomialGCD::normalize(q), true)
                         } else if old_h.is_zero() {
                             debug!("Cofactor image does not divide a yet");
                             continue 'new_image;
                         } else {
                             debug!("Stable cofactor image does not divide a");
+                            if automatic_budget.is_some() {
+                                return None;
+                            }
                             continue 'kronecker_prime;
                         }
                     }
                 };
 
-                if a.try_div(&gcd_candidate).is_some() && b.try_div(&gcd_candidate).is_some() {
+                if (a_already_certified || a.try_div(&gcd_candidate).is_some())
+                    && b.try_div(&gcd_candidate).is_some()
+                {
                     debug!("Found bivariate GCD: {}", gcd_candidate);
                     return Some(PolynomialGCD::normalize(gcd_candidate));
                 }
@@ -3386,6 +7272,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
                 debug!("Non-division of {}, trying new image", gcd_candidate);
 
                 if !old_h.is_zero() {
+                    if automatic_budget.is_some() {
+                        return None;
+                    }
                     continue 'kronecker_prime;
                 }
             }
@@ -3395,6 +7284,36 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E> {
 
 /// Polynomial GCD functions for a certain coefficient type `Self`.
 pub trait PolynomialGCD<E: PositiveExponent>: Ring {
+    /// Test exact divisibility. Coefficient domains can override this to avoid
+    /// constructing the quotient.
+    fn divides_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> bool {
+        dividend.try_div(divisor).is_some()
+    }
+
+    /// Tries a coefficient-domain GCD plan before generic univariate content removal.
+    ///
+    /// `vars` gives the active input coordinates with the generic main variable first, and
+    /// `bounds` gives the GCD degree bound in every input coordinate. A returned polynomial must
+    /// be the complete GCD of `a` and `b`, including coefficient content, in their coordinate
+    /// order. `a_degrees` and `b_degrees` describe the inputs after monomial shifts and common
+    /// exponent scales have been removed. Each degree slice has one entry per input coordinate in
+    /// the same coordinate order as its polynomial.
+    fn gcd_with_precontent_plan(
+        _a: &MultivariatePolynomial<Self, E>,
+        _b: &MultivariatePolynomial<Self, E>,
+        _vars: &[usize],
+        _bounds: &[E],
+        _a_degrees: &[E],
+        _b_degrees: &[E],
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        None
+    }
+
+    /// Try a heuristic GCD, returning the GCD and the two exact cofactors
+    /// `(g, a/g, b/g)`. Return `None` when the heuristic is unavailable or fails.
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -3403,22 +7322,121 @@ pub trait PolynomialGCD<E: PositiveExponent>: Ring {
         MultivariatePolynomial<Self, E>,
         MultivariatePolynomial<Self, E>,
     )>;
+    /// Compute the GCD of a nonempty collection of polynomials over this ring.
     fn gcd_multiple(f: Vec<MultivariatePolynomial<Self, E>>) -> MultivariatePolynomial<Self, E>;
+    /// Compute the polynomial GCD in the selected variable indices. `bounds`
+    /// contains degree bounds in input coordinate order and may be tightened
+    /// during computation. Inputs must have compatible variable maps.
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E>;
+    /// Compute degree bounds for the GCD of `a` and `b`, using `vars` as
+    /// the selected variable indices.
     fn get_gcd_var_bounds(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]>;
+    /// Normalize a polynomial GCD to the coefficient ring's preferred associate,
+    /// such as a monic polynomial over a field or positive leading coefficient
+    /// over the integers.
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E>;
 }
 
 impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
+    #[inline(never)]
+    fn gcd_with_precontent_plan(
+        a: &MultivariatePolynomial<Self, E>,
+        b: &MultivariatePolynomial<Self, E>,
+        vars: &[usize],
+        bounds: &[E],
+        a_degrees: &[E],
+        b_degrees: &[E],
+    ) -> Option<MultivariatePolynomial<Self, E>> {
+        let force_hu = GLOBAL_SETTINGS
+            .force_hu_monagan_poly_gcd
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let hu_enabled = force_hu
+            || GLOBAL_SETTINGS
+                .use_hu_monagan_poly_gcd
+                .load(std::sync::atomic::Ordering::Relaxed);
+        if !hu_enabled {
+            return None;
+        }
+        if a_degrees.len() != a.nvars() || b_degrees.len() != b.nvars() || a.nvars() != b.nvars() {
+            return None;
+        }
+        if !hu_monagan_has_minimum_geometry(vars, bounds) {
+            return None;
+        }
+
+        if !force_hu {
+            let bivariate_planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+                a, b, vars, bounds, a_degrees, b_degrees,
+            );
+            if let Some(prepared) = bivariate_planning.prepare()
+                && let Some(gcd) = prepared.run()
+            {
+                return Some(gcd);
+            }
+        }
+
+        let anchor = HuMonaganAnchor::from_inputs(a, b);
+        let (anchored_degrees, other_degrees) = match anchor {
+            HuMonaganAnchor::Left => (a_degrees, b_degrees),
+            HuMonaganAnchor::Right => (b_degrees, a_degrees),
+        };
+        if !hu_monagan_plan_is_applicable_with_degrees(a, b, vars, bounds, anchored_degrees) {
+            return None;
+        }
+        let current_variable = *vars.first()?;
+        let current_range = hu_monagan_kronecker_range(
+            vars,
+            bounds,
+            anchored_degrees,
+            other_degrees,
+            current_variable,
+        );
+        let maximum_modulus = SMOOTH_PRIMES.last()?.0;
+        // Making a different variable main must remove a larger radix than it adds. This reduces
+        // the interpolation exponent lattice independently of the later coefficient-row test.
+        let has_smaller_range = vars.iter().copied().skip(1).any(|variable| {
+            bounds[variable] > E::zero()
+                && hu_monagan_kronecker_range(
+                    vars,
+                    bounds,
+                    anchored_degrees,
+                    other_degrees,
+                    variable,
+                )
+                .is_some_and(|candidate_range| {
+                    current_range.is_none_or(|range| candidate_range < range)
+                        && candidate_range
+                            .checked_mul(2)
+                            .is_some_and(|bound| bound <= maximum_modulus)
+                })
+        });
+        if !has_smaller_range {
+            return None;
+        }
+        let planning = HuMonaganPlanningContext::new_with_degrees(
+            a, b, vars, bounds, anchor, a_degrees, b_degrees,
+        );
+        let main_variable = planning.alternative_main_variable()?;
+        let prepared = planning.prepare(main_variable)?;
+        debug!(
+            "Hu main variable {} with maximum coefficient row {} replaces {} with row {}",
+            main_variable,
+            planning.maximum_row_supports[main_variable],
+            vars[0],
+            planning.maximum_row_supports[vars[0]],
+        );
+        prepared.run()
+    }
+
     fn heuristic_gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
@@ -3468,96 +7486,71 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
             .filter(|(a, b)| **a && **b)
             .count();
 
-        if max_deg_a < 20 || max_deg_b < 20 || num_shared_vars < 3 && max_deg_a.min(max_deg_b) < 150
+        let heuristic_allowed = max_deg_a < 20
+            || max_deg_b < 20
+            || num_shared_vars < 3 && max_deg_a.min(max_deg_b) < 150;
+
+        let mut active_variables = contains_a
+            .iter()
+            .zip(&contains_b)
+            .enumerate()
+            .filter_map(|(variable, (in_a, in_b))| (*in_a || *in_b).then_some(variable));
+        if let Some(variable) = active_variables.next()
+            && active_variables.next().is_none()
+            && contains_a[variable]
+            && contains_b[variable]
         {
-            a.heuristic_gcd(b).ok()
-        } else {
-            None
+            let evaluation_bits = estimated_heuristic_gcd_evaluation_bits(a, b);
+            match select_univariate_integer_gcd(heuristic_allowed, evaluation_bits) {
+                UnivariateIntegerGcdAlgorithm::Scalar => {
+                    return a.heuristic_gcd_univariate(b, variable).ok();
+                }
+                UnivariateIntegerGcdAlgorithm::Modular => {
+                    debug!(
+                        "Using modular univariate integer GCD for an estimated {}-bit scalar image",
+                        evaluation_bits
+                    );
+                    return UnivariateModularGcdContext::new(a, b, variable).run();
+                }
+            }
         }
+
+        if !heuristic_allowed {
+            return None;
+        }
+
+        a.heuristic_gcd(b).ok()
     }
 
     fn gcd_multiple(f: Vec<MultivariatePolynomial<Self, E>>) -> MultivariatePolynomial<Self, E> {
         MultivariatePolynomial::gcd_multiple(f)
     }
 
+    /// Compute the gcd of two multivariate polynomials using a combination of heuristics and Zippel's algorithm.
+    /// Assumes a and b are primitive in the main variable.
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E> {
-        fn should_use_hu_monagan<E: PositiveExponent>(
-            a: &MultivariatePolynomial<IntegerRing, E>,
-            b: &MultivariatePolynomial<IntegerRing, E>,
-            vars: &[usize],
-            bounds: &[E],
-        ) -> bool {
-            if vars.len() < 3
-                || vars.first() != Some(&0)
-                || bounds[0] <= E::zero()
-                || bounds.get(vars[1]).is_none_or(|b| *b == E::zero())
-                || bounds.get(vars[2]).is_none_or(|b| *b == E::zero())
-            {
-                return false;
-            }
-
-            let nterms = a.nterms() + b.nterms();
-
-            let mut box_size = Integer::from(1);
-            let mut cofactor_box_size = Integer::from(1);
-            for v in vars.iter().skip(1) {
-                let bound = bounds[*v].to_u32();
-                box_size *= bound + 1;
-
-                if a.nterms() < b.nterms() {
-                    cofactor_box_size *= Integer::from(a.degree(*v).to_u32()) - bound + 1;
-                } else {
-                    cofactor_box_size *= Integer::from(b.degree(*v).to_u32()) - bound + 1;
-                }
-            }
-
-            cofactor_box_size * 12 < box_size || Integer::from(nterms) * 12 < box_size
-        }
-
-        if GLOBAL_SETTINGS
+        let force_hu = GLOBAL_SETTINGS
             .force_hu_monagan_poly_gcd
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if force_hu
             || (GLOBAL_SETTINGS
                 .use_hu_monagan_poly_gcd
                 .load(std::sync::atomic::Ordering::Relaxed)
                 && should_use_hu_monagan(a, b, vars, bounds))
         {
-            // TODO: find out when the bivariate case is faster
-            // currently it can be much slower due to the call to bivariate Zippel,
-            // that may involve a costly Newton interpolation that has to be called
-            // for every sample. Full Zippel would only call it once, since it stores
-            // the shape of the polynomial and can reuse it for all samples.
-            // if a.nvars() > 3
-            //     && vars[1] == 1
-            //     && bounds.get(1).is_some_and(|b| *b > E::zero())
-            //     && bounds.get(vars[2]).is_some_and(|b| *b > E::zero())
-            // {
-            //     // if let Some(g) = a.gcd_hu_monagan_bivariate(b, bounds) {
-            //     //     return g;
-            //     // }
-            // } else
-            if let Some(g) = a.gcd_hu_monagan(b, bounds) {
+            let anchor = HuMonaganAnchor::from_inputs(a, b);
+            if let Some(g) = a.gcd_hu_monagan_with_anchor(b, bounds, anchor) {
                 return g;
             }
         }
 
         let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> = bounds.iter().cloned().collect();
-        if a.coefficients
-            .iter()
-            .any(|x| !matches!(x, Integer::Single(_)))
-            || b.coefficients
-                .iter()
-                .any(|x| !matches!(x, Integer::Single(_)))
-        {
-            MultivariatePolynomial::gcd_zippel::<u64>(a, b, vars, bounds, &mut tight_bounds)
-        } else {
-            MultivariatePolynomial::gcd_zippel::<u32>(a, b, vars, bounds, &mut tight_bounds)
-        }
+        MultivariatePolynomial::gcd_zippel_auto(a, b, vars, bounds, &mut tight_bounds)
     }
 
     fn get_gcd_var_bounds(
@@ -3565,67 +7558,34 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
-        let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> =
-            (0..a.nvars()).map(|_| E::zero()).collect();
+        let mut primes = modular_gcd_prime_iterator();
 
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
-
-        let mut f = Zp::new(primes.next().unwrap() as u32);
+        let mut f = ModularGcdField::new(next_modular_gcd_prime(
+            &mut primes,
+            "gcd var bound detection",
+        ));
         let mut ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
         let mut bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
 
-        for var in vars.iter() {
-            if a.degree(*var) == E::zero() || b.degree(*var) == E::zero() {
-                continue;
-            }
+        while vars.iter().any(|variable| {
+            a.degree(*variable) > E::zero()
+                && b.degree(*variable) > E::zero()
+                && (ap.degree(*variable) != a.degree(*variable)
+                    || bp.degree(*variable) != b.degree(*variable))
+        }) {
+            debug!("Variable bounds failed due to bad prime");
 
-            while ap.degree(*var) != a.degree(*var) || bp.degree(*var) != b.degree(*var) {
-                debug!("Variable bounds failed due to bad prime");
-
-                let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                    panic!("Ran out of primes for gcd var bound detection.\ngcd({a},{b})");
-                };
-
-                f = Zp::new(p);
-                ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
-                bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
-            }
-
-            let vvars: SmallVec<[usize; INLINED_EXPONENTS]> =
-                vars.iter().filter(|i| *i != var).cloned().collect();
-            bounds[*var] = MultivariatePolynomial::get_gcd_var_bound(&ap, &bp, &vvars, *var);
-
-            // evaluate at every other variable at one, if they are present
-            /*if loose_bounds
-                .iter()
-                .enumerate()
-                .all(|(v, b)| *b == E::zero() || v == *var)
-            {
-                continue;
-            }
-
-            let mut a1 = a.zero();
-            let mut exp = vec![E::zero(); a.nvars()];
-            for m in a {
-                exp[*var] = m.exponents[*var];
-                a1.append_monomial(m.coefficient.clone(), &exp);
-            }
-
-            let mut b1 = b.zero();
-            for m in b {
-                exp[*var] = m.exponents[*var];
-                b1.append_monomial(m.coefficient.clone(), &exp);
-            }
-
-            if a1.degree(*var) == a.degree(*var) && b1.degree(*var) == b.degree(*var) {
-                let bound = a1.gcd(&b1).degree(*var);
-                if bound < tight_bounds[*var] {
-                    tight_bounds[*var] = bound;
-                }
-            }*/
+            let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
+            f = ModularGcdField::new(p);
+            ap = a.map_coeff(|c| c.to_finite_field(&f), f.clone());
+            bp = b.map_coeff(|c| c.to_finite_field(&f), f.clone());
         }
 
-        bounds
+        GcdBoundSamplingContext::new(&ap, &bp, vars)
+            .and_then(|context| context.sample_bounds(&ap, &bp))
+            .unwrap_or_else(|| {
+                MultivariatePolynomial::get_gcd_var_bounds_separately(&ap, &bp, vars)
+            })
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
@@ -3657,12 +7617,14 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E> {
         // remove the content so that the polynomials have integer coefficients
-        let content = a.ring.gcd(&a.content(), &b.content());
+        let a_c = a.content();
+        let a_int = a.map_coeff(|c| a.ring().div(c, &a_c).numerator(), Z);
+        let b_c = b.content();
+        let b_int = b.map_coeff(|c| b.ring().div(c, &b_c).numerator(), Z);
 
-        let a_int = a.map_coeff(|c| a.ring.div(c, &content).numerator(), Z);
-        let b_int = b.map_coeff(|c| b.ring.div(c, &content).numerator(), Z);
-
-        PolynomialGCD::gcd(&a_int, &b_int, vars, bounds).map_coeff(|c| c.to_rational(), Q)
+        PolynomialGCD::gcd(&a_int, &b_int, vars, bounds)
+            .map_coeff(|c| c.to_rational(), Q)
+            .make_monic()
     }
 
     fn get_gcd_var_bounds(
@@ -3671,16 +7633,16 @@ impl<E: PositiveExponent> PolynomialGCD<E> for RationalField {
         vars: &[usize],
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
         // remove the content so that the polynomials have integer coefficients
-        let content = a.ring.gcd(&a.content(), &b.content());
-
-        let a_int = a.map_coeff(|c| a.ring.div(c, &content).numerator(), Z);
-        let b_int = b.map_coeff(|c| b.ring.div(c, &content).numerator(), Z);
+        let a_c = a.content();
+        let a_int = a.map_coeff(|c| a.ring().div(c, &a_c).numerator(), Z);
+        let b_c = b.content();
+        let b_int = b.map_coeff(|c| b.ring().div(c, &b_c).numerator(), Z);
 
         PolynomialGCD::get_gcd_var_bounds(&a_int, &b_int, vars)
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
-        if a.lcoeff().is_negative() { -a } else { a }
+        a.make_monic()
     }
 }
 
@@ -3723,9 +7685,9 @@ where
                 // upgrade to a Galois field that is large enough
                 // TODO: start at a better bound?
                 // TODO: run with Zp[var]/m_i instead and use CRT
-                let field = a.ring.upgrade(a.ring.get_extension_degree() as usize + 1);
-                let ag = a.map_coeff(|c| a.ring.upgrade_element(c, &field), field.clone());
-                let bg = b.map_coeff(|c| a.ring.upgrade_element(c, &field), field.clone());
+                let field = a.ring().upgrade(a.ring().extension_degree() as usize + 1);
+                let ag = a.map_coeff(|c| a.ring().upgrade_element(c, &field), field.clone());
+                let bg = b.map_coeff(|c| a.ring().upgrade_element(c, &field), field.clone());
                 let g = PolynomialGCD::gcd(&ag, &bg, vars, bounds);
 
                 // workaround for ICE https://github.com/rust-lang/rust/issues/146965
@@ -3734,20 +7696,19 @@ where
                 let mut exponents = Vec::with_capacity(g.exponents.len());
 
                 for m in g.into_iter() {
-                    let nc = a.ring.downgrade_element(m.coefficient);
-                    if !a.ring.is_zero(&nc) {
+                    let nc = a.ring().downgrade_element(m.coefficient);
+                    if !a.ring().is_zero(&nc) {
                         coefficients.push(nc);
                         exponents.extend(m.exponents);
                     }
                 }
 
-                MultivariatePolynomial {
+                MultivariatePolynomial::from_parts(
                     coefficients,
                     exponents,
-                    ring: a.ring.clone(),
-                    variables: g.variables.clone(),
-                    _phantom: std::marker::PhantomData,
-                }
+                    a.ring().clone(),
+                    g.variables().clone(),
+                )
             }
         }
     }
@@ -3777,6 +7738,108 @@ where
 }
 
 impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField> {
+    fn divides_exact(
+        dividend: &MultivariatePolynomial<Self, E>,
+        divisor: &MultivariatePolynomial<Self, E>,
+    ) -> bool {
+        assert_eq!(dividend.ring(), divisor.ring());
+        assert_eq!(dividend.variables(), divisor.variables());
+
+        if divisor.is_zero() {
+            return false;
+        }
+        if dividend.is_zero() || divisor.is_constant() {
+            return true;
+        }
+
+        let mut active_variables = (0..dividend.nvars()).filter(|&candidate| {
+            dividend.degree(candidate) != E::zero() || divisor.degree(candidate) != E::zero()
+        });
+        let variable = active_variables
+            .next()
+            .expect("a nonconstant polynomial must have an active variable");
+        if active_variables.next().is_some() {
+            return dividend.try_div(divisor).is_some();
+        }
+        if dividend.degree(variable) < divisor.degree(variable) {
+            return false;
+        }
+
+        let defining_polynomial = dividend.ring().poly();
+        let algebraic_variable = &defining_polynomial.variables()[0];
+        assert!(
+            dividend
+                .variables()
+                .iter()
+                .position(|candidate| candidate == algebraic_variable)
+                .is_none_or(|position| {
+                    dividend.degree(position) == E::zero() && divisor.degree(position) == E::zero()
+                }),
+            "the number-field generator cannot also be an active polynomial variable"
+        );
+
+        // Flatten Q(alpha)[x] to Q[alpha, x] and clear all coefficient
+        // denominators at once, as in the ordinary rational polynomial GCD.
+        let to_integer_associate = |polynomial: &MultivariatePolynomial<RationalField, E>| {
+            let content = polynomial.content();
+            polynomial.map_coeff(
+                |coefficient| polynomial.ring().div(coefficient, &content).numerator(),
+                Z,
+            )
+        };
+        let dividend_integer = to_integer_associate(&dividend.from_number_field());
+        let divisor_integer = to_integer_associate(&divisor.from_number_field());
+        let defining_polynomial_content = defining_polynomial.content();
+        let defining_polynomial_integer = defining_polynomial.map_coeff(
+            |coefficient| {
+                defining_polynomial
+                    .ring()
+                    .div(coefficient, &defining_polynomial_content)
+                    .numerator()
+            },
+            Z,
+        );
+
+        if defining_polynomial_integer
+            .ring()
+            .is_one(&defining_polynomial_integer.lcoeff())
+        {
+            // The existing integer algebraic extension reduces every product
+            // modulo the defining polynomial and prevents degree growth in
+            // alpha during pseudo-division.
+            let integer_extension = AlgebraicExtension::new(defining_polynomial_integer);
+            let dividend_integer = dividend_integer.to_number_field(&integer_extension);
+            let divisor_integer = divisor_integer.to_number_field(&integer_extension);
+            return dividend_integer
+                .to_univariate_from_univariate(variable)
+                .pseudo_remainder(&divisor_integer.to_univariate_from_univariate(variable))
+                .is_zero();
+        }
+
+        // If denominator clearing makes the defining polynomial non-monic,
+        // remain in Z[alpha, x] and reduce the outer pseudo-remainder modulo it.
+        let algebraic_variable_position = dividend_integer
+            .variables()
+            .iter()
+            .position(|candidate| candidate == algebraic_variable)
+            .expect("flattening must add the number-field generator");
+        let remainder = dividend_integer
+            .to_univariate(variable)
+            .pseudo_remainder(&divisor_integer.to_univariate(variable));
+        if remainder.is_zero() {
+            return true;
+        }
+
+        let defining_polynomial_univariate =
+            defining_polynomial_integer.to_univariate_from_univariate(0);
+        remainder.coefficients().iter().all(|coefficient| {
+            coefficient
+                .to_univariate_from_univariate(algebraic_variable_position)
+                .pseudo_remainder(&defining_polynomial_univariate)
+                .is_zero()
+        })
+    }
+
     fn heuristic_gcd(
         _a: &MultivariatePolynomial<Self, E>,
         _b: &MultivariatePolynomial<Self, E>,
@@ -3792,15 +7855,16 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
         MultivariatePolynomial::repeated_gcd(f)
     }
 
+    #[inline(never)]
     fn gcd(
         a: &MultivariatePolynomial<Self, E>,
         b: &MultivariatePolynomial<Self, E>,
         vars: &[usize],
         bounds: &mut [E],
     ) -> MultivariatePolynomial<Self, E> {
-        let content = a.ring.poly().content().inv();
+        let content = a.ring().poly().content().inv();
         let a_integer =
-            AlgebraicExtension::new(a.ring.poly().map_coeff(|c| (c * &content).numerator(), Z));
+            AlgebraicExtension::new(a.ring().poly().map_coeff(|c| (c * &content).numerator(), Z));
         let a_lcoeff = a_integer.poly().lcoeff();
 
         debug!("Zippel gcd of {} and {} % {}", a, b, a_integer);
@@ -3810,17 +7874,14 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             b.check_consistency();
         }
 
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
+        let mut primes = modular_gcd_prime_iterator();
 
         let mut tight_bounds: SmallVec<[E; INLINED_EXPONENTS]> = bounds.iter().cloned().collect();
 
         'newfirstprime: loop {
-            let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                panic!("Ran out of primes for gcd reconstruction.\ngcd({a},{b})");
-            };
-
-            let mut finite_field = Zp::new(p);
-            let mut algebraic_field_ff = a.ring.to_finite_field(&finite_field);
+            let p = next_modular_gcd_prime(&mut primes, "gcd reconstruction");
+            let mut finite_field = ModularGcdField::new(p);
+            let mut algebraic_field_ff = a.ring().to_finite_field(&finite_field);
 
             let a_lcoeff_p = a_lcoeff.to_finite_field(&finite_field);
 
@@ -3888,21 +7949,21 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             }
 
             let gpc = gp.lcoeff_varorder(vars);
-            let lcoeff_factor = gp.ring.inv(&gpc);
+            let lcoeff_factor = gp.ring().inv(&gpc);
 
             // construct the gcd suggestion in Z
             // contrary to the integer case, we do not know the leading coefficient in Z
             // as it cannot easily be predicted from the two input polynomials
             // we use rational reconstruction to recover it
             let mut gm: MultivariatePolynomial<AlgebraicExtension<IntegerRing>, E> =
-                MultivariatePolynomial::new(&a_integer, gp.nterms().into(), a.variables.clone());
+                MultivariatePolynomial::new(&a_integer, gp.nterms().into(), a.variables().clone());
             gm.exponents.clone_from(&gp.exponents);
             gm.coefficients = gp
                 .coefficients
                 .iter()
                 .map(|x| {
-                    a_integer.to_element(
-                        gp.ring
+                    a_integer.element_from_polynomial(
+                        gp.ring()
                             .mul(x, &lcoeff_factor)
                             .poly
                             .map_coeff(|c| finite_field.to_symmetric_integer(c), Z),
@@ -3917,14 +7978,9 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             // add new primes until we can reconstruct the full gcd
             'newprime: loop {
                 loop {
-                    let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                        panic!(
-                            "Ran out of primes for gcd images.\ngcd({a},{b})\nAttempt: {gm}\n vars: {vars:?}, bounds: {bounds:?}; {tight_bounds:?}"
-                        );
-                    };
-
-                    finite_field = Zp::new(p);
-                    algebraic_field_ff = a.ring.to_finite_field(&finite_field);
+                    let p = next_modular_gcd_prime(&mut primes, "gcd images");
+                    finite_field = ModularGcdField::new(p);
+                    algebraic_field_ff = a.ring().to_finite_field(&finite_field);
 
                     let a_lcoeff_p = a_lcoeff.to_finite_field(&finite_field);
 
@@ -4004,8 +8060,8 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
 
                 // scale the new image
                 let gpc = gp.lcoeff_varorder(vars);
-                gp = gp.mul_coeff(ap.ring.inv(&gpc));
-                debug!("gp: {} mod {}", gp, gp.ring);
+                gp = gp.mul_coeff(ap.ring().inv(&gpc));
+                debug!("gp: {} mod {}", gp, gp.ring());
 
                 // use chinese remainder theorem to merge coefficients and map back to Z
                 // terms could be missing in gp, but not in gm (TODO: check this?)
@@ -4015,7 +8071,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                         gpi += 1;
                         gp.coefficients[gpi - 1].clone()
                     } else {
-                        ap.ring.zero()
+                        ap.ring().zero()
                     };
 
                     let gmc_a = &mut gm.coefficients[t];
@@ -4023,7 +8079,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                     // apply CRT to each integer coefficient in the algebraic number ring
                     let mut gpc_pos = 0;
                     let mut gmc_pos = 0;
-                    for i in 0..a.ring.poly().degree(0) {
+                    for i in 0..a.ring().poly().degree(0) {
                         let gpc =
                             if gpc_pos < gpc.poly.nterms() && i == gpc.poly.exponents(gpc_pos)[0] {
                                 gpc_pos += 1;
@@ -4075,7 +8131,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                 let mut gc = a.zero();
 
                 for c in &gm.coefficients {
-                    let mut nc = a.ring.poly().zero();
+                    let mut nc = a.ring().poly().zero();
 
                     for aa in &c.poly.coefficients {
                         match Rational::maximal_quotient_reconstruction(aa, &m, None) {
@@ -4089,13 +8145,13 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
                     }
 
                     nc.exponents.clone_from(&c.poly.exponents);
-                    gc.coefficients.push(a.ring.to_element(nc));
+                    gc.coefficients.push(a.ring().element_from_polynomial(nc));
                 }
 
                 gc.exponents.clone_from(&gm.exponents);
 
                 debug!("Final suggested gcd: {}", gc);
-                if gc.is_one() || (a.try_div(&gc).is_some() && b.try_div(&gc).is_some()) {
+                if gc.is_one() || (Self::divides_exact(a, &gc) && Self::divides_exact(b, &gc)) {
                     return gc;
                 }
 
@@ -4112,10 +8168,13 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
     ) -> SmallVec<[E; INLINED_EXPONENTS]> {
         let mut bounds: SmallVec<[_; INLINED_EXPONENTS]> =
             (0..a.nvars()).map(|_| E::zero()).collect();
-        let mut primes = PrimeIteratorU64::new(u32::get_large_prime() as u64);
+        let mut primes = modular_gcd_prime_iterator();
 
-        let mut f = Zp::new(primes.next().unwrap() as u32);
-        let mut algebraic_field_ff = a.ring.to_finite_field(&f);
+        let mut f = ModularGcdField::new(next_modular_gcd_prime(
+            &mut primes,
+            "gcd var bound detection",
+        ));
+        let mut algebraic_field_ff = a.ring().to_finite_field(&f);
         let mut ap = a.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
         let mut bp = b.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
 
@@ -4127,12 +8186,9 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
             while ap.degree(*var) != a.degree(*var) || bp.degree(*var) != b.degree(*var) {
                 debug!("Variable bounds failed due to bad prime");
 
-                let Some(p) = u32::try_from_integer(primes.next().unwrap().into()) else {
-                    panic!("Ran out of primes for gcd var bound detection.\ngcd({a},{b})");
-                };
-
-                f = Zp::new(p);
-                algebraic_field_ff = a.ring.to_finite_field(&f);
+                let p = next_modular_gcd_prime(&mut primes, "gcd var bound detection");
+                f = ModularGcdField::new(p);
+                algebraic_field_ff = a.ring().to_finite_field(&f);
                 ap = a.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
                 bp = b.map_coeff(|c| c.to_finite_field(&f), algebraic_field_ff.clone());
             }
@@ -4146,11 +8202,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
     }
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
-        if a.lcoeff().poly.lcoeff().is_negative() {
-            -a
-        } else {
-            a
-        }
+        a.make_monic()
     }
 }
 
@@ -4193,5 +8245,2120 @@ impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExpone
 
     fn normalize(a: MultivariatePolynomial<Self, E>) -> MultivariatePolynomial<Self, E> {
         a.one()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atom::AtomCore;
+    use crate::domains::finite_field::{Z2, Zp};
+    use crate::parse;
+    use crate::poly::PolyVariable;
+
+    #[test]
+    fn gcd_with_zero_is_monic_over_extensions() {
+        let field = crate::domains::algebraic::AlgebraicExtension::new(
+            parse!("a^3+a+1").to_polynomial::<_, u16>(&Z2, None),
+        );
+        let monic = parse!("x^2+x+1").to_polynomial::<_, u16>(&field, None);
+        let scaled = monic.clone().mul_coeff(field.generator());
+        assert_eq!(scaled.univariate_gcd(&scaled.zero()), monic);
+        assert_eq!(scaled.zero().univariate_gcd(&scaled), monic);
+        assert!(scaled.zero().univariate_gcd(&scaled.zero()).is_zero());
+    }
+
+    fn hu_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
+        let variables = ["x", "y", "z"]
+            .map(|variable| {
+                parse!(variable)
+                    .to_polynomial::<IntegerRing, u8>(&Z, None)
+                    .variables()[0]
+                    .clone()
+            })
+            .to_vec();
+        parse!(expression).to_polynomial::<_, u8>(&Z, Some(std::sync::Arc::new(variables)))
+    }
+
+    fn hu_bivariate_planning_fixture(expression: &str) -> MultivariatePolynomial<IntegerRing, u8> {
+        let variables = ["x", "y", "z", "u", "v"]
+            .map(|variable| {
+                parse!(variable)
+                    .to_polynomial::<IntegerRing, u8>(&Z, None)
+                    .variables()[0]
+                    .clone()
+            })
+            .to_vec();
+        parse!(expression).to_polynomial::<_, u8>(&Z, Some(std::sync::Arc::new(variables)))
+    }
+
+    #[test]
+    fn coefficient_row_counter_migrates_without_losing_counts() {
+        let mut rows = CoefficientRowCounter::default();
+        assert_eq!(rows.increment(0, 4), 1);
+        assert_eq!(rows.increment(2, 4), 1);
+        assert_eq!(rows.increment(0, 4), 2);
+        assert!(rows.sparse.is_none());
+
+        assert_eq!(rows.increment(100, 4), 1);
+        assert_eq!(rows.increment(2, 4), 2);
+        assert_eq!(rows.increment(100, 4), 2);
+        assert_eq!(rows.largest, 2);
+        assert!(rows.dense.is_empty());
+        assert_eq!(rows.sparse.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn bivariate_hu_pair_selection_prefers_two_low_cost_variables() {
+        let variables = [0, 1, 2, 3, 4];
+        let cases = [
+            (
+                [18u8, 17, 20, 18, 15],
+                [18u8, 17, 19, 18, 17],
+                [1usize, 1, 1, 4, 4],
+                [1usize, 1, 1, 2, 1],
+                [1, 4],
+            ),
+            (
+                [18u8, 16, 21, 15, 19],
+                [17u8, 15, 20, 17, 17],
+                [1usize, 2, 3, 2, 2],
+                [1usize, 6, 1, 2, 1],
+                [1, 3],
+            ),
+            (
+                [18u8, 16, 16, 17, 19],
+                [18u8, 14, 16, 17, 19],
+                [1usize, 1, 2, 4, 3],
+                [1usize, 1, 1, 3, 3],
+                [1, 2],
+            ),
+        ];
+
+        for (left_degrees, right_degrees, left_rows, right_rows, expected) in cases {
+            assert_eq!(
+                hu_monagan_bivariate_main_variables(
+                    &variables,
+                    &left_degrees,
+                    &right_degrees,
+                    &left_rows,
+                    &right_rows,
+                ),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_dense_input_boxes() {
+        let left = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)");
+        let right = hu_planning_fixture("(1+2*x+3*x^2)*(1+5*y+7*y^2)*(1+11*z+13*z^2)");
+        let variables = [0, 1, 2];
+        let bounds = [1u8, 1, 1];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        let main_variables = planning.main_variables().unwrap();
+        assert_eq!(main_variables, [0, 1]);
+        assert!(!planning.is_applicable(main_variables));
+        assert!(planning.prepare().is_none());
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unbounded_sample_schedule() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        assert_eq!(planning.main_variables(), Some([0, 1]));
+        assert!(!planning.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unbalanced_input_supports() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10+23*x*z^9+29*x*u^9+31*y*v^9+37*x*z^8+41*y*u^8+43*x*v^8+47*y*z^7+53*x*u^7+59*y*v^7+61*x*z^6+67*y*u^6",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        );
+
+        assert_eq!(forward.main_variables(), Some([0, 1]));
+        assert_eq!(reverse.main_variables(), Some([0, 1]));
+        assert!(!forward.is_applicable([0, 1]));
+        assert!(!reverse.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_rejects_unamortized_image_boxes() {
+        let left = hu_bivariate_planning_fixture(
+            "(1+x+x^2+x^3+x^4+x^5+x^6+x^7+x^8+x^9)*(1+y+y^2+y^3+y^4+y^5+y^6+y^7+y^8+y^9)*(1+z^20)*(1+u^20)*(1+v^20)",
+        );
+        let right = hu_bivariate_planning_fixture(
+            "(1+2*x+3*x^2+5*x^3+7*x^4+11*x^5+13*x^6+17*x^7+19*x^8+23*x^9)*(1+29*y+31*y^2+37*y^3+41*y^4+43*y^5+47*y^6+53*y^7+59*y^8+61*y^9)*(1+67*z^20)*(1+71*u^20)*(1+73*v^20)",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+
+        assert_eq!(planning.main_variables(), Some([0, 1]));
+        assert!(!planning.is_applicable([0, 1]));
+    }
+
+    #[test]
+    fn bivariate_hu_planning_is_symmetric_for_equal_length_inputs() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^10+13*u^10+17*v^10+19*z^10*u^10*v^10+23*x*z^9",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8, 1, 1, 1, 1];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        );
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        );
+
+        assert_eq!(forward.main_variables(), Some([0, 1]));
+        assert_eq!(reverse.main_variables(), Some([0, 1]));
+        assert!(forward.is_applicable([0, 1]));
+        assert!(reverse.is_applicable([0, 1]));
+        assert!(forward.prepare().is_some());
+        assert!(reverse.prepare().is_some());
+    }
+
+    #[test]
+    fn bivariate_hu_planning_is_symmetric_for_unequal_length_inputs() {
+        let left = hu_bivariate_planning_fixture("1+x+y+x*y+z^10+u^10+v^10+z^10*u^10*v^10+x*z^9");
+        let right = hu_bivariate_planning_fixture(
+            "2+3*x+5*y+7*x*y+11*z^6+13*u^6+17*v^6+19*z^6*u^6*v^6+23*z^5*u^4+29*y*u^5",
+        );
+        let variables = [0, 1, 2, 3, 4];
+        let bounds = [1u8; 5];
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let forward = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+            &right_degrees,
+        )
+        .prepare()
+        .unwrap();
+        let reverse = HuMonaganBivariatePlanningContext::new_with_degrees(
+            &right,
+            &left,
+            &variables,
+            &bounds,
+            &right_degrees,
+            &left_degrees,
+        )
+        .prepare()
+        .unwrap();
+
+        assert_eq!(forward.order, reverse.order);
+        assert_eq!(forward.bounds, reverse.bounds);
+        assert_eq!(forward.budget, reverse.budget);
+        assert_eq!(forward.budget.sample_limit, 18);
+        assert_eq!(forward.budget.prime_attempt_limit, 10);
+    }
+
+    #[test]
+    fn prepared_bivariate_hu_restores_original_coordinates() {
+        let mut polynomials = [
+            hu_planning_fixture("1+x^2+2*y^2+3*z^2"),
+            hu_planning_fixture("1+5*x^3+7*y^3+11*z^3"),
+            hu_planning_fixture("1+13*x+17*y+19*z"),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let order = smallvec![1usize, 0, 2];
+        let prepared = PreparedHuMonaganBivariateGcd {
+            left: left.rearrange_impl(&order, false, false),
+            right: right.rearrange_impl(&order, false, false),
+            bounds: smallvec![1u8, 1, 1],
+            order,
+            budget: HuMonaganBivariateAutomaticBudget {
+                sample_limit: 8,
+                prime_attempt_limit: 10,
+            },
+        };
+
+        assert_eq!(prepared.run(), Some(common_factor));
+    }
+
+    #[test]
+    fn bounded_bivariate_hu_image_restores_second_variable_content() {
+        let mut polynomials = [
+            parse!("(x+1)*(y+1)").to_polynomial::<IntegerRing, u32>(&Z, None),
+            parse!("x+2*y+3").to_polynomial::<IntegerRing, u32>(&Z, None),
+            parse!("2*x+3*y+5").to_polynomial::<IntegerRing, u32>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common_factor, left_cofactor, right_cofactor] = polynomials;
+        let field = Zp::new(577);
+        let common_factor = common_factor.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let left = (&common_factor
+            * &left_cofactor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            ))
+            .make_monic();
+        let right = (&common_factor
+            * &right_cofactor.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            ))
+            .make_monic();
+
+        assert_eq!(
+            MultivariatePolynomial::<IntegerRing, u8>::hu_monagan_bivariate_image_gcd(
+                &left,
+                &right,
+                (1, 1),
+            ),
+            Some(common_factor.make_monic())
+        );
+    }
+
+    #[test]
+    fn bivariate_hu_runs_word_width_dispatch_and_crt_images() {
+        fn sparse_fixture(
+            exponent: u32,
+            factor_coefficient: Integer,
+            left_coefficient: Integer,
+            right_coefficient: Integer,
+        ) -> (
+            MultivariatePolynomial<IntegerRing, u32>,
+            MultivariatePolynomial<IntegerRing, u32>,
+            MultivariatePolynomial<IntegerRing, u32>,
+        ) {
+            let template = parse!("x+y+z+w").to_polynomial::<IntegerRing, u32>(&Z, None);
+            let monomial = |coefficient, exponents: [u32; 4]| {
+                template.monomial(coefficient, exponents.to_vec())
+            };
+            let common_factor = template.one()
+                + monomial(Integer::one(), [1, 0, 0, 0])
+                + monomial(Integer::one(), [0, 1, 0, 0])
+                + monomial(factor_coefficient, [0, 0, exponent, exponent]);
+            let left_cofactor = template.one() + monomial(left_coefficient, [1, 0, 0, 0]);
+            let right_cofactor = template.one() + monomial(right_coefficient, [0, 1, 0, 0]);
+            (
+                &common_factor * &left_cofactor,
+                &common_factor * &right_cofactor,
+                common_factor,
+            )
+        }
+
+        let first_prime_for_radix = |radix: u64| {
+            let lower_bound = radix.checked_mul(radix).unwrap().checked_mul(2).unwrap();
+            SMOOTH_PRIMES
+                .iter()
+                .find(|prime| prime.0 >= lower_bound)
+                .unwrap()
+                .0
+        };
+        assert!(u32::try_from(first_prime_for_radix(45_000)).is_ok());
+        assert!(u32::try_from(first_prime_for_radix(47_000)).is_err());
+
+        for (case_index, (exponent, factor_coefficient, left_coefficient, right_coefficient)) in [
+            (44_999, Integer::one(), Integer::from(2), Integer::from(3)),
+            (46_999, Integer::one(), Integer::from(2), Integer::from(3)),
+            (
+                44_999,
+                (Integer::one() << 100usize) + Integer::one(),
+                (Integer::one() << 100usize) + Integer::from(3),
+                (Integer::one() << 100usize) + Integer::from(5),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (left, right, expected) = sparse_fixture(
+                exponent,
+                factor_coefficient,
+                left_coefficient,
+                right_coefficient,
+            );
+            let bounds = [1, 1, exponent, exponent];
+            assert_eq!(
+                left.gcd_hu_monagan_bivariate(&right, &bounds),
+                Some(expected)
+            );
+            if case_index == 0 {
+                assert_eq!(
+                    left.gcd_hu_monagan_bivariate_with_budget(
+                        &right,
+                        &bounds,
+                        Some(HuMonaganBivariateAutomaticBudget {
+                            sample_limit: HU_MONAGAN_BIVARIATE_INITIAL_SAMPLES,
+                            prime_attempt_limit: 0,
+                        }),
+                    ),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hu_planning_requires_two_sampling_doublings() {
+        let left = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3");
+        let right =
+            hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3+x*z^4");
+        let variables = [0, 1, 2];
+        let bounds = [1, 4, 4];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+
+        assert_eq!(anchor, HuMonaganAnchor::Left);
+        assert_eq!(planning.maximum_row_supports.as_slice(), [8, 2, 2]);
+        assert_eq!(planning.alternative_main_variable(), Some(1));
+
+        let below_threshold = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+x*y^4*z^3");
+        let larger = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+x*y^4*z^3+x*z^4");
+        let planning = HuMonaganPlanningContext::new(
+            &below_threshold,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 7);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert_eq!(planning.alternative_main_variable(), None);
+
+        let uniform = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)");
+        let larger = hu_planning_fixture("(1+x+x^2)*(1+y+y^2)*(1+z+z^2)+x^3*y^3*z^3");
+        let planning = HuMonaganPlanningContext::new(
+            &uniform,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 9);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert_eq!(planning.maximum_row_supports[2], usize::MAX);
+        assert_eq!(planning.alternative_main_variable(), None);
+    }
+
+    #[test]
+    fn hu_planning_accounts_for_image_degree_and_kronecker_range() {
+        let variables = [0, 1, 2];
+        let bounds = [1, 1, 1];
+
+        let high_image_degree = hu_planning_fixture("1+y^30+y^60+y^90+y^120+y^150+y^180+y^210+x*z");
+        let larger = hu_planning_fixture("1+y^30+y^60+y^90+y^120+y^150+y^180+y^210+x*z+x*z^2");
+        let planning = HuMonaganPlanningContext::new(
+            &high_image_degree,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 8);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert!(
+            hu_monagan_main_image_work(&planning.anchored_degrees, &planning.other_degrees, 1, 2,)
+                > planning.main_image_work(0)
+        );
+        assert!(planning.kronecker_range(1) < planning.kronecker_range(0));
+        assert_eq!(planning.alternative_main_variable(), None);
+
+        let larger_kronecker_range = hu_planning_fixture("1+y+y^2+y^3+y^4+y^5+y^6+y^7+x^100*z");
+        let larger = hu_planning_fixture("1+y+y^2+y^3+y^4+y^5+y^6+y^7+x^100*z+x^100*z^2");
+        let planning = HuMonaganPlanningContext::new(
+            &larger_kronecker_range,
+            &larger,
+            &variables,
+            &bounds,
+            HuMonaganAnchor::Left,
+        );
+        assert_eq!(planning.maximum_row_supports[0], 8);
+        assert_eq!(planning.maximum_row_supports[1], usize::MAX);
+        assert!(
+            hu_monagan_main_image_work(&planning.anchored_degrees, &planning.other_degrees, 1, 2,)
+                < planning.main_image_work(0)
+        );
+        assert!(planning.kronecker_range(1) > planning.kronecker_range(0));
+        assert_eq!(planning.alternative_main_variable(), None);
+    }
+
+    #[test]
+    fn hu_planning_preserves_anchor_and_restores_new_main_content() {
+        let mut polynomials = [
+            hu_planning_fixture("1+z"),
+            hu_planning_fixture("1+z+z^2"),
+            hu_planning_fixture(
+                "(1+z^8)*(1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x^2*y^4*z^3+x^3*y^4*z^4)",
+            ),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let variables = [0, 1, 2];
+        let bounds = [3, 4, 12];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        assert!(
+            variables
+                .iter()
+                .all(|variable| left.degree(*variable) > 1 && right.degree(*variable) > 1)
+        );
+        assert!(<IntegerRing as PolynomialGCD<u8>>::heuristic_gcd(&left, &right).is_none());
+        assert_eq!(
+            HuMonaganAnchor::from_inputs(&right, &left),
+            HuMonaganAnchor::Right
+        );
+        assert_eq!(
+            HuMonaganAnchor::from_inputs(&left, &left),
+            HuMonaganAnchor::Left
+        );
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+        let prepared = planning.prepare(1).unwrap();
+
+        assert_eq!(prepared.anchor, anchor);
+        assert!(prepared.left.univariate_content(0).is_one());
+        assert!(prepared.right.univariate_content(0).is_one());
+        assert_eq!(prepared.run(), Some(common_factor.clone()));
+
+        let optimized = <IntegerRing as PolynomialGCD<u8>>::gcd_with_precontent_plan(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &polynomial_degrees(&left),
+            &polynomial_degrees(&right),
+        );
+        assert_eq!(optimized, Some(common_factor.clone()));
+
+        let transform = |mut polynomial: MultivariatePolynomial<IntegerRing, u8>,
+                         shift: [u8; 3]| {
+            for exponents in polynomial.exponents_iter_mut() {
+                for ((exponent, scale), offset) in exponents.iter_mut().zip([2, 3, 2]).zip(shift) {
+                    *exponent = *exponent * scale + offset;
+                }
+            }
+            polynomial
+        };
+        let shifted_left = transform(left, [3, 2, 1]);
+        let shifted_right = transform(right, [1, 4, 2]);
+        let expected = transform(common_factor, [1, 2, 1]);
+        assert_eq!(shifted_left.gcd(&shifted_right), expected);
+        assert_eq!(shifted_right.gcd(&shifted_left), expected);
+    }
+
+    #[test]
+    fn hu_precontent_plan_requires_sparse_interpolation_geometry() {
+        let left = hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3");
+        let right =
+            hu_planning_fixture("1+z+y+y*z^2+y^2*z+y^2*z^3+y^3*z^2+y^3*z^4+x*y^4*z^3+x*z^4");
+        let variables = [0, 1, 2];
+        let bounds = [1, 1, 1];
+        let anchor = HuMonaganAnchor::from_inputs(&left, &right);
+        let left_degrees = polynomial_degrees(&left);
+        let right_degrees = polynomial_degrees(&right);
+        let planning = HuMonaganPlanningContext::new(&left, &right, &variables, &bounds, anchor);
+
+        assert_eq!(planning.alternative_main_variable(), Some(1));
+        assert!(!hu_monagan_plan_is_applicable_with_degrees(
+            &left,
+            &right,
+            &variables,
+            &bounds,
+            &left_degrees,
+        ));
+        assert_eq!(
+            <IntegerRing as PolynomialGCD<u8>>::gcd_with_precontent_plan(
+                &left,
+                &right,
+                &variables,
+                &bounds,
+                &left_degrees,
+                &right_degrees,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn dense_univariate_gcd_handles_sparse_images_and_constants() {
+        let field = Zp::new(2_147_483_659);
+        let factor = parse!("x^7+3*x^4+5*x+2").to_polynomial::<_, u8>(&field, None);
+        let left_cofactor =
+            parse!("x^5+7*x^2+11").to_polynomial::<_, u8>(&field, factor.variables().clone());
+        let right_cofactor =
+            parse!("x^4+13*x^3+17").to_polynomial::<_, u8>(&field, factor.variables().clone());
+        let left = &factor * &left_cofactor;
+        let right = &factor * &right_cofactor;
+
+        assert_eq!(left.univariate_gcd(&right), factor);
+        assert_eq!(
+            left.univariate_gcd(&left.constant(field.nth(Integer::from(3)))),
+            left.one()
+        );
+        assert_eq!(
+            left.constant(field.nth(Integer::from(3)))
+                .univariate_gcd(&left.constant(field.nth(Integer::from(5)))),
+            left.one()
+        );
+        assert_eq!(left.zero().univariate_gcd(&left), left);
+
+        let large_gap = parse!("x^100000+x^50000").to_polynomial::<_, u32>(&field, None);
+        let monomial =
+            parse!("x^75000").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        let expected =
+            parse!("x^50000").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        assert_eq!(large_gap.univariate_gcd(&monomial), expected);
+
+        let sparse_left =
+            parse!("x^100000+1").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        let sparse_right =
+            parse!("x^99999+2").to_polynomial::<_, u32>(&field, large_gap.variables().clone());
+        assert!(
+            !DenseUnivariateGcdContext::new(&sparse_left, &sparse_right)
+                .storage_is_bounded(&sparse_left, &sparse_right)
+        );
+    }
+
+    #[test]
+    fn shifted_transposed_vandermonde_recovers_coefficients() {
+        let field = Zp::new(2_147_483_659);
+        let polynomial = parse!("x").to_polynomial::<_, u8>(&field, None);
+        assert!(
+            polynomial
+                .solve_shifted_transposed_vandermonde(&[], &[])
+                .is_empty()
+        );
+
+        for len in 1..=12 {
+            let points = (0..len)
+                .map(|index| field.to_element(index as u32 + 2))
+                .collect::<Vec<_>>();
+            let expected = (0..len)
+                .map(|index| field.to_element(if index % 4 == 0 { 0 } else { index as u32 + 11 }))
+                .collect::<Vec<_>>();
+            let rhs = (0..len)
+                .map(|power| {
+                    points.iter().zip(&expected).fold(
+                        field.zero(),
+                        |mut value, (point, coefficient)| {
+                            field.add_mul_assign(
+                                &mut value,
+                                coefficient,
+                                &field.pow(point, power as u64 + 1),
+                            );
+                            value
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                polynomial.solve_shifted_transposed_vandermonde(&points, &rhs),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn zippel_shape_index_keeps_large_degree_gaps_sparse() {
+        let sparse = ZippelShapeIndex::new([3u32, 1_000_003]);
+        assert!(matches!(&sparse, ZippelShapeIndex::Sparse(_)));
+        assert_eq!(sparse.get(3), Some(0));
+        assert_eq!(sparse.get(1_000_003), Some(1));
+        assert_eq!(sparse.get(4), None);
+
+        let dense = ZippelShapeIndex::new([3u32, 5, 6]);
+        assert!(matches!(&dense, ZippelShapeIndex::Dense { .. }));
+        assert_eq!(dense.get(5), Some(1));
+    }
+
+    #[test]
+    fn dense_univariate_gcd_selector_rejects_sparse_gap_images() {
+        let field = Zp::new(2_147_483_659);
+        let sparse_left = parse!("x^260+x^256+1").to_polynomial::<_, u16>(&field, None);
+        let sparse_right = parse!("x^259+2*x^128+3")
+            .to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        assert!(
+            !DenseUnivariateGcdContext::new(&sparse_left, &sparse_right)
+                .storage_is_bounded(&sparse_left, &sparse_right)
+        );
+
+        let dense_left =
+            parse!("(1+x)^20").to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        let dense_right =
+            parse!("(1+2*x)^18").to_polynomial::<_, u16>(&field, sparse_left.variables().clone());
+        assert!(
+            DenseUnivariateGcdContext::new(&dense_left, &dense_right)
+                .storage_is_bounded(&dense_left, &dense_right)
+        );
+    }
+
+    #[test]
+    fn modular_gcd_primes_start_with_the_workspace_prime() {
+        let known_prime = u32::get_large_prime() as u64;
+        assert!(Integer::from(known_prime).is_prime(0));
+        let mut primes = ModularGcdPrimeIterator::for_workspace::<u32>();
+        assert_eq!(primes.next(), Some(known_prime));
+
+        let successor = primes.next().unwrap();
+        assert!(successor > known_prime);
+        assert!(Integer::from(successor).is_prime(0));
+
+        let u64_lower_bound = u64::get_large_prime();
+        let mut u64_primes = ModularGcdPrimeIterator::for_workspace::<u64>();
+        let first_u64_prime = u64_primes.next().unwrap();
+        assert!(first_u64_prime > u64_lower_bound);
+        assert!(Integer::from(first_u64_prime).is_prime(0));
+        let successor = u64_primes.next().unwrap();
+        assert!(successor > first_u64_prime);
+        assert!(Integer::from(successor).is_prime(0));
+    }
+
+    #[test]
+    fn univariate_modular_gcd_primes_match_dynamic_iterator() {
+        assert_eq!(UNIVARIATE_U64_MODULAR_GCD_PRIMES.len(), 32);
+
+        let mut actual = univariate_modular_gcd_prime_iterator();
+        let mut expected = PrimeIteratorU64::new(u64::get_large_prime());
+
+        // Compare every fixed prime and the first dynamically discovered fallback.
+        for _ in 0..=UNIVARIATE_U64_MODULAR_GCD_PRIMES.len() {
+            assert_eq!(actual.next(), expected.next());
+        }
+    }
+
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_uses_high_gamma() {
+        let polynomial = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let gamma = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        assert!(should_use_u64_zippel(&polynomial, &polynomial, &gamma));
+    }
+
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_uses_two_high_inputs() {
+        let coefficient = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        let polynomial = parse!(&format!("{coefficient}*x+1")).to_polynomial::<_, u16>(&Z, None);
+        assert!(should_use_u64_zippel(
+            &polynomial,
+            &polynomial,
+            &Integer::from(1)
+        ));
+    }
+
+    #[cfg(not(feature = "binary_size"))]
+    #[test]
+    fn zippel_word_selector_keeps_one_high_input_on_u32() {
+        let coefficient = Integer::from(1) << (U64_ZIPPEL_HEIGHT_BITS as usize - 1);
+        let high = parse!(&format!("{coefficient}*x+1")).to_polynomial::<_, u16>(&Z, None);
+        let low = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        assert!(!should_use_u64_zippel(&high, &low, &Integer::from(1)));
+        assert!(!should_use_u64_zippel(&low, &high, &Integer::from(1)));
+    }
+
+    #[test]
+    fn fused_gcd_bound_images_match_per_variable_sampling() {
+        fn check_case(
+            left_cofactor: &str,
+            right_cofactor: &str,
+            common_factor: &str,
+            variable_order: &[usize],
+        ) {
+            let mut polynomials = [
+                parse!(left_cofactor).to_polynomial::<_, u8>(&Z, None),
+                parse!(right_cofactor).to_polynomial::<_, u8>(&Z, None),
+                parse!(common_factor).to_polynomial::<_, u8>(&Z, None),
+            ];
+            MultivariatePolynomial::unify_variables_list(&mut polynomials);
+            let [left_cofactor, right_cofactor, common_factor] = polynomials;
+            let left = &left_cofactor * &common_factor;
+            let right = &right_cofactor * &common_factor;
+
+            let mut primes = modular_gcd_prime_iterator();
+            let field =
+                ModularGcdField::new(next_modular_gcd_prime(&mut primes, "fused GCD bound test"));
+            let left_mod = left.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+            let right_mod = right.map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            );
+
+            let mut context =
+                GcdBoundSamplingContext::new(&left_mod, &right_mod, variable_order).unwrap();
+            let mut points = vec![field.one(); left_mod.nvars()];
+            for (index, variable) in variable_order.iter().enumerate() {
+                let point = field.to_element((index as u64 + 101) as ModularGcdFieldWorkspace);
+                points[*variable] = point;
+                context.set_point(*variable, point);
+            }
+            context.fill_images(&left_mod, true);
+            context.fill_images(&right_mod, false);
+            assert!(context.degrees_are_preserved());
+
+            for (image_index, variable) in context.retained_variables.iter().enumerate() {
+                let sampled_variables = variable_order
+                    .iter()
+                    .filter(|sampled_variable| *sampled_variable != variable)
+                    .map(|sampled_variable| (*sampled_variable, points[*sampled_variable]))
+                    .collect::<Vec<_>>();
+                let mut cache = (0..left_mod.nvars())
+                    .map(|sampled_variable| {
+                        vec![
+                            field.zero();
+                            min(
+                                max(
+                                    left_mod.degree(sampled_variable),
+                                    right_mod.degree(sampled_variable)
+                                )
+                                .to_u32() as usize
+                                    + 1,
+                                POW_CACHE_SIZE
+                            )
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                let mut terms =
+                    HashMap::with_capacity_and_hasher(INITIAL_POW_MAP_SIZE, Default::default());
+                let reference_left = left_mod.sample_polynomial(
+                    *variable,
+                    &sampled_variables,
+                    &mut cache,
+                    &mut terms,
+                );
+                let reference_right = right_mod.sample_polynomial(
+                    *variable,
+                    &sampled_variables,
+                    &mut cache,
+                    &mut terms,
+                );
+                let fused_left = GcdBoundSamplingContext::image_polynomial(
+                    &field,
+                    &left_mod,
+                    *variable,
+                    context.left_images[image_index].clone(),
+                );
+                let fused_right = GcdBoundSamplingContext::image_polynomial(
+                    &field,
+                    &right_mod,
+                    *variable,
+                    context.right_images[image_index].clone(),
+                );
+                assert_eq!(fused_left, reference_left);
+                assert_eq!(fused_right, reference_right);
+            }
+
+            let fused = context.bounds_from_images(&left_mod, &right_mod);
+            for variable in variable_order {
+                assert_eq!(fused[*variable], common_factor.degree(*variable));
+            }
+        }
+
+        check_case(
+            "1+2*x1+3*x2^2+5*x3*x4+7*x5^2",
+            "2+3*x1^2+5*x2+7*x3^2+11*x4*x5",
+            "3+x1+x2*x3+x4^2+x5^3",
+            &[4, 0, 3, 1, 2],
+        );
+        check_case(
+            "1+x1+2*x2^2+3*x3*x4+5*x5*x6+7*x7^2+11*x8",
+            "2+3*x1*x2+5*x3^2+7*x4+11*x5*x7+13*x6^2+17*x8^2",
+            "5+x1*x8+x2*x7+x3*x6+x4*x5",
+            &[7, 2, 5, 0, 6, 1, 4, 3],
+        );
+    }
+
+    #[test]
+    fn linear_content_bound_screen_preserves_scalar_and_polynomial_content() {
+        let mut polynomials = [
+            parse!("y*(1+x+z+w)^9+(1+2*x+3*z+5*w)^9").to_polynomial::<_, u8>(&Z, None),
+            parse!("y").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x+z+w").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [linear, y, common_factor] = polynomials;
+        let linear_variable = (0..y.nvars())
+            .find(|variable| y.degree(*variable) > 0)
+            .unwrap();
+        let right = (&y * &linear)
+            .add_constant(Integer::one())
+            .mul_coeff(Integer::from(15));
+        let left = linear.mul_coeff(Integer::from(6));
+        let left_metadata = GcdInputMetadata::scan(&left);
+        let right_metadata = GcdInputMetadata::scan(&right);
+        let base_degrees: SmallVec<[Option<u8>; INLINED_EXPONENTS]> =
+            smallvec![Some(1u8); left.nvars()];
+        let variables = (0..left.nvars()).collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+        assert_eq!(left_metadata.shifted_degree(linear_variable), 1u8);
+        assert!(MultivariatePolynomial::should_screen_before_linear_content(
+            &left,
+            &right,
+            &left_metadata,
+            &right_metadata,
+            &base_degrees,
+            &variables,
+        ));
+        assert_eq!(left.gcd(&right), left.constant(Integer::from(3)));
+
+        let left_with_factor = &left * &common_factor;
+        let right_with_factor = &right * &common_factor;
+        assert_eq!(
+            left_with_factor.gcd(&right_with_factor),
+            common_factor.mul_coeff(Integer::from(3))
+        );
+    }
+
+    #[test]
+    fn constant_linear_content_uses_the_other_scalar_content() {
+        let mut polynomials = [
+            parse!("6*(y*(1+x)^75+(1+2*x)^75)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(y*(1+3*x)^75+(1+5*x)^75)").to_polynomial::<_, u8>(&Z, None),
+            parse!("y").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left, right, y] = polynomials;
+        let linear_variable = (0..y.nvars())
+            .find(|variable| y.degree(*variable) > 0)
+            .unwrap();
+        let left_metadata = GcdInputMetadata::scan(&left);
+        let right_metadata = GcdInputMetadata::scan(&right);
+        let base_degrees: SmallVec<[Option<u8>; INLINED_EXPONENTS]> =
+            smallvec![Some(1u8); left.nvars()];
+        let variables = (0..left.nvars()).collect::<SmallVec<[_; INLINED_EXPONENTS]>>();
+
+        assert_eq!(variables.len(), 2);
+        assert_eq!(left_metadata.shifted_degree(linear_variable), 1u8);
+        assert!(
+            !MultivariatePolynomial::should_screen_before_linear_content(
+                &left,
+                &right,
+                &left_metadata,
+                &right_metadata,
+                &base_degrees,
+                &variables,
+            )
+        );
+        assert!(<IntegerRing as PolynomialGCD<u8>>::heuristic_gcd(&left, &right).is_none());
+
+        let content = left.univariate_content(linear_variable);
+        assert!(content.is_constant());
+        assert_eq!(content.get_constant(), Integer::from(6));
+        assert_eq!(right.content(), Integer::from(15));
+        assert_eq!(left.gcd(&right), left.constant(Integer::from(3)));
+    }
+
+    #[test]
+    fn integer_gcd_multiple_ignores_zero_entries() {
+        let mut polynomials = [
+            parse!("0").to_polynomial::<_, u8>(&Z, None),
+            parse!("6*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+1)*(z+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*(x+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("-2*(x+1)").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [zero, left, right, expected, negative] = polynomials;
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero.clone(), left, right]),
+            expected.clone()
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero.clone(), zero.clone(), zero.clone()]),
+            zero.clone()
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![zero, negative]),
+            expected
+        );
+
+        let zero_with_q_layout = parse!("q").to_polynomial::<_, u8>(&Z, None).zero();
+        let negative_with_x_layout = parse!("-6*(x+1)").to_polynomial::<_, u8>(&Z, None);
+        let expected_with_x_layout = parse!("6*(x+1)").to_polynomial::<_, u8>(&Z, None);
+        let actual =
+            MultivariatePolynomial::gcd_multiple(vec![zero_with_q_layout, negative_with_x_layout]);
+        assert_eq!(actual.variables(), expected_with_x_layout.variables());
+        assert_eq!(actual, expected_with_x_layout);
+    }
+
+    #[test]
+    fn integer_gcd_multiple_uses_scalar_sparse_pair_certificate() {
+        let mut polynomials = [
+            parse!("6*(x+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+2)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+            parse!("1").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            dense_even,
+            dense_odd,
+            expected_even,
+            expected_odd,
+        ] = polynomials;
+
+        let pair_gcd = sparse_left.gcd(&sparse_right);
+        assert!(pair_gcd.is_constant());
+        assert_eq!(pair_gcd, sparse_left.constant(Integer::from(2)));
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense_even,
+                sparse_left.clone(),
+                sparse_right.clone()
+            ]),
+            expected_even
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense_odd, sparse_left, sparse_right]),
+            expected_odd
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_intersects_a_monomial_sparse_pair() {
+        let mut polynomials = [
+            parse!("6*x*y").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*x*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            dense_scalar,
+            dense_monomial,
+            expected_scalar,
+            expected_monomial,
+        ] = polynomials;
+
+        assert_eq!(sparse_left.gcd(&sparse_right), expected_monomial.clone());
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense_scalar,
+                sparse_left.clone(),
+                sparse_right.clone()
+            ]),
+            expected_scalar
+        );
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense_monomial, sparse_left, sparse_right]),
+            expected_monomial
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_probes_a_bounded_sparse_prefix() {
+        let mut polynomials = [
+            parse!("6*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("14*x*(z+1+z^2+z^3)").to_polynomial::<_, u8>(&Z, None),
+            parse!("22*(1+w)^31").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*x").to_polynomial::<_, u8>(&Z, None),
+            parse!("2").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [
+            sparse_left,
+            sparse_right,
+            next_sparse,
+            dense,
+            pair_gcd,
+            prefix_gcd,
+            expected,
+        ] = polynomials;
+
+        assert_eq!(sparse_left.gcd(&sparse_right), pair_gcd);
+        assert_eq!(pair_gcd.gcd(&next_sparse), prefix_gcd);
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![
+                dense,
+                next_sparse,
+                sparse_left,
+                sparse_right
+            ]),
+            expected
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_rejects_an_accidental_sparse_pair_factor() {
+        let mut polynomials = [
+            parse!("6*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("10*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+            parse!("15*(x+1)*(1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9)")
+                .to_polynomial::<_, u8>(&Z, None),
+            parse!("x+1").to_polynomial::<_, u8>(&Z, None),
+            parse!("2*(x+1)*(y+1)").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [sparse_left, sparse_right, dense, expected, accidental] = polynomials;
+
+        let mut supports = [sparse_left.nterms(), sparse_right.nterms(), dense.nterms()];
+        supports.sort_unstable_by(|left, right| right.cmp(left));
+        assert_eq!(supports, [20, 4, 4]);
+        assert!(supports[1].saturating_mul(4) <= supports[0]);
+        assert_eq!(sparse_left.gcd(&sparse_right), accidental);
+
+        let accidental_content = accidental.content();
+        let primitive_accidental = accidental.div_coeff(&accidental_content);
+        assert!(dense.try_div(&primitive_accidental).is_none());
+        assert_eq!(
+            MultivariatePolynomial::gcd_multiple(vec![dense, sparse_left, sparse_right]),
+            expected
+        );
+    }
+
+    #[test]
+    fn integer_gcd_multiple_preserves_an_untouched_variable_layout() {
+        let sparse_left = parse!("x+1").to_polynomial::<_, u8>(&Z, None);
+        let sparse_right = parse!("x+2").to_polynomial::<_, u8>(&Z, None);
+        let dense = parse!("1+z+z^2+z^3+z^4+z^5+z^6+z^7+z^8+z^9").to_polynomial::<_, u8>(&Z, None);
+        let expected = sparse_left.gcd(&dense).gcd(&sparse_right);
+
+        assert!(sparse_left.gcd(&sparse_right).is_one());
+        assert_eq!([dense.nterms(), sparse_left.nterms()], [10, 2]);
+        assert!(sparse_left.nterms().saturating_mul(4) <= dense.nterms());
+
+        let actual = MultivariatePolynomial::gcd_multiple(vec![dense, sparse_left, sparse_right]);
+        assert!(actual.is_one());
+        assert_eq!(actual.variables(), expected.variables());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn gcd_base_degree_scan_handles_mixed_degrees_and_absent_variables() {
+        let mut polynomials = [
+            parse!("1+x^2*y^3").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x^4+z^5").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+y^6+w^7").to_polynomial::<_, u8>(&Z, None),
+            parse!("q").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common, left_cofactor, right_cofactor, _absent_variable] = polynomials;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+        assert_eq!(left.gcd(&right), common);
+
+        let mut polynomials = [
+            parse!("1+x*y+y*z+z*x").to_polynomial::<_, u8>(&Z, None),
+            parse!("1+x^2+y^2+z^2").to_polynomial::<_, u8>(&Z, None),
+            parse!("2+x^3+y^3+z^3").to_polynomial::<_, u8>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [common, left_cofactor, right_cofactor] = polynomials;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+        assert_eq!(left.gcd(&right), common);
+    }
+
+    #[test]
+    fn gcd_input_metadata_tracks_monomial_shifts() {
+        let polynomial = parse!("x^3*y^5*z^2*w^6 + 2*x^7*y^5*w^6 + 3*x^5*y^9*z*w^6")
+            .to_polynomial::<_, u16>(&Z, None);
+        let metadata = GcdInputMetadata::scan(&polynomial);
+
+        for variable in 0..polynomial.nvars() {
+            let (minimum, maximum) = polynomial.degree_bounds(variable);
+            assert_eq!(metadata.variables[variable].min_degree, minimum);
+            assert_eq!(metadata.variables[variable].max_degree, maximum);
+            assert_eq!(metadata.shifted_degree(variable), maximum - minimum);
+            assert_eq!(metadata.occurs_after_shift(variable), minimum != maximum);
+        }
+
+        let mut shifted = Cow::Owned(polynomial);
+        metadata.remove_monomial_shift(&mut shifted);
+        for variable in 0..shifted.nvars() {
+            assert_eq!(
+                shifted.degree_bounds(variable),
+                (0, metadata.shifted_degree(variable))
+            );
+        }
+    }
+
+    #[test]
+    fn gcd_metadata_preserves_shifts_powers_and_unified_variables() {
+        let left = parse!("x^3*y^5*(x^4+y^2+1)*(z+1)").to_polynomial::<_, u16>(&Z, None);
+        let right = parse!("x^2*y^7*(x^4+y^2+1)*(w+1)").to_polynomial::<_, u16>(&Z, None);
+        let mut expected = parse!("x^2*y^5*(x^4+y^2+1)").to_polynomial::<_, u16>(&Z, None);
+        let mut actual = left.gcd(&right);
+        actual.unify_variables(&mut expected);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn galois_gcd_upgrade_samples_outside_the_prime_subfield() {
+        let field = AlgebraicExtension::galois_field(Z2, 2, PolyVariable::Temporary(0));
+        let mut factors = [
+            parse!("x+y^2+y+1").to_polynomial::<_, u8>(&field, None),
+            parse!("x+y+1").to_polynomial::<_, u8>(&field, None),
+            parse!("x^2+x+y+1").to_polynomial::<_, u8>(&field, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut factors);
+        let [common, left_cofactor, right_cofactor] = factors;
+        let left = &common * &left_cofactor;
+        let right = &common * &right_cofactor;
+
+        assert_eq!(left.gcd(&right), common.make_monic());
+    }
+
+    #[test]
+    fn integer_heuristic_reconstructs_dense_bivariate_gcd() {
+        let mut polynomials = [
+            parse!("(1+3*x+5*y)^5-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x-5*y)^5+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+3*x-5*y)^5+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [left_cofactor, right_cofactor, common_factor] = polynomials;
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+
+        let (actual, actual_left_cofactor, actual_right_cofactor) =
+            left.heuristic_gcd(&right).unwrap();
+        assert!(actual == common_factor || actual == -common_factor);
+        assert_eq!(&actual * &actual_left_cofactor, left);
+        assert_eq!(&actual * &actual_right_cofactor, right);
+    }
+
+    #[test]
+    fn integer_heuristic_uses_univariate_horner_path() {
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1+3*x)^32-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+
+        let (actual, actual_left_cofactor, actual_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&left, &right).unwrap();
+        assert!(actual == common_factor || actual == -common_factor.clone());
+        assert_eq!(&actual * &actual_left_cofactor, left);
+        assert_eq!(&actual * &actual_right_cofactor, right);
+        assert_eq!(left.gcd(&right), common_factor);
+
+        let mut inactive_left = left.clone();
+        let mut inactive_right = right.clone();
+        let mut inactive_expected = common_factor.clone();
+        let mut variable_template = parse!("y+1").to_polynomial::<IntegerRing, u16>(&Z, None);
+        inactive_left.unify_variables(&mut variable_template);
+        inactive_right.unify_variables(&mut variable_template);
+        inactive_expected.unify_variables(&mut variable_template);
+        assert_eq!(inactive_left.nvars(), 2);
+        let (inactive_gcd, inactive_left_cofactor, inactive_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&inactive_left, &inactive_right)
+                .unwrap();
+        assert_eq!(inactive_gcd, inactive_expected);
+        assert_eq!(&inactive_gcd * &inactive_left_cofactor, inactive_left);
+        assert_eq!(&inactive_gcd * &inactive_right_cofactor, inactive_right);
+
+        let variables_before_active = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            common_factor.variables()[0].clone(),
+        ]);
+        let [
+            preceding_left_cofactor,
+            preceding_right_cofactor,
+            preceding_common_factor,
+        ] = [
+            parse!("(1+3*x)^32-1")
+                .to_polynomial::<_, u16>(&Z, Some(variables_before_active.clone())),
+            parse!("(1-3*x)^32+1")
+                .to_polynomial::<_, u16>(&Z, Some(variables_before_active.clone())),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, Some(variables_before_active)),
+        ];
+        let preceding_left = &preceding_left_cofactor * &preceding_common_factor;
+        let preceding_right = &preceding_right_cofactor * &preceding_common_factor;
+        assert_eq!(preceding_left.degree(0), 0);
+        assert_ne!(preceding_left.degree(1), 0);
+        let (preceding_gcd, preceding_left_result, preceding_right_result) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&preceding_left, &preceding_right)
+                .unwrap();
+        assert!(
+            preceding_gcd == preceding_common_factor || preceding_gcd == -preceding_common_factor
+        );
+        assert_eq!(&preceding_gcd * &preceding_left_result, preceding_left);
+        assert_eq!(&preceding_gcd * &preceding_right_result, preceding_right);
+
+        let scaled_left = left.mul_coeff(Integer::from(6));
+        let scaled_right = right.mul_coeff(Integer::from(10));
+        let (scaled_gcd, scaled_left_cofactor, scaled_right_cofactor) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&scaled_left, &scaled_right)
+                .unwrap();
+        assert_eq!(scaled_gcd, common_factor.mul_coeff(Integer::from(2)));
+        assert_eq!(&scaled_gcd * &scaled_left_cofactor, scaled_left);
+        assert_eq!(&scaled_gcd * &scaled_right_cofactor, scaled_right);
+    }
+
+    #[test]
+    fn univariate_integer_gcd_selector_separates_scalar_and_modular_images() {
+        let [left_cofactor_32, right_cofactor_32, common_factor_32] = [
+            parse!("(1+3*x)^32-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^32+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left_32 = &left_cofactor_32 * &common_factor_32;
+        let right_32 = &right_cofactor_32 * &common_factor_32;
+        assert_eq!(
+            select_univariate_integer_gcd(
+                true,
+                estimated_heuristic_gcd_evaluation_bits(&left_32, &right_32),
+            ),
+            UnivariateIntegerGcdAlgorithm::Scalar,
+        );
+
+        let [left_cofactor_48, right_cofactor_48, common_factor_48] = [
+            parse!("(1+3*x)^48-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^48+1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1-3*x)^48+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left_48 = &left_cofactor_48 * &common_factor_48;
+        let right_48 = &right_cofactor_48 * &common_factor_48;
+        assert_eq!(
+            select_univariate_integer_gcd(
+                true,
+                estimated_heuristic_gcd_evaluation_bits(&left_48, &right_48),
+            ),
+            UnivariateIntegerGcdAlgorithm::Modular,
+        );
+        let (actual_48, left_result_48, right_result_48) =
+            <IntegerRing as PolynomialGCD<u16>>::heuristic_gcd(&left_48, &right_48).unwrap();
+        assert_eq!(actual_48, common_factor_48);
+        assert_eq!(&actual_48 * &left_result_48, left_48);
+        assert_eq!(&actual_48 * &right_result_48, right_48);
+
+        // Generated degree-80 factors produce degree-160 inputs, which the scalar heuristic's
+        // existing degree gate rejects before considering the evaluation-size estimate.
+        let max_deg_left_80 = 2usize * 80 + 1;
+        let max_deg_right_80 = max_deg_left_80;
+        let num_shared_variables_80 = 1usize;
+        let scalar_heuristic_allowed_80 = max_deg_left_80 < 20
+            || max_deg_right_80 < 20
+            || num_shared_variables_80 < 3 && max_deg_left_80.min(max_deg_right_80) < 150;
+        assert_eq!(
+            select_univariate_integer_gcd(scalar_heuristic_allowed_80, 0),
+            UnivariateIntegerGcdAlgorithm::Modular,
+        );
+    }
+
+    #[test]
+    fn dense_zp64_leading_inverse_matches_field_inverse() {
+        for prime in univariate_modular_gcd_prime_iterator()
+            .take(UNIVARIATE_U64_MODULAR_GCD_PRIMES.len() + 4)
+        {
+            let field = Zp64::new(prime);
+            let mut residues = vec![1, 2, prime / 2, prime - 2, prime - 1];
+            let mut state = prime ^ 0xd1b5_4a32_d192_ed03;
+            for _ in 0..512 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let residue = if state >= prime { state - prime } else { state };
+                residues.push(residue.max(1));
+            }
+
+            for residue in residues {
+                let coefficient = field.to_element(residue);
+                let inverse =
+                    DenseZp64UnivariateGcdImage::<u16>::inverse_leading(&field, &coefficient);
+                assert_eq!(
+                    inverse,
+                    field.inv(&coefficient),
+                    "inverse of {residue} modulo {prime}",
+                );
+                assert_eq!(
+                    field.mul(&coefficient, &inverse),
+                    field.one(),
+                    "inverse product of {residue} modulo {prime}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_zp64_univariate_gcd_image_matches_monic_field_gcd() {
+        let field = Zp64::new(
+            ModularGcdPrimeIterator::for_workspace::<u64>()
+                .next()
+                .unwrap(),
+        );
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1-3*x)^11+5").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+5*x)^10+7").to_polynomial::<_, u16>(&Z, None),
+            parse!("(1+2*x)^12+3").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let left = &left_cofactor * &common_factor;
+        let right = &right_cofactor * &common_factor;
+        let leading = Integer::from(37).to_finite_field(&field);
+
+        let actual = DenseZp64UnivariateGcdImage::new(&right, &left, 0, &field)
+            .unwrap()
+            .run(leading);
+        let left_image = left.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let right_image = right.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let expected = left_image.univariate_gcd(&right_image).mul_coeff(leading);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.lcoeff(), leading);
+    }
+
+    #[test]
+    fn dense_zp64_univariate_gcd_image_handles_inactive_and_sparse_variables() {
+        let field = Zp64::new(
+            ModularGcdPrimeIterator::for_workspace::<u64>()
+                .next()
+                .unwrap(),
+        );
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let left = parse!("(x+1)^15*(x+2)^8").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let right = parse!("(x+1)^15*(x+3)^7").to_polynomial::<_, u16>(&Z, Some(variables));
+        let leading = Integer::from(11).to_finite_field(&field);
+        let actual = DenseZp64UnivariateGcdImage::new(&left, &right, 1, &field)
+            .unwrap()
+            .run(leading);
+        let expected = parse!("(x+1)^15")
+            .to_polynomial::<_, u16>(&Z, Some(actual.variables().clone()))
+            .map_coeff(
+                |coefficient| coefficient.to_finite_field(&field),
+                field.clone(),
+            )
+            .mul_coeff(leading);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.lcoeff(), leading);
+
+        let dropped_leading = parse!("x")
+            .to_polynomial::<IntegerRing, u16>(&Z, Some(actual.variables().clone()))
+            .mul_coeff(Integer::from(field.get_prime()))
+            .add_constant(Integer::one());
+        assert!(DenseZp64UnivariateGcdImage::new(&dropped_leading, &left, 1, &field).is_none());
+
+        let sparse_left = parse!("x^100000+1").to_polynomial::<IntegerRing, u32>(&Z, None);
+        let sparse_right = parse!("x^99999+2")
+            .to_polynomial::<IntegerRing, u32>(&Z, sparse_left.variables().clone());
+        assert!(DenseZp64UnivariateGcdImage::new(&sparse_left, &sparse_right, 0, &field).is_none());
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_resets_an_unlucky_first_degree() {
+        let first_prime = ModularGcdPrimeIterator::for_workspace::<u64>()
+            .next()
+            .unwrap();
+        let common_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, None)
+            .mul_coeff(Integer::one() << 80usize)
+            .add_constant(Integer::from(-1));
+        let left_cofactor =
+            parse!("5*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor = left_cofactor
+            .clone()
+            .add_constant(Integer::from(first_prime));
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+
+        let coprime_right = left_cofactor.clone().add_constant(Integer::from(1));
+        let (unit, unit_left_result, unit_right_result) =
+            UnivariateModularGcdContext::new(&left_cofactor, &coprime_right, 0)
+                .run()
+                .unwrap();
+        assert_eq!(unit, left_cofactor.one());
+        assert_eq!(&unit * &unit_left_result, left_cofactor);
+        assert_eq!(&unit * &unit_right_result, coprime_right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_uses_leading_coordinate_for_zero_constants() {
+        let common_factor = parse!("x").to_polynomial::<_, u16>(&Z, None);
+        let left_cofactor =
+            parse!("6*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor =
+            parse!("10*x+1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Leading(_)
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_screens_reconstructions_at_one() {
+        let common_factor = parse!("x+1").to_polynomial::<_, u16>(&Z, None);
+        let left_cofactor =
+            parse!("x+2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let right_cofactor =
+            parse!("x+3").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+
+        assert!(context.passes_one_evaluation(&common_factor));
+        assert!(!context.passes_one_evaluation(&left_cofactor));
+        let scalar_only =
+            parse!("2*x").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(context.passes_one_evaluation(&scalar_only));
+        assert!(left.try_div(&scalar_only).is_none());
+        let unit_at_one =
+            parse!("x-2").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(context.passes_one_evaluation(&unit_at_one));
+        let zero_at_one =
+            parse!("x-1").to_polynomial::<_, u16>(&Z, common_factor.variables().clone());
+        assert!(!context.passes_one_evaluation(&zero_at_one));
+
+        let zero_input = &zero_at_one * &left_cofactor;
+        let zero_context = UnivariateModularGcdContext::new(&zero_input, &zero_input, 0);
+        assert!(zero_context.passes_one_evaluation(&zero_at_one));
+
+        let large = Integer::one() << 200usize;
+        let large_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(large);
+        let large_left = &large_factor * &left_cofactor;
+        let large_right = &large_factor * &right_cofactor;
+        let large_context = UnivariateModularGcdContext::new(&large_left, &large_right, 0);
+        assert!(large_context.passes_one_evaluation(&large_factor));
+        assert!(!large_context.passes_one_evaluation(&left_cofactor));
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_retains_leading_coordinate_fallback() {
+        let leading = Integer::one() << 384usize;
+        let constant = Integer::one() << 192usize;
+        let common_factor = parse!("x")
+            .to_polynomial::<_, u16>(&Z, None)
+            .mul_coeff(leading)
+            .add_constant(Integer::one());
+        let left_cofactor = parse!("x^2+x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(constant.clone());
+        let right_cofactor = parse!("x^2+2*x")
+            .to_polynomial::<_, u16>(&Z, common_factor.variables().clone())
+            .add_constant(constant.clone());
+        let left = &common_factor * &left_cofactor;
+        let right = &common_factor * &right_cofactor;
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 0);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+
+        let mut modulus = Integer::one();
+        for prime in univariate_modular_gcd_prime_iterator().take(7) {
+            modulus *= prime;
+        }
+        let constant_reconstruction = common_factor
+            .clone()
+            .mul_coeff(constant)
+            .map_coeff(|coefficient| coefficient.clone().symmetric_mod(&modulus), Z);
+        assert!(
+            context
+                .certified_reconstruction(&constant_reconstruction, 1u16)
+                .is_none()
+        );
+        let leading_reconstruction =
+            context.leading_reconstruction(&constant_reconstruction, &modulus);
+        assert_eq!(leading_reconstruction, common_factor);
+        assert_eq!(
+            context
+                .certified_reconstruction(&leading_reconstruction, 1u16)
+                .unwrap()
+                .0,
+            common_factor
+        );
+
+        let (actual, left_result, right_result) =
+            UnivariateModularGcdContext::new(&left, &right, 0)
+                .run()
+                .unwrap();
+        assert_eq!(actual, common_factor);
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn modular_univariate_integer_gcd_restores_content_with_an_inactive_variable() {
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let [left_cofactor, right_cofactor, common_factor] = [
+            parse!("(1+3*x)^24-1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^24+1").to_polynomial::<_, u16>(&Z, Some(variables.clone())),
+            parse!("(1-3*x)^24+3").to_polynomial::<_, u16>(&Z, Some(variables)),
+        ];
+        let left = (&left_cofactor * &common_factor).mul_coeff(Integer::from(6));
+        let right = (&right_cofactor * &common_factor).mul_coeff(Integer::from(10));
+        assert_eq!(left.degree(0), 0);
+        assert_ne!(left.degree(1), 0);
+
+        let context = UnivariateModularGcdContext::new(&left, &right, 1);
+        assert!(matches!(
+            &context.normalization,
+            UnivariateGcdProjectiveNormalization::Constant { .. }
+        ));
+        let (actual, left_result, right_result) = context.run().unwrap();
+        assert_eq!(actual, common_factor.mul_coeff(Integer::from(2)));
+        assert_eq!(&actual * &left_result, left);
+        assert_eq!(&actual * &right_result, right);
+    }
+
+    #[test]
+    fn dense_univariate_integer_division_certificate_matches_generic_division() {
+        let variable_template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let variables = std::sync::Arc::new(vec![
+            PolyVariable::Temporary(0),
+            variable_template.variables()[0].clone(),
+        ]);
+        let scale = Integer::from(1) << 200usize;
+        let divisor = parse!("-2*x^5+3*x^2-7")
+            .to_polynomial::<_, u16>(&Z, Some(variables.clone()))
+            .mul_coeff(scale);
+        let quotient =
+            parse!("-5*x^7+11*x^3-13").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let dividend = &divisor * &quotient;
+        let mut division =
+            DenseUnivariateIntegerDivisionContext::new(&divisor, &dividend, &dividend, 1).unwrap();
+        let actual = division.try_div(&dividend).unwrap();
+        actual.check_consistency();
+        assert_eq!(actual, quotient);
+        assert_eq!(Some(actual), dividend.try_div(&divisor));
+
+        let leading_inexact_divisor =
+            parse!("2*x+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let leading_inexact_dividend =
+            parse!("x^2").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let mut leading_inexact = DenseUnivariateIntegerDivisionContext::new(
+            &leading_inexact_divisor,
+            &leading_inexact_dividend,
+            &leading_inexact_dividend,
+            1,
+        )
+        .unwrap();
+        assert!(leading_inexact.try_div(&leading_inexact_dividend).is_none());
+
+        let final_remainder_divisor =
+            parse!("x+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let final_remainder_dividend =
+            parse!("x^2+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let mut final_remainder = DenseUnivariateIntegerDivisionContext::new(
+            &final_remainder_divisor,
+            &final_remainder_dividend,
+            &final_remainder_dividend,
+            1,
+        )
+        .unwrap();
+        assert!(final_remainder.try_div(&final_remainder_dividend).is_none());
+
+        let sparse_divisor =
+            parse!("x^1000+1").to_polynomial::<_, u16>(&Z, Some(variables.clone()));
+        let sparse_dividend = &sparse_divisor * &quotient;
+        assert!(
+            DenseUnivariateIntegerDivisionContext::new(
+                &sparse_divisor,
+                &sparse_dividend,
+                &sparse_dividend,
+                1,
+            )
+            .is_none()
+        );
+
+        let off_variable = parse!("y+x+1").to_polynomial::<_, u16>(&Z, None);
+        assert!(
+            DenseUnivariateIntegerDivisionContext::new(
+                &off_variable,
+                &off_variable,
+                &off_variable,
+                0,
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn balanced_two_ended_integer_division_certificate_checks_full_product() {
+        let template = parse!("x").to_polynomial::<IntegerRing, u16>(&Z, None);
+        let dense_polynomial = |degree: usize, salt: usize| {
+            let mut polynomial = template.zero_with_capacity(degree + 1);
+            let mut exponents = vec![0u16];
+            for term_degree in 0..=degree {
+                exponents[0] = term_degree as u16;
+                let magnitude = 1 + (term_degree * (salt + 2) + salt) % 17;
+                let coefficient = if salt % 2 == 0 {
+                    magnitude as i64
+                } else {
+                    -(magnitude as i64)
+                };
+                polynomial.append_monomial_back(Integer::from(coefficient), &exponents);
+            }
+            polynomial
+        };
+
+        for divisor_degree in [63, 64] {
+            let divisor = dense_polynomial(divisor_degree, 1);
+            let mut quotient = dense_polynomial(divisor_degree, 4);
+            if divisor_degree == 64 {
+                let constant = quotient.get_constant();
+                quotient = quotient.add_constant(-constant);
+            }
+            let dividend = &divisor * &quotient;
+            let mut division =
+                DenseUnivariateIntegerDivisionContext::new(&divisor, &dividend, &dividend, 0)
+                    .unwrap();
+
+            match division.try_div_balanced_two_ended(&dividend) {
+                DenseUnivariateCheckedDivision::Exact(actual) => assert_eq!(actual, quotient),
+                DenseUnivariateCheckedDivision::Unavailable => {
+                    panic!("the dense balanced division must use the checked split")
+                }
+                DenseUnivariateCheckedDivision::Inexact => {
+                    panic!("an exact dense balanced division was rejected")
+                }
+            }
+
+            let inexact_dividend = dividend.clone().add_constant(Integer::one());
+            let mut inexact = DenseUnivariateIntegerDivisionContext::new(
+                &divisor,
+                &inexact_dividend,
+                &inexact_dividend,
+                0,
+            )
+            .unwrap();
+            assert!(matches!(
+                inexact.try_div_balanced_two_ended(&inexact_dividend),
+                DenseUnivariateCheckedDivision::Inexact
+            ));
+            assert!(inexact.try_div(&inexact_dividend).is_none());
+
+            if divisor_degree == 63 {
+                let mut middle_inexact_dividend = dividend.clone();
+                *middle_inexact_dividend
+                    .coefficients
+                    .get_mut(divisor_degree)
+                    .unwrap() += 1;
+                let mut middle_inexact = DenseUnivariateIntegerDivisionContext::new(
+                    &divisor,
+                    &middle_inexact_dividend,
+                    &middle_inexact_dividend,
+                    0,
+                )
+                .unwrap();
+                assert!(matches!(
+                    middle_inexact.try_div_balanced_two_ended(&middle_inexact_dividend),
+                    DenseUnivariateCheckedDivision::Inexact
+                ));
+
+                let mut leading_inexact_dividend = dividend.clone();
+                *leading_inexact_dividend.coefficients.last_mut().unwrap() += 1;
+                let mut leading_inexact = DenseUnivariateIntegerDivisionContext::new(
+                    &divisor,
+                    &leading_inexact_dividend,
+                    &leading_inexact_dividend,
+                    0,
+                )
+                .unwrap();
+                assert!(matches!(
+                    leading_inexact.try_div_balanced_two_ended(&leading_inexact_dividend),
+                    DenseUnivariateCheckedDivision::Inexact
+                ));
+            }
+        }
+
+        let near_balanced_divisor = dense_polynomial(64, 3);
+        let near_balanced_quotient = dense_polynomial(63, 6);
+        let near_balanced_dividend = &near_balanced_divisor * &near_balanced_quotient;
+        let mut near_balanced = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &near_balanced_dividend,
+            &near_balanced_dividend,
+            0,
+        )
+        .unwrap();
+        match near_balanced.try_div_balanced_two_ended(&near_balanced_dividend) {
+            DenseUnivariateCheckedDivision::Exact(actual) => {
+                assert_eq!(actual, near_balanced_quotient)
+            }
+            DenseUnivariateCheckedDivision::Unavailable => {
+                panic!("the near-balanced division must use the two-ended certificate")
+            }
+            DenseUnivariateCheckedDivision::Inexact => {
+                panic!("an exact near-balanced division was rejected")
+            }
+        }
+
+        let mut near_balanced_inexact_dividend = near_balanced_dividend.clone();
+        *near_balanced_inexact_dividend
+            .coefficients
+            .get_mut(near_balanced_divisor.degree(0).to_u32() as usize)
+            .unwrap() += 1;
+        let mut near_balanced_inexact = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &near_balanced_inexact_dividend,
+            &near_balanced_inexact_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            near_balanced_inexact.try_div_balanced_two_ended(&near_balanced_inexact_dividend),
+            DenseUnivariateCheckedDivision::Inexact
+        ));
+        assert!(
+            near_balanced_inexact
+                .try_div(&near_balanced_inexact_dividend)
+                .is_none()
+        );
+
+        let narrower_quotient = dense_polynomial(62, 7);
+        let narrower_dividend = &near_balanced_divisor * &narrower_quotient;
+        let mut narrower = DenseUnivariateIntegerDivisionContext::new(
+            &near_balanced_divisor,
+            &narrower_dividend,
+            &narrower_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            narrower.try_div_balanced_two_ended(&narrower_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(
+            narrower.try_div(&narrower_dividend),
+            Some(narrower_quotient)
+        );
+
+        let short_divisor = dense_polynomial(62, 2);
+        let short_quotient = dense_polynomial(62, 5);
+        let short_dividend = &short_divisor * &short_quotient;
+        let mut short = DenseUnivariateIntegerDivisionContext::new(
+            &short_divisor,
+            &short_dividend,
+            &short_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            short.try_div_balanced_two_ended(&short_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(short.try_div(&short_dividend).unwrap(), short_quotient);
+
+        let sparse_divisor = dense_polynomial(63, 1);
+        let mut sparse_quotient = template.zero_with_capacity(1);
+        sparse_quotient.append_monomial_back(Integer::from(7), &[63u16]);
+        let sparse_dividend = &sparse_divisor * &sparse_quotient;
+        let mut sparse = DenseUnivariateIntegerDivisionContext::new(
+            &sparse_divisor,
+            &sparse_dividend,
+            &sparse_dividend,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            sparse.try_div_balanced_two_ended(&sparse_dividend),
+            DenseUnivariateCheckedDivision::Unavailable
+        ));
+        assert_eq!(sparse.try_div(&sparse_dividend).unwrap(), sparse_quotient);
+
+        let large_scale = (Integer::one() << 200usize) + Integer::from(37);
+        let large_divisor = dense_polynomial(63, 3).mul_coeff(large_scale);
+        let large_quotient = dense_polynomial(63, 2);
+        let large_dividend = &large_divisor * &large_quotient;
+        let mut large = DenseUnivariateIntegerDivisionContext::new(
+            &large_divisor,
+            &large_dividend,
+            &large_dividend,
+            0,
+        )
+        .unwrap();
+        match large.try_div_balanced_two_ended(&large_dividend) {
+            DenseUnivariateCheckedDivision::Exact(actual) => assert_eq!(actual, large_quotient),
+            DenseUnivariateCheckedDivision::Unavailable => {
+                panic!("the GMP-backed balanced division must use the two-ended certificate")
+            }
+            DenseUnivariateCheckedDivision::Inexact => {
+                panic!("an exact GMP-backed balanced division was rejected")
+            }
+        }
+    }
+
+    #[test]
+    fn hu_monagan_prime_bound_combines_interpolation_and_coefficient_bounds() {
+        assert_eq!(
+            hu_monagan_prime_lower_bound(100, 1, &Integer::from(500)),
+            500
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &Integer::from(500)),
+            2_000
+        );
+
+        // This height still needs no larger prime than the interpolation
+        // lattice because eight small images already cover its bits.
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &Integer::from(1u64 << 32)),
+            2_000
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &(Integer::one() << 255usize)),
+            1u64 << 32
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(1_000, 1, &(Integer::one() << 1023usize)),
+            1u64 << 63
+        );
+        assert_eq!(
+            hu_monagan_prime_lower_bound(u64::MAX, 1, &Integer::from(1)),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn hu_geometric_term_setup_falls_back_beyond_the_power_cache() {
+        let field = Zp64::new(1_088_391_169);
+        let integer_polynomial =
+            parse!("3*x+5*x*y^1001+7*x^2*y^17").to_polynomial::<_, u16>(&Z, None);
+        assert_eq!(integer_polynomial.degree(1), 1001);
+        let polynomial = integer_polynomial.map_coeff(
+            |coefficient| coefficient.to_finite_field(&field),
+            field.clone(),
+        );
+        let term_base = field.to_element(7);
+        let shifted_base = field.pow(&term_base, 19);
+
+        // A one-element table contains only x^0 and forces every positive exponent through the
+        // same direct-power fallback used beyond POW_CACHE_SIZE.
+        let (_, ratios, current) = MultivariatePolynomial::<IntegerRing, u16>::evaluate_terms(
+            &field,
+            &polynomial,
+            &[term_base],
+            &[shifted_base],
+            &[vec![field.one()]],
+            &[vec![field.one()]],
+        );
+
+        for (((exponents, coefficient), ratio), current) in polynomial
+            .exponents
+            .chunks(polynomial.nvars())
+            .zip(&polynomial.coefficients)
+            .zip(&ratios)
+            .zip(&current)
+        {
+            let exponent = exponents[1].to_u32() as u64;
+            assert_eq!(*ratio, field.pow(&term_base, exponent));
+            assert_eq!(
+                *current,
+                field.mul(coefficient, &field.pow(&shifted_base, exponent))
+            );
+        }
+    }
+
+    #[test]
+    fn hu_monagan_kronecker_map_decodes_u64_exponents() {
+        let map = HuMonaganKroneckerMap::new(&[0, 24, 24, 24, 24, 24, 24, 24], 1).unwrap();
+        assert_eq!(map.powers().last(), Some(&4_586_471_424));
+        assert_eq!(map.range(), 4_586_471_424);
+        assert!(map.range() > u32::MAX as u64);
+
+        let expected = [0u16, 23, 7, 0, 19, 3, 11, 5];
+        let encoded = expected
+            .iter()
+            .skip(1)
+            .zip(std::iter::once(1u64).chain(map.powers().iter().copied()))
+            .map(|(exponent, power)| *exponent as u64 * power)
+            .sum();
+        let mut decoded = [0u16; 8];
+        map.decode(encoded, &mut decoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(map.decode(map.range(), &mut decoded).is_none());
+    }
+
+    #[test]
+    fn hu_monagan_kronecker_map_rejects_invalid_ranges() {
+        assert!(HuMonaganKroneckerMap::new(&[0, u32::MAX, u32::MAX, 2], 1).is_none());
+        assert!(HuMonaganKroneckerMap::new(&[0, 2, 0, 3], 1).is_none());
+        assert!(HuMonaganKroneckerMap::new(&[2, 3], 3).is_none());
+    }
+
+    #[test]
+    fn hu_monagan_large_kronecker_exponents() {
+        let map = HuMonaganKroneckerMap::new(&[0, 261, 261, 261, 261, 261, 261, 261], 1).unwrap();
+        assert_eq!(map.range(), 82_505_623_639_781_421);
+
+        let mut polynomials = [
+            parse!("1+x1+2*x2+3*x3+4*x4+5*x5+6*x6+7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
+            parse!("1-x1+2*x2-3*x3+4*x4-5*x5+6*x6-7*x7+8*x8").to_polynomial::<_, u16>(&Z, None),
+            parse!("1+x1^256+2*x2^256+3*x3^256+5*x4^256+7*x5^256+11*x6^256+13*x7^256+17*x8^256")
+                .to_polynomial::<_, u16>(&Z, None),
+        ];
+        MultivariatePolynomial::unify_variables_list(&mut polynomials);
+        let [a, b, gcd] = polynomials;
+        let ag = &a * &gcd;
+        let bg = &b * &gcd;
+        let bounds = (0..gcd.nvars())
+            .map(|variable| gcd.degree(variable))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ag.gcd_hu_monagan(&bg, &bounds), Some(gcd));
+    }
+
+    #[test]
+    fn projective_integer_gcd_reconstruction_with_large_coefficients() {
+        let cofactors = [
+            parse!("(1+x+y+z)^3-1").to_polynomial::<_, u16>(&Z, None),
+            parse!("(2+x-y+2*z)^3+1").to_polynomial::<_, u16>(&Z, None),
+        ];
+        let gcds = [
+            // A small constant pivot lets projective reconstruction stop after roughly the
+            // coefficient height instead of twice that height.
+            parse!(
+                "3+100000000000000000000000000000000000000000000000000000000007*x^2\
+                 -100000000000000000000000000000000000000000000000000000000009*x*y\
+                 +100000000000000000000000000000000000000000000000000000000033*y^2+5*z^2"
+            )
+            .to_polynomial::<_, u16>(&Z, None),
+            // Exercise the minimum-total-degree fallback when no constant term is present.
+            parse!(
+                "100000000000000000000000000000000000000000000000000000000007*x^2\
+                 -100000000000000000000000000000000000000000000000000000000009*x*y\
+                 +100000000000000000000000000000000000000000000000000000000033*y^2+5*z^2"
+            )
+            .to_polynomial::<_, u16>(&Z, None),
+            // The selected probe reconstructs 3/6 = 1/2, while another coefficient needs the
+            // denominator 3. The common-denominator lift must fail safely before full MQR returns
+            // the primitive polynomial.
+            parse!("2*x^2+3*y+6").to_polynomial::<_, u16>(&Z, None),
+        ];
+
+        for gcd in gcds {
+            let mut polynomials = [cofactors[0].clone(), cofactors[1].clone(), gcd];
+            MultivariatePolynomial::unify_variables_list(&mut polynomials);
+            let [a, b, gcd] = polynomials;
+            let ag = &a * &gcd;
+            let bg = &b * &gcd;
+            let vars = (0..gcd.nvars()).collect::<Vec<_>>();
+            let mut bounds = (0..gcd.nvars())
+                .map(|variable| gcd.degree(variable))
+                .collect::<Vec<_>>();
+            let mut tight_bounds = bounds.clone();
+            let gamma = Z.gcd(&ag.lcoeff_varorder(&vars), &bg.lcoeff_varorder(&vars));
+
+            let reconstructed = MultivariatePolynomial::gcd_zippel::<u32>(
+                &ag,
+                &bg,
+                &vars,
+                &mut bounds,
+                &mut tight_bounds,
+                &gamma,
+            );
+            assert_eq!(reconstructed, gcd);
+        }
     }
 }

@@ -20,11 +20,13 @@ use ahash::HashMap;
 use bytes::Buf;
 use smallvec::{SmallVec, smallvec};
 
+#[cfg(feature = "integer-gmp")]
+use crate::domains::integer::MultiPrecisionInteger;
 use crate::{
     atom::{Atom, AtomCore, AtomView, Symbol},
     domains::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, Set,
-        algebraic_number::AlgebraicExtension,
+        algebraic::AlgebraicExtension,
         atom::AtomField,
         backend::float::Constant,
         backend::integer::from_lsf_bytes,
@@ -33,13 +35,14 @@ use crate::{
             Zp64,
         },
         float::{Complex, F64, Float, FloatField, FloatLike, Real, RealLike, SingleFloat},
-        integer::{Integer, IntegerRing, Z},
+        integer::{Integer, IntegerRing, SMALL_PRIMES, Z},
         rational::{Fraction, Q, Rational},
         rational_polynomial::{FromNumeratorAndDenominator, RationalPolynomial},
     },
     error,
     poly::{INLINED_EXPONENTS, PolyVariable, polynomial::MultivariatePolynomial},
     state::{FiniteFieldIndex, State, Workspace},
+    utils::Settable,
     warn,
 };
 
@@ -74,6 +77,16 @@ pub trait ConvertToRing: Ring {
         &self,
         number: CoefficientView<'_>,
     ) -> Result<Self::Element, String>;
+
+    /// Try to convert a `base` raised to the power of `exponent` to a Ring element.
+    fn try_element_from_pow(&self, _base: AtomView, _exponent: Rational) -> Option<Self::Element> {
+        None
+    }
+
+    /// Try to convert a `root` atom to a Ring element.
+    fn try_element_from_root(&self, _root: AtomView) -> Option<Self::Element> {
+        None
+    }
 }
 
 /// A coefficient that can appear in a Symbolica expression.
@@ -88,9 +101,13 @@ pub enum Coefficient {
     Indeterminate,
     /// Infinity with an optional complex phase
     Infinity(Option<Complex<Rational>>),
+    /// An exact complex number with rational real and imaginary parts.
     Complex(Complex<Rational>),
+    /// A complex number with arbitrary-precision floating-point components.
     Float(Complex<Float>),
+    /// A finite-field element together with its registered field index.
     FiniteField(FiniteFieldElement<u64>, FiniteFieldIndex),
+    /// A rational function of polynomial variables with integer coefficients.
     RationalPolynomial(RationalPolynomial<IntegerRing, u16>),
 }
 
@@ -149,6 +166,26 @@ impl Coefficient {
             Coefficient::Float(f) => Coefficient::Float(f.conj()),
             Coefficient::FiniteField(n, i) => Coefficient::FiniteField(*n, *i),
             Coefficient::RationalPolynomial(p) => Coefficient::RationalPolynomial(p.clone()),
+        }
+    }
+
+    /// Return whether this is an exact rational integer with zero imaginary part.
+    /// Floating-point and finite-field values are not classified as integers here.
+    pub fn is_integer(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real() && c.re.is_integer(),
+            _ => false,
+        }
+    }
+
+    /// Return whether this is a rational or floating-point number with zero
+    /// imaginary part, or an infinity with a real direction.
+    pub fn is_real(&self) -> bool {
+        match self {
+            Coefficient::Complex(c) => c.is_real(),
+            Coefficient::Float(f) => f.is_real(),
+            Coefficient::Infinity(Some(d)) => d.is_real(),
+            _ => false,
         }
     }
 }
@@ -249,14 +286,14 @@ impl From<(Integer, Integer)> for Coefficient {
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 impl From<rug::Integer> for Coefficient {
     fn from(value: rug::Integer) -> Self {
-        Coefficient::Complex(Rational::from(value).into())
+        Coefficient::Complex(Rational::from(MultiPrecisionInteger::from_raw(value)).into())
     }
 }
 
-#[cfg(feature = "gmp")]
+#[cfg(feature = "integer-gmp")]
 impl From<rug::Rational> for Coefficient {
     fn from(value: rug::Rational) -> Self {
         Coefficient::Complex(Rational::from(value).into())
@@ -336,18 +373,25 @@ impl Ord for Coefficient {
 }
 
 impl Coefficient {
+    /// Create the exact coefficient zero.
     pub fn new() -> Coefficient {
         Coefficient::zero()
     }
 
+    /// Create the exact coefficient zero.
     pub fn zero() -> Coefficient {
         Coefficient::Complex(Complex::new_zero())
     }
 
+    /// Create the exact coefficient one.
     pub fn one() -> Coefficient {
         Coefficient::Complex(Complex::new(Rational::one(), Rational::zero()))
     }
 
+    /// Return the sign convention used when printing coefficients. Real and
+    /// purely imaginary numbers are negative when their nonzero component is
+    /// negative; rational polynomials use the numerator's leading coefficient.
+    /// This is not an ordering of complex numbers.
     pub fn is_negative(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(None) => false,
@@ -362,6 +406,7 @@ impl Coefficient {
         }
     }
 
+    /// Return whether the coefficient is zero in its coefficient domain.
     pub fn is_zero(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
@@ -372,6 +417,7 @@ impl Coefficient {
         }
     }
 
+    /// Test for the unit coefficient.
     pub fn is_one(&self) -> bool {
         match self {
             Coefficient::Indeterminate | Coefficient::Infinity(_) => false,
@@ -381,10 +427,13 @@ impl Coefficient {
                 let f = State::get_finite_field(*field);
                 f.is_one(num)
             }
-            Coefficient::RationalPolynomial(r) => r.numerator.is_one(),
+            Coefficient::RationalPolynomial(r) => r.numerator.is_one() && r.denominator.is_one(),
         }
     }
 
+    /// Compute a coefficient GCD. Floating-point coefficients and non-finite
+    /// values use one as their GCD; incompatible coefficient domains yield
+    /// [`Coefficient::Indeterminate`].
     pub fn gcd(&self, rhs: &Self) -> Self {
         match (self, rhs) {
             (Coefficient::Indeterminate | Coefficient::Infinity(_), _) => Self::one(),
@@ -668,12 +717,17 @@ impl Mul for Coefficient {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A rational number whose large numerator and denominator remain borrowed
+/// in serialized form until converted with [`Self::to_rat`].
 pub enum SerializedRational<'a> {
+    /// A small rational stored as numerator and positive denominator.
     Natural(i64, i64),
+    /// A rational with a serialized arbitrary-size numerator or denominator.
     Large(SerializedLargeRational<'a>),
 }
 
 impl SerializedRational<'_> {
+    /// Return whether the numerator is zero.
     pub fn is_zero(&self) -> bool {
         match self {
             SerializedRational::Natural(n, _) => *n == 0,
@@ -681,6 +735,7 @@ impl SerializedRational<'_> {
         }
     }
 
+    /// Return whether the rational is negative.
     pub fn is_negative(&self) -> bool {
         match self {
             SerializedRational::Natural(n, _) => *n < 0,
@@ -688,6 +743,8 @@ impl SerializedRational<'_> {
         }
     }
 
+    /// Decode an owned rational. The representation must already have a
+    /// positive denominator and coprime numerator and denominator.
     pub fn to_rat(&self) -> Rational {
         match self {
             SerializedRational::Natural(n, d) => Rational::from_int_unchecked(*n, *d),
@@ -697,6 +754,8 @@ impl SerializedRational<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A borrowed arbitrary-size rational, stored as a sign and little-endian
+/// numerator and denominator byte sequences.
 pub struct SerializedLargeRational<'a> {
     pub(crate) is_negative: bool,
     pub(crate) num_digits: &'a [u8],
@@ -704,14 +763,18 @@ pub struct SerializedLargeRational<'a> {
 }
 
 impl SerializedLargeRational<'_> {
+    /// Return whether the serialized numerator is zero.
     pub fn is_zero(&self) -> bool {
         self.num_digits.is_empty()
     }
 
+    /// Return the stored sign of the rational.
     pub fn is_negative(&self) -> bool {
         self.is_negative
     }
 
+    /// Decode an owned rational from the serialized integer components.
+    /// The stored numerator and denominator must already be normalized.
     pub fn to_rat(&self) -> Rational {
         if self.num_digits.is_empty() {
             return Rational::zero();
@@ -726,18 +789,24 @@ impl SerializedLargeRational<'_> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// A borrowed rational polynomial in Symbolica's coefficient encoding.
+/// The bytes must contain a valid encoding with the corresponding symbol state.
 pub struct SerializedRationalPolynomial<'a>(pub &'a [u8]);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// A borrowed floating-point value encoded with its binary precision.
+/// The bytes must contain a valid serialized float.
 pub struct SerializedFloat<'a>(pub &'a [u8]);
 
 impl SerializedFloat<'_> {
+    /// Decode the floating-point value at its stored precision.
     pub fn to_float(&self) -> Float {
         let mut d = self.0;
         let prec = d.get_u32_le();
         Float::deserialize(d, prec)
     }
 
+    /// Decode the value and return whether it is zero.
     pub fn is_zero(&self) -> bool {
         self.to_float().is_zero() // TODO: improve
     }
@@ -747,7 +816,10 @@ impl SerializedFloat<'_> {
 /// serialized for efficiency.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum CoefficientView<'a> {
+    /// An undefined numerical result, such as `0/0`.
     Indeterminate,
+    /// Infinity with an optional direction given by rational real and imaginary
+    /// parts. `None` denotes an unspecified complex direction.
     Infinity(Option<(SerializedRational<'a>, SerializedRational<'a>)>),
     /// A complex number `(n_re, d_re, n_im, d_im)` that represents `n_re/d_re + i * n_im/d_im`.
     Natural(i64, i64, i64, i64),
@@ -755,7 +827,9 @@ pub enum CoefficientView<'a> {
     Float(SerializedFloat<'a>, SerializedFloat<'a>),
     /// A large complex number `(re, im)` that represents `re + i * im`.
     Large(SerializedRational<'a>, SerializedRational<'a>),
+    /// A finite-field element together with its registered field index.
     FiniteField(FiniteFieldElement<u64>, FiniteFieldIndex),
+    /// A borrowed serialized rational polynomial.
     RationalPolynomial(SerializedRationalPolynomial<'a>),
 }
 
@@ -991,10 +1065,15 @@ where
             }
             CoefficientView::Natural(n, d, i, _) => {
                 if i == 0 {
-                    Ok(self.div(
-                        &Integer::new(n).to_finite_field(self),
-                        &Integer::new(d).to_finite_field(self),
-                    ))
+                    let denom = Integer::new(d).to_finite_field(self);
+                    if self.is_zero(&denom) {
+                        return Err(
+                            "Cannot convert rational number with zero denominator to finite field"
+                                .to_owned(),
+                        );
+                    }
+
+                    Ok(self.div(&Integer::new(n).to_finite_field(self), &denom))
                 } else {
                     Err("Cannot convert complex number to finite field".to_owned())
                 }
@@ -1002,6 +1081,14 @@ where
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     let l = r.to_rat();
+                    let denom = l.denominator().to_finite_field(self);
+
+                    if self.is_zero(&denom) {
+                        return Err(
+                            "Cannot convert rational number with zero denominator to finite field"
+                                .to_owned(),
+                        );
+                    }
                     Ok(self.div(
                         &l.numerator().to_finite_field(self),
                         &l.denominator().to_finite_field(self),
@@ -1196,18 +1283,12 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             Coefficient::Complex(r) => {
                 if r.is_real() {
                     Ok(self.constant(r.re.clone()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(r.im.clone(), vec![1])
-                            + self.poly().constant(r.re.clone()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.re.clone()),
+                        &self.mul(&self.constant(r.im.clone()), &imaginary_unit),
+                    ))
                 }
             }
             Coefficient::Float(_) => Err(format!("Cannot convert float {} to extension", number)),
@@ -1235,36 +1316,26 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             CoefficientView::Natural(r, d, cr, cd) => {
                 if cr == 0 {
                     Ok(self.constant(Rational::from_int_unchecked(r, d)))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly()
-                            .monomial(Rational::from_int_unchecked(cr, cd), vec![1])
-                            + self.poly().constant(Rational::from_int_unchecked(r, d)),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(Rational::from_int_unchecked(r, d)),
+                        &self.mul(
+                            &self.constant(Rational::from_int_unchecked(cr, cd)),
+                            &imaginary_unit,
+                        ),
+                    ))
                 }
             }
             CoefficientView::Large(r, i) => {
                 if i.is_zero() {
                     Ok(self.constant(r.to_rat()))
-                } else if self.poly().exponents == [0, 2]
-                    && self.poly().get_constant() == Rational::one()
-                {
-                    Ok(self.to_element(
-                        self.poly().monomial(i.to_rat(), vec![1])
-                            + self.poly().constant(r.to_rat()),
-                    ))
                 } else {
-                    Err(
-                        "Cannot directly convert complex number to this extension. First create a polynomial with extension x^2+1 and then upgrade."
-                            .to_owned(),
-                    )
+                    let imaginary_unit = self.imaginary_unit()?;
+                    Ok(self.add(
+                        &self.constant(r.to_rat()),
+                        &self.mul(&self.constant(i.to_rat()), &imaginary_unit),
+                    ))
                 }
             }
             CoefficientView::Float(_, _) => Err(format!(
@@ -1280,9 +1351,20 @@ impl ConvertToRing for AlgebraicExtension<Q> {
             )),
         }
     }
+
+    fn try_element_from_pow(&self, base: AtomView, exponent: Rational) -> Option<Self::Element> {
+        let power = base.pow(Atom::num(exponent));
+        power.as_view().to_algebraic(self).ok()
+    }
+
+    fn try_element_from_root(&self, root: AtomView) -> Option<Self::Element> {
+        root.to_algebraic(self).ok()
+    }
 }
 
 impl CoefficientView<'_> {
+    /// Create an owned coefficient, reducing the small rational components
+    /// of [`Self::Natural`] to normalized fractions.
     pub fn normalize(&self) -> Coefficient {
         match self {
             CoefficientView::Natural(nr, dr, ni, di) => {
@@ -1298,6 +1380,8 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Decode an owned coefficient. Stored rational components are assumed
+    /// to be normalized; use [`Self::normalize`] for unreduced small fractions.
     pub fn to_owned(&self) -> Coefficient {
         match self {
             CoefficientView::Natural(nr, dr, ni, di) => Coefficient::Complex(Complex::new(
@@ -1322,6 +1406,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the coefficient is zero in its coefficient domain.
     pub fn is_zero(&self) -> bool {
         match self {
             CoefficientView::Natural(n, _, ni, _) => *n == 0 && *ni == 0,
@@ -1333,6 +1418,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the coefficient is one in its coefficient domain.
     pub fn is_one(&self) -> bool {
         match self {
             CoefficientView::Natural(n, d, ni, di) => *n == *d && *ni == 0 && *di == 1,
@@ -1350,6 +1436,10 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Convert to a complex floating-point number with `binary_prec` bits.
+    /// Existing floats retain their precision unless it must be lowered.
+    /// Returns an error for finite fields, rational polynomials, indeterminate
+    /// values, and infinities with a non-real or unspecified direction.
     pub fn to_float(&self, binary_prec: u32) -> Result<Complex<Float>, String> {
         match self {
             CoefficientView::Natural(n, d, ni, di) => Ok(Complex::new(
@@ -1397,6 +1487,9 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Simplify exponentiation and return `(factor, base, exponent)` representing
+    /// `self^other = factor * base^exponent`. Exact roots may remain as powers;
+    /// undefined or unsupported cases can contain an indeterminate coefficient.
     pub fn pow(&self, other: &CoefficientView<'_>) -> (Coefficient, Coefficient, Coefficient) {
         if let CoefficientView::Natural(0, _, 0, _) = self {
             let r = match other {
@@ -1476,11 +1569,120 @@ impl CoefficientView<'_> {
             return (Coefficient::one(), self.to_owned(), other.to_owned());
         }
 
+        /// Return `(extracted, rest)` such that
+        /// `base = extracted^denominator * rest`,
+        /// with `rest` denominator-th-power-free.
+        fn simplify_perfect_power_factors(
+            mut base: Integer,
+            denominator: u32,
+        ) -> (Integer, Integer) {
+            debug_assert!(!base.is_negative());
+            debug_assert!(denominator > 1);
+
+            if base <= 1 || base.root(denominator).is_one() {
+                return (Integer::one(), base);
+            }
+
+            let denominator_integer = Integer::from(denominator);
+            let mut extracted = Integer::one();
+            let mut rest = Integer::one();
+
+            for prime in SMALL_PRIMES.into_iter().map(|prime| prime as u64) {
+                let prime_integer = Integer::from(prime);
+                if prime_integer.pow(denominator as u64) > base {
+                    rest *= base;
+                    return (extracted, rest);
+                }
+
+                let mut count = Integer::zero();
+                while &base % prime == 0 {
+                    base /= prime;
+                    count += 1;
+                }
+
+                if !count.is_zero() {
+                    let occurrences = &count / &denominator_integer;
+                    let remainder = count - &occurrences * &denominator_integer;
+                    if !occurrences.is_zero() {
+                        extracted *= prime_integer.pow_i(occurrences);
+                    }
+                    if !remainder.is_zero() {
+                        rest *= Integer::from(prime).pow_i(remainder);
+                    }
+                }
+
+                if base.is_one() {
+                    return (extracted, rest);
+                }
+            }
+
+            let root = base.root(denominator);
+            if root.pow(denominator as u64) == base {
+                extracted *= root;
+                return (extracted, rest);
+            }
+
+            for (prime, count) in base.factor() {
+                let occurrences = &count / &denominator_integer;
+                let remainder = count - &occurrences * &denominator_integer;
+                if !occurrences.is_zero() {
+                    extracted *= prime.pow_i(occurrences);
+                }
+                if !remainder.is_zero() {
+                    rest *= prime.pow_i(remainder);
+                }
+            }
+
+            (extracted, rest)
+        }
+
+        fn simplify_rational_perfect_power_factors(
+            base: Rational,
+            denominator: u32,
+        ) -> (Rational, Rational) {
+            debug_assert!(!base.is_negative());
+            let (extracted_numerator, rest_numerator) =
+                simplify_perfect_power_factors(base.numerator(), denominator);
+            let (extracted_denominator, rest_denominator) =
+                simplify_perfect_power_factors(base.denominator(), denominator);
+            (
+                Rational::from((extracted_numerator, extracted_denominator)),
+                Rational::from((rest_numerator, rest_denominator)),
+            )
+        }
+
         fn rat_pow(
             mut base: Rational,
             mut exp: Rational,
         ) -> (Complex<Rational>, Rational, Rational) {
-            if base.is_negative() && !exp.is_integer() {
+            if !base.is_one()
+                && !exp.is_integer()
+                && let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                && denominator > 1
+            {
+                let absolute_base = base.abs();
+                let (extracted, rest) =
+                    simplify_rational_perfect_power_factors(absolute_base, denominator);
+
+                if !extracted.is_one() {
+                    let numerator = exp.numerator_ref().to_i64().unwrap();
+                    let extracted = if numerator < 0 {
+                        extracted.inv().pow(numerator.unsigned_abs())
+                    } else {
+                        extracted.pow(numerator.unsigned_abs())
+                    };
+                    let rest = if base.is_negative() { -rest } else { rest };
+                    let (coefficient, base, exp) = rat_pow(rest, exp);
+                    return (coefficient * Complex::from(extracted), base, exp);
+                }
+            }
+
+            if base.is_one() {
+                (Rational::one().into(), Rational::one(), Rational::one())
+            } else if base.is_negative() && !exp.is_integer() {
                 let pow = exp.numerator() / exp.denominator();
                 let rest = exp.numerator() - &pow * exp.denominator();
 
@@ -1507,8 +1709,6 @@ impl CoefficientView<'_> {
                         Rational::from_int_unchecked(rest, exp.denominator()),
                     )
                 }
-            } else if base.is_one() {
-                (Rational::one().into(), Rational::one(), Rational::one())
             } else {
                 if exp < 0 {
                     base = base.inv();
@@ -1516,6 +1716,27 @@ impl CoefficientView<'_> {
                 }
 
                 base = base.pow(exp.numerator().to_i64().unwrap().unsigned_abs());
+                if let Some(denominator) = exp
+                    .denominator_ref()
+                    .to_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                    && denominator > 1
+                {
+                    let (extracted, rest) =
+                        simplify_rational_perfect_power_factors(base, denominator);
+                    if !extracted.is_one() {
+                        return if rest.is_one() {
+                            (extracted.into(), Rational::one(), Rational::one())
+                        } else {
+                            (
+                                extracted.into(),
+                                rest,
+                                Rational::from_int_unchecked(Integer::one(), exp.denominator()),
+                            )
+                        };
+                    }
+                    base = rest;
+                }
                 (
                     Rational::one().into(),
                     base,
@@ -2028,6 +2249,8 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether the representation is an exact real integer or a
+    /// finite-field element. Floating-point values are not classified as integers.
     pub fn is_integer(&self) -> bool {
         match self {
             CoefficientView::Natural(_, d, i, _) => *i == 0 && *d == 1,
@@ -2040,6 +2263,9 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether this representation has no imaginary component.
+    /// Finite-field and rational-polynomial coefficients are treated as real
+    /// by this representation-level test.
     pub fn is_real(&self) -> bool {
         match self {
             CoefficientView::Natural(_, _, i, _) => *i == 0,
@@ -2053,6 +2279,7 @@ impl CoefficientView<'_> {
         }
     }
 
+    /// Return whether this view stores floating-point components.
     pub fn is_float(&self) -> bool {
         matches!(self, CoefficientView::Float(_, _))
     }
@@ -2066,6 +2293,29 @@ impl PartialOrd for CoefficientView<'_> {
 
 impl Ord for CoefficientView<'_> {
     fn cmp(&self, other: &CoefficientView) -> Ordering {
+        fn cmp_float_rational(
+            fr: &SerializedFloat,
+            fi: &SerializedFloat,
+            rr: Rational,
+            ri: Rational,
+        ) -> Ordering {
+            let difference = fr.to_float() - rr;
+            if difference.is_negative() {
+                Ordering::Less
+            } else if difference.is_zero() {
+                let difference = fi.to_float() - ri;
+                if difference.is_negative() {
+                    Ordering::Less
+                } else if difference.is_zero() {
+                    Ordering::Equal
+                } else {
+                    Ordering::Greater
+                }
+            } else {
+                Ordering::Greater
+            }
+        }
+
         match (self, other) {
             (
                 CoefficientView::Natural(n1, d1, ni1, di1),
@@ -2101,6 +2351,29 @@ impl Ord for CoefficientView<'_> {
                         .partial_cmp(&fi2.to_float())
                         .unwrap_or(Ordering::Equal)
                 }),
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Natural(n2, d2, ni2, di2)) => {
+                cmp_float_rational(
+                    fr1,
+                    fi1,
+                    Rational::from_int_unchecked(*n2, *d2),
+                    Rational::from_int_unchecked(*ni2, *di2),
+                )
+            }
+            (CoefficientView::Natural(n1, d1, ni1, di1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(
+                    fr2,
+                    fi2,
+                    Rational::from_int_unchecked(*n1, *d1),
+                    Rational::from_int_unchecked(*ni1, *di1),
+                )
+                .reverse()
+            }
+            (CoefficientView::Float(fr1, fi1), CoefficientView::Large(r2, i2)) => {
+                cmp_float_rational(fr1, fi1, r2.to_rat(), i2.to_rat())
+            }
+            (CoefficientView::Large(r1, i1), CoefficientView::Float(fr2, fi2)) => {
+                cmp_float_rational(fr2, fi2, r1.to_rat(), i1.to_rat()).reverse()
+            }
             (CoefficientView::RationalPolynomial(n1), CoefficientView::RationalPolynomial(n2)) => {
                 n1.deserialize().internal_cmp(&n2.deserialize())
             }
@@ -2881,6 +3154,22 @@ impl AtomView<'_> {
         workspace: &Workspace,
         out: &mut Atom,
     ) -> bool {
+        let mut set = Settable::from(&mut *out);
+        self.set_coefficient_ring_impl(vars, workspace, &mut set);
+        let changed = set.is_set();
+        if !changed {
+            out.set_from_view(self);
+        }
+        changed
+    }
+
+    /// Change the coefficient ring, leaving `out` unset if it is already suitable.
+    fn set_coefficient_ring_impl(
+        &self,
+        vars: &Arc<Vec<PolyVariable>>,
+        workspace: &Workspace,
+        out: &mut Settable<'_, Atom>,
+    ) {
         match self {
             AtomView::Num(n) => {
                 if let CoefficientView::RationalPolynomial(r) = n.get_coeff_view() {
@@ -2895,7 +3184,6 @@ impl AtomView<'_> {
                                 denominator: d,
                             };
                             out.to_num(Coefficient::RationalPolynomial(r));
-                            true
                         } else {
                             let mut n1 = workspace.new_atom();
                             r.numerator.to_expression_with_map(
@@ -2905,11 +3193,9 @@ impl AtomView<'_> {
                             );
 
                             let mut n1_conv = workspace.new_atom();
-                            n1.as_view().set_coefficient_ring_with_ws_into(
-                                vars,
-                                workspace,
-                                &mut n1_conv,
-                            );
+                            let mut n1_set = Settable::from(&mut *n1_conv);
+                            n1.as_view()
+                                .set_coefficient_ring_impl(vars, workspace, &mut n1_set);
 
                             let mut n2 = workspace.new_atom();
                             r.denominator.to_expression_with_map(
@@ -2919,32 +3205,23 @@ impl AtomView<'_> {
                             );
 
                             let mut n2_conv = workspace.new_atom();
-                            n2.as_view().set_coefficient_ring_with_ws_into(
-                                vars,
-                                workspace,
-                                &mut n2_conv,
-                            );
+                            let mut n2_set = Settable::from(&mut *n2_conv);
+                            n2.as_view()
+                                .set_coefficient_ring_impl(vars, workspace, &mut n2_set);
 
                             // create n1/n2
                             let mut n3 = workspace.new_atom();
                             let mut exp = workspace.new_atom();
                             exp.to_num(Coefficient::Complex(Rational::from(-1i64).into()));
-                            n3.to_pow(n2_conv.as_view(), exp.as_view());
+                            n3.to_pow(n2_set.as_view_or(n2.as_view()), exp.as_view());
 
                             let mut m = workspace.new_atom();
                             let mm = m.to_mul();
-                            mm.extend(n1_conv.as_view());
+                            mm.extend(n1_set.as_view_or(n1.as_view()));
                             mm.extend(n3.as_view());
                             m.as_view().normalize(workspace, out);
-                            true
                         }
-                    } else {
-                        out.set_from_view(self);
-                        false
                     }
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Var(v) => {
@@ -2961,76 +3238,71 @@ impl AtomView<'_> {
                         numerator: poly,
                         denominator: den,
                     }));
-                    true
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
 
                 let mut nb = workspace.new_atom();
-                if base.set_coefficient_ring_with_ws_into(vars, workspace, &mut nb) {
+                let mut base_set = Settable::from(&mut *nb);
+                base.set_coefficient_ring_impl(vars, workspace, &mut base_set);
+                if let Some(base) = base_set.get() {
                     let mut o = workspace.new_atom();
-                    o.to_pow(nb.as_view(), exp);
+                    o.to_pow(base.as_view(), exp);
 
                     o.as_view().normalize(workspace, out);
-                    true
-                } else {
-                    out.set_from_view(self);
-                    false
                 }
             }
             AtomView::Mul(m) => {
                 let mut o = workspace.new_atom();
-                let mul = o.to_mul();
-
-                let mut changed = false;
+                let mut mul = None;
 
                 let mut arg_o = workspace.new_atom();
-                for arg in m {
-                    changed |= arg.set_coefficient_ring_with_ws_into(vars, workspace, &mut arg_o);
-                    mul.extend(arg_o.as_view());
+                for (i, arg) in m.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_o);
+                    arg.set_coefficient_ring_impl(vars, workspace, &mut set);
+                    if mul.is_none() && set.is_set() {
+                        let new_mul = o.to_mul();
+                        for child in m.iter().take(i) {
+                            new_mul.extend(child);
+                        }
+                        new_mul.extend(set.as_view());
+                        mul = Some(new_mul);
+                    } else if let Some(mul) = &mut mul {
+                        mul.extend(set.as_view_or(arg));
+                    }
                 }
 
-                mul.set_normalized(!changed);
-
-                if !changed {
-                    mul.set_has_coefficient(m.has_coefficient());
-                    std::mem::swap(out, &mut o);
-                    false
-                } else {
+                if mul.is_some() {
                     o.as_view().normalize(workspace, out);
-                    true
                 }
             }
             AtomView::Add(a) => {
                 let mut o = workspace.new_atom();
-                let mul = o.to_add();
-
-                let mut changed = false;
+                let mut add = None;
 
                 let mut arg_o = workspace.new_atom();
-                for arg in a {
-                    changed |= arg.set_coefficient_ring_with_ws_into(vars, workspace, &mut arg_o);
-                    mul.extend(arg_o.as_view());
+                for (i, arg) in a.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_o);
+                    arg.set_coefficient_ring_impl(vars, workspace, &mut set);
+                    if add.is_none() && set.is_set() {
+                        let new_add = o.to_add();
+                        for child in a.iter().take(i) {
+                            new_add.extend(child);
+                        }
+                        new_add.extend(set.as_view());
+                        add = Some(new_add);
+                    } else if let Some(add) = &mut add {
+                        add.extend(set.as_view_or(arg));
+                    }
                 }
 
-                mul.set_normalized(!changed);
-
-                if !changed {
-                    std::mem::swap(out, &mut o);
-                    false
-                } else {
+                if add.is_some() {
                     o.as_view().normalize(workspace, out);
-                    true
                 }
             }
             AtomView::Fun(_) => {
                 // do not propagate into functions
-                out.set_from_view(self);
-                false
             }
         }
     }
@@ -3330,17 +3602,24 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
+    use std::{cmp::Ordering, sync::Arc};
 
     use crate::{
-        atom::{Atom, AtomCore},
+        atom::{Atom, AtomCore, AtomView},
         domains::float::Float,
         parse,
         printer::{AtomPrinter, PrintOptions},
         symbol,
     };
 
-    use super::Coefficient;
+    use super::{Coefficient, CoefficientView};
+
+    fn coefficient_view(atom: &Atom) -> CoefficientView<'_> {
+        let AtomView::Num(number) = atom.as_view() else {
+            panic!("expected a coefficient");
+        };
+        number.get_coeff_view()
+    }
 
     #[test]
     fn rat_pow() {
@@ -3348,7 +3627,27 @@ mod test {
         assert_eq!(parse!("(-2)^(1/2)"), parse!("1i*2^(1/2)"));
         assert_eq!(parse!("(-2)^(-5/3)"), parse!("-1/2*(-2)^(-2/3)"));
         assert_eq!(parse!("(-2)^(-5/2)"), parse!("-1i/4*(1/2)^(1/2)"));
-        assert_eq!(parse!("(2)^(-5/2)"), parse!("(1/32)^(1/2)"));
+        assert_eq!(parse!("(2)^(-5/2)"), parse!("1/4*(1/2)^(1/2)"));
+        assert_eq!(parse!("(4)^(1/2)"), parse!("2"));
+        assert_eq!(parse!("(1/4)^(1/2)"), parse!("1/2"));
+        assert_eq!(parse!("(-1/4)^(1/2)"), parse!("1i/2"));
+        assert_eq!(parse!("(27)^(1/3)"), parse!("3"));
+        assert_eq!(parse!("(-1/27)^(1/3)"), parse!("1/3*(-1)^(1/3)"));
+        assert_eq!(parse!("(27)^(2/3)"), parse!("9"));
+        assert_eq!(parse!("8^(-1/3)"), parse!("1/2"));
+        assert_eq!(parse!("72^(3/2)"), parse!("432*2^(1/2)"));
+        assert_eq!(parse!("(-2)^(3)"), parse!("-8"));
+        assert_eq!(parse!("(1)^(1/2)"), parse!("1"));
+
+        assert_eq!(parse!("8^(1/2)"), parse!("2*2^(1/2)"));
+        assert_eq!(parse!("54^(1/3)"), parse!("3*2^(1/3)"));
+        assert_eq!(parse!("(-54)^(1/3)"), parse!("3*(-2)^(1/3)"));
+        assert_eq!(parse!("(4/3)^(1/2)"), parse!("2*(1/3)^(1/2)"));
+        assert_eq!(parse!("(2850/39601)^(1/2)"), parse!("5/199*114^(1/2)"));
+        assert_eq!(parse!("17408^(1/10)"), parse!("2*17^(1/10)"));
+        assert_eq!(parse!("166659413^(1/2)"), parse!("547*557^(1/2)"));
+        assert_eq!(parse!("1301820637^(1/2)"), parse!("10007*13^(1/2)"));
+        assert_eq!(parse!("(13/100140049)^(1/2)"), parse!("1/10007*13^(1/2)"));
     }
 
     #[test]
@@ -3370,6 +3669,44 @@ mod test {
     }
 
     #[test]
+    fn compare_float_with_rational() {
+        let natural = parse!("1/2");
+        let natural_float = natural.to_float(16);
+        assert_eq!(
+            coefficient_view(&natural_float).cmp(&coefficient_view(&natural)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&natural).cmp(&coefficient_view(&natural_float)),
+            Ordering::Equal
+        );
+
+        let negative_float = parse!("-2/3").to_float(16);
+        let zero = parse!("0");
+        assert_eq!(
+            coefficient_view(&negative_float).cmp(&coefficient_view(&zero)),
+            Ordering::Less
+        );
+        assert_eq!(
+            coefficient_view(&zero).cmp(&coefficient_view(&negative_float)),
+            Ordering::Greater
+        );
+
+        // This value is too large for the inline natural representation, but is
+        // exactly representable as a binary float.
+        let large = parse!("18446744073709551616");
+        let large_float = large.to_float(16);
+        assert_eq!(
+            coefficient_view(&large_float).cmp(&coefficient_view(&large)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            coefficient_view(&large).cmp(&coefficient_view(&large_float)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
     fn coefficient_ring() {
         let expr = parse!("v1*v3+v1*(v2+2)^-1*(v2+v3+1)");
 
@@ -3387,6 +3724,64 @@ mod test {
         let a = a.replace(v2).with(Atom::num(3)).expand();
 
         assert_eq!(a, expr);
+    }
+
+    #[test]
+    fn coefficient_ring_sparse_changes_and_reused_output() {
+        let x = symbol!("x");
+        let vars = Arc::new(vec![x.into()]);
+        crate::state::Workspace::get_local().with(|ws| {
+            let mut out = parse!("stale+output");
+            for expr in ["x", "a+x*b+c", "x*y*z", "y*(x+1)^-1", "x^2*y+x*z"] {
+                let input = parse!(expr);
+                assert!(
+                    input
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                let converted = out.clone();
+                assert!(
+                    !converted
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                assert_eq!(out, converted);
+                let restored = out.set_coefficient_ring(&Arc::new(vec![]));
+                assert_eq!(restored.expand(), input.expand(), "{expr}");
+            }
+            // Function arguments and power exponents are intentionally opaque.
+            for expr in ["7", "y", "f(x)", "y^x", "a+y*z+c"] {
+                let input = parse!(expr);
+                assert!(
+                    !input
+                        .as_view()
+                        .set_coefficient_ring_with_ws_into(&vars, ws, &mut out)
+                );
+                assert_eq!(out, input, "{expr}");
+            }
+        });
+    }
+
+    #[test]
+    fn coefficient_ring_remapping_preserves_expression() {
+        let (x, y, z) = symbol!("x", "y", "z");
+        let initial = Arc::new(vec![x.into(), y.into()]);
+        let empty = Arc::new(vec![]);
+        for expr in ["x*y+x+y+1", "(x+y+1)/(x+2)", "x+1", "1/(y+1)"] {
+            let input = parse!(expr);
+            let converted = input.set_coefficient_ring(&initial);
+            for vars in [
+                vec![y.into(), x.into(), z.into()],
+                vec![x.into()],
+                vec![y.into()],
+                vec![z.into()],
+                vec![],
+            ] {
+                let remapped = converted.set_coefficient_ring(&Arc::new(vars));
+                let restored = remapped.set_coefficient_ring(&empty);
+                assert_eq!(restored.expand(), input.expand(), "{expr}");
+            }
+        }
     }
 
     #[test]

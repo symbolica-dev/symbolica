@@ -1,5 +1,5 @@
 use symbolica::{
-    atom::{Atom, AtomCore, EvaluationInfo},
+    atom::{Atom, AtomCore, EvaluationInfo, Symbol},
     domains::{
         Ring,
         finite_field::{FiniteFieldCore, Zp},
@@ -12,6 +12,150 @@ use symbolica::{
     },
     parse, symbol,
 };
+
+#[test]
+#[ignore = "may stack overflow in debug build"]
+fn create_evaluator_with_1000_variables() {
+    const VARIABLE_COUNT: usize = 1000;
+
+    let variable_names = (0..VARIABLE_COUNT)
+        .map(|i| format!("x{i}"))
+        .collect::<Vec<_>>();
+    let expression =
+        (parse!(&variable_names.join("+")) * parse!(&variable_names[..100].join("+"))).expand();
+
+    println!(
+        "{}",
+        expression
+            .evaluate(
+                &variable_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| (parse!(x), i as f64))
+                    .collect::<std::collections::HashMap<_, _>>()
+            )
+            .unwrap()
+    );
+
+    let params = variable_names.iter().map(|x| parse!(x)).collect::<Vec<_>>();
+
+    let start = std::time::Instant::now();
+    let evaluator = expression
+        .evaluator(&params)
+        .direct_translation(true)
+        //.max_horner_scheme_variables(10)
+        // .cpe_iterations(Some(0))
+        //.max_common_pair_cache_entries(10)
+        .horner_iterations(1)
+        .verbose(true)
+        .build()
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    eprintln!("created evaluator with {VARIABLE_COUNT} variables in {elapsed:?}");
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+
+    println!(
+        "{}",
+        evaluator.evaluate_single(&(0..VARIABLE_COUNT).map(|i| i as f64).collect::<Vec<_>>())
+    )
+
+    // assert_eq!(
+    //     evaluator.evaluate_single(&vec![1.0; VARIABLE_COUNT]),
+    //     VARIABLE_COUNT as f64
+    // );
+}
+
+#[test]
+fn common_pair_elimination_edits_the_same_instruction_multiple_times() {
+    let expressions = [parse!("if(q,a+b+c+d,g)"), parse!("a+b+e"), parse!("c+d+f")];
+    let params = [
+        parse!("q"),
+        parse!("a"),
+        parse!("b"),
+        parse!("c"),
+        parse!("d"),
+        parse!("e"),
+        parse!("f"),
+        parse!("g"),
+    ];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // Both (a, b) and (c, d) are extracted in one CPE pass. The first
+    // expression is safely rewritten twice, reducing seven additions to five.
+    assert_eq!(evaluator.count_operations().additions, 5);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 3];
+    evaluator.evaluate(&[1.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &mut output);
+    assert_eq!(output, [10.0, 8.0, 13.0]);
+
+    evaluator.evaluate(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &mut output);
+    assert_eq!(output, [7.0, 8.0, 13.0]);
+}
+
+#[test]
+fn common_pair_elimination_revalidates_overlapping_candidates() {
+    let expressions = [parse!("a+b+c"), parse!("a+b+d"), parse!("a+c+e")];
+    let params = [
+        parse!("a"),
+        parse!("b"),
+        parse!("c"),
+        parse!("d"),
+        parse!("e"),
+    ];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // Whichever pair is extracted first consumes an operand in the first
+    // expression. The other candidate then has only one current use and must
+    // not produce a redundant temporary instruction.
+    assert_eq!(evaluator.count_operations().additions, 5);
+    assert_eq!(evaluator.export_instructions().instructions.len(), 4);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 3];
+    evaluator.evaluate(&[1.0, 2.0, 3.0, 4.0, 5.0], &mut output);
+    assert_eq!(output, [6.0, 7.0, 9.0]);
+}
+
+#[test]
+fn common_pair_elimination_tracks_known_pairs_after_cache_limit() {
+    let expressions = [parse!("a+b+c"), parse!("a+b+d")];
+    let params = [parse!("a"), parse!("b"), parse!("c"), parse!("d")];
+
+    let evaluator = Atom::evaluator_multiple(&expressions, &params)
+        .direct_translation(true)
+        .horner_iterations(1)
+        .max_horner_scheme_variables(0)
+        .max_common_pair_cache_entries(0)
+        .cpe_iterations(Some(1))
+        .build()
+        .unwrap();
+
+    // The cache admits (a, b), then refuses new candidates. Its occurrence
+    // on the second line must still be collected and extracted.
+    assert_eq!(evaluator.count_operations().additions, 3);
+
+    let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+    let mut output = [0.0; 2];
+    evaluator.evaluate(&[1.0, 2.0, 3.0, 4.0], &mut output);
+    assert_eq!(output, [6.0, 7.0]);
+}
 
 #[test]
 fn evaluator_in_finite_field_ring() {
@@ -91,6 +235,135 @@ fn merge_evaluator_with_external_functions() {
 }
 
 #[test]
+fn merge_evaluator_preserves_external_constant_source_indices() {
+    let params: Vec<_> = [
+        "f", "dL", "dR", "rL", "sL", "uL", "vL", "hL", "rR", "sR", "uR", "vR", "hR",
+    ]
+    .into_iter()
+    .map(|s| parse!(s))
+    .collect();
+    let common = parse!("f/(dL*dR*rL^2*rR^2)");
+    let left = parse!("uL/(rL-sL)+vL/(-rL-sL)");
+    let right = parse!("uR/(rR-sR)+vR/(-rR-sR)");
+    let pi = Atom::var(Symbol::PI);
+    // Merging these evaluators moves pi to an index occupied by a later
+    // incoming literal. Subsequent merges also exercise reuse of pi.
+    let expressions = [
+        &common * &left * &right,
+        Atom::i() * &pi * &common * &left * parse!("hR"),
+        -Atom::i() * &pi * &common * parse!("hL") * &right,
+        &pi * &pi * &common * parse!("hL*hR"),
+    ];
+    let mut input =
+        [1., 1., 1., 2., 1., 1., 1., 0.3, 3., 1., 1., 1., 0.4].map(|x| Complex::new(x, 0.0));
+    input[0] = Complex::new(0.0, 1.0);
+    let pi = std::f64::consts::PI;
+    let expected = [
+        Complex::new(0.0, 1.0 / 216.0),
+        Complex::new(-pi / 135.0, 0.0),
+        Complex::new(pi / 480.0, 0.0),
+        Complex::new(0.0, pi * pi / 300.0),
+    ];
+    let convert = |c: &Complex<Rational>| Complex::new(c.re.to_f64(), c.im.to_f64());
+    let convert_prec = |c: &Complex<Rational>| {
+        Complex::new(c.re.to_multi_prec_float(256), c.im.to_multi_prec_float(256))
+    };
+    let input_prec =
+        input.map(|c| Complex::new(Float::with_val(256, c.re), Float::with_val(256, c.im)));
+
+    for expanded in [false, true] {
+        let expressions: Vec<_> = expressions
+            .iter()
+            .map(|a| if expanded { a.expand() } else { a.clone() })
+            .collect();
+        let evaluators: Vec<_> = expressions
+            .iter()
+            .map(|a| a.evaluator(&params).build().unwrap())
+            .collect();
+        let separate: Vec<_> = evaluators
+            .iter()
+            .cloned()
+            .map(|e| e.map_coeff(&convert).evaluate_single(&input))
+            .collect();
+        let separate_prec: Vec<_> = evaluators
+            .iter()
+            .cloned()
+            .map(|e| {
+                e.map_coeff_with_prec(&convert_prec, 256)
+                    .evaluate_single(&input_prec)
+            })
+            .collect();
+        let mut joint_output = [Complex::new(0.0, 0.0); 4];
+        Atom::evaluator_multiple(&expressions, &params)
+            .build()
+            .unwrap()
+            .map_coeff(&convert)
+            .evaluate(&input, &mut joint_output);
+
+        for cpe_rounds in [None, Some(0)] {
+            let mut merged = evaluators[0].clone();
+            for evaluator in evaluators.iter().skip(1) {
+                merged.merge(evaluator.clone(), cpe_rounds).unwrap();
+            }
+            let mut merged_output = [Complex::new(0.0, 0.0); 4];
+            merged
+                .clone()
+                .map_coeff(&convert)
+                .evaluate(&input, &mut merged_output);
+            for (route, output) in [
+                ("separate", separate.as_slice()),
+                ("joint", joint_output.as_slice()),
+                ("merged", merged_output.as_slice()),
+            ] {
+                for (i, (actual, expected)) in output.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (actual.re - expected.re).abs() < 1e-12
+                            && (actual.im - expected.im).abs() < 1e-12,
+                        "{route} output {i}, expanded={expanded}, cpe_rounds={cpe_rounds:?}: expected {expected:?}, got {actual:?}"
+                    );
+                }
+            }
+
+            // Keep builtin pi exact until mapping to the requested precision.
+            let mut merged_prec =
+                vec![Complex::new(Float::with_val(256, 0), Float::with_val(256, 0)); 4];
+            merged
+                .map_coeff_with_prec(&convert_prec, 256)
+                .evaluate(&input_prec, &mut merged_prec);
+            for (i, (actual, expected)) in merged_prec.iter().zip(&separate_prec).enumerate() {
+                assert!(
+                    (actual.re.clone() - &expected.re).to_f64().abs() < 1e-65
+                        && (actual.im.clone() - &expected.im).to_f64().abs() < 1e-65,
+                    "256-bit output {i}, expanded={expanded}, cpe_rounds={cpe_rounds:?}: expected {expected:?}, got {actual:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn merge_evaluator_with_imaginary_pi() {
+    let x = parse!("x");
+    let expressions = [-&x, Atom::i() * Atom::var(Symbol::PI) * &x];
+    let params = [x];
+    let evaluators: Vec<_> = expressions
+        .iter()
+        .map(|a| a.evaluator(&params).build().unwrap())
+        .collect();
+    for cpe_rounds in [None, Some(0)] {
+        let mut merged = evaluators[0].clone();
+        merged.merge(evaluators[1].clone(), cpe_rounds).unwrap();
+        let mut output = [Complex::new(0.0, 0.0); 2];
+        merged
+            .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()))
+            .evaluate(&[Complex::new(2.0, 0.0)], &mut output);
+        assert_eq!(output[0], Complex::new(-2.0, 0.0));
+        assert_eq!(output[1].re, 0.0);
+        assert!((output[1].im - 2.0 * std::f64::consts::PI).abs() < 1e-12);
+    }
+}
+
+#[test]
 fn error_propagating_float_transcendental_evaluator() {
     let params = vec![
         parse!("x"),
@@ -142,7 +415,7 @@ fn float_transcendental_evaluator() {
         parse!("b"),
     ];
     let expr = parse!(
-        "tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+asinh(x)+acosh(y)+atanh(a)+acoth(y)+asech(b)+acsch(x)+gamma(y)+zeta(y)+polygamma(1,y)+polylog(2,a)+bessel_j(0,x)+bessel_y(0,y)+bessel_i(0,x)+bessel_k(0,y)"
+        "tan(x)+asin(a)+acos(b)+atan(x)+atan(x,y)+sinh(x)+cosh(x)+tanh(x)+cot(x)+sec(x)+csc(x)+acot(x)+asec(y)+acsc(y)+coth(x)+sech(x)+csch(x)+asinh(x)+acosh(y)+atanh(a)+acoth(y)+asech(b)+acsch(x)+gamma(y)+erf(x)+zeta(y)+polygamma(1,y)+polylog(2,a)+bessel_j(0,x)+bessel_y(0,y)+bessel_i(0,x)+bessel_k(0,y)"
     );
 
     let evaluator = expr

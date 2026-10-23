@@ -55,3 +55,18 @@ fn replace_once() {
 
     assert_eq!(r, res);
 }
+
+#[test]
+fn failed_nested_power_match_restores_wildcards() {
+    let pattern = parse!("r(F_^(b__*(c__+d__*ivar_)^2), ivar_)")
+        .to_pattern()
+        .set_optional(symbol!("c__"))
+        .set_optional(symbol!("d__"));
+
+    let target = parse!("r(e^((b-2*c*x)^2*d^5), x)");
+    let replaced = target
+        .replace(&pattern)
+        .with(parse!("hit(F_,b__,c__,d__,ivar_)").to_pattern());
+
+    assert_eq!(replaced, parse!("hit(e,d^5,b,-2*c,x)"));
+}

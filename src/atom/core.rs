@@ -2,11 +2,12 @@
 //!
 //! See [AtomCore] for the possible operations.
 
+use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
+
 use ahash::{HashMap, HashSet};
 use rayon::ThreadPool;
 
 use crate::{
-    OperationCount,
     atom::{
         AddView, AliasedAtom, AtomType, FunctionBuilder, Indeterminate, KeyLookup, MulView,
         NumView, VarView, representation::FunView,
@@ -14,18 +15,19 @@ use crate::{
     coefficient::{Coefficient, CoefficientView, ConvertToRing},
     domains::{
         EuclideanDomain, InternalOrdering,
+        algebraic::{AlgebraicContext, AlgebraicExtension},
         atom::AtomField,
         factorized_rational_polynomial::{
             FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
         },
         float::{FixedPrecision, Real, SingleFloat},
         integer::Z,
-        rational::Rational,
+        rational::{Q, Rational},
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    evaluate::{EvaluationDomain, EvaluatorBuilder},
+    evaluate::{EvaluationDomain, EvaluatorBuilder, OperationCount},
     id::{
         BorrowReplacement, Condition, ConditionResult, Context, MatchSettings, Pattern,
         PatternAtomTreeIterator, PatternRestriction, ReplaceBuilder, ReplaceSettings,
@@ -45,7 +47,7 @@ use crate::{
 };
 
 use super::{
-    Atom, AtomOrView, AtomView, ListSlice, Symbol,
+    Atom, AtomOrView, AtomView, ListSlice, Symbol, ZeroTestSettings,
     representation::{InlineNum, InlineVar},
 };
 use crate::{
@@ -64,15 +66,33 @@ impl Atom {
 /// All core features of expressions, such as expansion and
 /// pattern matching that leave the expression unchanged.
 ///
+/// Mathematical property queries (`is_real`, `is_integer`, `is_scalar`,
+/// `is_positive`, and `is_nonnegative`) return [`ConditionResult`]. `True`
+/// establishes the property, `False` establishes its negation, and `Inconclusive`
+/// means neither is established under the current symbol assumptions. These
+/// inexpensive queries do not attempt exhaustive simplification. Properties
+/// concern values where the expression is defined, not absence of poles.
+///
+/// For these property queries, use `.is_true()` when a transformation requires
+/// proof. Its negation means "not proven", whereas `.is_false()` means "proven false".
+/// To check whether an expression is already the number zero, use
+/// [`is_zero`](AtomCore::is_zero), which returns a `bool`.
+/// To test whether it is identically zero, use [`check_zero`](AtomCore::check_zero),
+/// which returns a [`ConditionResult`]. Its documentation describes when a
+/// nonzero result is heuristic and how to handle an inconclusive result.
+/// Use [`check_equal`](AtomCore::check_equal) to test whether two expressions
+/// are mathematically equal.
 ///
 /// This trait is sealed, such that new methods can be added
 /// without breaking existing implementations.
 pub trait AtomCore: private::Sealed + Sized {
+    /// The expression result type returned by operations on this receiver.
     type Output;
 
     /// Take a view of the atom.
     fn as_atom_view(&self) -> AtomView<'_>;
 
+    /// Wrap an owned expression in this receiver's result type.
     fn atom_to_output(&self, atom: Atom) -> Self::Output;
 
     /// Get a function view if the atom is a function.
@@ -115,6 +135,7 @@ pub trait AtomCore: private::Sealed + Sized {
         }
     }
 
+    /// Return the outermost expression type, such as a sum, variable, or function.
     fn get_atom_type(&self) -> AtomType {
         match self.as_atom_view() {
             AtomView::Num(_) => AtomType::Num,
@@ -407,6 +428,7 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Write the expression as a sum of terms with minimal denominators in `x`.
+    /// Factors the denominators over the rationals by default, or over the complex rationals if an `i` appears.
     ///
     /// # Example
     ///
@@ -421,7 +443,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().apart(x.into().borrow()).wrap(self)
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// Pass an empty slice to decompose in all variables.
     /// This method computes a Groebner basis and may therefore be slow for large inputs.
     ///
     /// # Example
@@ -429,12 +452,22 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     /// use symbolica::prelude::*;
     /// let expr = parse!("(2y-x)/(y*(x+y)*(y-x))");
-    /// let apart = expr.apart_multivariate();
-    /// let r = parse!("3/(2*y*x+2*y^2)+1/(2*y^2-2*x*y)");
+    /// let apart = expr.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+    /// let r = parse!("3/2/(y*x+y^2)-1/2/(y*x-y^2)");
     /// assert_eq!(apart, r);
     /// ```
-    fn apart_multivariate(&self) -> Self::Output {
-        self.as_atom_view().apart_multivariate().wrap(self)
+    fn apart_multivariate<'a, V: Clone + Into<BorrowedOrOwned<'a, Indeterminate>>>(
+        &self,
+        variables: &'a [V],
+    ) -> Self::Output {
+        let variables = variables
+            .iter()
+            .cloned()
+            .map(|variable| variable.into().yield_owned())
+            .collect::<Vec<_>>();
+        self.as_atom_view()
+            .apart_multivariate(&variables)
+            .wrap(self)
     }
 
     /// Cancel all common factors between numerators and denominators.
@@ -453,7 +486,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().cancel().wrap(self)
     }
 
-    /// Factor the expression over the rationals.
+    /// Factor the expression over the rationals, or over the
+    /// complex rationals if an `i` appears.
     ///
     /// # Example
     ///
@@ -466,6 +500,44 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn factor(&self) -> Self::Output {
         self.as_atom_view().factor().wrap(self)
+    }
+
+    /// Factor the expression over complex rationals.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("x^4 + 1");
+    /// let factored = expr.factor_complex();
+    /// let r = parse!("(-1𝑖+x^2)*(1𝑖+x^2)");
+    /// assert_eq!(factored, r);
+    /// ```
+    fn factor_complex(&self) -> Self::Output {
+        self.as_atom_view().factor_complex().wrap(self)
+    }
+
+    /// Factor the expression over an algebraic number field.
+    ///
+    /// Algebraic numbers already present in the expression define the initial
+    /// field. The supplied explicit roots and rational powers are adjoined as
+    /// additional generators.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let factorization = parse!("x^2-2")
+    ///     .factor_in_extension(&[parse!("sqrt(2)")])
+    ///     .unwrap();
+    /// assert_eq!(factorization, parse!("(x-sqrt(2))*(x+sqrt(2))"));
+    /// ```
+    fn factor_in_extension(&self, generators: &[Atom]) -> Result<Self::Output, String> {
+        Ok(self
+            .as_atom_view()
+            .factor_in_extension(generators)?
+            .wrap(self))
     }
 
     /// Collect numerical factors by removing the numerical content from additions.
@@ -679,6 +751,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
+    /// The iteration stops once the Newton step is smaller than `prec` in absolute value,
+    /// independent of the overall scale of the function. This does not certify the root.
     ///
     /// # Example
     ///
@@ -704,6 +778,8 @@ pub trait AtomCore: private::Sealed + Sized {
     }
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
+    /// The iteration stops once every component of the Newton step is smaller than `prec`
+    /// in absolute value, independent of the scale of each equation. This does not certify the root.
     ///
     /// # Example
     ///
@@ -737,52 +813,48 @@ pub trait AtomCore: private::Sealed + Sized {
         AtomView::nsolve_system(system, vars, init, prec, max_iterations)
     }
 
-    /// Solve a system that is linear in `vars`, if possible.
-    /// Each expression in `system` is understood to yield 0.
+    /// Solve a system of exact equations, with each expression understood to equal zero.
     ///
-    /// If the system is underdetermined, a partial solution is returned
-    /// where each bound variable is a linear combination of the free
-    /// variables. The free variables are chosen such that they have the
-    /// highest index in the `vars` list.
+    /// Each returned branch maps assigned variables directly to expressions.
+    /// Free variables and validity conditions are available as branch metadata.
+    /// Specify the domain with `over` and the unknowns with `wrt`.
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```
-    /// use symbolica::prelude::*;
-    /// let expr1 = parse!("2*x + y - 1");
-    /// let expr2 = parse!("x + y + 1");
-    /// let system = &[expr1, expr2];
-    /// let vars = &[parse!("x"), parse!("y")];
-    /// let solution = Atom::solve_linear_system::<u8, _, _>(system, vars).unwrap();
-    /// assert_eq!(solution, [Atom::num(2), Atom::num(-3)]);
-    /// ```
-    ///
-    /// Underdetermined system example:
+    /// Solve two equations over the reals. Each input expression is understood
+    /// to equal zero:
     ///
     /// ```
     /// use symbolica::prelude::*;
-    /// let (v1, v2, v3) = symbol!("v1", "v2", "v3");
-    /// let eqs = ["v1 + v2 - 3", "2*v1 + 2*v2 - 6", "v1 + v3 - 5"];
-    /// let system: Vec<_> = eqs.iter().map(|e| parse!(e)).collect();
     ///
-    /// let sol = Atom::solve_linear_system::<u8, _, Atom>(
-    ///     &system,
-    ///     &[v1.into(), v2.into(), v3.into()],
-    /// );
+    /// let (x, y) = symbol!("x", "y");
+    /// let system = [parse!("x+y"), parse!("y^2-2")];
+    /// let solutions = Atom::solve(&system)
+    ///     .over(Reals)
+    ///     .wrt(&[Atom::var(x), Atom::var(y)])
+    ///     .unwrap();
     ///
-    /// assert_eq!(
-    ///     sol,
-    ///     Err(SolveError::Underdetermined {
-    ///         rank: 2,
-    ///         partial_solution: vec![parse!("-v3+5"), parse!("v3-2"), parse!("v3"),],
-    ///     })
-    /// );
+    /// assert_eq!(solutions.len(), 2);
+    /// assert!(solutions.iter().all(|solution| solution.is_point()));
     /// ```
-    fn solve_linear_system<E: PositiveExponent, T1: AtomCore, T2: AtomCore>(
-        system: &[T1],
-        vars: &[T2],
-    ) -> Result<Vec<Atom>, SolveError> {
-        AtomView::solve_linear_system::<E, T1, T2>(system, vars)
+    ///
+    /// Restricting the domain can remove otherwise valid solutions:
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let x = Atom::var(symbol!("x"));
+    /// let real_solutions = Atom::solve(&[parse!("x^2+1")])
+    ///     .over(Reals)
+    ///     .wrt(std::slice::from_ref(&x))
+    ///     .unwrap();
+    /// assert!(real_solutions.is_empty().unwrap());
+    /// ```
+    fn solve<T>(system: &[T]) -> crate::solve::SolveBuilder
+    where
+        T: AtomCore,
+    {
+        crate::solve::SolveBuilder::new(system)
     }
 
     /// Convert a system of linear equations to a matrix representation, returning the matrix
@@ -827,12 +899,12 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("x + y");
     /// let x = parse!("x");
     /// let y = parse!("y");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// const_map.insert(x.clone(), 1.0);
     /// const_map.insert(y.clone(), 2.0);
     /// let result = expr.evaluate(&const_map).unwrap();
@@ -840,7 +912,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain + FixedPrecision>(
         &self,
-        map: &HashMap<A, T>,
+        map: &StdHashMap<A, T, impl BuildHasher>,
     ) -> Result<T, EvaluationError> {
         self.as_atom_view()
             .evaluate(map, T::BINARY_PRECISION as u32)
@@ -856,18 +928,18 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("2x");
     /// let x = parse!("x");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// const_map.insert(x.clone(), Float::with_val(200, 3));
     /// let result = expr.evaluate_with_prec(&const_map, 200).unwrap();
     /// assert_eq!(result, Float::with_val(200, 6));
     /// ```
     fn evaluate_with_prec<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
         &self,
-        map: &HashMap<A, T>,
+        map: &StdHashMap<A, T, impl BuildHasher>,
         binary_prec: u32,
     ) -> Result<T, EvaluationError> {
         self.as_atom_view().evaluate(map, binary_prec)
@@ -881,11 +953,11 @@ pub trait AtomCore: private::Sealed + Sized {
     /// # Example
     ///
     /// ```
-    /// # use ahash::HashMap;
+    /// # use std::collections::HashMap;
     /// use symbolica::prelude::*;
     /// let expr = parse!("1/3*x^2 + 2");
     /// let x = parse!("x");
-    /// let mut const_map = HashMap::default();
+    /// let mut const_map = HashMap::new();
     /// let r = Zp::new(5);
     /// const_map.insert(x.clone(), r.nth(3.into()));
     /// let result = expr.evaluate_in_ring(&const_map, &r).unwrap();
@@ -893,7 +965,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn evaluate_in_ring<A: AtomCore + KeyLookup, R: ConvertToRing>(
         &self,
-        map: &HashMap<A, R::Element>,
+        map: &StdHashMap<A, R::Element, impl BuildHasher>,
         ring: &R,
     ) -> Result<R::Element, EvaluationError> {
         self.as_atom_view().evaluate_in_ring(map, ring)
@@ -980,19 +1052,176 @@ pub trait AtomCore: private::Sealed + Sized {
         EvaluatorBuilder::new_multiple(exprs, params)
     }
 
-    /// Check if the expression could be 0, using (potentially) numerical sampling with
-    /// a given tolerance and number of iterations.
+    /// Return whether the expression is already the number zero.
     ///
-    /// # Example
+    /// An expression that is mathematically zero but has not simplified to zero
+    /// returns `false`. Use [`check_zero`](AtomCore::check_zero) to test such
+    /// identities. Equivalent to [`Atom::is_zero`] and [`AtomView::is_zero`].
     ///
     /// ```
     /// use symbolica::prelude::*;
-    /// let expr = parse!("(x+1)^2 - x^2 - 2x - 1");
-    /// let result = expr.zero_test(100, 1e-7);
-    /// assert_eq!(result, ConditionResult::Inconclusive);
+    /// assert!(parse!("0").is_zero());
+    /// assert!(!parse!("(x+1)^2-x^2-2*x-1").is_zero());
+    /// assert_eq!(parse!("(x+1)^2-x^2-2*x-1").check_zero(), ConditionResult::True);
     /// ```
-    fn zero_test(&self, iterations: usize, tolerance: f64) -> ConditionResult {
-        self.as_atom_view().zero_test(iterations, tolerance)
+    fn is_zero(&self) -> bool {
+        self.as_atom_view().is_zero()
+    }
+
+    /// Test whether the expression is identically zero with the default settings.
+    ///
+    /// Use this to test zero identities, including expressions that have not
+    /// simplified to the number zero:
+    ///
+    /// - `True`: the expression is identically zero wherever it is defined.
+    /// - `False`: the expression was found to be nonzero, subject to the
+    ///   numerical and user-defined function limitations below.
+    /// - `Inconclusive`: the test could not decide. This is not proof of zero;
+    ///   preserve this distinction when, for example, removing zero coefficients.
+    ///
+    /// This tests an identity, not the value at a particular point: `x` returns
+    /// `False` even though it vanishes at `x = 0`. Use [`is_zero`](AtomCore::is_zero)
+    /// for a quick check of whether the expression is already the number zero.
+    /// Use `check_zero().is_true()` when a proof of zero is required, or
+    /// `!check_zero().is_false()` when an undecided result should count as possibly zero.
+    ///
+    /// Many polynomial, rational, algebraic, trigonometric and hyperbolic
+    /// identities are supported. Others, such as logarithm identities, identities
+    /// involving roots of variable expressions, and special-function identities,
+    /// may return `Inconclusive`. Very small nonzero values may need a higher
+    /// precision limit through [`check_zero_with`](AtomCore::check_zero_with).
+    /// Large expressions can be expensive to check; disable
+    /// [`ZeroTestSettings::exact_fallback`] to accept more inconclusive results
+    /// in exchange for less work.
+    ///
+    /// Numerical nonzero results are heuristic, not certified. Set
+    /// [`ZeroTestSettings::numerical_samples`] to zero if such results are
+    /// unacceptable. Small numerical values are never accepted as proof of zero.
+    ///
+    /// User-defined functions with evaluation info use their registered evaluators
+    /// during numerical testing; their calls are never assigned random values.
+    /// The numerical domains are `Complex<ErrorPropagatingFloat<f64>>` and
+    /// `Complex<Float>`. Missing evaluators for these domains or failed evaluations
+    /// leave the numerical test inconclusive. Numerical zeros cannot prove an identity.
+    ///
+    /// Calls to user-defined functions without evaluation info are assumed
+    /// independent unless they are identical expressions. For example, `f((x+1)^2)`
+    /// and `f(x^2+2*x+1)` may be considered different, so their difference can
+    /// incorrectly return `False`.
+    /// Identities satisfied by such an opaque function can also cause incorrect
+    /// `False` results. This limitation applies even with numerical testing disabled.
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// assert_eq!(parse!("0").check_zero(), ConditionResult::True);
+    /// assert_eq!(parse!("x").check_zero(), ConditionResult::False);
+    /// assert_eq!(parse!("(x+1)^2-x^2-2*x-1").check_zero(), ConditionResult::True);
+    /// assert_eq!(parse!("sin(x)^2+cos(x)^2-1").check_zero(), ConditionResult::True);
+    /// assert_eq!(parse!("log(2)+log(3)-log(6)").check_zero(), ConditionResult::Inconclusive);
+    /// ```
+    fn check_zero(&self) -> ConditionResult {
+        self.as_atom_view().check_zero()
+    }
+
+    /// Test whether the expression is identically zero with explicit settings.
+    /// See [`check_zero`](AtomCore::check_zero) for the result semantics and limitations.
+    /// Default settings are the same as for `check_zero()`. Customize them to
+    /// limit the work spent on a check, increase numerical precision (in bits),
+    /// or choose how floating coefficients are interpreted. There is no tolerance
+    /// that turns small values into zero.
+    ///
+    /// Raising the working precision cannot recover accuracy already lost in
+    /// floating coefficients. Enable [`ZeroTestSettings::treat_floats_as_exact`]
+    /// only when you intend to test their exact stored values, rather than the
+    /// mathematical values they approximate.
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// // Prefer a quicker check, accepting that more identities remain undecided.
+    /// let fast = ZeroTestSettings::new().exact_fallback(false);
+    /// assert_eq!(parse!("(x+1)^2-x^2-2*x-1").check_zero_with(&fast), ConditionResult::Inconclusive);
+    ///
+    /// // Distinguish pi from the exact stored value of a high-precision float.
+    /// let pi = Atom::var(Symbol::PI);
+    /// let difference = &pi - pi.to_float(10000); // decimal digits
+    /// let settings = ZeroTestSettings::new()
+    ///     .max_precision(80_000) // binary bits
+    ///     .treat_floats_as_exact(true);
+    /// assert_eq!(difference.check_zero_with(&settings), ConditionResult::False);
+    /// ```
+    fn check_zero_with(&self, settings: &ZeroTestSettings) -> ConditionResult {
+        self.as_atom_view().check_zero_with(settings)
+    }
+
+    /// Test whether two expressions are mathematically equal with the default settings.
+    ///
+    /// Returns `True` when equality is established wherever both expressions are
+    /// defined, `False` when they are found to differ, and `Inconclusive` when
+    /// the test cannot decide. A `False` result does not rule out equality at
+    /// particular values of the variables.
+    ///
+    /// Use this to compare expressions written in different forms. Use `==`
+    /// to check whether they already have the same expression structure.
+    /// To require proof of equality, use `check_equal(other).is_true()`.
+    /// The numerical and user-defined function limitations of
+    /// [`check_zero`](AtomCore::check_zero) also apply here. Customize the test
+    /// with [`check_equal_with`](AtomCore::check_equal_with).
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let factored = parse!("(x+1)^2");
+    /// let expanded = parse!("x^2+2*x+1");
+    /// assert_ne!(factored, expanded);
+    /// assert_eq!(factored.check_equal(&expanded), ConditionResult::True);
+    /// assert_eq!(parse!("sin(x)^2+cos(x)^2").check_equal(1), ConditionResult::True);
+    /// assert_eq!(parse!("x").check_equal(0), ConditionResult::False);
+    /// assert_eq!(parse!("log(2)+log(3)").check_equal(parse!("log(6)")), ConditionResult::Inconclusive);
+    /// ```
+    fn check_equal<'a, T: Into<AtomOrView<'a>>>(&self, other: T) -> ConditionResult {
+        self.as_atom_view().check_equal(other)
+    }
+
+    /// Test whether two expressions are mathematically equal with explicit settings.
+    ///
+    /// See [`check_equal`](AtomCore::check_equal) for the result meanings and
+    /// limitations. Default settings are the same as for `check_equal(other)`.
+    /// Use [`ZeroTestSettings`] to adjust the work and precision, or to compare
+    /// floating coefficients in both expressions as exact stored values.
+    /// There is no tolerance that makes nearby values equal.
+    /// Differences too small for the input precision can return `Inconclusive`.
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let settings = ZeroTestSettings::new().exact_fallback(false);
+    /// let lhs = parse!("(x+1)^2");
+    /// let rhs = parse!("x^2+2*x+1");
+    /// assert_eq!(lhs.check_equal_with(&rhs, &settings), ConditionResult::Inconclusive);
+    /// assert_eq!(lhs.check_equal(&rhs), ConditionResult::True);
+    /// ```
+    fn check_equal_with<'a, T: Into<AtomOrView<'a>>>(
+        &self,
+        other: T,
+        settings: &ZeroTestSettings,
+    ) -> ConditionResult {
+        self.as_atom_view().check_equal_with(other, settings)
+    }
+
+    /// Test whether the expression is identically zero with a sample limit.
+    ///
+    /// Deprecated: use [`check_zero`](AtomCore::check_zero) for default settings
+    /// or [`check_zero_with`](AtomCore::check_zero_with) to customize the test.
+    ///
+    /// `iterations` limits the finite-field and numerical samples; zero requests
+    /// only a quick check. It does not increase numerical precision.
+    /// `tolerance` is ignored and never turns a small nonzero value into zero.
+    #[deprecated(note = "Use `check_zero()` instead, or `check_zero_with()` for custom settings.")]
+    fn zero_test(&self, iterations: usize, _tolerance: f64) -> ConditionResult {
+        self.check_zero_with(
+            &ZeroTestSettings::default()
+                .finite_field_samples(iterations)
+                .numerical_samples(iterations)
+                .exact_fallback(iterations != 0),
+        )
     }
 
     /// Set the coefficient ring to the multivariate rational polynomial with `vars` variables.
@@ -1180,6 +1409,53 @@ pub trait AtomCore: private::Sealed + Sized {
         )
     }
 
+    /// Convert the expression to a polynomial over an algebraic number field.
+    ///
+    /// Algebraic coefficients occurring in the expression are discovered
+    /// automatically. `generators` are additionally adjoined, which allows the
+    /// coefficient field to contain algebraic numbers that do not occur in the
+    /// expression. Pass an empty slice to use automatic discovery only.
+    ///
+    /// The returned context records how every algebraic expression is embedded
+    /// in the polynomial's coefficient field. When no algebraic numbers are
+    /// discovered or supplied, the context represents the trivial extension of
+    /// [`Q`](tyalias@crate::domains::rational::Q).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let expression = parse!("x^2-2");
+    /// let sqrt_2 = parse!("sqrt(2)");
+    /// let (context, polynomial) = expression
+    ///     .to_polynomial_in_algebraic_extension::<u16>(
+    ///         symbol!("x"),
+    ///         std::slice::from_ref(&sqrt_2),
+    ///     )
+    ///     .unwrap();
+    /// let sqrt_2 = context.image(&sqrt_2).unwrap();
+    ///
+    /// assert_eq!(polynomial.factor().len(), 2);
+    /// assert_eq!(context.field().pow(sqrt_2, 2), context.field().nth(2.into()));
+    /// ```
+    fn to_polynomial_in_algebraic_extension<E: Exponent>(
+        &self,
+        var_map: impl IntoVariableMap,
+        generators: &[Atom],
+    ) -> Result<
+        (
+            AlgebraicContext,
+            MultivariatePolynomial<AlgebraicExtension<Q>, E>,
+        ),
+        String,
+    > {
+        let mut context = AlgebraicContext::from_atom(self.as_atom_view())?;
+        context.adjoin_generators(generators)?;
+        let polynomial = context.to_polynomial(self.as_atom_view(), var_map)?;
+        Ok((context, polynomial))
+    }
+
     /// Convert the atom to a polynomial in specific variables.
     /// All other parts will be collected into the coefficient, which
     /// is a general expression.
@@ -1201,11 +1477,34 @@ pub trait AtomCore: private::Sealed + Sized {
         &self,
         var_map: impl IntoVariableMap,
     ) -> MultivariatePolynomial<AtomField, E> {
+        self.to_polynomial_in_vars_with_field(var_map, &AtomField::new())
+    }
+
+    /// Convert to a polynomial in specific variables using the supplied
+    /// expression coefficient field. Other parts remain expression coefficients.
+    ///
+    /// Unlike [`AtomCore::to_polynomial_in_vars`], this permits configuring
+    /// coefficient normalization and zero testing settings.
+    ///
+    /// ```
+    /// use symbolica::{prelude::*, domains::atom::AtomField};
+    /// let field = AtomField { statistical_zero_test: false, ..AtomField::new() };
+    /// let expression = parse!("t*(x+y)^100");
+    /// let polynomial = expression.to_polynomial_in_vars_with_field::<u32>(symbol!("t"), &field);
+    /// assert_eq!(polynomial.nterms(), 1);
+    /// assert!(!polynomial.ring().statistical_zero_test);
+    /// ```
+    fn to_polynomial_in_vars_with_field<E: Exponent>(
+        &self,
+        var_map: impl IntoVariableMap,
+        field: &AtomField,
+    ) -> MultivariatePolynomial<AtomField, E> {
         let var_map = var_map
             .into_var_map()
             .expect("Could not convert variables to a variable map")
             .expect("A variable map is required");
-        self.as_atom_view().to_polynomial_in_vars(&var_map)
+        self.as_atom_view()
+            .to_polynomial_in_vars_with_field(&var_map, field)
     }
 
     /// Convert the atom to a rational polynomial, optionally in the variable ordering
@@ -1274,6 +1573,31 @@ pub trait AtomCore: private::Sealed + Sized {
                 .into_var_map()
                 .map_err(PolynomialConversionError::InvalidVariableMap)?,
         )
+    }
+
+    /// Convert the expression to a rational polynomial over the algebraic
+    /// number field generated by its coefficients.
+    ///
+    /// The returned context records how algebraic subexpressions are embedded
+    /// in the rational polynomial's coefficient field. When the coefficients
+    /// are rational, the context represents the trivial extension of [`Q`](tyalias@crate::domains::rational::Q).
+    fn to_rational_polynomial_in_algebraic_extension<E: PositiveExponent>(
+        &self,
+        var_map: impl IntoVariableMap,
+    ) -> Result<
+        (
+            AlgebraicContext,
+            RationalPolynomial<AlgebraicExtension<Q>, E>,
+        ),
+        String,
+    >
+    where
+        RationalPolynomial<AlgebraicExtension<Q>, E>:
+            FromNumeratorAndDenominator<AlgebraicExtension<Q>, AlgebraicExtension<Q>, E>,
+    {
+        let mut context = AlgebraicContext::from_atom(self.as_atom_view())?;
+        let polynomial = context.to_rational_polynomial(self.as_atom_view(), var_map)?;
+        Ok((context, polynomial))
     }
 
     /// Convert the atom to a rational polynomial with factorized denominators, optionally in the variable ordering
@@ -1521,6 +1845,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().canonize_tensors(indices)
     }
 
+    /// Convert to a pattern, interpreting wildcard symbols as placeholders.
+    /// Use a literal pattern when wildcard-named symbols should match themselves.
     fn to_pattern(&self) -> Pattern {
         Pattern::from_view(self.as_atom_view(), true)
     }
@@ -1585,7 +1911,8 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().contains(s.into().as_atom_view())
     }
 
-    /// Returns true iff `self` is scalar, i.e. contains only numbers and symbols with the `Scalar` attribute.
+    /// Test whether an expression is scalar under its symbol assumptions.
+    /// Missing attributes give `Inconclusive`, not `False`.
     ///
     /// # Example
     ///
@@ -1593,13 +1920,14 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_scalar"; Scalar);
     /// let expr = parse!("3*2^x_scalar + (1+x_scalar)^2");
-    /// assert!(expr.is_scalar());
+    /// assert!(expr.is_scalar().is_true());
     /// ```
-    fn is_scalar(&self) -> bool {
+    fn is_scalar(&self) -> ConditionResult {
         self.as_atom_view().is_scalar()
     }
 
-    /// Returns true iff an expression is real. Symbols must have the `Real` attribute.
+    /// Test whether an expression is real under its symbol assumptions.
+    /// Returns `Inconclusive` when neither realness nor nonrealness is established.
     ///
     /// # Example
     ///
@@ -1607,27 +1935,30 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_real"; Real);
     /// let expr = parse!("3*2^x_real + (1+x_real)^2 + (1/2)^x_real");
-    /// assert!(expr.is_real());
+    /// assert!(expr.is_real().is_true());
     /// ```
-    fn is_real(&self) -> bool {
+    fn is_real(&self) -> ConditionResult {
         self.as_atom_view().is_real()
     }
 
-    /// Returns true iff an expression only consists of integer numbers and symbols with the `Integer` attribute.
+    /// Test whether an expression is integer under its symbol assumptions.
+    /// Returns `Inconclusive` when neither membership nor nonmembership is established.
     ///
     /// # Example
     ///
     /// ```
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_integer"; Integer);
-    /// let expr = parse!("3*2^x_integer + (1+x_integer)^2");
-    /// assert!(expr.is_integer());
+    /// let expr = parse!("3*2^(x_integer^2) + (1+x_integer)^2");
+    /// assert!(expr.is_integer().is_true());
     /// ```
-    fn is_integer(&self) -> bool {
+    fn is_integer(&self) -> ConditionResult {
         self.as_atom_view().is_integer()
     }
 
-    /// Returns true iff an expression is positive. Symbols must have the `Positive` attribute.
+    /// Test whether an expression is strictly positive under its symbol assumptions.
+    /// Zero is `False`; a real square can be `Inconclusive` because it may vanish.
+    /// Use [`is_nonnegative`](AtomCore::is_nonnegative) for a weak inequality.
     ///
     /// # Example
     ///
@@ -1635,10 +1966,18 @@ pub trait AtomCore: private::Sealed + Sized {
     /// use symbolica::prelude::*;
     /// let _ = symbol!("x_p"; Positive);
     /// let expr = parse!("3*2^x_p + (1+x_p)^2 + (1/2)^x_p");
-    /// assert!(expr.is_positive());
+    /// assert!(expr.is_positive().is_true());
     /// ```
-    fn is_positive(&self) -> bool {
+    fn is_positive(&self) -> ConditionResult {
         self.as_atom_view().is_positive()
+    }
+
+    /// Test whether an expression is real and greater than or equal to zero.
+    /// Returns `Inconclusive` when its sign cannot be established.
+    /// Like the other mathematical property queries, this concerns values where
+    /// the expression is defined; it does not prove absence of poles.
+    fn is_nonnegative(&self) -> ConditionResult {
+        self.as_atom_view().is_nonnegative()
     }
 
     /// Returns true iff an expression has no explicit infinities and is not indeterminate.
@@ -1979,6 +2318,23 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn visitor<'a, F: FnMut(AtomView<'a>) -> bool>(&'a self, v: &mut F) {
         self.as_atom_view().visitor(v)
+    }
+
+    /// Return the position of `part` within `self`, if the `part` refers to data within `self`.
+    /// This position can be used with [`AtomIndex::index`](crate::atom::AtomIndex::index)
+    /// to retrieve the corresponding expression view within `self`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("f(g(3+x, 2), h(4))");
+    /// let part = expr.index([0, 0, 1]).unwrap();
+    /// let pos = expr.position(part).unwrap();
+    /// assert_eq!(pos, [0, 0, 1]);
+    /// ```
+    fn position<T: AtomCore>(&self, part: T) -> Option<Vec<usize>> {
+        self.as_atom_view().position(part.as_atom_view())
     }
 
     /// Return an iterator over matched expressions.

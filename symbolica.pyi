@@ -23,6 +23,1264 @@ from typing import Any, Callable, Iterator, Literal, Sequence, overload
 import numpy as np
 import numpy.typing as npt
 
+class Float:
+    """An immutable real number with arbitrary binary precision.
+
+    Notes
+    -----
+    Values use binary floating-point arithmetic, so decimal fractions need not
+    be exact. Arithmetic tracks accuracy and may change the result's precision.
+    Native numeric operands are converted at this Float's precision; existing
+    Float operands keep their own precision. Increasing precision does not
+    recover lost digits. Operations return new values; Float is unhashable.
+
+    Supports arithmetic and real comparisons with Float, int, float and Decimal.
+    Addition, subtraction, multiplication and division with complex operands
+    return ComplexFloat. Use float(x), int(x), to_decimal() or as_integer_ratio()
+    for explicit conversion. str(x) displays significant digits; repr(x)
+    preserves value and precision. Formatting accepts Decimal-style specifications.
+
+    Examples
+    --------
+    >>> from symbolica import Float
+    >>> x = Float("1.25", decimal_digits=80)
+    >>> x.precision
+    266
+    >>> x.as_integer_ratio()
+    (5, 4)
+    >>> str(x + 2)
+    '3.25'
+    >>> Float.from_ratio(1, 3, precision=200).to_decimal(10)
+    Decimal('0.3333333333')
+    >>> Float.pi(decimal_digits=60).sin().is_finite()
+    True
+    """
+    def __new__(cls, value: Float | int | float | str | Decimal | None = None, *, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct an immutable real number with arbitrary binary precision.
+
+        Parameters
+        ----------
+        value : Float, int, float, str, Decimal, optional
+            Initial value; omitted or None means zero. Strings and Decimal values
+            are rounded directly to the requested binary precision. For decimal
+            input, use a string such as "0.1".
+        precision : int, optional
+            Working precision in bits. Mutually exclusive with decimal_digits.
+        decimal_digits : int, optional
+            Decimal working precision, converted to ceil(decimal_digits * log2(10)) bits.
+
+        Notes
+        -----
+        Without a precision option, Float inputs retain their precision, native
+        floats use 53 bits, and strings, integers and Decimal inputs infer precision
+        from their significant decimal digits, with a minimum of 53 bits.
+        Unsupported input types raise TypeError; malformed strings, invalid precision,
+        or supplying both precision options raise ValueError. Negative or out-of-range
+        integer precision arguments raise OverflowError.
+        """
+    @staticmethod
+    def from_ratio(numerator: int, denominator: int, *, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct numerator / denominator from two Python integers.
+
+        Specify precision in bits or decimal_digits, never both; the default is
+        53 bits. The rational is rounded directly without conversion through a
+        native float. A zero denominator raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        numerator : int
+            Numerator of the rational value; accepts arbitrary-sized Python
+            integers.
+        denominator : int
+            Nonzero denominator of the rational value; either sign is accepted.
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+
+        Examples
+        --------
+        >>> Float.from_ratio(1, 8, precision=100).to_decimal()
+        Decimal('0.125')
+        """
+    @property
+    def precision(self) -> int:
+        """The working precision in bits. Read-only; use with_precision() to return a rounded copy."""
+    @property
+    def real(self) -> Float:
+        """The real part as a Float with the same value and precision."""
+    @property
+    def imag(self) -> Float:
+        """Zero as a Float at this value's precision."""
+    def with_precision(self, *, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Return a copy rounded to a new working precision.
+
+        Specify exactly one of precision (bits) or decimal_digits. Missing, invalid,
+        or conflicting precision options raise ValueError; negative or out-of-range
+        integer arguments raise OverflowError. Increasing precision
+        cannot recover digits already lost. The original value is unchanged.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. Exactly one precision option is required.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. Exactly one precision
+            option is required.
+        """
+    def to_decimal(self, digits: int | None = None) -> Decimal:
+        """Convert the stored binary value to Decimal.
+
+        With digits omitted, conversion is exact. A positive digits value rounds
+        to that many significant decimal digits, using round-half-even. Neither
+        mode depends on or modifies Python's global decimal context. Preserves
+        signed zero, NaN and infinity. Zero digits raises ValueError; negative or
+        out-of-range integer digits raise OverflowError.
+
+        Parameters
+        ----------
+        digits : int, optional
+            Positive number of significant decimal digits per converted value.
+            Omitted or None converts the stored binary value exactly; otherwise
+            round half-even.
+
+        Examples
+        --------
+        >>> Float.from_ratio(1, 3, precision=100).to_decimal(digits=5)
+        Decimal('0.33333')
+        """
+    def as_integer_ratio(self) -> tuple[int, int]:
+        """Return the exact (numerator, denominator) of the stored binary value.
+
+        Both entries are Python integers and the denominator is positive. This
+        describes the stored value, which may approximate the original decimal
+        input. NaN and infinity raise ValueError.
+
+        Examples
+        --------
+        >>> Float("1.25").as_integer_ratio()
+        (5, 4)
+        """
+    def is_finite(self) -> bool:
+        """Return True for finite values, including zero; False for NaN and infinities."""
+    def is_nan(self) -> bool:
+        """Return whether the value is NaN (not a number)."""
+    def is_infinite(self) -> bool:
+        """Return whether the value is positive or negative infinity; False for NaN."""
+    def __str__(self) -> str:
+        """Return a decimal display using significant digits appropriate to the precision."""
+    def _repr_html_(self) -> str:
+        """Return HTML with the same significant digits as str(self)."""
+    def _repr_latex_(self) -> str:
+        """Return LaTeX with the same significant digits as str(self), using powers of ten for scientific notation."""
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Write the same significant digits as str(self) to a notebook pretty printer.
+
+        Parameters
+        ----------
+        pretty : object
+            Pretty printer providing a text(string) method.
+        cycle : bool
+            Whether the printer detected a reference cycle; prints ... if True.
+        """
+    def __repr__(self) -> str:
+        """Return a constructor expression that preserves the value and its precision."""
+    def __format__(self, spec: str) -> str:
+        """Format with a Decimal-style specification. An empty specification uses str(self).
+
+        Parameters
+        ----------
+        spec : str
+            Decimal-style format specification, such as ".12f". An empty string uses
+            str(self).
+        """
+    def __float__(self) -> float:
+        """Convert to a native binary64 float, potentially losing precision or overflowing to infinity."""
+    def __int__(self) -> int:
+        """Convert to a Python integer by truncating toward zero. NaN and infinity cannot be converted."""
+    def __bool__(self) -> bool:
+        """Return False for zero and True otherwise, including NaN."""
+    def __copy__(self) -> Float:
+        """Return a copy preserving the value and precision."""
+    def __deepcopy__(self, memo: Any) -> Float:
+        """Return a copy preserving the value and precision.
+
+        Parameters
+        ----------
+        memo : dict
+            Memo dictionary supplied by copy.deepcopy.
+        """
+    def __eq__(self, other: object) -> bool:
+        """Compare numeric values exactly across compatible scalar types; NaN is unequal to every value.
+
+        Parameters
+        ----------
+        other : object
+            Value to compare numerically. Compatible numeric types compare by value;
+            unsupported types are not equal.
+        """
+    def __ne__(self, other: object) -> bool:
+        """Return the negation of numeric equality, including True for NaN.
+
+        Parameters
+        ----------
+        other : object
+            Value to compare numerically. Compatible numeric types compare by value;
+            unsupported types are not equal.
+        """
+    def __lt__(self, other: Float | int | float | Decimal) -> bool:
+        """Return self < other using numeric comparison. Comparisons with NaN return False.
+
+        Parameters
+        ----------
+        other : Float, int, float or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __le__(self, other: Float | int | float | Decimal) -> bool:
+        """Return self <= other using numeric comparison. Comparisons with NaN return False.
+
+        Parameters
+        ----------
+        other : Float, int, float or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __gt__(self, other: Float | int | float | Decimal) -> bool:
+        """Return self > other using numeric comparison. Comparisons with NaN return False.
+
+        Parameters
+        ----------
+        other : Float, int, float or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __ge__(self, other: Float | int | float | Decimal) -> bool:
+        """Return self >= other using numeric comparison. Comparisons with NaN return False.
+
+        Parameters
+        ----------
+        other : Float, int, float or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __neg__(self) -> Float:
+        """Return the additive inverse."""
+    def __pos__(self) -> Float:
+        """Return a copy of this value."""
+    def __abs__(self) -> Float:
+        """Return the magnitude as a real Float."""
+    def __pow__(self, exponent: Float | int | float | Decimal, modulo: None = None) -> Float:
+        """Raise to an integer or real numeric exponent. Negative integer powers are supported; zero to a negative power raises ZeroDivisionError. Modular powers are unsupported.
+
+        Parameters
+        ----------
+        exponent : Float, int, float or Decimal
+            Numeric exponent. Use ** for signed integer powers.
+        modulo : None, optional
+            Must be None. Three-argument modular exponentiation is unsupported.
+        """
+    def sqrt(self) -> Float:
+        """Return the nonnegative square root. Negative real inputs yield NaN; use ComplexFloat for complex roots."""
+    def exp(self) -> Float:
+        """Return the exponential e**self with accuracy tracking."""
+    def ln(self) -> Float:
+        """Return the natural logarithm. Zero yields negative infinity; negative inputs yield NaN."""
+    def log(self) -> Float:
+        """Alias for ln(), the natural logarithm (base e)."""
+    def log1p(self) -> Float:
+        """Return log(1+self), retaining small increments lost when adding one."""
+    def sin(self) -> Float:
+        """Return the sine, with the argument in radians."""
+    def cos(self) -> Float:
+        """Return the cosine, with the argument in radians."""
+    def tan(self) -> Float:
+        """Return the tangent, with the argument in radians."""
+    @overload
+    def __add__(self, other: Float | int | float | Decimal) -> Float:
+        """Return self + other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __add__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return self + other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __radd__(self, other: Float | int | float | Decimal) -> Float:
+        """Return other + self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __radd__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return other + self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __sub__(self, other: Float | int | float | Decimal) -> Float:
+        """Return self - other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __sub__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return self - other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rsub__(self, other: Float | int | float | Decimal) -> Float:
+        """Return other - self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rsub__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return other - self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __mul__(self, other: Float | int | float | Decimal) -> Float:
+        """Return self * other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __mul__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return self * other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rmul__(self, other: Float | int | float | Decimal) -> Float:
+        """Return other * self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rmul__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return other * self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __truediv__(self, other: Float | int | float | Decimal) -> Float:
+        """Return self / other with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __truediv__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return self / other with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rtruediv__(self, other: Float | int | float | Decimal) -> Float:
+        """Return other / self with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    @overload
+    def __rtruediv__(self, other: ComplexFloat | complex) -> ComplexFloat:
+        """Return other / self with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def asin(self) -> Float:
+        """Return the inverse sine in radians, in [-pi/2, pi/2]. Inputs outside [-1, 1] yield NaN."""
+    def acos(self) -> Float:
+        """Return the inverse cosine in radians, in [0, pi]. Inputs outside [-1, 1] yield NaN."""
+    def atan(self) -> Float:
+        """Return the inverse tangent in radians, in [-pi/2, pi/2]."""
+    def sinh(self) -> Float:
+        """Return the hyperbolic sine with accuracy tracking."""
+    def cosh(self) -> Float:
+        """Return the hyperbolic cosine with accuracy tracking."""
+    def tanh(self) -> Float:
+        """Return the hyperbolic tangent with accuracy tracking."""
+    def sech(self) -> Float:
+        """Return the reciprocal hyperbolic cosine without overflowing an intermediate cosh."""
+    def csch(self) -> Float:
+        """Return the reciprocal hyperbolic sine, retaining accuracy near zero and at infinity."""
+    def asinh(self) -> Float:
+        """Return the inverse hyperbolic sine."""
+    def acosh(self) -> Float:
+        """Return the nonnegative inverse hyperbolic cosine. Inputs below one yield NaN."""
+    def atanh(self) -> Float:
+        """Return the inverse hyperbolic tangent. Inputs outside [-1, 1] yield NaN; +/-1 yield signed infinity."""
+    @staticmethod
+    def pi(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct pi with precision in bits or decimal_digits (default: 53 bits).
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def e(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct Euler's number e with precision in bits or decimal_digits (default: 53 bits).
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def euler(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct the Euler-Mascheroni constant with precision in bits or decimal_digits (default: 53 bits).
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def euler_gamma(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Alias for euler(), the Euler-Mascheroni constant; precision defaults to 53 bits.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def phi(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct the golden ratio (1+sqrt(5))/2 with precision in bits or decimal_digits (default: 53 bits).
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def new_zero(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct zero with precision in bits or decimal_digits (default: 53 bits). Use zero() to retain instance precision.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def new_one(*, precision: int | None = None, decimal_digits: int | None = None) -> Float:
+        """Construct one with precision in bits or decimal_digits (default: 53 bits). Use one() to retain instance precision.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits.
+        """
+    @staticmethod
+    def i() -> Float | None:
+        """Return None. Construct the imaginary unit with ComplexFloat.i()."""
+    def conjugate(self) -> Float:
+        """Return a copy with the same value and precision."""
+    def to_f64(self) -> float:
+        """Convert to a native binary64 float; alias for float(self). Precision can be lost and overflow yields infinity."""
+    def round_to_nearest_integer(self) -> int:
+        """Return the nearest Python integer, rounding ties to even. NaN and infinity raise ValueError."""
+    def to_usize_clamped(self) -> int:
+        """Round ties to even and clamp to [0, 2**pointer_bits-1]. Negative values become zero, positive infinity becomes the maximum, and NaN raises ValueError."""
+    def conj(self) -> Float:
+        """Alias for conjugate()."""
+    def neg(self) -> Float:
+        """Return the additive inverse, equivalent to -self."""
+    def zero(self) -> Float:
+        """Return zero at this value's precision."""
+    def one(self) -> Float:
+        """Return one at this value's precision."""
+    def nan(self) -> Float:
+        """Return NaN at this value's precision."""
+    def inv(self) -> Float:
+        """Return 1/self. Zero raises ZeroDivisionError."""
+    def norm(self) -> Float:
+        """Return the magnitude as a real Float, equivalent to abs(self)."""
+    def hypot(self, other: Float | int | float | Decimal) -> Float:
+        """Return sqrt(self**2 + other**2), avoiding unnecessary overflow and underflow.
+
+        Parameters
+        ----------
+        other : Float, int, float, Decimal
+            Second coordinate. Native numbers use this value's precision;
+            existing arbitrary-precision scalars retain their precision.
+        """
+    def is_zero(self) -> bool:
+        """Return whether the value is zero; signed zero also counts as zero."""
+    def is_one(self) -> bool:
+        """Return whether the value equals one."""
+    def is_fully_zero(self) -> bool:
+        """Return whether the value is exactly zero."""
+    def fixed_precision(self) -> bool:
+        """Return False: arithmetic dynamically tracks precision for these scalar types."""
+    def get_precision(self) -> int:
+        """Return the working precision in bits; alias for the precision property."""
+    def get_epsilon(self) -> float:
+        """Return 2**(-precision) as a native float. Very high precision can underflow to zero."""
+    def from_usize(self, value: int) -> Float:
+        """Convert a nonnegative platform-sized integer at this value's precision. Out-of-range inputs raise OverflowError.
+
+        Parameters
+        ----------
+        value : int
+            Integer in [0, 2**pointer_bits-1] to convert.
+        """
+    def from_i64(self, value: int) -> Float:
+        """Convert a signed 64-bit integer at this value's precision. Out-of-range inputs raise OverflowError.
+
+        Parameters
+        ----------
+        value : int
+            Integer in [-2**63, 2**63-1] to convert.
+        """
+    def from_rational(self, numerator: int, denominator: int) -> Float:
+        """Convert numerator / denominator at this value's precision. Both inputs must be Python integers; zero denominator raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        numerator : int
+            Numerator of the rational value; accepts arbitrary-sized Python
+            integers.
+        denominator : int
+            Nonzero denominator of the rational value; either sign is accepted.
+        """
+    def sample_unit(self, rng: Any = None) -> Float:
+        """Sample uniformly from [0, 1) using the full working precision.
+
+        rng must supply getrandbits(bits); omitted or None uses Python's random
+        module. Pass random.Random(seed) for reproducibility.
+
+        Parameters
+        ----------
+        rng : object, optional
+            Random generator with a getrandbits(bits) method returning an integer in
+            [0, 2**bits). Omitted or None uses Python's random module; use
+            random.Random(seed) for reproducible samples.
+        """
+    def set_from(self, other: Float | int | float | str | Decimal) -> Float:
+        """Return a new value converted from other, with precision inferred as in the constructor.
+
+        Parameters
+        ----------
+        other : Float, int, float, str or Decimal
+            Value to copy or convert using constructor precision inference.
+        """
+    def pow(self, exponent: int) -> Float:
+        """Raise to an unsigned 64-bit integer exponent. Negative or out-of-range exponents raise OverflowError; use ** for signed integer powers.
+
+        Parameters
+        ----------
+        exponent : int
+            Unsigned exponent in [0, 2**64-1]; zero returns one, including for a
+            zero base.
+        """
+    def powf(self, exponent: Float | int | float | Decimal) -> Float:
+        """Raise to a real numeric exponent with accuracy tracking. Zero to a negative power raises ZeroDivisionError; non-real results yield NaN.
+
+        Parameters
+        ----------
+        exponent : Float, int, float or Decimal
+            Numeric exponent. Use ** for signed integer powers.
+        """
+    def atan2(self, x: Float | int | float | Decimal) -> Float:
+        """Return the quadrant-aware angle atan2(self, x) in radians in [-pi, pi]. Accepts real numeric operands and preserves signed-zero quadrant conventions.
+
+        Parameters
+        ----------
+        x : Float, int, float or Decimal
+            Horizontal coordinate; self is the vertical coordinate in atan2(self,
+            x).
+        """
+    def mul_add(self, a: Float | int | float | Decimal, b: Float | int | float | Decimal) -> Float:
+        """Return self*a+b with accuracy tracking, rounding the multiplication and addition separately.
+
+        Parameters
+        ----------
+        a : Float, int, float or Decimal
+            Multiplier in self*a+b.
+        b : Float, int, float or Decimal
+            Addend in self*a+b.
+        """
+
+
+class ComplexFloat:
+    """An immutable complex number with arbitrary-precision Float components.
+
+    Notes
+    -----
+    Each component tracks its own precision. The precision property reports
+    the minimum; real.precision and imag.precision expose each component.
+
+    Arithmetic accepts Float, ComplexFloat, int, float, complex and Decimal
+    operands. Use the constructor to convert strings or (real, imag) pairs.
+    Accuracy tracking may change component precision. Values are immutable and
+    unhashable. Equality is supported; ordering comparisons raise TypeError.
+    abs(z) and norm() return a real Float. Elementary functions use the principal
+    complex branch; signed zero selects the side of a branch cut where applicable.
+
+    Use complex(z) for a native complex value, as_tuple() for Float components,
+    or to_decimal_tuple() for Decimal components. Decimal conversion is exact
+    by default and independent of the global decimal context.
+
+    Examples
+    --------
+    >>> from symbolica import ComplexFloat, Float
+    >>> z = ComplexFloat("3", "4", decimal_digits=60)
+    >>> z.as_tuple() == (Float(3), Float(4))
+    True
+    >>> abs(z) == Float(5)
+    True
+    >>> str(z.conjugate())
+    '(3-4j)'
+    >>> ComplexFloat("1.25-2.5j").to_decimal_tuple()
+    (Decimal('1.25'), Decimal('-2.5'))
+    >>> ComplexFloat.i(precision=200) ** 2 == -1
+    True
+    """
+    def __new__(cls, real: ComplexFloat | Float | int | float | complex | str | Decimal | tuple[Float | int | float | str | Decimal, Float | int | float | str | Decimal] | None = None, imag: Float | int | float | str | Decimal | None = None, *, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct an immutable complex number from scalars or a complex value.
+
+        Parameters
+        ----------
+        real : ComplexFloat, Float, int, float, complex, str, Decimal, tuple, optional
+            Real component when imag is supplied. Otherwise, accepts a real scalar,
+            a complete complex value, a (real, imag) pair, or a string such as
+            "1.25-2.5j", "(1+2i)" or "-j". Omitted or None means zero.
+        imag : Float, int, float, str, Decimal, optional
+            Imaginary component. When supplied, real must also be a real scalar.
+        precision : int, optional
+            Working precision of both components in bits; exclusive with decimal_digits.
+        decimal_digits : int, optional
+            Decimal working precision for both components, converted to
+            ceil(decimal_digits * log2(10)) bits.
+
+        Notes
+        -----
+        Without a precision option, existing components retain their precision;
+        native complex components use 53 bits. Other components follow Float's
+        precision inference. precision reports the minimum component precision;
+        real.precision and imag.precision expose the individual values.
+        Invalid inputs raise TypeError, ValueError or OverflowError, as for Float.
+        """
+    @property
+    def real(self) -> Float:
+        """The real component as a Float, preserving its own precision."""
+    @property
+    def imag(self) -> Float:
+        """The imaginary component as a Float, preserving its own precision."""
+    @property
+    def precision(self) -> int:
+        """The minimum component precision in bits. Read-only; inspect real.precision and imag.precision individually."""
+    def with_precision(self, *, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Return a copy with both components rounded to the requested precision in bits or decimal_digits. Specify exactly one option; invalid options raise ValueError or OverflowError. Increasing precision cannot recover lost digits.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. Exactly one precision option is required. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. Exactly one precision
+            option is required. Applies to both components.
+        """
+    def to_decimal_tuple(self, digits: int | None = None) -> tuple[Decimal, Decimal]:
+        """Return (real, imag) as Decimal values.
+
+        Conversion of each stored component is exact when digits is omitted.
+        A positive digits value rounds each component to that many significant
+        decimal digits, using round-half-even. Conversion is independent of
+        Python's global decimal context and preserves signed zero and special values.
+
+        Parameters
+        ----------
+        digits : int, optional
+            Positive number of significant decimal digits per converted value.
+            Omitted or None converts the stored binary value exactly; otherwise
+            round half-even.
+
+        Examples
+        --------
+        >>> ComplexFloat("1.25", "-2.5").to_decimal_tuple()
+        (Decimal('1.25'), Decimal('-2.5'))
+        """
+    def as_tuple(self) -> tuple[Float, Float]:
+        """Return (real, imag) as two Float values, preserving their individual precisions."""
+    def is_finite(self) -> bool:
+        """Return True only when both components are finite."""
+    def is_nan(self) -> bool:
+        """Return True if either component is NaN."""
+    def conjugate(self) -> ComplexFloat:
+        """Return the complex conjugate, negating the imaginary component."""
+    def __str__(self) -> str:
+        """Return a decimal display using significant digits appropriate to the precision."""
+    def _repr_html_(self) -> str:
+        """Return HTML with the same significant digits as str(self)."""
+    def _repr_latex_(self) -> str:
+        """Return LaTeX preserving each component's displayed precision, using i for the imaginary unit."""
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Write the same significant digits as str(self) to a notebook pretty printer.
+
+        Parameters
+        ----------
+        pretty : object
+            Pretty printer providing a text(string) method.
+        cycle : bool
+            Whether the printer detected a reference cycle; prints ... if True.
+        """
+    def __repr__(self) -> str:
+        """Return a constructor expression that preserves the value and its precision."""
+    def __format__(self, spec: str) -> str:
+        """Format with a Decimal-style specification, applied separately to complex components. An empty specification uses str(self).
+
+        Parameters
+        ----------
+        spec : str
+            Decimal-style format specification, such as ".12f". An empty string uses
+            str(self). Applied to both components.
+        """
+    def __complex__(self) -> complex:
+        """Convert both components to native binary64 floats, potentially losing precision or overflowing to infinity."""
+    def __bool__(self) -> bool:
+        """Return False for zero and True otherwise, including NaN."""
+    def __copy__(self) -> ComplexFloat:
+        """Return a copy preserving the value and component precisions."""
+    def __deepcopy__(self, memo: Any) -> ComplexFloat:
+        """Return a copy preserving the value and component precisions.
+
+        Parameters
+        ----------
+        memo : dict
+            Memo dictionary supplied by copy.deepcopy.
+        """
+    def __eq__(self, other: object) -> bool:
+        """Compare numeric values exactly across compatible scalar types; NaN is unequal to every value.
+
+        Parameters
+        ----------
+        other : object
+            Value to compare numerically. Compatible numeric types compare by value;
+            unsupported types are not equal.
+        """
+    def __ne__(self, other: object) -> bool:
+        """Return the negation of numeric equality, including True for NaN.
+
+        Parameters
+        ----------
+        other : object
+            Value to compare numerically. Compatible numeric types compare by value;
+            unsupported types are not equal.
+        """
+    def __neg__(self) -> ComplexFloat:
+        """Return the additive inverse."""
+    def __pos__(self) -> ComplexFloat:
+        """Return a copy of this value."""
+    def __abs__(self) -> Float:
+        """Return the magnitude as a real Float."""
+    def __pow__(self, exponent: Float | int | float | Decimal | ComplexFloat | complex, modulo: None = None) -> ComplexFloat:
+        """Raise to an integer, real or complex numeric exponent. Integer powers support negative exponents; other powers use the principal branch. Modular powers are unsupported.
+
+        Parameters
+        ----------
+        exponent : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric exponent. Use ** for signed integer powers. Non-integer powers
+            use the principal complex branch.
+        modulo : None, optional
+            Must be None. Three-argument modular exponentiation is unsupported.
+        """
+    def sqrt(self) -> ComplexFloat:
+        """Return the principal complex square root; signed zero distinguishes the sides of the negative-real branch cut."""
+    def exp(self) -> ComplexFloat:
+        """Return the exponential e**self with accuracy tracking."""
+    def ln(self) -> ComplexFloat:
+        """Return the principal complex natural logarithm. Its imaginary part is the argument in [-pi, pi]."""
+    def log(self) -> ComplexFloat:
+        """Alias for ln(), the principal natural logarithm (base e)."""
+    def log1p(self) -> ComplexFloat:
+        """Return the principal log(1+self), retaining small increments and signed-zero branch cuts."""
+    def sin(self) -> ComplexFloat:
+        """Return the sine, with the argument in radians."""
+    def cos(self) -> ComplexFloat:
+        """Return the cosine, with the argument in radians."""
+    def __add__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return self + other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __radd__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return other + self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __sub__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return self - other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __rsub__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return other - self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __mul__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return self * other with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __rmul__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return other * self with accuracy tracking; complex operands produce ComplexFloat.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __truediv__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return self / other with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def __rtruediv__(self, other: ComplexFloat | Float | int | float | complex | Decimal) -> ComplexFloat:
+        """Return other / self with accuracy tracking; complex operands produce ComplexFloat. A zero divisor raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric operand. Existing arbitrary-precision scalars retain their
+            precision; native numbers are converted at the receiver's precision.
+        """
+    def asin(self) -> ComplexFloat:
+        """Return the principal complex inverse sine; signed zero selects the side of a real-axis branch cut."""
+    def acos(self) -> ComplexFloat:
+        """Return the principal complex inverse cosine; signed zero selects the side of a real-axis branch cut."""
+    def atan(self) -> ComplexFloat:
+        """Return the principal complex inverse tangent."""
+    def sinh(self) -> ComplexFloat:
+        """Return the hyperbolic sine with accuracy tracking."""
+    def cosh(self) -> ComplexFloat:
+        """Return the hyperbolic cosine with accuracy tracking."""
+    def tanh(self) -> ComplexFloat:
+        """Return the hyperbolic tangent with accuracy tracking."""
+    def sech(self) -> ComplexFloat:
+        """Return the reciprocal hyperbolic cosine without overflowing an intermediate cosh."""
+    def csch(self) -> ComplexFloat:
+        """Return the reciprocal hyperbolic sine, retaining accuracy near zero and at infinity."""
+    def asinh(self) -> ComplexFloat:
+        """Return the principal complex inverse hyperbolic sine."""
+    def acosh(self) -> ComplexFloat:
+        """Return the principal complex inverse hyperbolic cosine."""
+    def atanh(self) -> ComplexFloat:
+        """Return the principal complex inverse hyperbolic tangent."""
+    def tan(self) -> ComplexFloat:
+        """Return the tangent, with the argument in radians."""
+    @staticmethod
+    def pi(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct pi with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def e(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct Euler's number e with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def euler(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct the Euler-Mascheroni constant with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def euler_gamma(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Alias for euler(), the Euler-Mascheroni constant; precision defaults to 53 bits.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def phi(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct the golden ratio (1+sqrt(5))/2 with precision in bits or decimal_digits (default: 53 bits). Complex results have zero imaginary part.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def new_zero(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct zero with precision in bits or decimal_digits (default: 53 bits). Use zero() to retain instance precision.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def new_one(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct one with precision in bits or decimal_digits (default: 53 bits). Use one() to retain instance precision.
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def i(*, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct the imaginary unit 0+1j with precision in bits or decimal_digits (default: 53 bits).
+
+        Parameters
+        ----------
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+        """
+    @staticmethod
+    def from_ratio(numerator: int, denominator: int, *, precision: int | None = None, decimal_digits: int | None = None) -> ComplexFloat:
+        """Construct numerator / denominator from two Python integers.
+
+        Specify precision in bits or decimal_digits, never both; the default is
+        53 bits. The rational is rounded directly without conversion through a
+        native float. A zero denominator raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        numerator : int
+            Numerator of the rational value; accepts arbitrary-sized Python
+            integers.
+        denominator : int
+            Nonzero denominator of the rational value; either sign is accepted.
+        precision : int, optional
+            Positive working precision in bits. Mutually exclusive with
+            decimal_digits. If neither option is supplied, use 53 bits. Applies to
+            both components.
+        decimal_digits : int, optional
+            Positive decimal working precision, converted to ceil(decimal_digits *
+            log2(10)) bits. Mutually exclusive with precision. If neither option is
+            supplied, use 53 bits. Applies to both components.
+
+        Examples
+        --------
+        >>> Float.from_ratio(1, 8, precision=100).to_decimal()
+        Decimal('0.125')
+        """
+    def conj(self) -> ComplexFloat:
+        """Alias for conjugate()."""
+    def neg(self) -> ComplexFloat:
+        """Return the additive inverse, equivalent to -self."""
+    def zero(self) -> ComplexFloat:
+        """Return zero at this value's precision, preserving component precisions."""
+    def one(self) -> ComplexFloat:
+        """Return one at this value's precision, preserving component precisions."""
+    def nan(self) -> ComplexFloat:
+        """Return NaN at this value's precision; both complex components become NaN."""
+    def inv(self) -> ComplexFloat:
+        """Return 1/self. Zero raises ZeroDivisionError."""
+    def norm(self) -> Float:
+        """Return the magnitude as a real Float, equivalent to abs(self)."""
+    def hypot(self, other: Float | int | float | Decimal | ComplexFloat | complex) -> Float:
+        """Return sqrt(abs(self)**2 + abs(other)**2) as a real Float, using scaled arithmetic.
+
+        Parameters
+        ----------
+        other : Float, int, float, Decimal, ComplexFloat, complex
+            Second coordinate. Native numbers use this value's precision;
+            existing arbitrary-precision scalars retain their precision.
+        """
+    def is_zero(self) -> bool:
+        """Return whether the value is zero; signed zero also counts as zero."""
+    def is_one(self) -> bool:
+        """Return whether the value equals one (1+0j for ComplexFloat)."""
+    def is_fully_zero(self) -> bool:
+        """Return whether the value is exactly zero in every component."""
+    def fixed_precision(self) -> bool:
+        """Return False: arithmetic dynamically tracks precision for these scalar types."""
+    def get_precision(self) -> int:
+        """Return the working precision in bits; alias for the precision property."""
+    def get_epsilon(self) -> float:
+        """Return 2**(-precision) as a native float. Very high precision can underflow to zero."""
+    def from_usize(self, value: int) -> ComplexFloat:
+        """Convert a nonnegative platform-sized integer at this value's precision. Out-of-range inputs raise OverflowError.
+
+        Parameters
+        ----------
+        value : int
+            Integer in [0, 2**pointer_bits-1] to convert.
+        """
+    def from_i64(self, value: int) -> ComplexFloat:
+        """Convert a signed 64-bit integer at this value's precision. Out-of-range inputs raise OverflowError.
+
+        Parameters
+        ----------
+        value : int
+            Integer in [-2**63, 2**63-1] to convert.
+        """
+    def from_rational(self, numerator: int, denominator: int) -> ComplexFloat:
+        """Convert numerator / denominator at this value's precision. Both inputs must be Python integers; zero denominator raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        numerator : int
+            Numerator of the rational value; accepts arbitrary-sized Python
+            integers.
+        denominator : int
+            Nonzero denominator of the rational value; either sign is accepted.
+        """
+    def sample_unit(self, rng: Any = None) -> ComplexFloat:
+        """Sample uniformly from [0, 1) using the full working precision.
+
+        rng must supply getrandbits(bits); omitted or None uses Python's random
+        module. Pass random.Random(seed) for reproducibility. Complex samples have
+        zero imaginary part and preserve the receiver's component precisions.
+
+        Parameters
+        ----------
+        rng : object, optional
+            Random generator with a getrandbits(bits) method returning an integer in
+            [0, 2**bits). Omitted or None uses Python's random module; use
+            random.Random(seed) for reproducible samples.
+        """
+    def set_from(self, other: ComplexFloat | Float | int | float | str | Decimal | complex | tuple[Float | int | float | str | Decimal, Float | int | float | str | Decimal]) -> ComplexFloat:
+        """Return a new value converted from other, with precision inferred as in the constructor.
+
+        Parameters
+        ----------
+        other : Float, ComplexFloat, int, float, complex, str, Decimal or tuple
+            Value to copy or convert using constructor precision inference.
+            A tuple supplies (real, imag).
+        """
+    def pow(self, exponent: int) -> ComplexFloat:
+        """Raise to an unsigned 64-bit integer exponent. Negative or out-of-range exponents raise OverflowError; use ** for signed integer powers.
+
+        Parameters
+        ----------
+        exponent : int
+            Unsigned exponent in [0, 2**64-1]; zero returns one, including for a
+            zero base.
+        """
+    def powf(self, exponent: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
+        """Raise to a real or complex numeric exponent on the principal branch. Zero to a negative-real or non-real exponent raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        exponent : Float, ComplexFloat, int, float, complex or Decimal
+            Numeric exponent. Use ** for signed integer powers. Non-integer powers
+            use the principal complex branch.
+        """
+    def atan2(self, x: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
+        """Return atan(self/x) for complex arguments; two real arguments use the usual quadrant-aware atan2. A zero complex denominator raises ZeroDivisionError.
+
+        Parameters
+        ----------
+        x : Float, ComplexFloat, int, float, complex or Decimal
+            Horizontal coordinate; self is the vertical coordinate in atan2(self,
+            x). For non-real arguments, this is the divisor in atan(self/x).
+        """
+    def mul_add(self, a: Float | int | float | Decimal | ComplexFloat | complex, b: Float | int | float | Decimal | ComplexFloat | complex) -> ComplexFloat:
+        """Return self*a+b with accuracy tracking, rounding the multiplication and addition separately.
+
+        Parameters
+        ----------
+        a : Float, ComplexFloat, int, float, complex or Decimal
+            Multiplier in self*a+b.
+        b : Float, ComplexFloat, int, float, complex or Decimal
+            Addend in self*a+b.
+        """
+
 
 def use_custom_logger() -> None:
     """
@@ -33,12 +1291,10 @@ def use_custom_logger() -> None:
     This function must be called before any Symbolica logging events are emitted.
     """
 
-
 def get_namespace() -> str:
     """
     Get the Symbolica namespace for the calling module. Use `set_namespace` to set a namespace.
     """
-
 
 def set_namespace(namespace: str) -> None:
     """
@@ -53,18 +1309,36 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
+def set_library_key(key: str) -> None:
+    """
+    Set the Symbolica library key for this Python package.
+
+    Obtaining and using a library key requires a separate agreement with Symbolica.
+    Contact license@symbolica.io to arrange one. Possessing a copied or stolen key
+    does not authorize its use, even if Symbolica accepts it.
+
+    Call this from your package during import, before using Symbolica. It lets users run
+    your library without their own Symbolica license; it does not license their other code.
+    The key must be issued for your package.
+
+    If the key has expired, an internet connection and an active subscription are required.
+    Renew the key when prompted to keep your library usable offline.
+
+    Parameters
+    ----------
+    key: str
+        The Symbolica library key issued for your package.
+    """
 
 def get_version() -> str:
     """
     Get the current Symbolica version.
     """
 
-
 def is_licensed() -> bool:
     """
     Check if the current Symbolica instance has a valid license key set.
     """
-
 
 def set_license_key(key: str) -> None:
     """
@@ -77,7 +1351,6 @@ def set_license_key(key: str) -> None:
         The license key to register for this machine.
     """
 
-
 def request_hobbyist_license(name: str, email: str) -> None:
     """
     Request a key for **non-professional** use for the user `name`, that will be sent to the e-mail address `email`.
@@ -89,7 +1362,6 @@ def request_hobbyist_license(name: str, email: str) -> None:
     email: str
         The email address that should receive the license.
     """
-
 
 def request_trial_license(name: str, email: str, company: str) -> None:
     """
@@ -104,7 +1376,6 @@ def request_trial_license(name: str, email: str, company: str) -> None:
     company: str
         The company of the user.
     """
-
 
 def request_sublicense(name: str, email: str, company: str, super_licence: str) -> None:
     """
@@ -123,7 +1394,6 @@ def request_sublicense(name: str, email: str, company: str, super_licence: str) 
         The parent site-wide license key.
     """
 
-
 def get_license_key(email: str) -> str:
     """
     Get the license key for the account registered with the provided email address.
@@ -134,22 +1404,24 @@ def get_license_key(email: str) -> str:
         The email address of the licensed account.
     """
 
-
 @overload
 def S(
     name: str,
+    /,
+    *,
     is_symmetric: bool | None = None,
     is_antisymmetric: bool | None = None,
     is_cyclesymmetric: bool | None = None,
     is_linear: bool | None = None,
+    is_flat: bool | None = None,
     is_scalar: bool | None = None,
     is_real: bool | None = None,
     is_integer: bool | None = None,
     is_positive: bool | None = None,
     tags: Sequence[str] | None = None,
     aliases: Sequence[str] | None = None,
-    normalization: Transformer | None = None,
-    print: Callable[..., str | None] | None = None,
+    normalization: Transformer | Callable[[Expression], Expression] | None = None,
+    print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
     derivative: Callable[[Expression, int], Expression] | None = None,
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
     | None = None,
@@ -249,6 +1521,8 @@ def S(
         Set to true if the symbol is cyclesymmetric.
     is_linear : bool | None
         Set to true if the symbol is linear.
+    is_flat : bool | None
+        Set to true if the symbol is flat (associative). A flat function removes nesting.
     is_scalar : bool | None
         Set to true if the symbol is a scalar. It will be moved out of linear functions.
     is_real : bool | None
@@ -265,10 +1539,14 @@ def S(
         A transformer that is called after every normalization. Note that the symbol
         name cannot be used in the transformer as this will lead to a definition of the
         symbol. Use a wildcard with the same attributes instead.
-    print : Callable[..., str | None] | None:
+    print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
         A function that is called when printing the variable/function, which is provided as its first argument.
         This function should return a string, or `None` if the default print function should be used.
         The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+        Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+        or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+        Values replace the entire variable or function call verbatim. Missing modes use default printing.
+        The dictionary is copied when the symbol is defined; duplicate modes are rejected.
     derivative: Callable[[Expression, int], Expression] | None:
         A function that is called when computing the derivative of a function in a given argument.
     series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -281,37 +1559,54 @@ def S(
 
         For arbitrary precision evaluation of constant functions, register a function that
         maps the tags and the requested decimal precision to a number:
-        - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+        - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
         Evaluators for non-constant functions when `tag_count = 0`:
         - `float`: Sequence[float] -> float
         - `complex`: Sequence[complex] -> complex
-        - `decimal`: Sequence[Decimal] -> Decimal
-        - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+        - `decimal`: Sequence[Float] -> Float
+        - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
         Evaluators for non-constant functions when `tag_count > 0` are generators:
         - `float`: Sequence[Expression] -> (Sequence[float] -> float)
         - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-        - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-        - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+        - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+        - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
     data: str | int | Expression | bytes | list | dict | None = None
         Custom user data to associate with the symbol.
     """
 
-
 @overload
 def S(
+    name0: str,
+    name1: str,
+    /,
     *names: str,
     is_symmetric: bool | None = None,
     is_antisymmetric: bool | None = None,
     is_cyclesymmetric: bool | None = None,
     is_linear: bool | None = None,
+    is_flat: bool | None = None,
     is_scalar: bool | None = None,
     is_real: bool | None = None,
     is_integer: bool | None = None,
     is_positive: bool | None = None,
     tags: Sequence[str] | None = None,
-) -> Sequence[Expression]:
+    aliases: Sequence[str] | None = None,
+    normalization: Transformer | Callable[[Expression], Expression] | None = None,
+    print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
+    derivative: Callable[[Expression, int], Expression] | None = None,
+    series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+    | None = None,
+    eval: dict[str, Any] | None = None,
+    data: str
+    | int
+    | Expression
+    | bytes
+    | list[Any]
+    | dict[str | int | Expression, Any]
+    | None = None,
+) -> list[Expression]:
     """
     Create new symbols from `names`. Symbols can have attributes,
     such as symmetries. If no attributes
@@ -340,6 +1635,8 @@ def S(
         Set to true if the symbol is cyclesymmetric.
     is_linear : bool | None
         Set to true if the symbol is multilinear.
+    is_flat : bool | None
+        Set to true if the symbol is flat (associative).
     is_scalar : bool | None
         Set to true if the symbol is a scalar. It will be moved out of linear functions.
     is_real : bool | None
@@ -352,9 +1649,8 @@ def S(
         A list of tags to associate with the symbol.
     """
 
-
 def N(
-    num: int | float | complex | str | Decimal, relative_error: float | None = None
+    num: int | float | complex | str | Float | ComplexFloat | Decimal, relative_error: float | None = None
 ) -> Expression:
     """
     Create a new Symbolica number from an int, a float, or a string.
@@ -377,12 +1673,11 @@ def N(
 
     Parameters
     ----------
-    num: int | float | complex | str | Decimal
+    num: int | float | complex | str | Float | ComplexFloat | Decimal
         The value to convert into a Symbolica number.
     relative_error: float | None
         The maximum relative error used when converting floating-point input to a rational number.
     """
-
 
 def E(
     input: str,
@@ -416,12 +1711,10 @@ def E(
         If the input is not a valid expression.
     """
 
-
 def T() -> Transformer:
     """
     Create a new transformer that maps an expression.
     """
-
 
 @overload
 def P(
@@ -442,7 +1735,6 @@ def P(
     vars: Sequence[Expression] | None
         The variables to treat as polynomial variables, in the given order.
     """
-
 
 @overload
 def P(
@@ -469,7 +1761,6 @@ def P(
     vars: Sequence[Expression] | None
         The variables to treat as polynomial variables, in the given order.
     """
-
 
 @overload
 def P(
@@ -506,7 +1797,6 @@ def P(
         The variables to treat as polynomial variables, in the given order.
     """
 
-
 class AtomType(Enum):
     """Specifies the type of the atom."""
 
@@ -522,7 +1812,6 @@ class AtomType(Enum):
     """The expression is a product."""
     Pow = 6
     """The expression is a power."""
-
 
 class SymbolAttribute(Enum):
     """Specifies the attributes of a symbol."""
@@ -543,7 +1832,8 @@ class SymbolAttribute(Enum):
     """The symbol represents an integer."""
     Positive = (8,)
     """The symbol represents a positive number."""
-
+    Flat = (9,)
+    """The function is flat (associative)."""
 
 class AtomTree:
     """
@@ -570,7 +1860,6 @@ class AtomTree:
     tail: list[AtomTree]
     """The list of child atoms of this atom."""
 
-
 class ParseMode(Enum):
     """Specifies the parse mode."""
 
@@ -579,6 +1868,230 @@ class ParseMode(Enum):
     Mathematica = 2
     """Parse using Mathematica notation."""
 
+class SolveDomain(Enum):
+    """A domain supported by the exact equation solver."""
+
+    Integers = 1
+    Rationals = 2
+    Reals = 3
+    Complexes = 4
+
+Integers: SolveDomain
+Rationals: SolveDomain
+Reals: SolveDomain
+Complexes: SolveDomain
+
+class SolveError(ValueError):
+    """Base exception for invalid solve requests or failures to obtain the requested result."""
+
+class UnsupportedProblem(SolveError):
+    """The equations require a solving method that is not supported."""
+
+class IncompleteCoverage(SolveError):
+    """The requested conclusion cannot be established for all relevant cases."""
+
+class SolutionCondition:
+    """A formula or domain restriction under which a solution branch is valid."""
+
+    @property
+    def kind(self) -> Literal["formula", "domain_membership"]:
+        """The restriction type: ``"formula"`` or ``"domain_membership"``."""
+    @property
+    def formula(self) -> Condition | None:
+        """The symbolic condition, or None for a domain-membership restriction."""
+    @property
+    def variable(self) -> Expression | None:
+        """The variable restricted by a domain-membership condition, otherwise None."""
+    @property
+    def value(self) -> Expression | None:
+        """The expression restricted by a domain-membership condition, otherwise None."""
+    @property
+    def domain(self) -> SolveDomain | None:
+        """The required domain for a domain-membership condition, otherwise None."""
+    def __repr__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+
+class Solution:
+    """One equality-solution branch: Expression assignments and validity conditions.
+
+    Index or iterate over the mapping to read assigned variables and their values.
+    Use ``free_variables()`` for the family's free coordinates and ``variables``
+    for all requested unknowns. All assignments hold simultaneously, subject to
+    ``conditions()``, which includes the parent set's coverage guard.
+
+    Examples
+    --------
+    >>> from symbolica import Expression, S
+    >>> x, y = S("x", "y")
+    >>> branch = Expression.solve(x + y - 1, [x, y])[0]
+    >>> branch[x] == 1 - y
+    True
+    >>> dict(branch) == {x: 1-y}
+    True
+    >>> branch.free_variables() == [y]
+    True
+    >>> y in branch
+    False
+    """
+    def as_dict(self) -> dict[Expression, Expression]:
+        """Return assigned variables mapped directly to Expressions.
+
+        Use ``free_variables()`` for free coordinates and ``conditions()`` for the
+        restrictions under which these assignments are valid.
+        """
+    @property
+    def variables(self) -> list[Expression]:
+        """All requested unknowns in coordinate order, including free variables.
+        """
+    def free_variables(self) -> list[Expression]:
+        """Return the unknowns that remain free within this branch.
+        """
+    def conditions(self) -> list[SolutionCondition]:
+        """Return additional conditions that must hold for this branch to be valid.
+        """
+    @property
+    def domain(self) -> SolveDomain:
+        """The allowed domain of this branch's unknowns.
+        """
+    def is_conditional(self) -> bool:
+        """Return whether this branch has additional validity conditions.
+        """
+    def is_point(self) -> bool:
+        """Return whether all unknowns have assigned expressions, possibly subject to conditions.
+        """
+    def dimension(self) -> int | None:
+        """Return the number of independent coordinates in this branch, or None if unknown.
+        """
+    def codimension(self) -> int | None:
+        """Return the number of unknowns minus the dimension, or None if unknown.
+        """
+    def keys(self) -> list[Expression]:
+        """Return the assigned variables in coordinate order; free variables are omitted.
+        """
+    def values(self) -> list[Expression]:
+        """Return the assigned Expressions in the same order as ``keys()``.
+        """
+    def items(self) -> list[tuple[Expression, Expression]]:
+        """Return (variable, Expression) pairs, omitting free variables.
+        """
+    def get(self, variable: Expression) -> Expression | None:
+        """Return an assigned Expression, or None for a free or absent variable.
+
+        Parameters
+        ----------
+        variable: Expression
+            Variable whose assignment to retrieve. ``branch[variable]`` raises
+            KeyError when the variable is free or absent.
+        """
+    def __getitem__(self, variable: Expression) -> Expression:
+        """Retrieve an assigned Expression; raise KeyError for a free or absent variable.
+
+        Parameters
+        ----------
+        variable: Expression
+            Variable whose assignment to retrieve.
+        """
+    def __contains__(self, variable: Expression) -> bool:
+        """Check whether a variable has an assignment in this branch.
+
+        Parameters
+        ----------
+        variable: Expression
+            Variable to look up; free variables are not mapping keys.
+        """
+    def __len__(self) -> int:
+        """Count assignments, excluding free variables.
+        """
+    def __iter__(self) -> Iterator[Expression]: ...
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Display the assignments in IPython.
+
+        Parameters
+        ----------
+        pretty: object
+            IPython's pretty printer.
+        cycle: bool
+            Whether this object is already being displayed.
+        """
+
+class SolutionSet:
+    """Exact solutions returned by ``Expression.solve``.
+
+    Iterate or index this set to get Solution branches. Each branch describes
+    an alternative: a point, or a family of points with free variables.
+    ``len(result)`` counts branches, so a set of length one can still contain
+    infinitely many points. Branch order is not guaranteed.
+
+    For a generic result, the assignments apply where ``coverage_guard`` is true.
+    Solve again after substituting parameter values outside that guard.
+    Use ``dict(result[i])`` or ``result[i].as_dict()`` to extract assignments.
+    Use ``branch.free_variables()`` and ``branch.conditions()`` to inspect a
+    family's free coordinates and validity restrictions.
+
+    Printing a set shows each branch's assignments and restrictions; notebooks
+    display them as aligned equations. A branch with an empty mapping describes
+    a family in which all requested variables are free.
+
+    Examples
+    --------
+    >>> from symbolica import Expression, S, Reals
+    >>> x = S("x")
+    >>> result = Expression.solve(x.eq(2), [x], domain=Reals)
+    >>> print(result)
+    [0] {x = 2}
+    >>> dict(result[0]) == {x: 2}
+    True
+    >>> bool(Expression.solve(x**2 + 1, [x], domain=Reals))
+    False
+    """
+    @property
+    def variables(self) -> list[Expression]:
+        """The unknowns requested in the solve, in the original input order."""
+    @property
+    def parameters(self) -> list[Expression]:
+        """Symbols treated as fixed parameters during the solve."""
+    @property
+    def domain(self) -> SolveDomain:
+        """The solve domain, also used as the default domain of external parameters."""
+    @property
+    def coverage(self) -> Literal["complete", "generic"]:
+        """Whether the represented solutions are complete or generic."""
+    @property
+    def coverage_guard(self) -> Condition:
+        """The condition under which the coverage claim applies."""
+    def dimension(self) -> int | None:
+        """Return the largest branch dimension for fixed external parameter values.
+
+        A finite nonempty collection of points has dimension zero; a free line
+        has dimension one. Returns -1 for a complete empty set, or None if unknown.
+        """
+    def is_empty(self) -> bool:
+        """Return whether there are no solutions.
+
+        Raises IncompleteCoverage if completeness is not established or emptiness
+        depends on unresolved branch conditions. ``bool(result)`` is the opposite
+        of this check; use ``len(result)`` to count represented branches.
+        """
+    def __len__(self) -> int: ...
+    def __bool__(self) -> bool: ...
+    def __getitem__(self, index: int) -> Solution: ...
+    def __iter__(self) -> Iterator[Solution]: ...
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None:
+        """Display assignments using IPython's pretty printer.
+
+        Parameters
+        ----------
+        pretty: Any
+            IPython's pretty printer.
+        cycle: bool
+            Whether this object is already being displayed.
+        """
 
 class PrintMode(Enum):
     """Specifies the print mode."""
@@ -594,6 +2107,73 @@ class PrintMode(Enum):
     Typst = 5
     """Print using Typst notation."""
 
+class RootLocation(Enum):
+    """Proven location of an isolated root relative to the coordinate axes."""
+
+    Complex = ...
+    Real = ...
+    Imaginary = ...
+    Zero = ...
+
+class Citation:
+    """A scientific reference with explanations of its relevance to a computation.
+
+    Fields are read-only. Reasons and description may contain Markdown.
+    """
+
+    def __new__(
+        cls,
+        id: str,
+        reference: str,
+        bibtex: str,
+        *,
+        reasons: Sequence[str] = (),
+        description: str = "",
+        url: str = "",
+        relevance: int | None = None,
+    ) -> Citation:
+        """Create a citation. Relevance is a nonnegative library-defined score."""
+
+    @property
+    def id(self) -> str:
+        """The stable identity of the citation, preferably a DOI or arXiv ID."""
+    @property
+    def reference(self) -> str:
+        """The human-readable bibliographic reference."""
+
+    @property
+    def url(self) -> str:
+        """A hyperlink to the work."""
+
+    @property
+    def bibtex(self) -> str:
+        """The ready-to-export BibTeX entry."""
+    @property
+    def reasons(self) -> list[str]:
+        """The reasons for including this citation, optionally formatted as Markdown."""
+    @property
+    def description(self) -> str:
+        """A description of the citation, optionally formatted as Markdown."""
+    @property
+    def relevance(self) -> int | None:
+        """The relevance score, or None if unknown."""
+
+    def __str__(self) -> str:
+        """Display the reference, identifier, URL, description, reasons and known relevance."""
+
+    def __repr__(self) -> str:
+        """Return a compact representation suitable for lists of citations."""
+
+    def to_markdown(self, include_bibtex: bool = False) -> str:
+        """Return a Markdown report, optionally including a fenced BibTeX entry."""
+
+    def to_bibtex(self) -> str:
+        """Return the original BibTeX entry unchanged, ready to write to a .bib file."""
+
+    def _repr_markdown_(self) -> str: ...
+    def _repr_html_(self) -> str:
+        """Display an HTML report, with description and reasons as escaped text."""
+    def _repr_pretty_(self, pretty: Any, cycle: bool) -> None: ...
 
 class FormattedOutput:
     """A formatted string with rich notebook display representations."""
@@ -621,20 +2201,45 @@ class FormattedOutput:
     def _repr_pretty_(self, pretty, cycle: bool):
         """Convert the formatted output into a pretty string representation."""
 
+class IntegrationStep:
+    """One accepted transformation in a symbolic integration derivation."""
 
-class Expression:
-    """
-    A Symbolica expression.
+    @property
+    def rule(self) -> int | None:
+        """The integration rule number, if available."""
 
-    Supports standard arithmetic operations, such
-    as addition and multiplication.
+    @property
+    def depth(self) -> int:
+        """The zero-based depth in the recursive integration tree."""
 
-    Examples
-    --------
-    >>> x = S('x')
-    >>> e = x**2 + 2 - x + 1 / x**4
-    >>> print(e)
-    """
+    @property
+    def description(self) -> str:
+        """A description of the transformation."""
+
+    @property
+    def references(self) -> list[str]:
+        """Bibliographic references associated with the rule."""
+
+    @property
+    def source(self) -> str:
+        """The original Rubi rule or pattern used by the integration backend."""
+
+    @property
+    def input(self) -> Expression:
+        """The integrand to which the rule was applied."""
+
+    @property
+    def output(self) -> Expression:
+        """The immediate result produced by the rule."""
+
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def _repr_latex_(self) -> str: ...
+    def _repr_pretty_(self, pretty, cycle: bool) -> None: ...
+
+class Symbol:
+    """Built-in Symbolica symbols."""
 
     E: Expression
     """Euler's number `e`, approximately `2.7182`."""
@@ -684,26 +2289,145 @@ class Expression:
     IF: Expression
     """The built-in function for piecewise-defined expressions. `IF(cond, true_expr, false_expr)` evaluates to `true_expr` if `cond` is non-zero and `false_expr` otherwise."""
 
+    TAN: Expression
+    """The built-in tangent function."""
+
+    COT: Expression
+    """The built-in cotangent function."""
+
+    SEC: Expression
+    """The built-in secant function."""
+
+    CSC: Expression
+    """The built-in cosecant function."""
+
+    ASIN: Expression
+    """The built-in inverse sine function."""
+
+    ACOS: Expression
+    """The built-in inverse cosine function."""
+
+    ATAN: Expression
+    """The built-in inverse tangent function."""
+
+    ACOT: Expression
+    """The built-in inverse cotangent function."""
+
+    ASEC: Expression
+    """The built-in inverse secant function."""
+
+    ACSC: Expression
+    """The built-in inverse cosecant function."""
+
+    SINH: Expression
+    """The built-in hyperbolic sine function."""
+
+    COSH: Expression
+    """The built-in hyperbolic cosine function."""
+
+    TANH: Expression
+    """The built-in hyperbolic tangent function."""
+
+    COTH: Expression
+    """The built-in hyperbolic cotangent function."""
+
+    SECH: Expression
+    """The built-in hyperbolic secant function."""
+
+    CSCH: Expression
+    """The built-in hyperbolic cosecant function."""
+
+    ASINH: Expression
+    """The built-in inverse hyperbolic sine function."""
+
+    ACOSH: Expression
+    """The built-in inverse hyperbolic cosine function."""
+
+    ATANH: Expression
+    """The built-in inverse hyperbolic tangent function."""
+
+    ACOTH: Expression
+    """The built-in inverse hyperbolic cotangent function."""
+
+    ASECH: Expression
+    """The built-in inverse hyperbolic secant function."""
+
+    ACSCH: Expression
+    """The built-in inverse hyperbolic cosecant function."""
+
+    ZETA: Expression
+    """The built-in Riemann zeta function."""
+
+    GAMMA: Expression
+    """The built-in gamma function."""
+
+    ERF: Expression
+    """The built-in error function."""
+
+    POLYGAMMA: Expression
+    """The built-in polygamma function."""
+
+    POLYLOG: Expression
+    """The built-in polylogarithm function."""
+
+    BESSEL_J: Expression
+    """The built-in cylindrical Bessel function of the first kind."""
+
+    BESSEL_Y: Expression
+    """The built-in cylindrical Bessel function of the second kind."""
+
+    BESSEL_I: Expression
+    """The built-in modified Bessel function of the first kind."""
+
+    BESSEL_K: Expression
+    """The built-in modified Bessel function of the second kind."""
+
+    ROOT: Expression
+    """The built-in algebraic root function."""
+
+    ALT: Expression
+    """The built-in alternative-pattern function."""
+
+    @classmethod
+    def get(_cls, name: str) -> Expression | None:
+        """Returns the variable with the given name, if it exists."""
+
+class Expression:
+    """
+    A Symbolica expression.
+
+    Supports standard arithmetic operations, such
+    as addition and multiplication.
+
+    Examples
+    --------
+    >>> x = S('x')
+    >>> e = x**2 + 2 - x + 1 / x**4
+    >>> print(e)
+    """
+
     @overload
     @classmethod
     def symbol(
         _cls,
         name: str,
+        /,
+        *,
         is_symmetric: bool | None = None,
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
         is_linear: bool | None = None,
+        is_flat: bool | None = None,
         is_scalar: bool | None = None,
         is_real: bool | None = None,
         is_integer: bool | None = None,
         is_positive: bool | None = None,
         tags: Sequence[str] | None = None,
         aliases: Sequence[str] | None = None,
-        normalization: Transformer | None = None,
-        print: Callable[..., str | None] | None = None,
+        normalization: Transformer | Callable[[Expression], Expression] | None = None,
+        print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
         derivative: Callable[[Expression, int], Expression] | None = None,
-        series: Callable[[Sequence[Series]],
-                         tuple[Expression, Expression] | None]
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
         | None = None,
         eval: dict[str, Any] | None = None,
         data: str
@@ -750,8 +2474,8 @@ class Expression:
         >>> E("real_log(exp(x)) + real_log(5)")
 
         Define a custom print function:
-        >>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
-        >>>     if latex:
+        >>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+        >>>     if mode == PrintMode.Latex:
         >>>         if mu.get_type() == AtomType.Fn:
         >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
         >>>         else:
@@ -801,6 +2525,8 @@ class Expression:
             Set to true if the symbol is cyclesymmetric.
         is_linear : bool | None
             Set to true if the symbol is linear.
+        is_flat : bool | None
+            Set to true if the symbol is flat (associative).  A flat function removes nesting.
         is_scalar : bool | None
             Set to true if the symbol is a scalar. It will be moved out of linear functions.
         is_real : bool | None
@@ -817,10 +2543,14 @@ class Expression:
             A transformer that is called after every normalization. Note that the symbol
             name cannot be used in the transformer as this will lead to a definition of the
             symbol. Use a wildcard with the same attributes instead.
-        print : Callable[..., str | None] | None:
+        print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
             A function that is called when printing the variable/function, which is provided as its first argument.
             This function should return a string, or `None` if the default print function should be used.
             The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+            Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+            or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+            Values replace the entire variable or function call verbatim. Missing modes use default printing.
+            The dictionary is copied when the symbol is defined; duplicate modes are rejected.
         derivative: Callable[[Expression, int], Expression] | None:
             A function that is called when computing the derivative of a function in a given argument.
         series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -833,19 +2563,19 @@ class Expression:
 
             For arbitrary precision evaluation of constant functions, register a function that
             maps the tags and the requested decimal precision to a number:
-            - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+            - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
             Evaluators for non-constant functions when `tag_count = 0`:
             - `float`: Sequence[float] -> float
             - `complex`: Sequence[complex] -> complex
-            - `decimal`: Sequence[Decimal] -> Decimal
-            - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+            - `decimal`: Sequence[Float] -> Float
+            - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
             Evaluators for non-constant functions when `tag_count > 0` are generators:
             - `float`: Sequence[Expression] -> (Sequence[float] -> float)
             - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-            - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-            - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+            - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+            - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
         data: str | int | Expression | bytes | list | dict | None = None
             Custom user data to associate with the symbol.
         """
@@ -854,17 +2584,35 @@ class Expression:
     @classmethod
     def symbol(
         _cls,
+        name0: str,
+        name1: str,
+        /,
         *names: str,
         is_symmetric: bool | None = None,
         is_antisymmetric: bool | None = None,
         is_cyclesymmetric: bool | None = None,
         is_linear: bool | None = None,
-        is_real: bool | None = None,
+        is_flat: bool | None = None,
         is_scalar: bool | None = None,
+        is_real: bool | None = None,
         is_integer: bool | None = None,
         is_positive: bool | None = None,
         tags: Sequence[str] | None = None,
-    ) -> Sequence[Expression]:
+        aliases: Sequence[str] | None = None,
+        normalization: Transformer | Callable[[Expression], Expression] | None = None,
+        print: Callable[..., str | None] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str] | None = None,
+        derivative: Callable[[Expression, int], Expression] | None = None,
+        series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None]
+        | None = None,
+        eval: dict[str, Any] | None = None,
+        data: str
+        | int
+        | Expression
+        | bytes
+        | list[Any]
+        | dict[str | int | Expression, Any]
+        | None = None,
+    ) -> list[Expression]:
         """
         Create new symbols from `names`. Symbols can have attributes,
         such as symmetries. If no attributes
@@ -893,6 +2641,8 @@ class Expression:
             Set to true if the symbol is cyclesymmetric.
         is_linear : bool | None
             Set to true if the symbol is multilinear.
+        is_flat : bool | None
+            Set to true if the symbol is flat (associative).
         is_scalar : bool | None
             Set to true if the symbol is a scalar. It will be moved out of linear functions.
         is_real : bool | None
@@ -925,7 +2675,7 @@ class Expression:
 
     @overload
     def __call__(
-        self, *args: Expression | int | float | complex | Decimal
+        self, *args: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Create a Symbolica expression or transformer by calling the function with appropriate arguments.
@@ -938,13 +2688,13 @@ class Expression:
 
         Parameters
         ----------
-        args: Expression | int | float | complex | Decimal
+        args: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The arguments passed to the expression call.
         """
 
     @overload
     def __call__(
-        self, *args: HeldExpression | Expression | int | float | complex | Decimal
+        self, *args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> HeldExpression:
         """
         Create a Symbolica expression or transformer by calling the function with appropriate arguments.
@@ -957,14 +2707,14 @@ class Expression:
 
         Parameters
         ----------
-        args: HeldExpression | Expression | int | float | complex | Decimal
+        args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The arguments passed to the expression or transformer call.
         """
 
     @classmethod
     def num(
         _cls,
-        num: int | float | complex | str | Decimal,
+        num: int | float | complex | str | Float | ComplexFloat | Decimal,
         relative_error: float | None = None,
     ) -> Expression:
         """
@@ -988,7 +2738,7 @@ class Expression:
 
         Parameters
         ----------
-        num: int | float | complex | str | Decimal
+        num: int | float | complex | str | Float | ComplexFloat | Decimal
             The value to convert into a Symbolica number.
         relative_error: float | None
             The maximum relative error used when converting floating-point input to a rational number.
@@ -1037,6 +2787,16 @@ class Expression:
     def __new__(cls) -> Expression:
         """
         Create a new expression that represents 0.
+        """
+
+    def __getstate__(self) -> bytes:
+        """
+        Get a serialized version of the expression.
+        """
+
+    def __reduce__(self) -> tuple[Callable[[bytes], Expression], tuple[bytes]]:
+        """
+        Reconstruct an expression from a serialized version.
         """
 
     def __copy__(self) -> Expression:
@@ -1177,8 +2937,7 @@ class Expression:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the expression into a human-readable string, with tunable settings.
@@ -1287,8 +3046,7 @@ class Expression:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the expression into a rich display object, with tunable settings.
@@ -1379,7 +3137,7 @@ class Expression:
         >>> a = E('f(x+2i + 3) * 2 / x')
         >>> print(a.to_typst())
 
-        Yields ```(2 op("f")(3+2𝑖+"x"))/"x"```.
+        Yields ```(2 op(f)(3+2𝑖+x))/x```.
 
         Parameters
         ----------
@@ -1435,6 +3193,20 @@ class Expression:
         is a variable or function, otherwise throw an error.
         """
 
+    def get_head(self) -> Expression:
+        """
+        Get the function symbol of a function or return the variable itself.
+        Throw an error if the current atom is neither a variable nor a function.
+
+        Examples
+        --------
+        >>> x, f = S('x', 'f')
+        >>> f(x).get_head() == f
+        True
+        >>> x.get_head() == x
+        True
+        """
+
     def get_tags(self) -> list[str]:
         """
         Get the tags of a variable or function if the current atom
@@ -1468,9 +3240,12 @@ class Expression:
             The symbol-data key to retrieve. Omit it to return all stored data.
         """
 
-    def is_scalar(self) -> bool:
+    def is_scalar(self) -> bool | None:
         """
         Check if the expression is a scalar. Symbols must have the scalar attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -1479,9 +3254,12 @@ class Expression:
         >>> print(e.is_scalar())  # True
         """
 
-    def is_real(self) -> bool:
+    def is_real(self) -> bool | None:
         """
         Check if the expression is real. Symbols must have the real attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -1490,9 +3268,12 @@ class Expression:
         >>> print(e.is_real())  # True
         """
 
-    def is_integer(self) -> bool:
+    def is_integer(self) -> bool | None:
         """
         Check if the expression is integer. Symbols must have the integer attribute.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
@@ -1501,15 +3282,25 @@ class Expression:
         >>> print(e.is_integer())  # True
         """
 
-    def is_positive(self) -> bool:
+    def is_positive(self) -> bool | None:
         """
-        Check if the expression is a positive scalar. Symbols must have the positive attribute.
+        Check if the expression is strictly positive. Zero returns False.
+        A real square may vanish: use is_nonnegative() for a weak inequality.
+
+        Returns None when the property is unknown. Use `is True` or `is False`
+        to distinguish a proof from an inconclusive result.
 
         Examples
         --------
         >>> x = S('x', is_positive=True)
         >>> e = (x + 1)**2 + 5
         >>> print(e.is_positive())  # True
+        """
+
+    def is_nonnegative(self) -> bool | None:
+        """
+        Check if the expression is real and greater than or equal to zero.
+        Returns None when its sign is unknown. This does not test absence of poles.
         """
 
     def is_finite(self) -> bool:
@@ -1533,120 +3324,120 @@ class Expression:
         """
 
     def __add__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Add this expression to `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __radd__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Add this expression to `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __sub__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Subtract `other` from this expression, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rsub__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Subtract this expression from `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __mul__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Multiply this expression with `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rmul__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Multiply this expression with `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __truediv__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Divide this expression by `other`, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rtruediv__(
-        self, other: Expression | int | float | complex | Decimal
+        self, other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Divide `other` by this expression, returning the result.
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
-    def __pow__(self, exp: Expression | int | float | complex | Decimal) -> Expression:
+    def __pow__(self, exp: Expression | int | float | complex | Float | ComplexFloat | Decimal) -> Expression:
         """
         Take `self` to power `exp`, returning the result.
 
         Parameters
         ----------
-        exp: Expression | int | float | complex | Decimal
+        exp: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The exponent.
         """
 
     def __rpow__(
-        self, base: Expression | int | float | complex | Decimal
+        self, base: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Expression:
         """
         Take `base` to power `self`, returning the result.
 
         Parameters
         ----------
-        base: Expression | int | float | complex | Decimal
+        base: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The base expression.
         """
 
@@ -1727,7 +3518,7 @@ class Expression:
         """
 
     def atan(
-        self, y: Expression | int | float | complex | Decimal | None = None
+        self, y: Expression | int | float | complex | Float | ComplexFloat | Decimal | None = None
     ) -> Expression:
         """
         Take the inverse tangent of this expression, returning the result.
@@ -1842,6 +3633,24 @@ class Expression:
         Take the square root of this expression, returning the result.
         """
 
+    def root(self, index: int, variable: Expression | None = None) -> Expression:
+        """
+        Construct the root with index `index` of the polynomial represented by
+        this expression. If `variable` is provided, explicitly select it as the
+        polynomial variable.
+
+        Examples
+        --------
+        >>> E("x^3-1").root(1) == E("root(x^3-1,1)")
+        True
+
+        If the polynomial contains parameters, explicitly select the polynomial
+        variable:
+        >>> x = E("x")
+        >>> E("x^2-a").root(1, x) == E("root(x^2-a,x,1)")
+        True
+        """
+
     def abs(self) -> Expression:
         """
         Take the absolute value of this expression, returning the result.
@@ -1859,37 +3668,43 @@ class Expression:
         `gamma(z)` is meromorphic with simple poles at the non-positive integers.
         """
 
-    def polygamma(self, n: Expression | int | float | Decimal) -> Expression:
+    def erf(self) -> Expression:
+        """
+        Compute the error function of the expression.
+        `erf(z)` is entire and odd, with derivative `2*exp(-z^2)/sqrt(pi)`.
+        """
+
+    def polygamma(self, n: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the polygamma function of order `n` to this expression.
         For fixed non-negative integer `n`, this is meromorphic with poles at the non-positive integers.
         """
 
-    def polylog(self, s: Expression | int | float | Decimal) -> Expression:
+    def polylog(self, s: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the polylogarithm of order `s` to this expression.
         Uses the principal branch in `z`, with the standard branch cut on `[1, +infinity)`.
         """
 
-    def bessel_j(self, nu: Expression | int | float | Decimal) -> Expression:
+    def bessel_j(self, nu: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the cylindrical Bessel function of the first kind of order `nu` to this expression.
         For fixed `nu`, `bessel_j(nu, z)` is entire in `z`.
         """
 
-    def bessel_y(self, nu: Expression | int | float | Decimal) -> Expression:
+    def bessel_y(self, nu: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the cylindrical Bessel function of the second kind of order `nu` to this expression.
         Uses the principal branch in `z`, with branch cut on `(-infinity, 0]`.
         """
 
-    def bessel_i(self, nu: Expression | int | float | Decimal) -> Expression:
+    def bessel_i(self, nu: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the modified Bessel function of the first kind of order `nu` to this expression.
         For fixed `nu`, `bessel_i(nu, z)` is entire in `z`.
         """
 
-    def bessel_k(self, nu: Expression | int | float | Decimal) -> Expression:
+    def bessel_k(self, nu: Expression | int | Float | float | Decimal) -> Expression:
         """
         Apply the modified Bessel function of the second kind of order `nu` to this expression.
         Uses the principal branch in `z`, with branch cut on `(-infinity, 0]`.
@@ -1926,8 +3741,43 @@ class Expression:
             The transformer to bind to the expression.
         """
 
+    def alt(
+        self,
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal,
+        *others: Expression | int | float | complex | Float | ComplexFloat | Decimal,
+    ) -> Expression:
+        """
+        Create an alternative pattern that matches this expression or any of the
+        supplied alternatives.
+
+        Examples
+        --------
+        >>> x, y, z, w_ = S('x', 'y', 'z', 'w_')
+        >>> next(E('y*a').match(x.alt(y, z) * w_), None) is not None
+        True
+
+        Parameters
+        ----------
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
+            The first alternative.
+        others: Expression | int | float | complex | Float | ComplexFloat | Decimal
+            Additional alternatives.
+        """
+
+    def opt(self) -> Expression:
+        """
+        Turn a wildcard `x_` into an optional wildcard which will match a default value if the wildcard is not matched.
+        Equivalent to writing `opt(x_)`.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x, b_, e_ = S('x', 'b_', 'e_')
+        >>> x.replace(b_**e_.opt(), 1) # 1
+        """
+
     def contains(
-        self, a: Transformer | HeldExpression | Expression | int | float | Decimal
+        self, a: Transformer | HeldExpression | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
         Returns true iff `self` contains `a` literally.
@@ -1943,7 +3793,7 @@ class Expression:
 
         Parameters
         ----------
-        a: Transformer | HeldExpression | Expression | int | float | Decimal
+        a: Transformer | HeldExpression | Expression | int | Float | float | Decimal
             The subexpression or pattern that should be contained literally.
         """
 
@@ -2087,11 +3937,13 @@ class Expression:
 
     def req(
         self,
-        filter_fn: Callable[[Expression], bool | Condition],
+        filter_fn: Callable[[Expression], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a new pattern restriction that calls the function `filter_fn` with the matched
-        atom that should return a boolean. If true, the pattern matches.
+        Restrict a wildcard using a callback receiving its matched expression.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        A returned `Condition` is evaluated explicitly and may also be undecidable.
+        Unknown decisions stay unknown under negation and do not complete a match.
 
         Examples
         --------
@@ -2103,18 +3955,20 @@ class Expression:
 
         Parameters
         ----------
-        filter_fn: Callable[[Expression], bool | Condition]
-            A callback that filters partially constructed graphs.
+        filter_fn: Callable[[Expression], bool | None | Condition]
+            A callback deciding whether the wildcard value is accepted.
         """
 
     def req_cmp(
         self,
-        other: Expression | int | float | complex | Decimal,
-        cmp_fn: Callable[[Expression, Expression], bool | Condition],
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal,
+        cmp_fn: Callable[[Expression, Expression], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a new pattern restriction that calls the function `cmp_fn` with another the matched
-        atom and the match atom of the `other` wildcard that should return a boolean. If true, the pattern matches.
+        Restrict two wildcards using a callback receiving their matched expressions.
+        The callback runs only once both wildcards have values.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        A returned `Condition` is evaluated explicitly and may also be undecidable.
 
         Examples
         --------
@@ -2126,14 +3980,14 @@ class Expression:
 
         Parameters
         ----------
-        other: Expression | int | float | complex | Decimal
+        other: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
-        cmp_fn: Callable[[Expression, Expression], bool | Condition]
+        cmp_fn: Callable[[Expression, Expression], bool | None | Condition]
             The comparison callback applied to the matched values.
         """
 
     def req_lt(
-        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+        self, num: Expression | int | float | complex | Float | ComplexFloat | Decimal, cmp_any_atom=False
     ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is smaller than a number `num`.
@@ -2153,14 +4007,14 @@ class Expression:
 
         Parameters
         ----------
-        num: Expression | int | float | complex | Decimal
+        num: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The value that the match is compared against.
         cmp_any_atom: Any
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
     def req_gt(
-        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+        self, num: Expression | int | float | complex | Float | ComplexFloat | Decimal, cmp_any_atom=False
     ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is greater than a number `num`.
@@ -2180,14 +4034,14 @@ class Expression:
 
         Parameters
         ----------
-        num: Expression | int | float | complex | Decimal
+        num: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The value that the match is compared against.
         cmp_any_atom: Any
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
     def req_le(
-        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+        self, num: Expression | int | float | complex | Float | ComplexFloat | Decimal, cmp_any_atom=False
     ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is smaller than or equal to a number `num`.
@@ -2207,14 +4061,14 @@ class Expression:
 
         Parameters
         ----------
-        num: Expression | int | float | complex | Decimal
+        num: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The value that the match is compared against.
         cmp_any_atom: Any
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
     def req_ge(
-        self, num: Expression | int | float | complex | Decimal, cmp_any_atom=False
+        self, num: Expression | int | float | complex | Float | ComplexFloat | Decimal, cmp_any_atom=False
     ) -> PatternRestriction:
         """
         Create a pattern restriction that passes when the wildcard is greater than or equal to a number `num`.
@@ -2234,7 +4088,7 @@ class Expression:
 
         Parameters
         ----------
-        num: Expression | int | float | complex | Decimal
+        num: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The value that the match is compared against.
         cmp_any_atom: Any
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -2340,79 +4194,135 @@ class Expression:
             Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
         """
 
-    def __eq__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions.
+    def __eq__(self, other: object) -> bool:
+        """Compare structural equality and exact scalar values. Use .eq() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
+    ) -> Condition:
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
 
-    def __ne__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions.
-
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
-
-    def __lt__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
-
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __le__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __ne__(self, other: object) -> bool:
+        """Compare structural equality and exact scalar values. Use .ne() for a deferred Condition."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
+    ) -> Condition:
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
+
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __gt__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __lt__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def __le__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-    def __ge__(self, other: Expression | int | float | complex | Decimal) -> Condition:
-        """
-        Compare two expressions. If any of the two expressions is not a rational number, an interal ordering is used.
+    def __gt__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
 
-        Parameters
-        ----------
-        other: Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
-        """
+    def __ge__(
+        self,
+        other: Expression
+        | int
+        | float
+        | complex
+        | Decimal
+        | Transformer
+        | HeldExpression,
+    ) -> Condition:
+        """Construct a mathematical ordering Condition. Undecidable bool conversion raises TypeError."""
+
+    def compare_structure(self, other: Expression) -> int:
+        """Return -1, 0, or 1 for internal structural ordering; this order may change between versions."""
+
+    def __bool__(self) -> bool:
+        """Return numeric truth for scalar numbers; raise TypeError for ambiguous symbolic truth."""
 
     def __iter__(self) -> Iterator[Expression]:
         """
         Create an iterator over all subexpressions of the expression.
         """
 
-    def __getitem__(self, idx: int) -> Expression:
+    def terms(self) -> Iterator[Expression]:
         """
-        Get the `idx`th component of the expression.
+        Create an iterator over all terms in the expression.
+        """
+
+    @overload
+    def __getitem__(self, idx: int, /) -> Expression:
+        """Get a child expression by index. Negative indices count from the end."""
+
+    @overload
+    def __getitem__(self, idx: slice, /) -> list[Expression]:
+        """
+        Get a slice of the expression's immediate children as a list.
+
+        Slices follow Python's usual bounds and step rules, including reverse
+        slices, and use the same child order as iteration. Leaf expressions
+        cannot be indexed or sliced.
+
+        Examples
+        --------
+        >>> f, x, y, z = S('f', 'x', 'y', 'z')
+        >>> f(x, y, z)[1:]
+        [y, z]
+        >>> f(x, y, z)[::-1]
+        [z, y, x]
 
         Parameters
         ----------
-        idx: int
-            The zero-based index to access.
+        idx: slice
+            The slice to access.
         """
 
     def map(
@@ -2720,13 +4630,14 @@ class Expression:
     def series(
         self,
         x: Expression,
-        expansion_point: Expression | int | float | complex | Decimal,
+        expansion_point: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         depth: int,
         depth_denom: int = 1,
         depth_is_absolute: bool = True,
     ) -> Series:
         """
-        Series expand in `x` around `expansion_point` to depth `depth`.
+        Series expand in `x` around `expansion_point`, including powers through
+        `depth / depth_denom`. The remainder starts at `Series.get_absolute_order()`.
 
         Examples
         --------
@@ -2734,14 +4645,14 @@ class Expression:
         >>> p = E('cos(x)/(x+1)')
         >>> print(p.series(S('x'), 0, 3))
 
-        yields `-1-x-1/2*x^2-1/2*x^3+𝒪(x^4)`
+        yields `1-x+1/2*x^2-1/2*x^3+𝒪(x^4)`
 
         Parameters
         ----------
 
         x : Expression
             The variable to expand in.
-        expansion_point : Expression | int | float | complex | Decimal
+        expansion_point : Expression | int | float | complex | Float | ComplexFloat | Decimal
             The point around which to expand.
         depth : int
             The depth of the expansion.
@@ -2752,12 +4663,67 @@ class Expression:
             relative to the lowest order encountered in the expression.
         """
 
-    def apart(self, x: Expression | None = None) -> Expression:
+    def integrate(self, x: Expression) -> Expression:
         """
-        Compute the partial fraction decomposition in `x`.
+        Integrate the expression with respect to `x`.
 
-        If `None` is passed, the expression will be decomposed in all variables
-        which involves a potentially expensive Groebner basis computation.
+        If the integral cannot be completely solved, the best-effort result is
+        returned and may contain an unevaluated integral.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = 1/(x**2+1)
+        >>> print(e.integrate(x))  # atan(x)
+
+        Parameters
+        ----------
+        x: Expression
+            The variable with respect to which to integrate.
+        """
+
+    def integrate_with_steps(
+        self, x: Expression
+    ) -> tuple[Expression, str, list[IntegrationStep]]:
+        """
+        Integrate the expression and return the result, an overview of the steps, and each individual transformation step.
+
+        Steps are ordered from the outer transformation to recursively solved
+        subintegrals.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = x/(1+x)
+        >>> result, overview, steps = e.integrate_with_steps(x)
+        >>> print(overview)
+
+        yields
+
+        ```
+        ∫ x/(1+x) dx = ∫ 1-1/(1+x) dx
+            ∫ 1-1/(1+x) dx = ∫ 1 dx+∫ 1/(-1-x) dx
+                ∫ 1 dx = x
+                ∫ -1/(1+x) dx = -log(1+x)
+            = x-log(1+x)
+        ```
+
+        Parameters
+        ----------
+        x: Expression
+            The variable with respect to which to integrate.
+        """
+
+    def apart(self, *variables: Expression) -> Expression:
+        """
+        Compute a partial fraction decomposition in the specified variables.
+
+        A single variable uses univariate partial fractioning. Multiple variables
+        use multivariate partial fractioning in the chosen variables. With no
+        arguments, the expression is decomposed in all variables. Multivariate
+        decomposition computes a Groebner basis and may be expensive.
 
 
         Examples
@@ -2772,10 +4738,16 @@ class Expression:
 
         yields `3/2*y^-1*(x+y)^-1+1/2*y^-1*(-x+y)^-1`
 
+        Multivariate partial fractioning in chosen variables:
+        >>> p = E('(2*y-x)/(y*(x+z*y)*(y-x))')
+        >>> print(p.apart(S('x'), S('y')))
+
         Parameters
         ----------
-        x: Expression | None
-            The variable with respect to which to perform the partial-fraction decomposition.
+        variables: Expression
+            No variables for decomposition in all variables, one variable for
+            univariate decomposition, or multiple chosen variables for
+            multivariate decomposition.
         """
 
     def together(self) -> Expression:
@@ -2803,9 +4775,14 @@ class Expression:
         >>> print(p.cancel())  # 1+(y+1)**10/(x+1)
         """
 
-    def factor(self) -> Expression:
+    def factor(
+        self,
+        complex: bool = False,
+        extension: Sequence[Expression] | None = None,
+    ) -> Expression:
         """
-        Factor the expression over the rationals.
+        Factor the expression over the rationals, over the complex rationals, or
+        over an algebraic number field generated by `extension`.
 
         Examples
         --------
@@ -2813,10 +4790,46 @@ class Expression:
         >>> from symbolica import *
         >>> p = E('(6 + x)/(7776 + 6480*x + 2160*x^2 + 360*x^3 + 30*x^4 + x^5)')
         >>> print(p.factor())  # (x+6)**-4
+        >>> E("x^2-2").factor(extension=[E("sqrt(2)")])
+
+        Parameters
+        ----------
+        complex: bool
+            If `True`, factor over the complex rationals.
+        extension: Sequence[Expression] | None
+            Algebraic generators to adjoin. Algebraic numbers already present
+            in the expression define the initial field.
         """
 
     @overload
-    def to_polynomial(self, vars: Sequence[Expression] | None = None) -> Polynomial:
+    def to_polynomial(
+        self,
+        *,
+        extensions: Sequence[Expression],
+        vars: Sequence[Expression] | None = None,
+    ) -> NumberFieldPolynomial:
+        """
+        Convert the expression to a polynomial over an automatically constructed algebraic number field.
+
+        An empty `extensions` sequence discovers algebraic coefficients already in the
+        expression. Any supplied generators are adjoined to the discovered field.
+
+        Parameters
+        ----------
+        extensions: Sequence[Expression]
+            Additional algebraic generators to adjoin. Use an empty sequence for
+            automatic discovery only.
+        vars: Sequence[Expression] | None
+            The variables treated as polynomial variables, in the given order.
+        """
+
+    @overload
+    def to_polynomial(
+        self,
+        *,
+        vars: Sequence[Expression] | None = None,
+        extensions: None = None,
+    ) -> Polynomial:
         """
         Convert the expression to a polynomial, optionally, with the variable ordering specified in `vars`.
         All non-polynomial parts will be converted to new, independent variables.
@@ -2830,8 +4843,10 @@ class Expression:
     @overload
     def to_polynomial(
         self,
+        *,
         minimal_poly: Polynomial,
         vars: Sequence[Expression] | None = None,
+        extensions: None = None,
     ) -> NumberFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
@@ -2855,6 +4870,8 @@ class Expression:
         power: tuple[int, Expression] | None = None,
         minimal_poly: Polynomial | None = None,
         vars: Sequence[Expression] | None = None,
+        *,
+        extensions: None = None,
     ) -> FiniteFieldPolynomial:
         """
         Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
@@ -2902,11 +4919,10 @@ class Expression:
 
     def match(
         self,
-        lhs: Expression | int | float | complex | Decimal,
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> MatchIterator:
@@ -2914,7 +4930,7 @@ class Expression:
         Return an iterator over the pattern `self` matching to `lhs`.
         Restrictions on the pattern can be supplied through `cond`.
 
-        The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+        `min_level` and `max_level` specify the inclusive matching bounds.
         The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
         depending on `level_is_tree_depth`.
 
@@ -2930,7 +4946,7 @@ class Expression:
 
         Parameters
         ----------
-        lhs: Expression | int | float | complex | Decimal
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The expression to match against.
         cond: PatternRestriction | Condition | None
             An additional restriction that a match or replacement must satisfy.
@@ -2938,8 +4954,6 @@ class Expression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -2948,11 +4962,10 @@ class Expression:
 
     def matches(
         self,
-        lhs: Expression | int | float | complex | Decimal,
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -2969,7 +4982,7 @@ class Expression:
 
         Parameters
         ----------
-        lhs: Expression | int | float | complex | Decimal
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The expression to match against.
         cond: PatternRestriction | Condition | None
             An additional restriction that a match or replacement must satisfy.
@@ -2977,8 +4990,6 @@ class Expression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -2987,18 +4998,19 @@ class Expression:
 
     def replace_iter(
         self,
-        lhs: Expression | int | float | complex | Decimal,
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         rhs: HeldExpression
         | Expression
         | Callable[[dict[Expression, Expression]], Expression]
         | int
         | float
         | complex
+        | Float
+        | ComplexFloat
         | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -3036,9 +5048,6 @@ class Expression:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -3049,19 +5058,20 @@ class Expression:
 
     def replace(
         self,
-        pattern: Expression | int | float | complex | Decimal,
+        pattern: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         rhs: HeldExpression
         | Expression
         | Callable[[dict[Expression, Expression]], Expression]
         | int
         | float
         | complex
+        | Float
+        | ComplexFloat
         | Decimal,
         cond: PatternRestriction | Condition | None = None,
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -3101,9 +5111,6 @@ class Expression:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -3179,184 +5186,140 @@ class Expression:
         """
 
     @classmethod
-    def solve_linear_system(
+    def solve(
         _cls,
-        system: Sequence[Expression],
-        variables: Sequence[Expression],
-        warn_if_underdetermined: bool = True,
-    ) -> Sequence[Expression]:
-        """
-        Solve a linear system in the variables `variables`, where each expression
-        in the system is understood to yield 0.
+        system: (
+            Expression | Condition | bool | int | float | complex | Float | ComplexFloat | Decimal
+            | Sequence[Expression | Condition | bool | int | float | complex | Float | ComplexFloat | Decimal]
+        ),
+        variables: Sequence[Expression], *,
+        domain: SolveDomain | None = None,
+    ) -> SolutionSet:
+        """Find exact solutions to an equation or a system of equations.
 
-        If the system is underdetermined, a partial solution is returned
-        where each bound variable is a linear combination of the free
-        variables. The free variables are chosen such that they have the highest index in the `vars` list.
+        An expression represents an equation equal to zero; a list asks for solutions
+        that satisfy every equation. The returned SolutionSet contains solution
+        branches. Each branch maps solved variables directly to Expressions and may
+        include conditions on when those assignments are valid.
 
         Examples
         --------
-        >>> from symbolica import *
-        >>> x, y, c = S('x', 'y', 'c')
-        >>> f = S('f')
-        >>> x_r, y_r = Expression.solve_linear_system([f(c)*x + y/c - 1, y-c/2], [x, y])
-        >>> print('x =', x_r, ', y =', y_r)
+        Solve a linear system, then read an individual value or extract a dictionary:
+
+        >>> from symbolica import Expression, S, Reals
+        >>> x, y, a = S("x", "y", "a")
+        >>> result = Expression.solve([x + y - 3, x - y - 1], [x, y])
+        >>> result[0][x]
+        2
+        >>> dict(result[0])
+        {x: 2, y: 1}
+
+        Use ``eq`` to write a right-hand side. Python ``==`` tests equality immediately
+        instead of constructing an equation:
+
+        >>> Expression.solve(x.eq(2), [x])[0][x]
+        2
+
+        Nonlinear systems can have several solutions. Iterate over the result to
+        collect them; their order is not guaranteed:
+
+        >>> result = Expression.solve([x**2 + y**2 - 5, x*y - 2], [x, y])
+        >>> len(result)
+        4
+        >>> points = [dict(branch) for branch in result]
+        >>> {x: 1, y: 2} in points
+        True
+
+        Solutions are complex by default. Choose Reals to keep only real solutions:
+
+        >>> len(Expression.solve(x**2 + 1, [x]))
+        2
+        >>> Expression.solve(x**2 + 1, [x], domain=Reals).is_empty()
+        True
+        >>> roots = Expression.solve(x**2 - 1, [x], domain=Reals)
+        >>> {branch[x] for branch in roots} == {-1, 1}
+        True
+
+        A branch can describe a whole family. Free variables are omitted from its
+        dictionary and are available through ``free_variables()``:
+
+        >>> family = Expression.solve(x + y - 1, [x, y])
+        >>> dict(family[0])
+        {x: 1-y}
+        >>> family[0].free_variables()
+        [y]
+
+        Symbols outside the variables list act as parameters. A symbolic answer may
+        exclude some parameter values; inspect ``coverage_guard`` before substituting
+        values. Excluded values may need to be solved separately:
+
+        >>> result = Expression.solve(a*x - 1, [x])
+        >>> result[0][x]
+        1/a
+        >>> print(result.coverage_guard)
+        a != 0
+
+        Other restrictions stay with the branch. For example, a denominator must
+        remain nonzero even when it no longer appears in the answer:
+
+        >>> branch = Expression.solve(x/y, [x, y])[0]
+        >>> dict(branch)
+        {x: 0}
+        >>> print(branch.conditions()[0])
+        y != 0
 
         Parameters
         ----------
-        system: Sequence[Expression]
-            The equations or polynomials that define the system.
+        system: Expression, Condition, bool, number, or sequence of these
+            Equation or equations to satisfy, written as expressions equal to zero
+            or using ``eq``. Supports polynomial and rational equations and some
+            equations involving rational powers. Inequalities and general Boolean
+            combinations are not supported. True and an empty list impose no
+            constraints; False has no solutions. Use exact coefficients, such as
+            ``Expression.parse("1/10")`` instead of the Python float ``0.1``.
         variables: Sequence[Expression]
-            The variables to solve for, in order.
-        warn_if_underdetermined: bool
-            Whether to warn when the system is underdetermined.
+            Variables to solve for. Earlier variables are solved for preferentially,
+            leaving later ones free when possible. For ``x + y = 1``, ``[x, y]``
+            gives x = 1 - y; ``[y, x]`` gives y = 1 - x. Symbols outside this list
+            are parameters.
+        domain: SolveDomain | None
+            Domain of variables and parameters: Complexes (default), Reals,
+            Rationals, or Integers. Symbol attributes, such as ``is_integer=True``,
+            can restrict individual symbols further. For example, Reals also treats
+            parameters as real for this solve, without changing their attributes.
+            Any domain restrictions that cannot be resolved remain in
+            ``branch.conditions()``.
         """
 
-    @overload
     def nsolve(
         self,
         variable: Expression,
-        init: float,
+        init: Float | int | float | str | Decimal,
         prec: float = 1e-4,
-        max_iter: int = 10000,
-    ) -> float:
-        """
-        Find the root of an expression in `x` numerically over the reals using Newton's method.
-        Use `init` as the initial guess for the root. This method uses the same precision as `init`.
+        max_iterations: int = 1000,
+    ) -> Float:
+        """Find a real root with Newton's method, using the precision of init.
 
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> a = E("x^2-2").nsolve(E("x"), 1., 0.0001, 1000000)
-
-        Parameters
-        ----------
-        variable: Expression
-            The variable to solve for.
-        init: float
-            The initial guess for Newton's method.
-        prec: float
-            The numerical tolerance for the Newton iteration.
-        max_iter: int
-            The maximum number of Newton iterations.
+        Use Float(1, decimal_digits=80) for an 80-digit initial guess.
+        The return value is always Float, including for native float inputs.
         """
 
-    @overload
-    def nsolve(
-        self,
-        variable: Expression,
-        init: Decimal,
-        prec: float = 1e-4,
-        max_iter: int = 10000,
-    ) -> Decimal:
-        """
-        Find the root of an expression in `x` numerically over the reals using Newton's method.
-        Use `init` as the initial guess for the root. This method uses the same precision as `init`.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> a = E("x^2-2").nsolve(
-        ...     E("x"),
-        ...     Decimal("1.000000000000000000000000000000000000000000000000000000000000000000000000"),
-        ...     1e-74,
-        ...     1000000,
-        ... )
-
-        Parameters
-        ----------
-        variable: Expression
-            The variable to solve for.
-        init: Decimal
-            The initial guess for Newton's method.
-        prec: float
-            The numerical tolerance for the Newton iteration.
-        max_iter: int
-            The maximum number of Newton iterations.
-        """
-
-    @overload
     @classmethod
     def nsolve_system(
         _cls,
-        system: Sequence[Expression],
+        system: Sequence[Expression | int | float | complex | Float | ComplexFloat | Decimal],
         variables: Sequence[Expression],
-        init: Sequence[float],
+        init: Sequence[Float | int | float | str | Decimal],
         prec: float = 1e-4,
-        max_iter: int = 10000,
-    ) -> Sequence[float]:
-        """
-        Find a common root of multiple expressions in `variables` numerically over the reals using Newton's method.
-        Use `init` as the initial guess for the root. This method uses the same precision as `init`.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> a = Expression.nsolve_system(
-        ...     [E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")],
-        ...     [S("x"), S("y")],
-        ...     [1., 1.],
-        ...     1e-20,
-        ...     1000000,
-        ... )
-
-        Parameters
-        ----------
-        system: Sequence[Expression]
-            The equations or polynomials that define the system.
-        variables: Sequence[Expression]
-            The variables to solve for, in order.
-        init: Sequence[float]
-            The initial guess for Newton's method.
-        prec: float
-            The numerical tolerance for the Newton iteration.
-        max_iter: int
-            The maximum number of Newton iterations.
-        """
-
-    @overload
-    @classmethod
-    def nsolve_system(
-        _cls,
-        system: Sequence[Expression],
-        variables: Sequence[Expression],
-        init: Sequence[Decimal],
-        prec: float = 1e-4,
-        max_iter: int = 10000,
-    ) -> Sequence[Decimal]:
-        """
-        Find a common root of multiple expressions in `variables` numerically over the reals using Newton's method.
-        Use `init` as the initial guess for the root. This method uses the same precision as `init`.
-
-        Examples
-        --------
-        >>> from symbolica import *
-        >>> a = Expression.nsolve_system(
-        ...     [E("5x^2+x*y^2+sin(2y)^2 - 2"), E("exp(2x-y)+4y - 3")],
-        ...     [S("x"), S("y")],
-        ...     [Decimal("1.00000000000000000"), Decimal("1.00000000000000000")],
-        ...     1e-20,
-        ...     1000000,
-        ... )
-
-        Parameters
-        ----------
-        system: Sequence[Expression]
-            The equations or polynomials that define the system.
-        variables: Sequence[Expression]
-            The variables to solve for, in order.
-        init: Sequence[Decimal]
-            The initial guess for Newton's method.
-        prec: float
-            The numerical tolerance for the Newton iteration.
-        max_iter: int
-            The maximum number of Newton iterations.
-        """
+        max_iterations: int = 1000,
+    ) -> list[Float]:
+        """Find a common real root using the precision of the initial guesses."""
 
     @overload
     def evaluate(
         self,
         constants: dict[
-            Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]
+            Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]
         ],
     ) -> complex:
         """
@@ -3371,21 +5334,21 @@ class Expression:
 
         Parameters
         ----------
-        constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
+        constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
         decimal_digit_precision: int | None
-            If omitted, uses the f64 backend and returns a complex. If specified,
-            uses arbitrary precision and returns (real, imaginary) as Decimals.
+            If omitted, evaluates at double precision and returns a complex.
+            If specified, sets the working precision in decimal digits and returns a ComplexFloat.
         """
 
     @overload
     def evaluate(
         self,
         constants: dict[
-            Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]
+            Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]
         ],
         decimal_digit_precision: int,
-    ) -> tuple[Decimal, Decimal]:
+    ) -> ComplexFloat:
         """
         Evaluate the expression, using a map of all constants and user functions.
 
@@ -3398,18 +5361,17 @@ class Expression:
 
         Parameters
         ----------
-        constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
+        constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
             The constant substitutions applied during evaluation.
         decimal_digit_precision: int
-            If omitted, uses the f64 backend and returns a complex. If specified,
-            uses arbitrary precision and returns (real, imaginary) as Decimals.
+            If omitted, evaluates at double precision and returns a complex.
+            If specified, sets the working precision in decimal digits and returns a ComplexFloat.
         """
 
     def evaluator(
         self,
         params: Sequence[Expression],
-        functions: dict[tuple[Expression,
-                              Sequence[Expression]], Expression] = {},
+        functions: Sequence[FunctionDefinition] = [],
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3418,15 +5380,14 @@ class Expression:
         direct_translation: bool = True,
         jit_direct_translation: bool = False,
         jit_optimization_level: int = 3,
+        jit_options: dict[str, str] = {},
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
     ) -> Evaluator:
         """
         Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
-        Function definitions can be provided with `functions`, where each key is
-        `(name, arguments)` and the value is the function body. For example the function
-        `f(x,y)=x^2+y` should be provided as `{(f, (x, y)): x**2 + y}`.
+        Function definitions can be provided with `functions`.
         All free parameters should be provided in the `params` list.
 
         If `KeyboardInterrupt` is triggered during the optimization, the optimization will stop and will yield the
@@ -3441,7 +5402,13 @@ class Expression:
         >>> fd = E("y^2 + z^2*y^2")
         >>> gd = E("y + 5")
         >>>
-        >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
+        >>> ev = e1.evaluator(
+        >>>     [x],
+        >>>     functions=[
+        >>>         FunctionDefinition(f, [y, z], fd, inlining="never"),
+        >>>         FunctionDefinition(g, [y], gd),
+        >>>     ],
+        >>> )
         >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
         >>> print(res)
 
@@ -3453,9 +5420,8 @@ class Expression:
         ----------
         params: Sequence[Expression]
             A list of free parameters.
-        functions: dict[tuple[Expression, Sequence[Expression]], Expression]
-            A dictionary of functions. The key is a tuple of the function name and the argument variables.
-            The value is the function body. If the function name entry contains arguments, these are considered tags.
+        functions: Sequence[FunctionDefinition]
+            Function definitions available to the evaluator.
         iterations: int, optional
             The number of Horner schemes to try.
         cpe_iterations: int | None, optional
@@ -3473,6 +5439,8 @@ class Expression:
             If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
         jit_optimization_level: int, optional
             The optimization level to use for JIT compilation.
+        jit_options: dict[str, str], optional
+            A dictionary of options to pass to the JIT compiler.
         max_horner_scheme_variables: int, optional
             The maximum number of variables in a Horner scheme.
         max_common_pair_cache_entries: int, optional
@@ -3486,8 +5454,7 @@ class Expression:
         _cls,
         exprs: Sequence[Expression],
         params: Sequence[Expression],
-        functions: dict[tuple[Expression,
-                              Sequence[Expression]], Expression] = {},
+        functions: Sequence[FunctionDefinition] = [],
         iterations: int = 1,
         cpe_iterations: int | None = None,
         n_cores: int = 4,
@@ -3496,6 +5463,7 @@ class Expression:
         direct_translation: bool = True,
         jit_direct_translation: bool = False,
         jit_optimization_level: int = 3,
+        jit_options: dict[str, str] = {},
         max_horner_scheme_variables: int = 500,
         max_common_pair_cache_entries: int = 1000000,
         max_common_pair_distance: int = 100,
@@ -3520,30 +5488,31 @@ class Expression:
             The expressions to compile into a joint evaluator.
         params: Sequence[Expression]
             The evaluator parameters, in input order.
-        functions: dict[tuple[Expression, Sequence[Expression]], Expression]
-            A dictionary of functions. The key is a tuple of the function name and the argument variables.
-            The value is the function body. If the function name entry contains arguments, these are considered tags.
-        iterations: int
+        functions: Sequence[FunctionDefinition]
+            Function definitions available to the evaluator.
+        iterations: int, optional
             The number of optimization passes to run.
-        cpe_iterations: int | None
+        cpe_iterations: int | None, optional
             The number of common subexpression elimination iterations to perform.
-        n_cores: int
+        n_cores: int, optional
             The number of CPU cores used for parallel optimization.
-        verbose: bool
+        verbose: bool, optional
             Whether verbose output should be enabled.
-        jit_compile: bool
+        jit_compile: bool, optional
             Whether JIT compilation should be enabled.
-        direct_translation: bool
+        direct_translation: bool, optional
             Whether to prefer direct translation when compiling the evaluator.
-        jit_direct_translation: bool
+        jit_direct_translation: bool, optional
             Whether to directly translate Symbolica instructions to SymJIT IR.
-        jit_optimization_level: int
+        jit_optimization_level: int, optional
             The optimization level to use for JIT compilation.
-        max_horner_scheme_variables: int
+        jit_options: dict[str, str], optional
+            A dictionary of options to pass to the JIT compiler.
+        max_horner_scheme_variables: int, optional
             The maximum number of variables considered for Horner-scheme optimization.
-        max_common_pair_cache_entries: int
+        max_common_pair_cache_entries: int, optional
             The maximum number of common-subexpression pairs to cache.
-        max_common_pair_distance: int
+        max_common_pair_distance: int, optional
             The maximum distance between factors when searching for common pairs.
         """
 
@@ -3584,25 +5553,25 @@ class Expression:
             The index patterns that should be treated as contracted, optionally grouped by a marker.
         """
 
-
 class Replacement:
     """A replacement of a pattern by a right-hand side."""
 
     def __new__(
         cls,
-        pattern: Expression | int | float | complex | Decimal,
+        pattern: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         rhs: HeldExpression
         | Expression
         | Callable[[dict[Expression, Expression]], Expression]
         | int
         | float
         | complex
+        | Float
+        | ComplexFloat
         | Decimal,
         cond: PatternRestriction | Condition | None = None,
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -3613,9 +5582,9 @@ class Replacement:
 
         Parameters
         ----------
-        pattern: Expression | int | float | complex | Decimal
+        pattern: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The left-hand-side pattern to match.
-        rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Decimal
+        rhs: HeldExpression | Expression | Callable[[dict[Expression, Expression]], Expression] | int | float | complex | Float | ComplexFloat | Decimal
             The right-hand-side operand.
         cond: PatternRestriction | Condition | None
             An additional restriction that a match or replacement must satisfy.
@@ -3625,8 +5594,6 @@ class Replacement:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -3636,7 +5603,6 @@ class Replacement:
         rhs_cache_size: int
             The cache size for memoizing right-hand-side evaluations.
         """
-
 
 class PatternRestriction:
     """A restriction on wildcards."""
@@ -3668,67 +5634,44 @@ class PatternRestriction:
 
     @classmethod
     def req_matches(
-        _cls, match_fn: Callable[[dict[Expression, Expression]], int]
+        _cls,
+        match_fn: Callable[[dict[Expression, Expression]], bool | None | Condition],
     ) -> PatternRestriction:
         """
-        Create a pattern restriction based on the current matched variables.
-        `match_fn` is a Python function that takes a dictionary of wildcards and their matched values
-        and should return an integer. If the integer is less than 0, the restriction is false.
-        If the integer is 0, the restriction is inconclusive.
-        If the integer is greater than 0, the restriction is true.
-
-        If your pattern restriction cannot decide if it holds since not all the required variables
-        have been matched, it should return inclusive (0).
+        Create a restriction from a callback receiving the currently matched wildcards.
+        Return `True` to accept, `False` to reject, or `None` when undecidable.
+        The dictionary may be incomplete: return `None` until the required wildcards
+        are present. A completed match is accepted only when the restriction is true.
+        A returned `Condition` is evaluated using the same three-valued contract.
 
         Examples
         --------
         >>> from symbolica import *
         >>> f, x_, y_, z_ = S('f', 'x_', 'y_', 'z_')
-        >>>
-        >>> def filter(m: dict[Expression, Expression]) -> int:
-        >>>    if x_ in m and y_ in m:
-        >>>        if m[x_] > m[y_]:
-        >>>            return -1  # no match
-        >>>        if z_ in m:
-        >>>            if m[y_] > m[z_]:
-        >>>                return -1
-        >>>            return 1  # match
-        >>>
-        >>>    return 0  # inconclusive
-        >>>
-        >>>
+        >>> def ordered(m: dict[Expression, Expression]) -> bool | None:
+        ...     if x_ not in m or y_ not in m:
+        ...         return None
+        ...     if m[x_] <= m[y_] is False:
+        ...         return False
+        ...     if z_ not in m:
+        ...         return None
+        ...     return (m[x_] <= m[y_]) & (m[y_] <= m[z_])
         >>> e = f(1, 2, 3).replace(f(x_, y_, z_), 1,
-        >>>         PatternRestriction.req_matches(filter))
-
-        Parameters
-        ----------
-        match_fn: Callable[[dict[Expression, Expression]], int]
-            The callback evaluated on each match.
+        ...     PatternRestriction.req_matches(ordered))
+        >>> assert e == 1
         """
-
 
 class Condition:
-    """Relations that evaluate to booleans"""
+    """A deferred relation or logical combination consumed by Transformers, matching, and solve."""
 
-    def eval(self) -> bool:
-        """
-        Evaluate the condition.
-        """
+    def eval(self) -> bool | None:
+        """Evaluate, returning None for undecidable truth. Unbound Transformers need an execution input."""
 
-    def __repr__(self) -> str:
-        """
-        Return a string representation of the condition.
-        """
-
-    def __str__(self) -> str:
-        """
-        Return a string representation of the condition.
-        """
-
+    def __repr__(self) -> str: ...
+    def _repr_html_(self) -> str: ...
+    def __str__(self) -> str: ...
     def __bool__(self) -> bool:
-        """
-        Return the boolean value of the condition.
-        """
+        """Return known truth; raise TypeError when truth is undecidable."""
 
     def __and__(self, other: Condition) -> Condition:
         """
@@ -3760,12 +5703,12 @@ class Condition:
         Convert the condition to a pattern restriction.
         """
 
-
 class CompareOp:
     """One of the following comparison operators: `<`,`>`,`<=`,`>=`,`==`,`!=`."""
 
-
 class HeldExpression:
+    """A deferred symbolic computation. Call the object to execute it."""
+
     def __call__(self) -> Expression:
         """
         Execute a bound transformer. If the transformer is unbound,
@@ -3780,75 +5723,127 @@ class HeldExpression:
         >>> print(e)
         """
 
-    def __eq__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    def __eq__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
+
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
-        """
-        Compare two transformers.
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
 
-        Parameters
-        ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __ne__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+    def __ne__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
+
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
-        """
-        Compare two transformers.
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
-        Parameters
-        ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
     def __lt__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __le__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __gt__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __ge__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
@@ -3863,24 +5858,23 @@ class HeldExpression:
         """
 
     def contains(
-        self, element: HeldExpression | Expression | int | float | complex | Decimal
+        self, element: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> Condition:
         """
         Create a transformer that checks if the expression contains the given `element`.
 
         Parameters
         ----------
-        element: HeldExpression | Expression | int | float | complex | Decimal
+        element: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The element that should be contained in the expression.
         """
 
     def matches(
         self,
-        lhs: Expression | int | float | complex | Decimal,
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -3890,7 +5884,7 @@ class HeldExpression:
 
         Parameters
         ----------
-        lhs: Expression | int | float | complex | Decimal
+        lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The expression to match against.
         cond: PatternRestriction | Condition | None
             An additional restriction that a match or replacement must satisfy.
@@ -3898,8 +5892,6 @@ class HeldExpression:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
@@ -3907,122 +5899,194 @@ class HeldExpression:
         """
 
     def __add__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __radd__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __sub__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Subtract `other` from this transformer, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rsub__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Subtract this transformer from `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __mul__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rmul__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Add this transformer to `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __truediv__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Divide this transformer by `other`, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __rtruediv__(
-        self, other: HeldExpression | Expression | int | float | complex | Decimal
+        self,
+        other: HeldExpression
+        | Transformer
+        | Expression
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> HeldExpression:
         """
         Divide `other` by this transformer, returning the result.
 
         Parameters
         ----------
-        other: HeldExpression | Expression | int | float | complex | Decimal
+        other: HeldExpression | Transformer | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The other operand to combine or compare with.
         """
 
     def __pow__(
-        self, exp: HeldExpression | Expression | int | float | complex | Decimal
+        self, exp: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> HeldExpression:
         """
         Take `self` to power `exp`, returning the result.
 
         Parameters
         ----------
-        exp: HeldExpression | Expression | int | float | complex | Decimal
+        exp: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The exponent.
         """
 
     def __rpow__(
-        self, base: HeldExpression | Expression | int | float | complex | Decimal
+        self, base: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ) -> HeldExpression:
         """
         Take `base` to power `self`, returning the result.
 
         Parameters
         ----------
-        base: HeldExpression | Expression | int | float | complex | Decimal
+        base: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
             The base expression.
         """
 
@@ -4051,7 +6115,6 @@ class HeldExpression:
         Negate the current transformer, returning the result.
         """
 
-
 class Transformer:
     """Operations that transform an expression."""
 
@@ -4062,7 +6125,7 @@ class Transformer:
 
     def __call__(
         self,
-        expr: Expression | int | float | complex | Decimal,
+        expr: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         stats_to_file: str | None = None,
     ) -> Expression:
         """
@@ -4396,7 +6459,7 @@ class Transformer:
         """
 
     def map(
-        self, f: Callable[[Expression], Expression | int | float | complex | Decimal]
+        self, f: Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | Decimal]
     ) -> Transformer:
         """
         Create a transformer that applies a Python function.
@@ -4411,7 +6474,7 @@ class Transformer:
 
         Parameters
         ----------
-        f: Callable[[Expression], Expression | int | float | complex | Decimal]
+        f: Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | Decimal]
             The callback or function to apply.
         """
 
@@ -4725,15 +6788,15 @@ class Transformer:
         Any non-canceling parts of the expression will not be rewritten.
         """
 
-    def factor(self) -> Transformer:
+    def factor(self, complex: bool = False) -> Transformer:
         """
-        Create a transformer that factors the expression over the rationals.
+        Create a transformer that factors the expression over the rationals, or over the complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
         """
 
     def series(
         self,
         x: Expression,
-        expansion_point: Expression | int | float | complex | Decimal,
+        expansion_point: Expression | int | float | complex | Float | ComplexFloat | Decimal,
         depth: int,
         depth_denom: int = 1,
         depth_is_absolute: bool = True,
@@ -4758,7 +6821,7 @@ class Transformer:
         ----------
         x: Expression
             The variable around which the series is expanded.
-        expansion_point: Expression | int | float | complex | Decimal
+        expansion_point: Expression | int | float | complex | Float | ComplexFloat | Decimal
             The point around which the series should be expanded.
         depth: int
             The numerator of the expansion depth.
@@ -4770,19 +6833,20 @@ class Transformer:
 
     def replace(
         self,
-        pat: HeldExpression | Expression | int | float | complex | Decimal,
+        pat: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal,
         rhs: HeldExpression
         | Expression
         | Callable[[dict[Expression, Expression]], Expression]
         | int
         | float
         | complex
+        | Float
+        | ComplexFloat
         | Decimal,
         cond: PatternRestriction | Condition | None = None,
         non_greedy_wildcards: Sequence[Expression] | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
         allow_new_wildcards_on_rhs: bool = False,
@@ -4821,9 +6885,6 @@ class Transformer:
             The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
         max_level: int | None, optional
             The maximum level at which the pattern is allowed to match. `None` means no maximum.
-        level_range:
-            Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-            Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
         level_is_tree_depth: bool, optional
             If set to `True`, the level is increased when going one level deeper in the expression tree.
         partial: bool, optional
@@ -4912,8 +6973,7 @@ class Transformer:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> Transformer:
         """
         Create a transformer that prints the expression.
@@ -5005,75 +7065,91 @@ class Transformer:
             The percentage change threshold that should be highlighted as a large change.
         """
 
-    def __eq__(
-        self, other: Transformer | Expression | int | float | Decimal
+    def __eq__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .eq() for a deferred Condition."""
+
+    def eq(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
-        """
-        Compare two transformers.
+        """Construct a deferred equality Condition for solve, matching, or Transformers.
 
-        Parameters
-        ----------
-        other: Transformer | Expression | int | float | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
-    def __ne__(
-        self, other: Transformer | Expression | int | float | Decimal
+    def __ne__(self, other: object) -> bool:
+        """Compare object identity without executing the computation. Use .ne() for a deferred Condition."""
+
+    def ne(
+        self,
+        other: Expression
+        | HeldExpression
+        | Transformer
+        | int
+        | float
+        | complex
+        | Float
+        | ComplexFloat
+        | Decimal,
     ) -> Condition:
-        """
-        Compare two transformers.
+        """Construct a deferred disequality Condition for solve, matching, or Transformers.
 
-        Parameters
-        ----------
-        other: Transformer | Expression | int | float | Decimal
-            The other operand to combine or compare with.
+        Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
         """
 
     def __lt__(
-        self, other: Transformer | Expression | int | float | Decimal
+        self, other: Transformer | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: Transformer | Expression | int | float | Decimal
+        other: Transformer | Expression | int | Float | float | Decimal
             The other operand to combine or compare with.
         """
 
     def __le__(
-        self, other: Transformer | Expression | int | float | Decimal
+        self, other: Transformer | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: Transformer | Expression | int | float | Decimal
+        other: Transformer | Expression | int | Float | float | Decimal
             The other operand to combine or compare with.
         """
 
     def __gt__(
-        self, other: Transformer | Expression | int | float | Decimal
+        self, other: Transformer | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: Transformer | Expression | int | float | Decimal
+        other: Transformer | Expression | int | Float | float | Decimal
             The other operand to combine or compare with.
         """
 
     def __ge__(
-        self, other: Transformer | Expression | int | float | Decimal
+        self, other: Transformer | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
-        Compare two transformers. If any of the two expressions is not a rational number, an interal ordering is used.
+        Construct a deferred Condition using mathematical real ordering after execution. Unknown truth is not false.
 
         Parameters
         ----------
-        other: Transformer | Expression | int | float | Decimal
+        other: Transformer | Expression | int | Float | float | Decimal
             The other operand to combine or compare with.
         """
 
@@ -5088,24 +7164,23 @@ class Transformer:
         """
 
     def contains(
-        self, element: Transformer | HeldExpression | Expression | int | float | Decimal
+        self, element: Transformer | HeldExpression | Expression | int | Float | float | Decimal
     ) -> Condition:
         """
         Create a transformer that checks if the expression contains the given `element`.
 
         Parameters
         ----------
-        element: Transformer | HeldExpression | Expression | int | float | Decimal
+        element: Transformer | HeldExpression | Expression | int | Float | float | Decimal
             The element that should be contained in the expression.
         """
 
     def matches(
         self,
-        lhs: HeldExpression | Expression | int | float | Decimal,
+        lhs: HeldExpression | Expression | int | Float | float | Decimal,
         cond: PatternRestriction | Condition | None = None,
         min_level: int = 0,
         max_level: int | None = None,
-        level_range: tuple[int, int | None] | None = None,
         level_is_tree_depth: bool = False,
         partial: bool = True,
     ) -> Condition:
@@ -5115,7 +7190,7 @@ class Transformer:
 
         Parameters
         ----------
-        lhs: HeldExpression | Expression | int | float | Decimal
+        lhs: HeldExpression | Expression | int | Float | float | Decimal
             The expression to match against.
         cond: PatternRestriction | Condition | None
             An additional restriction that a match or replacement must satisfy.
@@ -5123,14 +7198,11 @@ class Transformer:
             The minimum level at which a match is allowed.
         max_level: int | None
             The maximum level at which a match is allowed.
-        level_range: tuple[int, int | None] | None
-            The `(min_level, max_level)` range in which matches are allowed.
         level_is_tree_depth: bool
             Whether levels should be measured by tree depth instead of function nesting.
         partial: bool
             Whether matches are allowed inside larger expressions instead of only at the top level.
         """
-
 
 class Series:
     """
@@ -5148,7 +7220,9 @@ class Series:
 
     def __getitem__(self, expr: Expression | int) -> Expression:
         """
-        Get the coefficient of the term with exponent `exp`
+        Get the coefficient of `(x - expansion_point)**exp`.
+        Known absent terms return zero. Raises IndexError at or above the
+        absolute order, where the coefficient is unknown.
 
         Parameters
         ----------
@@ -5158,7 +7232,8 @@ class Series:
 
     def get_coefficient(self, exp: Expression | int) -> Expression:
         """
-        Get the coefficient of the term with exponent `exp`.  Alternatively, use `series[exp]`.
+        Get the coefficient of the term with exponent `exp`. Alternatively, use `series[exp]`.
+        Known absent terms return zero. Raises IndexError at or above the absolute order.
 
         Parameters
         ----------
@@ -5236,8 +7311,7 @@ class Series:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the series into a human-readable string.
@@ -5330,8 +7404,7 @@ class Series:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the series into a rich display object, with tunable settings.
@@ -5556,7 +7629,6 @@ class Series:
         Convert the series to an expression
         """
 
-
 class TermStreamer:
     """
     A term streamer that can handle large expressions, by
@@ -5703,7 +7775,6 @@ class TermStreamer:
             If set, the output of the `stats` transformer will be written to a file in JSON format.
         """
 
-
 class MatchIterator:
     """An iterator over matches."""
 
@@ -5716,7 +7787,6 @@ class MatchIterator:
         """
         Return the next match.
         """
-
 
 class ReplaceIterator:
     """An iterator over single replacements."""
@@ -5731,6 +7801,34 @@ class ReplaceIterator:
         Return the next replacement.
         """
 
+class IsolatedRoot:
+    """A certified isolated root in the complex plane."""
+
+    @property
+    def index(self) -> int:
+        """Canonical index of this root within its defining polynomial."""
+
+    @property
+    def center(self) -> tuple[Expression, Expression]:
+        """Center of the certified complex disk as exact real and imaginary parts."""
+
+    @property
+    def radius(self) -> Expression:
+        """Radius of the certified complex disk."""
+
+    def to_expression(self) -> Expression:
+        """Convert this isolated root to an exact expression."""
+
+    def refine(self, tolerance: Float | float | Decimal) -> IsolatedRoot:
+        """Return a root whose cached enclosure has at most the requested radius."""
+
+    def location(self) -> RootLocation:
+        """Resolve and cache the root's relationship to the coordinate axes."""
+
+    def is_positive(self) -> bool:
+        """Determine whether this root lies on the positive real axis."""
+
+    def __repr__(self) -> str: ...
 
 class Polynomial:
     """A Symbolica polynomial with rational coefficients."""
@@ -5841,8 +7939,7 @@ class Polynomial:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -5925,8 +8022,7 @@ class Polynomial:
         show_namespaces: bool = False,
         hide_namespace: str | None = None,
         include_attributes: bool = False,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> FormattedOutput:
         """
         Convert the polynomial into a rich display object, with tunable settings.
@@ -5989,7 +8085,7 @@ class Polynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -5999,7 +8095,7 @@ class Polynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -6257,34 +8353,31 @@ class Polynomial:
             The prime modulus of the target finite field.
         """
 
-    def isolate_roots(
-        self, refine: float | Decimal | None = None
-    ) -> list[tuple[Expression, Expression, int]]:
+    def root(self, index: int) -> IsolatedRoot | None:
+        """Return one root from the canonical ordering, counting multiplicity."""
+
+    def isolate_roots(self) -> list[tuple[IsolatedRoot, int]]:
         """
-        Isolate the real roots of the polynomial. The result is a list of intervals with rational bounds that contain exactly one root,
-        and the multiplicity of that root. Optionally, the intervals can be refined to a given precision.
+        Isolate all distinct roots in the complex plane, together with their
+        multiplicities.
 
         Examples
         --------
         >>> from symbolica import *
-        >>> p = E('2016+5808*x+5452*x^2+1178*x^3+-753*x^4+-232*x^5+41*x^6').to_polynomial()
-        >>> for a, b, n in p.isolate_roots():
-        >>>     print('({},{}): {}'.format(a, b, n))
+        >>> p = E('(x-1)^2*(x^2+1)').to_polynomial()
+        >>> for root, multiplicity in p.isolate_roots():
+        ...     print(root.center, multiplicity)
+        """
 
-        yields
-        ```
-        (-56/45,-77/62): 1
-        (-98/79,-119/96): 1
-        (-119/96,-21/17): 1
-        (-7/6,0): 1
-        (0,6): 1
-        (6,12): 1
-        ```
+    def isolate_real_roots(self) -> list[tuple[IsolatedRoot, int]]:
+        """Isolate all distinct real roots, together with their multiplicities."""
 
-        Parameters
-        ----------
-        refine: float | Decimal | None
-            The optional interval refinement tolerance.
+    def isolate_real_root_intervals(
+        self,
+    ) -> list[tuple[Expression, Expression, int]]:
+        """
+        Isolate the real roots as rational intervals containing exactly one
+        distinct root, together with their multiplicities.
         """
 
     @overload
@@ -6297,7 +8390,7 @@ class Polynomial:
         Approximate all complex roots of a univariate polynomial, given a maximal number of iterations
         and a given tolerance. Returns the roots and their multiplicity.
 
-        Specify `decimal_digit_precision` to return roots as (real, imaginary) Decimal pairs.
+        Specify `decimal_digit_precision` to return roots as ComplexFloat values.
 
         Examples
         --------
@@ -6320,20 +8413,20 @@ class Polynomial:
         max_iterations: int,
         tolerance: float,
         decimal_digit_precision: int,
-    ) -> list[tuple[tuple[Decimal, Decimal], int]]:
+    ) -> list[tuple[ComplexFloat, int]]:
         """
         Approximate all complex roots of a univariate polynomial, given a maximal number of iterations
         and a given tolerance. Returns the roots and their multiplicity.
 
         If `decimal_digit_precision` is omitted, roots are returned as complex numbers.
-        If it is specified, roots are returned as (real, imaginary) Decimal pairs.
+        If it is specified, roots are returned as ComplexFloat values.
 
         Examples
         --------
 
         >>> p = E('x^2-2').to_polynomial()
-        >>> for ((r, i), m) in p.approximate_roots(1000, 1e-10, 100):
-        >>>     print(r, i, m)
+        >>> for (r, m) in p.approximate_roots(1000, 1e-10, 100):
+        >>>     print(r.real, r.imag, m)
 
         Parameters
         ----------
@@ -6699,7 +8792,6 @@ class Polynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-
 class NumberFieldPolynomial:
     """A Symbolica polynomial with rational coefficients."""
 
@@ -6778,8 +8870,7 @@ class NumberFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -6849,7 +8940,7 @@ class NumberFieldPolynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -6859,7 +8950,7 @@ class NumberFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -7329,7 +9420,6 @@ class NumberFieldPolynomial:
         Convert the number field polynomial to a rational polynomial.
         """
 
-
 class FiniteFieldPolynomial:
     """A Symbolica polynomial with finite field coefficients."""
 
@@ -7445,8 +9535,7 @@ class FiniteFieldPolynomial:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the polynomial into a human-readable string, with tunable settings.
@@ -7516,7 +9605,7 @@ class FiniteFieldPolynomial:
         Get the list of variables in the internal ordering of the polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -7526,7 +9615,7 @@ class FiniteFieldPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -8015,7 +10104,6 @@ class FiniteFieldPolynomial:
             The minimal polynomial that defines the algebraic extension.
         """
 
-
 class RationalPolynomial:
     """A Symbolica rational polynomial."""
 
@@ -8110,7 +10198,7 @@ class RationalPolynomial:
         Get the denominator.
         """
 
-    def __eq__(self, rhs: RationalPolynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two rational polynomials are equal.
 
@@ -8120,7 +10208,7 @@ class RationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: RationalPolynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two rational polynomials are not equal.
 
@@ -8298,7 +10386,6 @@ class RationalPolynomial:
             The variable with respect to which to perform the partial-fraction decomposition.
         """
 
-
 class FiniteFieldRationalPolynomial:
     """A Symbolica rational polynomial."""
 
@@ -8351,7 +10438,7 @@ class FiniteFieldRationalPolynomial:
             If the input is not a valid Symbolica rational polynomial.
         """
 
-    def __eq__(self, rhs: Polynomial | int) -> bool:
+    def __eq__(self, rhs: object) -> bool:
         """
         Check if two polynomials are equal.
 
@@ -8361,7 +10448,7 @@ class FiniteFieldRationalPolynomial:
             The right-hand-side operand.
         """
 
-    def __ne__(self, rhs: Polynomial | int) -> bool:
+    def __ne__(self, rhs: object) -> bool:
         """
         Check if two polynomials are not equal.
 
@@ -8518,7 +10605,6 @@ class FiniteFieldRationalPolynomial:
         x: Expression | None
             The variable with respect to which to perform the partial-fraction decomposition.
         """
-
 
 class Matrix:
     """A matrix with rational polynomial coefficients."""
@@ -8757,8 +10843,7 @@ class Matrix:
         hide_namespace: str | None = None,
         include_attributes: bool = False,
         max_terms: int | None = None,
-        custom_print_mode: dict[str, int | str |
-                                dict[str | int, Any]] | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
     ) -> str:
         """
         Convert the matrix into a human-readable string, with tunable settings.
@@ -8844,7 +10929,7 @@ class Matrix:
         Convert the matrix into a pretty string representation.
         """
 
-    def __eq__(self, other: Matrix) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Compare two matrices.
 
@@ -8854,7 +10939,7 @@ class Matrix:
             The other operand to combine or compare with.
         """
 
-    def __ne__(self, other: Matrix) -> bool:
+    def __ne__(self, other: object) -> bool:
         """
         Compare two matrices.
 
@@ -8949,6 +11034,89 @@ class Matrix:
         Negate the matrix, returning the result.
         """
 
+class FunctionDefinition:
+    """A function definition and its evaluator registration settings."""
+
+    def __new__(
+        cls,
+        function: Expression,
+        arguments: Sequence[Expression],
+        body: Expression,
+        inlining: Literal["always", "never", "auto"] = "auto",
+    ) -> FunctionDefinition:
+        """
+        Define a function for an evaluator. The function may either
+        be a symbol (e.g. `f`) or a function call, where each argument is considered a tag.
+        For example, `function=f(1)` would treat the `1` as a tag that is not passed
+        to the function body.
+        """
+
+class EvaluatorInstructions:
+    """A portable instruction stream for evaluating an expression."""
+
+    @property
+    def input_count(self) -> int:
+        """The number of input parameter values expected by this instruction stream."""
+
+    @property
+    def output_count(self) -> int:
+        """The number of output values produced by this instruction stream."""
+
+    @property
+    def instructions(self) -> list[tuple]:
+        """
+        Return a portable instruction representation for efficiently evaluating the expression.
+        This can be used to generate code for the expression evaluation in any programming
+        language.
+
+        There are four lists that are used in the evaluation instructions:
+        - `param`: the list of input parameters.
+        - `temp`: the list of temporary slots. Its size is available as `temporary_count`.
+        - `const`: the list of constants.
+        - `out`: the list of outputs.
+
+        The instructions are of the form:
+        - `('add', ('out', 0), [('const', 1), ('param', 0)], 0)` which means `out[0] = const[1] + param[0]` where the first `0` arguments are real.
+        - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
+        - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
+        - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
+        - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
+        - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
+        - `('goto', 10)` which means `goto label 10`.
+        - `('label', 3)` which means `label 3`.
+        - `('join', ('out', 0), ('temp', 0), 3, 7)` which means `out[0] = (temp[0] != 0) ? label 3 : label 7`.
+        """
+
+    @property
+    def temporary_count(self) -> int:
+        """The number of temporary storage slots required by `instructions`."""
+
+    @property
+    def constants(self) -> list[Expression]:
+        """Exact constants referenced by `('const', index)` slots."""
+
+    @property
+    def sub_evaluators(self) -> list[EvaluatorFunction]:
+        """Non-inlined function bodies referenced by `fun` instructions in this stream."""
+
+    def __repr__(self) -> str: ...
+
+class EvaluatorFunction:
+    """A non-inlined function evaluator referenced by an instruction stream."""
+
+    @property
+    def function(self) -> Expression:
+        """The function referenced by the calling `fun` instruction."""
+
+    @property
+    def tags(self) -> list[str]:
+        """The tags used to distinguish this function implementation."""
+
+    @property
+    def evaluator(self) -> EvaluatorInstructions:
+        """The exported instruction body of this sub-evaluator."""
+
+    def __repr__(self) -> str: ...
 
 class Evaluator:
     """An optimized evaluator of an expression."""
@@ -8962,10 +11130,6 @@ class Evaluator:
     def load(
         cls,
         evaluator: bytes,
-        external_functions: dict[
-            tuple[Expression, str],
-            Callable[[Sequence[float | complex]], float | complex],
-        ] = {},
     ) -> Evaluator:
         """
         Load the evaluator into memory, preparing it for evaluation.
@@ -8974,8 +11138,6 @@ class Evaluator:
         ----------
         evaluator: bytes
             The serialized evaluator state.
-        external_functions: dict[tuple[Expression, str], Callable[[ Sequence[float | complex]], float | complex]]
-            The external functions to register.
         """
 
     def jit_compile(
@@ -9002,20 +11164,28 @@ class Evaluator:
         Save the evaluator to a byte string.
         """
 
+    def export_symjit(self, complex: bool = False) -> bytes:
+        """
+        Export the serialized SymJIT application used for double or complex evaluation, which
+        can be loaded by the `symjit` module.
+
+        Parameters
+        ----------
+        complex: bool
+            Whether to export the real or complex evaluator.
+        """
+
     def get_instructions(
         self,
-    ) -> tuple[
-        list[tuple[str, tuple[str, int], list[tuple[str, int]]]
-             ], int, list[Expression]
-    ]:
+    ) -> EvaluatorInstructions:
         """
-        Return the instructions for efficiently evaluating the expression, the length of the list
-        of temporary variables, and the list of constants. This can be used to generate
-        code for the expression evaluation in any programming language.
+        Return a portable instruction representation for efficiently evaluating the expression.
+        This can be used to generate code for the expression evaluation in any programming
+        language.
 
         There are four lists that are used in the evaluation instructions:
         - `param`: the list of input parameters.
-        - `temp`: the list of temporary slots. The size of it is provided as the second return value.
+        - `temp`: the list of temporary slots. Its size is available as `temporary_count`.
         - `const`: the list of constants.
         - `out`: the list of outputs.
 
@@ -9034,12 +11204,13 @@ class Evaluator:
         --------
 
         >>> from symbolica import *
-        >>> (ins, m, c) = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
+        >>> exported = E('x^2+5/3+cos(x)').evaluator([S('x')]).get_instructions()
         >>>
-        >>> for x in ins:
+        >>> for x in exported.instructions:
         >>>     print(x)
-        >>> print('temp list length:', m)
-        >>> print('constants:', c)
+        >>> print('temp list length:', exported.temporary_count)
+        >>> print('constants:', exported.constants)
+        >>> print('sub-evaluators:', exported.sub_evaluators)
 
         yields
 
@@ -9049,6 +11220,7 @@ class Evaluator:
         ('add', ('out', 0), [('const', 0), ('out', 0), ('temp', 1)])
         temp list length: 2
         constants: [5/3]
+        sub-evaluators: []
         ```
         """
 
@@ -9092,9 +11264,11 @@ class Evaluator:
         For example, to compute first derivatives in two variables `x` and `y`,
         use `dual_shape = [[0, 0], [1, 0], [0, 1]]`.
 
-        Non built-in functions will be rewritten to functions with the suffix `_v`
-        that take the vector index as an additional tag.
-        The input to the functions is the flattened vector of all components of all parameters,
+        External functions are dualized automatically using their symbolic derivative
+        rules. Functions appearing in those derivatives must support evaluation.
+        An explicit function with the suffix `_v` overrides automatic dualization
+        and computes one component per vector-index tag. The input to these functions
+        is the flattened vector of all components of all parameters,
         followed by all previously computed output components.
 
         Examples
@@ -9433,7 +11607,8 @@ class Evaluator:
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
-        For best performance, use `numpy` arrays instead of lists.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         On the first call, the expression is JIT compiled using SymJIT.
 
@@ -9455,9 +11630,13 @@ class Evaluator:
         """
 
     def evaluate_with_prec(
-        self, inputs: Sequence[float | str | Decimal], decimal_digit_precision: int
-    ) -> list[Decimal]:
+        self, inputs: Sequence[Float | int | float | str | Decimal], decimal_digit_precision: int
+    ) -> list[Float]:
         """
+        Input counts must match the evaluator. Precision must be positive and
+        fit the supported range; violations raise ValueError. Values outside
+        the u32 argument range raise OverflowError during Python conversion.
+
         Evaluate the expression for a single input. The precision of the input parameters is honored, and
         all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
 
@@ -9475,17 +11654,18 @@ class Evaluator:
 
         Parameters
         ----------
-        inputs: Sequence[float | str | Decimal]
+        inputs: Sequence[Float | int | float | str | Decimal]
             The input values or batches to evaluate.
         decimal_digit_precision: int
-            The decimal precision used for arbitrary-precision evaluation.
+            Positive decimal precision. Invalid precision or input counts raise ValueError.
         """
 
     def evaluate_complex(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
-        For best performance, use `numpy` arrays and `np.complex128` instead of lists and
-        `complex`.
+        For best performance, use NumPy arrays with dtype `np.complex128` for input;
+        results are returned as NumPy arrays when NumPy is installed and as nested
+        Python lists otherwise.
 
         On the first call, the expression is JIT compiled using SymJIT.
 
@@ -9508,10 +11688,14 @@ class Evaluator:
 
     def evaluate_complex_with_prec(
         self,
-        inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]],
+        inputs: Sequence[ComplexFloat | Float | int | float | complex | str | Decimal | tuple[Float | int | float | str | Decimal, Float | int | float | str | Decimal]],
         decimal_digit_precision: int,
-    ) -> list[tuple[Decimal]]:
+    ) -> list[ComplexFloat]:
         """
+        Input counts must match the evaluator. Precision must be positive and
+        fit the supported range; violations raise ValueError. Values outside
+        the u32 argument range raise OverflowError during Python conversion.
+
         Evaluate the expression for a single complex input, represented as a tuple of real and imaginary parts.
         The precision of the input parameters is honored, and all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
 
@@ -9526,16 +11710,15 @@ class Evaluator:
         >>> print(ev.evaluate_complex_with_prec(
         >>>     [(Decimal('1.234567890121223456789981273238947212312338947923'), Decimal('3.434567890121223356789981273238947212312338947923'))], 50))
 
-        Yields `[(Decimal('-10.27209871653338252296233957800668637617803672307'), Decimal('8.480414467170121512062583245527383392798704790330'))]`
+        Returns a list of ComplexFloat values. Use `to_decimal_tuple()` for Decimal components.
 
         Parameters
         ----------
-        inputs: Sequence[tuple[float | str | Decimal, float | str | Decimal]]
+        inputs: Sequence[ComplexFloat | Float | int | float | complex | str | Decimal | tuple[Float | int | float | str | Decimal, Float | int | float | str | Decimal]]
             The input values or batches to evaluate.
         decimal_digit_precision: int
-            The decimal precision used for arbitrary-precision evaluation.
+            Positive decimal precision. Invalid precision or input counts raise ValueError.
         """
-
 
 class CompiledRealEvaluator:
     """A compiled evaluator of an expression."""
@@ -9545,11 +11728,11 @@ class CompiledRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9557,22 +11740,19 @@ class CompiledRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledComplexEvaluator:
     """A compiled evaluator of an expression."""
@@ -9582,11 +11762,11 @@ class CompiledComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9594,22 +11774,19 @@ class CompiledComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledSimdRealEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
@@ -9619,11 +11796,11 @@ class CompiledSimdRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledSimdRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9631,22 +11808,19 @@ class CompiledSimdRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledSimdComplexEvaluator:
     """A compiled evaluator of an expression that packs 4 double using SIMD."""
@@ -9656,11 +11830,11 @@ class CompiledSimdComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
     ) -> CompiledSimdComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9668,22 +11842,19 @@ class CompiledSimdComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledCudaRealEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
@@ -9693,13 +11864,13 @@ class CompiledCudaRealEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
-        cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256,
+        number_of_evaluations: int,
+        block_size: int = 512,
     ) -> CompiledCudaRealEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9707,26 +11878,23 @@ class CompiledCudaRealEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
-        cuda_number_of_evaluations: int
+        number_of_evaluations: int
             The number of evaluations to batch per CUDA kernel launch.
-        cuda_block_size: int | None
+        block_size: int
             The CUDA thread block size used by the compiled kernel.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.float64]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class CompiledCudaComplexEvaluator:
     """A compiled evaluator of an expression that uses CUDA for GPU acceleration."""
@@ -9736,13 +11904,13 @@ class CompiledCudaComplexEvaluator:
         _cls,
         filename: str,
         function_name: str,
-        input_len: int,
-        output_len: int,
-        cuda_number_of_evaluations: int,
-        cuda_block_size: int | None = 256,
+        number_of_evaluations: int,
+        block_size: int = 512,
     ) -> CompiledCudaComplexEvaluator:
         """
         Load a compiled library, previously generated with `Evaluator.compile()`.
+        Input and output dimensions are read from the library.
+        Libraries generated before Symbolica 3.0 must be re-exported and recompiled.
 
         Parameters
         ----------
@@ -9750,26 +11918,23 @@ class CompiledCudaComplexEvaluator:
             The file path to load from or save to.
         function_name: str
             The exported symbol name of the compiled entry point.
-        input_len: int
-            The number of scalar inputs expected by the compiled evaluator.
-        output_len: int
-            The number of scalar outputs produced by the compiled evaluator.
-        cuda_number_of_evaluations: int
+        number_of_evaluations: int
             The number of evaluations to batch per CUDA kernel launch.
-        cuda_block_size: int | None
+        block_size: int
             The CUDA thread block size used by the compiled kernel.
         """
 
     def evaluate(self, inputs: npt.ArrayLike) -> npt.NDArray[np.complex128]:
         """
         Evaluate the expression for multiple inputs and return the result.
+        For best performance, use NumPy arrays for input; results are returned as
+        NumPy arrays when NumPy is installed and as nested Python lists otherwise.
 
         Parameters
         ----------
         inputs: npt.ArrayLike
             The input values or batches to evaluate.
         """
-
 
 class NumericalIntegrator:
     """A numerical integrator for high-dimensional integrals."""
@@ -9787,6 +11952,7 @@ class NumericalIntegrator:
         min_samples_for_update: int = 100,
         bin_number_evolution: Sequence[int] | None = None,
         train_on_avg: bool = False,
+        min_probability_density: float = 0.0,
     ) -> NumericalIntegrator:
         """
         Create a new continuous grid for the numerical integrator.
@@ -9803,6 +11969,10 @@ class NumericalIntegrator:
             An optional schedule that changes the number of bins during training.
         train_on_avg: bool
             Whether integrator training should use average sample values.
+        min_probability_density: float
+            The uniform probability-density floor for the joint continuous grid.
+            A positive value bounds the continuous inverse density by its reciprocal.
+            Zero disables the safeguard.
         """
 
     @classmethod
@@ -10055,7 +12225,6 @@ class NumericalIntegrator:
             Whether intermediate integration statistics should be shown.
         """
 
-
 class Sample:
     """A sample from the Symbolica integrator. It could consist of discrete layers,
     accessible with `d` (empty when there are not discrete layers), and the final continuous layer `c` if it is present."""
@@ -10067,7 +12236,6 @@ class Sample:
     """ A sample point per (nested) discrete layer. Empty if not present."""
     c: list[float]
     """ A sample in the continuous layer. Empty if not present."""
-
 
 class Probe:
     """A probe that is used to access the Jacobian weight of a point or region
@@ -10134,7 +12302,6 @@ class Probe:
             The continuous probe coordinates; use `None` to include the full range of a dimension.
         """
 
-
 class RandomNumberGenerator:
     """A reproducible, fast, non-cryptographic random number generator suitable for parallel Monte Carlo simulations.
     A `seed` has to be set, which can be any `u64` number (small numbers work just as well as large numbers).
@@ -10186,7 +12353,6 @@ class RandomNumberGenerator:
         Export the random number generator state as a bytes object of length 32, which can be imported again to restore the state.
         """
 
-
 class HalfEdge:
     """A half-edge in a graph that connects to one vertex, consisting of a direction (or `None` if undirected) and edge data."""
 
@@ -10217,7 +12383,6 @@ class HalfEdge:
         """
         Get the data of the half-edge.
         """
-
 
 class Graph:
     """A graph that supported directional edges, parallel edges, self-edges and expression data on the nodes and edges.
@@ -10255,7 +12420,7 @@ class Graph:
         Get the number of nodes in the graph.
         """
 
-    def __eq__(self, other: Graph) -> bool:
+    def __eq__(self, other: object) -> bool:
         """
         Compare two graphs.
 
@@ -10265,7 +12430,7 @@ class Graph:
             The other operand to combine or compare with.
         """
 
-    def __ne__(self, other: Graph) -> bool:
+    def __ne__(self, other: object) -> bool:
         """
         Compare two graphs.
 
@@ -10498,8 +12663,9 @@ class Graph:
             The other operand to combine or compare with.
         """
 
-
 class Integer:
+    """Number-theoretic operations on Python integers, including factoring and primality testing."""
+
     @classmethod
     def prime_iter(_cls, start: int = 1) -> Iterator[int]:
         """
@@ -10606,10 +12772,10 @@ class Integer:
     @classmethod
     def solve_integer_relation(
         _cls,
-        x: Sequence[int | float | complex | Decimal],
-        tolerance: float | Decimal,
+        x: Sequence[int | float | complex | Float | ComplexFloat | Decimal],
+        tolerance: Float | float | Decimal,
         max_coeff: int | None = None,
-        gamma: float | Decimal | None = None,
+        gamma: Float | float | Decimal | None = None,
     ) -> Sequence[int]:
         """
         Use the PSLQ algorithm to find a vector of integers `a` that satisfies `a.x = 0`,
@@ -10624,12 +12790,12 @@ class Integer:
         >>> print(r)  # [1,5,6]
         Parameters
         ----------
-        x: Sequence[int | float | complex | Decimal]
+        x: Sequence[int | float | complex | Float | ComplexFloat | Decimal]
             The numeric vector for which an integer relation is sought.
-        tolerance: float | Decimal
+        tolerance: Float | float | Decimal
             The tolerance used to accept an integer relation.
         max_coeff: int | None
             The maximum coefficient size to consider.
-        gamma: float | Decimal | None
+        gamma: Float | float | Decimal | None
             The PSLQ gamma parameter controlling the reduction strategy.
         """

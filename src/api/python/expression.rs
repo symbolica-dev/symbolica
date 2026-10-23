@@ -1,7 +1,9 @@
 use super::*;
+use crate::atom::{FunctionBuilder, NormalizationFunction};
 use crate::utils::Settable;
+use pyo3::types::{PySlice, PySliceMethods};
 
-/// Operations that transform an expression.
+/// A deferred symbolic computation. Call the object to execute it.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -11,6 +13,7 @@ use crate::utils::Settable;
 )]
 #[derive(Clone)]
 pub struct PythonHeldExpression {
+    /// The pattern describing the deferred computation.
     pub expr: Pattern,
 }
 
@@ -60,29 +63,84 @@ impl PythonHeldExpression {
         Ok(out.into())
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(&self, other: ConvertibleToPattern, op: CompareOp) -> PyResult<PythonCondition> {
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.expr.clone(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Compare object identity without executing this computation. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            true.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred equality Condition on the results after execution.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare object identity without executing this computation. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            false.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred disequality Condition on the results after execution.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __lt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Lt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __le__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Le,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __gt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Gt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __ge__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.clone(),
+            other.to_pattern()?.expr,
+            CompareOp::Ge,
+        ))
     }
 
     /// Test if the expression is of a certain type.
@@ -114,20 +172,19 @@ impl PythonHeldExpression {
 
     /// Create a transformer that tests whether the pattern is found in the expression.
     /// Restrictions on the pattern can be supplied through `cond`.
-    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true))]
+    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true))]
     pub fn matches(
         &self,
         lhs: ConvertibleToPattern,
         cond: Option<ConvertibleToPatternRestriction>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
     ) -> PyResult<PythonCondition> {
         let conditions = cond.map(|r| r.0).unwrap_or_default();
         let settings = MatchSettings {
-            level_range: level_range.unwrap_or((min_level, max_level)),
+            level_range: (min_level, max_level),
             level_is_tree_depth,
             partial,
             ..MatchSettings::default()
@@ -147,7 +204,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __add__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -161,7 +218,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __radd__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__add__(rhs)
@@ -171,7 +228,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __sub__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__add__(ConvertibleToPattern::Held(rhs.to_pattern()?.__neg__()?))
@@ -181,7 +238,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rsub__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         rhs.to_pattern()?
@@ -192,7 +249,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __mul__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -206,7 +263,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rmul__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         self.__mul__(rhs)
@@ -216,7 +273,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __truediv__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         let res = Workspace::get_local().with(|workspace| {
@@ -230,7 +287,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: HeldExpression | Expression | int | float | complex | Decimal
+    /// rhs: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rtruediv__(&self, rhs: ConvertibleToPattern) -> PyResult<PythonHeldExpression> {
         rhs.to_pattern()?
@@ -241,7 +298,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// exponent: HeldExpression | Expression | int | float | complex | Decimal
+    /// exponent: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The exponent.
     pub fn __pow__(
         &self,
@@ -265,7 +322,7 @@ impl PythonHeldExpression {
     ///
     /// Parameters
     /// ----------
-    /// base: HeldExpression | Expression | int | float | complex | Decimal
+    /// base: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The base expression.
     pub fn __rpow__(
         &self,
@@ -312,6 +369,7 @@ impl PythonHeldExpression {
 /// Operations that transform an expression.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
+    frozen,
     from_py_object,
     name = "Transformer",
     subclass,
@@ -320,6 +378,217 @@ impl PythonHeldExpression {
 #[derive(Clone)]
 pub struct PythonTransformer {
     pub chain: Vec<Transformer>,
+}
+
+pub enum PythonNormalization {
+    Transformer(PythonTransformer),
+    Callable(Py<PyAny>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for PythonNormalization {
+    type Error = PyErr;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if let Ok(transformer) = ob.extract::<PythonTransformer>() {
+            Ok(Self::Transformer(transformer))
+        } else if ob.is_callable() {
+            Ok(Self::Callable(ob.extract::<Py<PyAny>>()?))
+        } else {
+            Err(exceptions::PyTypeError::new_err(
+                "normalization must be a Transformer or callable",
+            ))
+        }
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+impl PyStubType for PythonNormalization {
+    fn type_output() -> TypeInfo {
+        TypeInfo::unqualified("Transformer | typing.Callable[[Expression], Expression]")
+    }
+}
+
+fn condition_has_opaque_callback<T>(condition: &Condition<T>, leaf: fn(&T) -> bool) -> bool {
+    match condition {
+        Condition::And(conditions) | Condition::Or(conditions) => {
+            condition_has_opaque_callback(&conditions.0, leaf)
+                || condition_has_opaque_callback(&conditions.1, leaf)
+        }
+        Condition::Not(condition) => condition_has_opaque_callback(condition, leaf),
+        Condition::Yield(value) => leaf(value),
+        Condition::True | Condition::False => false,
+    }
+}
+
+fn restriction_has_opaque_callback(restriction: &PatternRestriction) -> bool {
+    match restriction {
+        PatternRestriction::MatchStack(_) => true,
+        PatternRestriction::Wildcard((_, restriction)) => matches!(
+            restriction,
+            WildcardRestriction::Filter(_) | WildcardRestriction::Cmp(_, _)
+        ),
+    }
+}
+
+fn relation_has_opaque_callback(relation: &Relation) -> bool {
+    match relation {
+        Relation::Eq(lhs, rhs)
+        | Relation::Ne(lhs, rhs)
+        | Relation::Gt(lhs, rhs)
+        | Relation::Ge(lhs, rhs)
+        | Relation::Lt(lhs, rhs)
+        | Relation::Le(lhs, rhs)
+        | Relation::Contains(lhs, rhs) => {
+            pattern_has_opaque_callback(lhs) || pattern_has_opaque_callback(rhs)
+        }
+        Relation::IsType(pattern, _) => pattern_has_opaque_callback(pattern),
+        Relation::Matches(lhs, rhs, condition, _) => {
+            pattern_has_opaque_callback(lhs)
+                || pattern_has_opaque_callback(rhs)
+                || condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+        }
+    }
+}
+
+fn pattern_has_opaque_callback(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Literal(_) | Pattern::Wildcard(_, _) => false,
+        Pattern::Fn(_, arguments)
+        | Pattern::Mul(arguments)
+        | Pattern::Add(arguments)
+        | Pattern::Alternative(arguments) => arguments.iter().any(pattern_has_opaque_callback),
+        Pattern::Pow(arguments) => arguments.iter().any(pattern_has_opaque_callback),
+        Pattern::Transformer(transformer) => {
+            transformer
+                .0
+                .as_ref()
+                .is_some_and(pattern_has_opaque_callback)
+                || transformer_chain_has_opaque_callback(&transformer.1)
+        }
+    }
+}
+
+fn replace_with_has_opaque_callback(replacement: &ReplaceWith<'_>) -> bool {
+    match replacement {
+        ReplaceWith::Pattern(pattern) => pattern_has_opaque_callback(pattern),
+        ReplaceWith::Map(_) => true,
+    }
+}
+
+fn transformer_has_opaque_callback(transformer: &Transformer) -> bool {
+    match transformer {
+        Transformer::IfElse(condition, if_block, else_block) => {
+            condition_has_opaque_callback(condition, relation_has_opaque_callback)
+                || transformer_chain_has_opaque_callback(if_block)
+                || transformer_chain_has_opaque_callback(else_block)
+        }
+        Transformer::IfChanged(condition, if_block, else_block) => {
+            transformer_chain_has_opaque_callback(condition)
+                || transformer_chain_has_opaque_callback(if_block)
+                || transformer_chain_has_opaque_callback(else_block)
+        }
+        Transformer::Collect(_, key_map, coefficient_map)
+        | Transformer::CollectSymbol(_, key_map, coefficient_map) => {
+            transformer_chain_has_opaque_callback(key_map)
+                || transformer_chain_has_opaque_callback(coefficient_map)
+        }
+        Transformer::ReplaceAll(pattern, replacement, condition, _, _) => {
+            pattern_has_opaque_callback(pattern)
+                || replace_with_has_opaque_callback(replacement)
+                || condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+        }
+        Transformer::ReplaceAllMultiple(replacements, _) => {
+            replacements.iter().any(|replacement| {
+                pattern_has_opaque_callback(&replacement.pat)
+                    || replace_with_has_opaque_callback(&replacement.rhs)
+                    || replacement.conditions.as_ref().is_some_and(|condition| {
+                        condition_has_opaque_callback(condition, restriction_has_opaque_callback)
+                    })
+            })
+        }
+        Transformer::Map(_) => true,
+        Transformer::ForEach(chain)
+        | Transformer::MapTerms(chain, _)
+        | Transformer::Repeat(chain)
+        | Transformer::Stats(_, chain) => transformer_chain_has_opaque_callback(chain),
+        _ => false,
+    }
+}
+
+fn transformer_chain_has_opaque_callback(chain: &[Transformer]) -> bool {
+    chain.iter().any(transformer_has_opaque_callback)
+}
+
+fn python_transformer_fingerprint(transformer: &PythonTransformer) -> Option<Vec<u8>> {
+    if transformer_chain_has_opaque_callback(&transformer.chain) {
+        None
+    } else {
+        let mut fingerprint = b"symbolica-python-transformer-v1\0".to_vec();
+        fingerprint.extend(format!("{:?}", transformer.chain).into_bytes());
+        Some(fingerprint)
+    }
+}
+
+fn transformer_normalization_function(chain: Vec<Transformer>) -> NormalizationFunction {
+    Box::new(move |input: AtomView<'_>, out: &mut Settable<Atom>| {
+        let _ = Workspace::get_local()
+            .with(|ws| {
+                Transformer::execute_chain(
+                    input,
+                    &chain,
+                    ws,
+                    &TransformerState::default(),
+                    &mut *out,
+                )
+            })
+            .unwrap();
+    })
+}
+
+fn callable_normalization_function(function: Py<PyAny>) -> NormalizationFunction {
+    Box::new(move |input: AtomView<'_>, out: &mut Settable<Atom>| {
+        match Python::attach(|py| -> PyResult<PythonExpression> {
+            Ok(function
+                .call1(py, (PythonExpression::from(input.to_owned()),))?
+                .extract::<ConvertibleToExpression>(py)?
+                .to_expression())
+        }) {
+            Ok(value) => **out = value.expr,
+            Err(err) => {
+                error!("Python custom normalization callback failed: {err}");
+                **out = input.to_owned();
+            }
+        }
+    })
+}
+
+impl PythonNormalization {
+    fn fingerprint(&self, py: Python<'_>) -> PyResult<Option<Vec<u8>>> {
+        match self {
+            Self::Transformer(transformer) => Ok(python_transformer_fingerprint(transformer)),
+            Self::Callable(function) => {
+                let mut fingerprint = b"symbolica-python-normalization-callable-v1\0".to_vec();
+                fingerprint.extend(python_callable_fingerprint(function.bind(py))?);
+                Ok(Some(fingerprint))
+            }
+        }
+    }
+
+    fn into_function(self) -> NormalizationFunction {
+        match self {
+            Self::Transformer(transformer) => transformer_normalization_function(transformer.chain),
+            Self::Callable(function) => callable_normalization_function(function),
+        }
+    }
+
+    fn clone_function(&self, py: Python<'_>) -> NormalizationFunction {
+        match self {
+            Self::Transformer(transformer) => {
+                transformer_normalization_function(transformer.chain.clone())
+            }
+            Self::Callable(function) => callable_normalization_function(function.clone_ref(py)),
+        }
+    }
 }
 
 impl PythonTransformer {
@@ -399,33 +668,84 @@ impl PythonTransformer {
         Ok(out.into())
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(
-        &self,
-        other: ConvertibleToOpenPattern,
-        op: CompareOp,
-    ) -> PyResult<PythonCondition> {
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Compare object identity without executing this computation. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            true.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred equality Condition on the results after execution.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare object identity without executing this computation. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        slf: PyRef<'_, Self>,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        if slf.as_ptr() == other.as_ptr() {
+            false.into_py_any(other.py())
+        } else {
+            Ok(other.py().NotImplemented())
+        }
+    }
+
+    /// Construct a deferred disequality Condition on the results after execution.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __lt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Lt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __le__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Le,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __gt__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Gt,
+        ))
+    }
+
+    /// Construct a deferred Condition using mathematical real ordering after execution.
+    fn __ge__(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ge,
+        ))
     }
 
     /// Test if the expression is of a certain type.
@@ -457,20 +777,19 @@ impl PythonTransformer {
 
     /// Create a transformer that tests whether the pattern is found in the expression.
     /// Restrictions on the pattern can be supplied through `cond`.
-    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true))]
+    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true))]
     pub fn matches(
         &self,
         lhs: ConvertibleToOpenPattern,
         cond: Option<ConvertibleToPatternRestriction>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
     ) -> PyResult<PythonCondition> {
         let conditions = cond.map(|r| r.0).unwrap_or_default();
         let settings = MatchSettings {
-            level_range: level_range.unwrap_or((min_level, max_level)),
+            level_range: (min_level, max_level),
             level_is_tree_depth,
             partial,
             ..MatchSettings::default()
@@ -755,7 +1074,7 @@ impl PythonTransformer {
                         ));
                     }
                 }
-                Pattern::Wildcard(x) => *x,
+                Pattern::Wildcard(x, _) => *x,
                 _ => {
                     return Err(exceptions::PyValueError::new_err(
                         "Derivative must be taken wrt a variable",
@@ -799,7 +1118,7 @@ impl PythonTransformer {
                     ));
                 }
             }
-            Pattern::Wildcard(x) => *x,
+            Pattern::Wildcard(x, _) => *x,
             _ => {
                 return Err(exceptions::PyValueError::new_err(
                     "Derivative must be taken wrt a variable",
@@ -822,12 +1141,12 @@ impl PythonTransformer {
     ///
     /// Parameters
     /// ----------
-    /// f: Callable[[Expression], Expression | int | float | complex | Decimal]
+    /// f: Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | Decimal]
     ///     The callback or function to apply.
     pub fn map(
         &self,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[Expression], Expression | int | float | complex | decimal.Decimal]"
+            type_repr = "typing.Callable[[Expression], Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal]"
         ))]
         f: Py<PyAny>,
     ) -> PyResult<PythonTransformer> {
@@ -889,7 +1208,8 @@ impl PythonTransformer {
             rep_chain.extend(p.chain);
         }
 
-        let pool = if n_cores < 2 || !LicenseManager::is_licensed() {
+        let n_cores = LicenseManager::max_threads(n_cores);
+        let pool = if n_cores < 2 {
             None
         } else {
             Some(Arc::new(
@@ -1434,10 +1754,16 @@ impl PythonTransformer {
         })))
     }
 
-    /// Create a transformer that factors the expression over the rationals.
-    pub fn factor(&self) -> PyResult<PythonTransformer> {
-        self.append_transformer(Transformer::Map(Box::new(|i, _state, o| {
-            *o = i.factor();
+    /// Create a transformer that factors the expression over the rationals, or over the
+    /// complex rationals if `complex` is set to `True` or if an `i` is present in the expression.
+    #[pyo3(signature = (complex = false))]
+    pub fn factor(&self, complex: bool) -> PyResult<PythonTransformer> {
+        self.append_transformer(Transformer::Map(Box::new(move |i, _state, o| {
+            *o = if complex {
+                i.factor_complex()
+            } else {
+                i.factor()
+            };
             Ok(())
         })))
     }
@@ -1477,7 +1803,7 @@ impl PythonTransformer {
     /// ----------
     /// x: Expression
     ///     The variable around which the series is expanded.
-    /// expansion_point: Expression | int | float | complex | Decimal
+    /// expansion_point: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The point around which the series should be expanded.
     /// depth: int
     ///     The numerator of the expansion depth.
@@ -1536,9 +1862,6 @@ impl PythonTransformer {
     ///     The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
     /// max_level: int | None, optional
     ///     The maximum level at which the pattern is allowed to match. `None` means no maximum.
-    /// level_range:
-    ///     Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-    ///     Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
     /// level_is_tree_depth: bool, optional
     ///     If set to `True`, the level is increased when going one level deeper in the expression tree.
     /// partial: bool, optional
@@ -1556,7 +1879,7 @@ impl PythonTransformer {
     /// nested: bool, optional
     ///     Replace nested matches, starting from the deepest first and acting on the result of that replacement.
     ///     For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
-    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, once = false, bottom_up = false, nested = false))]
+    #[pyo3(signature = (lhs, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, once = false, bottom_up = false, nested = false))]
     pub fn replace(
         &self,
         lhs: ConvertibleToExpression,
@@ -1565,7 +1888,6 @@ impl PythonTransformer {
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
         allow_new_wildcards_on_rhs: bool,
@@ -1596,7 +1918,7 @@ impl PythonTransformer {
                 .collect::<Result<_, _>>()?;
         }
 
-        settings.level_range = level_range.unwrap_or((min_level, max_level));
+        settings.level_range = (min_level, max_level);
         settings.partial = partial;
         settings.level_is_tree_depth = level_is_tree_depth;
         settings.allow_new_wildcards_on_rhs = allow_new_wildcards_on_rhs;
@@ -1898,6 +2220,7 @@ impl PythonTransformer {
 ///    The built-in function for piecewise-defined expressions. `IF(cond, true_expr, false_expr)` evaluates to `true_expr` if `cond` is non-zero and `false_expr` otherwise.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
+    frozen,
     from_py_object,
     name = "Expression",
     subclass,
@@ -1908,76 +2231,400 @@ pub struct PythonExpression {
     pub expr: Atom,
 }
 
-pub enum PythonEvaluationValue {
-    Real(PythonMultiPrecisionFloat),
-    Complex(Complex<f64>),
-    DecimalComplex(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat),
+/// Built-in Symbolica symbols.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(frozen, name = "Symbol", module = "symbolica.core")]
+pub struct PythonSymbol;
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonSymbol {
+    /// Euler's number `e`, approximately `2.7182`.
+    #[classattr]
+    #[pyo3(name = "E")]
+    pub fn e() -> PythonExpression {
+        Atom::var(Symbol::E).into()
+    }
+
+    /// The mathematical constant `π`, approximately `3.1415`.
+    #[classattr]
+    #[pyo3(name = "PI")]
+    pub fn pi() -> PythonExpression {
+        Atom::var(Symbol::PI).into()
+    }
+
+    /// The Euler-Mascheroni constant `γ`, approximately `0.57721`.
+    #[classattr]
+    #[pyo3(name = "EULER_GAMMA")]
+    pub fn euler_gamma() -> PythonExpression {
+        Atom::from(crate::transcendental::euler_gamma()).into()
+    }
+
+    /// The mathematical constant `i`, where `i^2 = -1`.
+    #[classattr]
+    #[pyo3(name = "I")]
+    pub fn i() -> PythonExpression {
+        Atom::i().into()
+    }
+
+    /// The number that represents infinity: `∞`.
+    #[classattr]
+    #[pyo3(name = "INFINITY")]
+    pub fn inf() -> PythonExpression {
+        Atom::num(Coefficient::Infinity(Some(Rational::one().into()))).into()
+    }
+
+    /// The number that represents infinity with an unknown complex phase: `⧞`.
+    #[classattr]
+    #[pyo3(name = "COMPLEX_INFINITY")]
+    pub fn cinf() -> PythonExpression {
+        Atom::num(Coefficient::Infinity(None)).into()
+    }
+
+    /// The number that represents indeterminacy: `¿`.
+    #[classattr]
+    #[pyo3(name = "INDETERMINATE")]
+    pub fn indeterminate() -> PythonExpression {
+        Atom::num(Coefficient::Indeterminate).into()
+    }
+
+    /// The built-in function that converts a rational polynomial to a coefficient.
+    #[classattr]
+    #[pyo3(name = "COEFF")]
+    pub fn coeff() -> PythonExpression {
+        Atom::var(Symbol::COEFF).into()
+    }
+
+    /// The built-in cosine function.
+    #[classattr]
+    #[pyo3(name = "COS")]
+    pub fn cos() -> PythonExpression {
+        Atom::var(Symbol::COS).into()
+    }
+
+    /// The built-in sine function.
+    #[classattr]
+    #[pyo3(name = "SIN")]
+    pub fn sin() -> PythonExpression {
+        Atom::var(Symbol::SIN).into()
+    }
+
+    /// The built-in exponential function.
+    #[classattr]
+    #[pyo3(name = "EXP")]
+    pub fn exp() -> PythonExpression {
+        Atom::var(Symbol::EXP).into()
+    }
+
+    /// The built-in logarithm function.
+    #[classattr]
+    #[pyo3(name = "LOG")]
+    pub fn log() -> PythonExpression {
+        Atom::var(Symbol::LOG).into()
+    }
+
+    /// The built-in square root function.
+    #[classattr]
+    #[pyo3(name = "SQRT")]
+    pub fn sqrt() -> PythonExpression {
+        Atom::var(Symbol::SQRT).into()
+    }
+
+    /// The built-in absolute value function.
+    #[classattr]
+    #[pyo3(name = "ABS")]
+    pub fn abs() -> PythonExpression {
+        Atom::var(Symbol::ABS).into()
+    }
+
+    /// The built-in complex conjugate function.
+    #[classattr]
+    #[pyo3(name = "CONJ")]
+    pub fn conj() -> PythonExpression {
+        Atom::var(Symbol::CONJ).into()
+    }
+
+    /// The built-in if function.
+    #[classattr]
+    #[pyo3(name = "IF")]
+    pub fn if_attr() -> PythonExpression {
+        Atom::var(Symbol::IF).into()
+    }
+
+    /// The built-in tangent function.
+    #[classattr]
+    #[pyo3(name = "TAN")]
+    pub fn tan() -> PythonExpression {
+        Atom::from(crate::transcendental::tan()).into()
+    }
+
+    /// The built-in cotangent function.
+    #[classattr]
+    #[pyo3(name = "COT")]
+    pub fn cot() -> PythonExpression {
+        Atom::from(crate::transcendental::cot()).into()
+    }
+
+    /// The built-in secant function.
+    #[classattr]
+    #[pyo3(name = "SEC")]
+    pub fn sec() -> PythonExpression {
+        Atom::from(crate::transcendental::sec()).into()
+    }
+
+    /// The built-in cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSC")]
+    pub fn csc() -> PythonExpression {
+        Atom::from(crate::transcendental::csc()).into()
+    }
+
+    /// The built-in inverse sine function.
+    #[classattr]
+    #[pyo3(name = "ASIN")]
+    pub fn asin() -> PythonExpression {
+        Atom::from(crate::transcendental::asin()).into()
+    }
+
+    /// The built-in inverse cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOS")]
+    pub fn acos() -> PythonExpression {
+        Atom::from(crate::transcendental::acos()).into()
+    }
+
+    /// The built-in inverse tangent function.
+    #[classattr]
+    #[pyo3(name = "ATAN")]
+    pub fn atan() -> PythonExpression {
+        Atom::from(crate::transcendental::atan()).into()
+    }
+
+    /// The built-in inverse cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOT")]
+    pub fn acot() -> PythonExpression {
+        Atom::from(crate::transcendental::acot()).into()
+    }
+
+    /// The built-in inverse secant function.
+    #[classattr]
+    #[pyo3(name = "ASEC")]
+    pub fn asec() -> PythonExpression {
+        Atom::from(crate::transcendental::asec()).into()
+    }
+
+    /// The built-in inverse cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSC")]
+    pub fn acsc() -> PythonExpression {
+        Atom::from(crate::transcendental::acsc()).into()
+    }
+
+    /// The built-in hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "SINH")]
+    pub fn sinh() -> PythonExpression {
+        Atom::from(crate::transcendental::sinh()).into()
+    }
+
+    /// The built-in hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "COSH")]
+    pub fn cosh() -> PythonExpression {
+        Atom::from(crate::transcendental::cosh()).into()
+    }
+
+    /// The built-in hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "TANH")]
+    pub fn tanh() -> PythonExpression {
+        Atom::from(crate::transcendental::tanh()).into()
+    }
+
+    /// The built-in hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "COTH")]
+    pub fn coth() -> PythonExpression {
+        Atom::from(crate::transcendental::coth()).into()
+    }
+
+    /// The built-in hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "SECH")]
+    pub fn sech() -> PythonExpression {
+        Atom::from(crate::transcendental::sech()).into()
+    }
+
+    /// The built-in hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSCH")]
+    pub fn csch() -> PythonExpression {
+        Atom::from(crate::transcendental::csch()).into()
+    }
+
+    /// The built-in inverse hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "ASINH")]
+    pub fn asinh() -> PythonExpression {
+        Atom::from(crate::transcendental::asinh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOSH")]
+    pub fn acosh() -> PythonExpression {
+        Atom::from(crate::transcendental::acosh()).into()
+    }
+
+    /// The built-in inverse hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "ATANH")]
+    pub fn atanh() -> PythonExpression {
+        Atom::from(crate::transcendental::atanh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOTH")]
+    pub fn acoth() -> PythonExpression {
+        Atom::from(crate::transcendental::acoth()).into()
+    }
+
+    /// The built-in inverse hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "ASECH")]
+    pub fn asech() -> PythonExpression {
+        Atom::from(crate::transcendental::asech()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSCH")]
+    pub fn acsch() -> PythonExpression {
+        Atom::from(crate::transcendental::acsch()).into()
+    }
+
+    /// The built-in Riemann zeta function.
+    #[classattr]
+    #[pyo3(name = "ZETA")]
+    pub fn zeta() -> PythonExpression {
+        Atom::from(crate::transcendental::zeta()).into()
+    }
+
+    /// The built-in gamma function.
+    #[classattr]
+    #[pyo3(name = "GAMMA")]
+    pub fn gamma() -> PythonExpression {
+        Atom::from(crate::transcendental::gamma()).into()
+    }
+
+    /// The built-in error function.
+    #[classattr]
+    #[pyo3(name = "ERF")]
+    pub fn erf() -> PythonExpression {
+        Atom::from(crate::transcendental::erf()).into()
+    }
+
+    /// The built-in polygamma function.
+    #[classattr]
+    #[pyo3(name = "POLYGAMMA")]
+    pub fn polygamma() -> PythonExpression {
+        Atom::from(crate::transcendental::polygamma()).into()
+    }
+
+    /// The built-in polylogarithm function.
+    #[classattr]
+    #[pyo3(name = "POLYLOG")]
+    pub fn polylog() -> PythonExpression {
+        Atom::from(crate::transcendental::polylog()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_J")]
+    pub fn bessel_j() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_j()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_Y")]
+    pub fn bessel_y() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_y()).into()
+    }
+
+    /// The built-in modified Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_I")]
+    pub fn bessel_i() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_i()).into()
+    }
+
+    /// The built-in modified Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_K")]
+    pub fn bessel_k() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_k()).into()
+    }
+
+    /// The built-in algebraic root function.
+    #[classattr]
+    #[pyo3(name = "ROOT")]
+    pub fn root() -> PythonExpression {
+        Atom::from(crate::transcendental::root()).into()
+    }
+
+    /// The built-in alternative-pattern function.
+    #[classattr]
+    #[pyo3(name = "ALT")]
+    pub fn alt() -> PythonExpression {
+        Atom::var(Symbol::ALT).into()
+    }
+
+    /// Returns the variable with the given name, if it exists.
+    #[classmethod]
+    pub fn get(
+        _cls: &Bound<'_, PyType>,
+        name: &str,
+        py: Python<'_>,
+    ) -> PyResult<Option<PythonExpression>> {
+        let namespace = DefaultNamespace {
+            namespace: get_namespace(py)?.into(),
+            data: "",
+            file: "".into(),
+            line: 0,
+        };
+
+        let name = namespace.attach_namespace(name);
+        Ok(Symbol::get_symbol(name).map(|s| Atom::var(s).into()))
+    }
 }
+
+pub struct PythonEvaluationValue(PythonMultiPrecisionComplex);
 
 impl PythonEvaluationValue {
     fn to_complex_f64(&self) -> Complex<f64> {
-        match self {
-            PythonEvaluationValue::Real(r) => Complex::new(r.0.to_f64(), 0.),
-            PythonEvaluationValue::Complex(c) => *c,
-            PythonEvaluationValue::DecimalComplex(re, im) => {
-                Complex::new(re.0.to_f64(), im.0.to_f64())
-            }
-        }
+        Complex::new(self.0.0.re.to_f64(), self.0.0.im.to_f64())
     }
-
     fn to_complex_float(&self, prec: u32) -> Complex<Float> {
-        match self {
-            PythonEvaluationValue::Real(r) => {
-                let mut re = r.0.clone();
-                re.set_prec(prec);
-                Complex::new(re, Float::new(prec))
-            }
-            PythonEvaluationValue::Complex(c) => {
-                Complex::new(Float::with_val(prec, c.re), Float::with_val(prec, c.im))
-            }
-            PythonEvaluationValue::DecimalComplex(re, im) => {
-                let mut re = re.0.clone();
-                let mut im = im.0.clone();
-                re.set_prec(prec);
-                im.set_prec(prec);
-                Complex::new(re, im)
-            }
-        }
+        let mut value = self.0.0.clone();
+        value.re.set_prec(prec);
+        value.im.set_prec(prec);
+        value
     }
 }
-
 impl<'py> FromPyObject<'_, 'py> for PythonEvaluationValue {
     type Error = PyErr;
-
     fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
-        if let Ok((re, im)) = ob.extract::<(PythonMultiPrecisionFloat, PythonMultiPrecisionFloat)>()
-        {
-            Ok(PythonEvaluationValue::DecimalComplex(re, im))
-        } else if let Ok(r) = ob.extract::<PythonMultiPrecisionFloat>() {
-            Ok(PythonEvaluationValue::Real(r))
-        } else if let Ok(c) = ob.extract::<Complex<f64>>() {
-            Ok(PythonEvaluationValue::Complex(c))
-        } else {
-            Err(exceptions::PyTypeError::new_err(
-                "Expected int, float, complex, Decimal or tuple[Decimal, Decimal]",
-            ))
-        }
+        ob.extract::<PythonMultiPrecisionComplex>().map(Self)
     }
 }
-
 #[cfg(feature = "python_stubgen")]
 impl PyStubType for PythonEvaluationValue {
     fn type_output() -> TypeInfo {
-        TypeInfo {
-            name:
-                "int | float | complex | decimal.Decimal | tuple[decimal.Decimal, decimal.Decimal]"
-                    .into(),
-            import: {
-                let mut h = std::collections::HashSet::default();
-                h.insert("decimal".into());
-                h
-            },
-        }
+        PythonMultiPrecisionComplex::type_input()
     }
 }
 
@@ -2028,39 +2675,28 @@ impl PythonPatternRestriction {
         (!self.condition.clone()).into()
     }
 
-    /// Create a pattern restriction based on the current matched variables.
-    /// `match_fn` is a Python function that takes a dictionary of wildcards and their matched values
-    /// and should return an integer. If the integer is less than 0, the restriction is false.
-    /// If the integer is 0, the restriction is inconclusive.
-    /// If the integer is greater than 0, the restriction is true.
-    ///
-    /// If your pattern restriction cannot decide if it holds since not all the required variables
-    /// have been matched, it should return inclusive (0).
+    /// Create a restriction from a callback receiving the currently matched wildcards.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// The dictionary may be incomplete: return `None` until the required wildcards
+    /// are present. A completed match is accepted only when the restriction is true.
+    /// A returned `Condition` is evaluated using the same three-valued contract.
     ///
     /// Examples
     /// --------
     /// >>> from symbolica import *
     /// >>> f, x_, y_, z_ = S('f', 'x_', 'y_', 'z_')
-    /// >>>
-    /// >>> def filter(m: dict[Expression, Expression]) -> int:
-    /// >>>    if x_ in m and y_ in m:
-    /// >>>        if m[x_] > m[y_]:
-    /// >>>            return -1  # no match
-    /// >>>        if z_ in m:
-    /// >>>            if m[y_] > m[z_]:
-    /// >>>                return -1
-    /// >>>            return 1  # match
-    /// >>>
-    /// >>>    return 0  # inconclusive
-    /// >>>
-    /// >>>
+    /// >>> def ordered(m: dict[Expression, Expression]) -> Condition | None:
+    /// ...     if not all(w in m for w in (x_, y_, z_)):
+    /// ...         return None
+    /// ...     return (m[x_] <= m[y_]) & (m[y_] <= m[z_])
     /// >>> e = f(1, 2, 3).replace(f(x_, y_, z_), 1,
-    /// >>>         PatternRestriction.req_matches(filter))
+    /// ...     PatternRestriction.req_matches(ordered))
+    /// >>> assert e == 1
     #[classmethod]
     pub fn req_matches(
         _cls: &Bound<'_, PyType>,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[dict[Expression, Expression]], int]"
+            type_repr = "typing.Callable[[dict[Expression, Expression]], bool | None | Condition]"
         ))]
         match_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
@@ -2072,30 +2708,17 @@ impl PythonPatternRestriction {
                     .map(|(s, t)| (Atom::var(*s).into(), t.to_atom().into()))
                     .collect();
 
-                let r = match Python::attach(|py| {
-                    match_fn.call(py, (matches,), None)?.extract::<isize>(py)
-                }) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        error!("Python pattern match callback failed: {err}");
-                        -1
-                    }
-                };
-
-                if r < 0 {
-                    false.into()
-                } else if r == 0 {
-                    ConditionResult::Inconclusive
-                } else {
-                    true.into()
-                }
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = match_fn.call1(py, (matches,))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
             }))
             .into(),
         })
     }
 }
 
-/// A restriction on wildcards.
+/// A deferred relation or logical combination for Transformers, matching, and solve.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "Condition", module = "symbolica.core")]
 #[derive(Clone)]
@@ -2123,18 +2746,40 @@ impl PythonCondition {
         format!("{}", self.condition)
     }
 
-    /// Evaluate the condition.
-    pub fn eval(&self) -> PyResult<bool> {
-        Ok(self
-            .condition
-            .evaluate(&None)
-            .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
-            == ConditionResult::True)
+    /// Render algebraic expressions in the condition using native HTML formatting.
+    pub fn _repr_html_(&self) -> String {
+        if let Some(text) = format_algebraic_condition(&self.condition, &solution::formatted_atom) {
+            solution::inline_html(&text)
+        } else {
+            crate::printer::AnsiHtmlFormatter::escape_html(&self.__str__())
+        }
     }
 
-    /// Return the boolean value of the condition.
+    /// Evaluate the condition, returning None when its truth is undecidable.
+    /// Unbound Transformers require an input and cannot be evaluated here.
+    pub fn eval(&self) -> PyResult<Option<bool>> {
+        if let Ok(truth) = algebraic_condition_truth(&self.condition) {
+            return Ok(truth);
+        }
+
+        Ok(
+            match self
+                .condition
+                .evaluate(&None)
+                .map_err(exceptions::PyValueError::new_err)?
+            {
+                ConditionResult::True => Some(true),
+                ConditionResult::False => Some(false),
+                ConditionResult::Inconclusive => None,
+            },
+        )
+    }
+
+    /// Convert a decidable condition to bool; raise TypeError for unknown truth.
     pub fn __bool__(&self) -> PyResult<bool> {
-        self.eval()
+        self.eval()?.ok_or_else(|| {
+            exceptions::PyTypeError::new_err("The truth of this Condition is undecidable.")
+        })
     }
 
     /// Create a new pattern restriction that is the logical 'and' operation between two restrictions (i.e., both should hold).
@@ -2162,76 +2807,19 @@ impl PythonCondition {
     }
 }
 
-macro_rules! req_cmp_rel {
-    ($self:ident,$num:ident,$cmp_any_atom:ident,$c:ident) => {{
-        let num = if !$cmp_any_atom {
-            if let Pattern::Literal(a) = $num {
-                if let AtomView::Num(_) = a.as_view() {
-                    a
-                } else {
-                    return Err("Can only compare to number");
-                }
-            } else {
-                return Err("Can only compare to number");
-            }
-        } else if let Pattern::Literal(a) = $num {
-            a
-        } else {
-            return Err("Pattern must be literal");
-        };
-
-        if let Pattern::Wildcard(name) = $self {
-            if name.get_wildcard_level() == 0 {
-                return Err("Only wildcards can be restricted.");
-            }
-
-            Ok(PatternRestriction::Wildcard((
-                name,
-                WildcardRestriction::Filter(Box::new(move |v: &Match| {
-                    if let Match::Single(m) = v {
-                        if !$cmp_any_atom {
-                            if let AtomView::Num(_) = m {
-                                return m.cmp(&num.as_view()).$c();
-                            }
-                        } else {
-                            return m.cmp(&num.as_view()).$c();
-                        }
-                    }
-
-                    false
-                })),
-            )))
-        } else {
-            Err("Only wildcards can be restricted.")
-        }
-    }};
-}
-
 impl TryFrom<Relation> for PatternRestriction {
     type Error = &'static str;
 
     fn try_from(value: Relation) -> Result<Self, &'static str> {
         match value {
-            Relation::Eq(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_eq)
-            }
-            Relation::Ne(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_ne)
-            }
-            Relation::Gt(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_gt)
-            }
-            Relation::Ge(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_ge)
-            }
-            Relation::Lt(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_lt)
-            }
-            Relation::Le(atom, atom1) => {
-                req_cmp_rel!(atom, atom1, true, is_le)
-            }
+            Relation::Eq(..)
+            | Relation::Ne(..)
+            | Relation::Gt(..)
+            | Relation::Ge(..)
+            | Relation::Lt(..)
+            | Relation::Le(..) => condition::matching_relation(value),
             Relation::Contains(atom, atom1) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     if name.get_wildcard_level() == 0 {
                         return Err("Only wildcards can be restricted.");
                     }
@@ -2260,7 +2848,7 @@ impl TryFrom<Relation> for PatternRestriction {
                 }
             }
             Relation::Matches(atom, pattern, cond, settings) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     if name.get_wildcard_level() == 0 {
                         return Err("Only wildcards can be restricted.");
                     }
@@ -2279,7 +2867,7 @@ impl TryFrom<Relation> for PatternRestriction {
                 }
             }
             Relation::IsType(atom, atom_type) => {
-                if let Pattern::Wildcard(name) = atom {
+                if let Pattern::Wildcard(name, _) = atom {
                     Ok(PatternRestriction::Wildcard((
                         name,
                         WildcardRestriction::IsAtomType(atom_type),
@@ -2333,6 +2921,186 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToPatternRestriction {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(ConvertibleToPatternRestriction = PythonPatternRestriction | PythonCondition);
 
+/// Read concrete operands without admitting pattern predicates into equation solving.
+fn algebraic_operands(relation: &Relation) -> Option<(Atom, Atom)> {
+    let (a, b) = match relation {
+        Relation::Eq(a, b)
+        | Relation::Ne(a, b)
+        | Relation::Lt(a, b)
+        | Relation::Le(a, b)
+        | Relation::Gt(a, b)
+        | Relation::Ge(a, b) => (a, b),
+        _ => return None,
+    };
+    let a = a.to_atom().ok()?;
+    let b = b.to_atom().ok()?;
+    if [&a, &b].iter().any(|a| {
+        a.get_all_symbols(true)
+            .iter()
+            .any(|s| s.get_wildcard_level() > 0)
+    }) {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Evaluate concrete algebraic comparisons while retaining operand definedness.
+fn algebraic_condition_truth(condition: &Condition<Relation>) -> Result<Option<bool>, ()> {
+    let and = |a, b| match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    };
+    Ok(match condition {
+        Condition::True => Some(true),
+        Condition::False => Some(false),
+        Condition::Not(c) => algebraic_condition_truth(c)?.map(|v| !v),
+        Condition::And(c) => and(
+            algebraic_condition_truth(&c.0)?,
+            algebraic_condition_truth(&c.1)?,
+        ),
+        Condition::Or(c) => match (
+            algebraic_condition_truth(&c.0)?,
+            algebraic_condition_truth(&c.1)?,
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        },
+        Condition::Yield(relation) => {
+            let (a, b) = algebraic_operands(relation).ok_or(())?;
+            let mut defined = Some(true);
+            for denominator in [&a, &b]
+                .iter()
+                .filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view()))
+            {
+                let nonzero = crate::id::exact_numeric_value(denominator.as_view())
+                    .map(|v| !v.re.is_zero() || !v.im.is_zero());
+                defined = and(defined, nonzero);
+            }
+            let difference = a - b;
+            let truth = if !difference.is_finite() {
+                Some(false)
+            } else if let Some(value) = crate::id::exact_numeric_value(difference.as_view()) {
+                let zero = Rational::from(0);
+                match relation {
+                    Relation::Eq(..) => Some(value.re == zero && value.im == zero),
+                    Relation::Ne(..) => Some(value.re != zero || value.im != zero),
+                    _ if value.im != zero => None,
+                    Relation::Lt(..) => Some(value.re < zero),
+                    Relation::Le(..) => Some(value.re <= zero),
+                    Relation::Gt(..) => Some(value.re > zero),
+                    Relation::Ge(..) => Some(value.re >= zero),
+                    _ => unreachable!(),
+                }
+            } else {
+                None
+            };
+            and(defined, truth)
+        }
+    })
+}
+
+fn format_algebraic_condition(
+    condition: &Condition<Relation>,
+    atom: &impl Fn(&Atom) -> String,
+) -> Option<String> {
+    Some(match condition {
+        Condition::True => "True".into(),
+        Condition::False => "False".into(),
+        Condition::And(c) => format!(
+            "({} & {})",
+            format_algebraic_condition(&c.0, atom)?,
+            format_algebraic_condition(&c.1, atom)?
+        ),
+        Condition::Or(c) => format!(
+            "({} | {})",
+            format_algebraic_condition(&c.0, atom)?,
+            format_algebraic_condition(&c.1, atom)?
+        ),
+        Condition::Not(c) => format!("~({})", format_algebraic_condition(c, atom)?),
+        Condition::Yield(relation) => {
+            let (a, b) = algebraic_operands(relation)?;
+            let guards = [&a, &b]
+                .iter()
+                .filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view()))
+                .collect::<Vec<_>>();
+            let op = match relation {
+                Relation::Eq(..) => "=",
+                Relation::Ne(..) => "!=",
+                Relation::Lt(..) => "<",
+                Relation::Le(..) => "<=",
+                Relation::Gt(..) => ">",
+                Relation::Ge(..) => ">=",
+                _ => unreachable!(),
+            };
+            let mut text = format!("{} {op} 0", atom(&(a - b)));
+            for guard in guards {
+                text.push_str(&format!(" & {} != 0", atom(&guard)));
+            }
+            text
+        }
+    })
+}
+
+/// Equations and poles retained before comparing their left and right sides.
+pub struct ConvertibleToSolveInput {
+    equations: Vec<Atom>,
+    denominators: Vec<Atom>,
+}
+impl ConvertibleToSolveInput {
+    fn append_condition(&mut self, condition: &Condition<Relation>) -> PyResult<()> {
+        match condition {
+            Condition::True => {},
+            Condition::False => self.equations.push(Atom::num(1)),
+            Condition::And(c) => { self.append_condition(&c.0)?; self.append_condition(&c.1)?; },
+            Condition::Yield(relation @ Relation::Eq(..)) => {
+                let (a,b) = algebraic_operands(relation).ok_or_else(|| exceptions::PyTypeError::new_err("Solve requires concrete equations without wildcards or pattern predicates"))?;
+                self.denominators.extend([&a,&b].iter().filter_map(|a| crate::solve::rational_denominator::<u16>(a.as_view())));
+                self.equations.push(a-b);
+            }
+            _ => return Err(solution::solve_error(crate::solve::SolveError::UnsupportedProblem("solve accepts equalities only; inequalities and general Boolean combinations are not supported".into()))),
+        }
+        Ok(())
+    }
+}
+impl<'py> FromPyObject<'_, 'py> for ConvertibleToSolveInput {
+    type Error = PyErr;
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        let mut input = Self {
+            equations: Vec::new(),
+            denominators: Vec::new(),
+        };
+        // bool is an integer subtype, but True imposes no equation.
+        if ob.is_instance_of::<pyo3::types::PyBool>() {
+            if !ob.extract::<bool>()? {
+                input.equations.push(Atom::num(1));
+            }
+        } else if let Ok(c) = ob.extract::<PythonCondition>() {
+            input.append_condition(&c.condition)?;
+        } else if let Ok(e) = ob.extract::<ConvertibleToExpression>() {
+            input.equations.push(e.to_expression().expr);
+        } else if let Ok(items) = ob.extract::<Vec<Bound<'py, PyAny>>>() {
+            for item in items {
+                let item = item.extract::<ConvertibleToSolveInput>()?;
+                input.equations.extend(item.equations);
+                input.denominators.extend(item.denominators);
+            }
+        } else {
+            return Err(exceptions::PyTypeError::new_err(
+                "Expected an equation, expression, bool, or sequence",
+            ));
+        }
+        Ok(input)
+    }
+}
+#[cfg(feature = "python_stubgen")]
+struct SolveScalarStub;
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(SolveScalarStub = ConvertibleToExpression | PythonCondition | bool);
+#[cfg(feature = "python_stubgen")]
+impl_stub_type!(ConvertibleToSolveInput = SolveScalarStub | Vec<SolveScalarStub>);
+
 impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
     type Error = PyErr;
 
@@ -2342,8 +3110,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
         } else if let Ok(num) = ob.extract::<i64>() {
             Ok(ConvertibleToExpression(Atom::num(num).into()))
         } else if let Ok(num) = ob.cast::<PyInt>() {
-            let a = num.to_string();
-            let i = Integer::from(a.parse::<MultiPrecisionInteger>().unwrap());
+            let i = num.extract::<Integer>()?;
             Ok(ConvertibleToExpression(Atom::num(i).into()))
         } else if ob.extract::<PyBackedStr>().is_ok() {
             // disallow direct string conversion
@@ -2352,10 +3119,8 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
             ))
         } else if let Ok(f) = ob.extract::<PythonMultiPrecisionFloat>() {
             Ok(ConvertibleToExpression(Atom::num(f.0).into()))
-        } else if let Ok(num) = ob.extract::<Complex<f64>>() {
-            Ok(ConvertibleToExpression(
-                Atom::num(Complex::<Float>::new(num.re.into(), num.im.into())).into(),
-            ))
+        } else if let Ok(num) = ob.extract::<PythonMultiPrecisionComplex>() {
+            Ok(ConvertibleToExpression(Atom::num(num.0).into()))
         } else {
             Err(exceptions::PyTypeError::new_err(
                 "Cannot convert to expression",
@@ -2367,7 +3132,7 @@ impl<'py> FromPyObject<'_, 'py> for ConvertibleToExpression {
 #[cfg(feature = "python_stubgen")]
 impl_stub_type!(
     ConvertibleToExpression =
-        PythonExpression | PyInt | PyBackedStr | pyo3::types::PyFloat | Complex64
+        PythonExpression | PyInt | PythonMultiPrecisionFloat | PythonMultiPrecisionComplex
 );
 
 impl<'py> FromPyObject<'_, 'py> for Symbol {
@@ -2746,8 +3511,8 @@ impl PythonExpression {
     /// >>> E("real_log(exp(x)) + real_log(5)")
     ///
     /// Define a custom print function:
-    /// >>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
-    /// >>>     if latex:
+    /// >>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+    /// >>>     if mode == PrintMode.Latex:
     /// >>>         if mu.get_type() == AtomType.Fn:
     /// >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
     /// >>>         else:
@@ -2797,6 +3562,8 @@ impl PythonExpression {
     ///     Set to true if the symbol is cyclesymmetric.
     /// is_linear : bool | None
     ///     Set to true if the symbol is linear.
+    /// is_flat : bool | None
+    ///     Set to true if the symbol is flat (associative).
     /// is_scalar : bool | None
     ///     Set to true if the symbol is a scalar. It will be moved out of linear functions.
     /// is_real : bool | None
@@ -2809,14 +3576,19 @@ impl PythonExpression {
     ///     A list of tags to associate with the symbol.
     /// aliases: Sequence[str] | None
     ///     A list of aliases to associate with the symbol.
-    /// normalization : Transformer | None
-    ///     A transformer that is called after every normalization. Note that the symbol
-    ///     name cannot be used in the transformer as this will lead to a definition of the
-    ///     symbol. Use a wildcard with the same attributes instead.
-    /// print : Callable[..., str | None] | None:
+    /// normalization : Transformer | Callable[[Expression], Expression] | None
+    ///     A transformer or callable that is applied after every normalization. A callable
+    ///     receives the normalized function and returns its replacement. The symbol name
+    ///     cannot be used in a transformer, as this would define the symbol recursively;
+    ///     use a wildcard with the same attributes instead.
+    /// print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     ///     A function that is called when printing the variable/function, which is provided as its first argument.
     ///     This function should return a string, or `None` if the default print function should be used.
     ///     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+    ///     Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    ///     or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    ///     Values replace the entire variable or function call verbatim. Missing modes use default printing.
+    ///     The dictionary is copied when the symbol is defined; duplicate modes are rejected.
     /// derivative: Callable[[Expression, int], Expression] | None:
     ///     A function that is called when computing the derivative of a function in a given argument.
     /// series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -2829,23 +3601,23 @@ impl PythonExpression {
     ///
     ///     For arbitrary precision evaluation of constant functions, register a function that
     ///     maps the tags and the requested decimal precision to a number:
-    ///     - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    ///     - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
     ///
     ///     Evaluators for non-constant functions when `tag_count = 0`:
     ///     - `float`: Sequence[float] -> float
     ///     - `complex`: Sequence[complex] -> complex
-    ///     - `decimal`: Sequence[Decimal] -> Decimal
-    ///     - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    ///     - `decimal`: Sequence[Float] -> Float
+    ///     - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
     ///
     ///     Evaluators for non-constant functions when `tag_count > 0` are generators:
     ///     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     ///     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    ///     - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    ///     - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    ///     - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    ///     - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
     /// data: str | int | Expression | bytes | list | dict | None = None
     ///     Custom user data to associate with the symbol.
     #[gen_stub(skip)]
-    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
+    #[pyo3(signature = (*names,is_symmetric=None,is_antisymmetric=None,is_cyclesymmetric=None,is_linear=None,is_flat=None,is_scalar=None,is_real=None,is_integer=None,is_positive=None,tags=None,aliases=None,normalization=None, print=None, derivative=None, series=None, eval=None, data=None))]
     #[classmethod]
     pub fn symbol(
         _cls: &Bound<'_, PyType>,
@@ -2855,13 +3627,14 @@ impl PythonExpression {
         is_antisymmetric: Option<bool>,
         is_cyclesymmetric: Option<bool>,
         is_linear: Option<bool>,
+        is_flat: Option<bool>,
         is_scalar: Option<bool>,
         is_real: Option<bool>,
         is_integer: Option<bool>,
         is_positive: Option<bool>,
         tags: Option<Vec<String>>,
         aliases: Option<Vec<String>>,
-        normalization: Option<PythonTransformer>,
+        normalization: Option<PythonNormalization>,
         print: Option<Py<PyAny>>,
         derivative: Option<Py<PyAny>>,
         series: Option<Py<PyAny>>,
@@ -2885,6 +3658,7 @@ impl PythonExpression {
             && is_antisymmetric.is_none()
             && is_cyclesymmetric.is_none()
             && is_linear.is_none()
+            && is_flat.is_none()
             && is_scalar.is_none()
             && is_real.is_none()
             && is_integer.is_none()
@@ -2950,6 +3724,10 @@ impl PythonExpression {
             opts.push(SymbolAttribute::Linear);
         }
 
+        if let Some(true) = is_flat {
+            opts.push(SymbolAttribute::Flat);
+        }
+
         if let Some(true) = is_scalar {
             opts.push(SymbolAttribute::Scalar);
         }
@@ -2966,54 +3744,52 @@ impl PythonExpression {
             opts.push(SymbolAttribute::Positive);
         }
 
+        let print = print
+            .map(|definition| PythonPrintDefinition::from_py(definition.bind(py)))
+            .transpose()?;
+
         if names.len() == 1 {
             let name = names.get_item(0).unwrap().extract::<PyBackedStr>()?;
             let name = namespace.attach_namespace(&name);
 
+            let derivative = derivative
+                .map(|function| {
+                    let key = python_callable_fingerprint(function.bind(py))?;
+                    Ok::<_, PyErr>((function, key))
+                })
+                .transpose()?;
+            let series = series
+                .map(|function| {
+                    let key = python_callable_fingerprint(function.bind(py))?;
+                    Ok::<_, PyErr>((function, key))
+                })
+                .transpose()?;
+            let eval = eval
+                .map(|definition| {
+                    let key = python_evaluation_fingerprint(definition.bind(py))?;
+                    let spec = PythonEvalSpec::from_py(py, definition)?;
+                    Ok::<_, PyErr>((spec, key))
+                })
+                .transpose()?;
+
             let mut symbol = SymbolBuilder::new(name).with_attributes(opts);
 
             if let Some(f) = normalization {
-                symbol = symbol.with_normalization_function(Box::new(
-                    move |input: AtomView<'_>, out: &mut Settable<Atom>| {
-                        let _ = Workspace::get_local()
-                            .with(|ws| {
-                                Transformer::execute_chain(
-                                    input,
-                                    &f.chain,
-                                    ws,
-                                    &TransformerState::default(),
-                                    &mut *out,
-                                )
-                            })
-                            .unwrap();
-                    },
-                ))
+                let key = f.fingerprint(py)?;
+                let normalization_function = f.into_function();
+                symbol = if let Some(key) = key {
+                    symbol.with_keyed_normalization_function(normalization_function, key)
+                } else {
+                    symbol.with_normalization_function(normalization_function)
+                };
             }
 
-            if let Some(f) = print {
-                symbol = symbol.with_print_function(Box::new(
-                    move |input: AtomView<'_>, opts: &PrintOptions, state: &PrintState| {
-                        match Python::attach(|py| {
-                            let kwargs = print_options_to_dict(opts, state, py)?;
-                            f.call(
-                                py,
-                                (PythonExpression::from(input.to_owned()),),
-                                Some(&kwargs),
-                            )?
-                            .extract::<Option<String>>(py)
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python custom print callback failed: {err}");
-                                None
-                            }
-                        }
-                    },
-                ))
+            if let Some(print) = &print {
+                symbol = print.apply_to(py, symbol);
             }
 
-            if let Some(f) = derivative {
-                symbol = symbol.with_derivative_function(Box::new(
+            if let Some((f, key)) = derivative {
+                symbol = symbol.with_keyed_derivative_function(
                     move |input: AtomView<'_>, arg: usize, out: &mut Settable<Atom>| {
                         match Python::attach(|py| -> PyResult<PythonExpression> {
                             Ok(
@@ -3028,13 +3804,14 @@ impl PythonExpression {
                             }
                         }
                     },
-                ))
+                    key,
+                )
             }
 
-            if let Some(f) = series {
-                symbol =
-                    symbol.with_series_function(Box::new(move |args: &[Series<AtomField>]| {
-                        match Python::attach(|py| -> PyResult<Option<(Atom, Atom)>> {
+            if let Some((f, key)) = series {
+                symbol = symbol.with_keyed_series_function(
+                    move |args: &[Series<AtomField>]| match Python::attach(
+                        |py| -> PyResult<Option<(Atom, Atom)>> {
                             let args = args
                                 .iter()
                                 .cloned()
@@ -3045,20 +3822,20 @@ impl PythonExpression {
                                 .extract::<Option<(PythonExpression, PythonExpression)>>(py)?;
                             Ok(value
                                 .map(|(singular, regularized)| (singular.expr, regularized.expr)))
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python custom series callback failed: {err}");
-                                None
-                            }
+                        },
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            error!("Python custom series callback failed: {err}");
+                            None
                         }
-                    }))
+                    },
+                    key,
+                )
             }
 
-            if let Some(eval) = eval {
-                symbol = symbol.with_evaluation_info(
-                    PythonEvalSpec::from_py(py, eval)?.into_evaluation_info(),
-                );
+            if let Some((eval, key)) = eval {
+                symbol = symbol.with_keyed_evaluation_info(eval.into_evaluation_info(), key);
             }
 
             if let Some(t) = tags {
@@ -3096,23 +3873,18 @@ impl PythonExpression {
                 let name = namespace.attach_namespace(&name);
                 let mut symbol = SymbolBuilder::new(name).with_attributes(opts.clone());
 
+                if let Some(print) = &print {
+                    symbol = print.apply_to(py, symbol);
+                }
+
                 if let Some(f) = &normalization {
-                    let t = f.chain.clone();
-                    symbol = symbol.with_normalization_function(Box::new(
-                        move |input: AtomView<'_>, out: &mut Settable<Atom>| {
-                            let _ = Workspace::get_local()
-                                .with(|ws| {
-                                    Transformer::execute_chain(
-                                        input,
-                                        &t,
-                                        ws,
-                                        &TransformerState::default(),
-                                        &mut *out,
-                                    )
-                                })
-                                .unwrap();
-                        },
-                    ))
+                    let key = f.fingerprint(py)?;
+                    let normalization_function = f.clone_function(py);
+                    symbol = if let Some(key) = key {
+                        symbol.with_keyed_normalization_function(normalization_function, key)
+                    } else {
+                        symbol.with_normalization_function(normalization_function)
+                    };
                 }
 
                 if let Some(t) = tags.as_ref() {
@@ -3160,7 +3932,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// num: int | float | complex | str | Decimal
+    /// num: int | float | complex | str | Float | ComplexFloat | Decimal
     ///     The value to convert into a Symbolica number.
     /// relative_error: float | None
     ///     The maximum relative error used when converting floating-point input to a rational number.
@@ -3170,7 +3942,7 @@ impl PythonExpression {
         _cls: &Bound<'_, PyType>,
         py: Python,
         #[gen_stub(override_type(
-            type_repr = "int | float | complex | str | decimal.Decimal",
+            type_repr = "int | float | complex | str | decimal.Decimal | Float | ComplexFloat",
             imports = ("decimal")
         ))]
         num: Py<PyAny>,
@@ -3195,20 +3967,20 @@ impl PythonExpression {
             } else {
                 Ok(Atom::num(f.0).into())
             }
-        } else if let Ok(f) = num.extract::<Complex<f64>>(py) {
+        } else if let Ok(f) = num.extract::<PythonMultiPrecisionComplex>(py) {
             if let Some(relative_error) = relative_error {
                 let err = relative_error
                     .try_into()
                     .map_err(|e: &'static str| exceptions::PyValueError::new_err(e.to_string()))?;
-                let r = Rational::try_from(f.re)
+                let r = Rational::try_from(f.0.re)
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
-                let i = Rational::try_from(f.im)
+                let i = Rational::try_from(f.0.im)
                     .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?
                     .round(&err);
                 Ok(Atom::num(Complex::new(r, i)).into())
             } else {
-                Ok(Atom::num(Complex::<Float>::new(f.re.into(), f.im.into())).into())
+                Ok(Atom::num(f.0).into())
             }
         } else {
             Err(exceptions::PyValueError::new_err("Not a valid number"))
@@ -3286,6 +4058,160 @@ impl PythonExpression {
         Atom::var(Symbol::SIN).into()
     }
 
+    /// The built-in tangent function.
+    #[classattr]
+    #[pyo3(name = "TAN")]
+    pub fn tan_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::tan()).into()
+    }
+
+    /// The built-in cotangent function.
+    #[classattr]
+    #[pyo3(name = "COT")]
+    pub fn cot_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::cot()).into()
+    }
+
+    /// The built-in secant function.
+    #[classattr]
+    #[pyo3(name = "SEC")]
+    pub fn sec_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sec()).into()
+    }
+
+    /// The built-in cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSC")]
+    pub fn csc_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::csc()).into()
+    }
+
+    /// The built-in inverse sine function.
+    #[classattr]
+    #[pyo3(name = "ASIN")]
+    pub fn asin_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asin()).into()
+    }
+
+    /// The built-in inverse cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOS")]
+    pub fn acos_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acos()).into()
+    }
+
+    /// The built-in inverse tangent function.
+    #[classattr]
+    #[pyo3(name = "ATAN")]
+    pub fn atan_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::atan()).into()
+    }
+
+    /// The built-in inverse cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOT")]
+    pub fn acot_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acot()).into()
+    }
+
+    /// The built-in inverse secant function.
+    #[classattr]
+    #[pyo3(name = "ASEC")]
+    pub fn asec_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asec()).into()
+    }
+
+    /// The built-in inverse cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSC")]
+    pub fn acsc_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acsc()).into()
+    }
+
+    /// The built-in hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "SINH")]
+    pub fn sinh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sinh()).into()
+    }
+
+    /// The built-in hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "COSH")]
+    pub fn cosh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::cosh()).into()
+    }
+
+    /// The built-in hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "TANH")]
+    pub fn tanh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::tanh()).into()
+    }
+
+    /// The built-in hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "COTH")]
+    pub fn coth_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::coth()).into()
+    }
+
+    /// The built-in hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "SECH")]
+    pub fn sech_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::sech()).into()
+    }
+
+    /// The built-in hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "CSCH")]
+    pub fn csch_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::csch()).into()
+    }
+
+    /// The built-in inverse hyperbolic sine function.
+    #[classattr]
+    #[pyo3(name = "ASINH")]
+    pub fn asinh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asinh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosine function.
+    #[classattr]
+    #[pyo3(name = "ACOSH")]
+    pub fn acosh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acosh()).into()
+    }
+
+    /// The built-in inverse hyperbolic tangent function.
+    #[classattr]
+    #[pyo3(name = "ATANH")]
+    pub fn atanh_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::atanh()).into()
+    }
+
+    /// The built-in inverse hyperbolic cotangent function.
+    #[classattr]
+    #[pyo3(name = "ACOTH")]
+    pub fn acoth_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acoth()).into()
+    }
+
+    /// The built-in inverse hyperbolic secant function.
+    #[classattr]
+    #[pyo3(name = "ASECH")]
+    pub fn asech_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::asech()).into()
+    }
+
+    /// The built-in inverse hyperbolic cosecant function.
+    #[classattr]
+    #[pyo3(name = "ACSCH")]
+    pub fn acsch_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::acsch()).into()
+    }
+
     /// The built-in exponential function.
     #[classattr]
     #[pyo3(name = "EXP")]
@@ -3314,6 +4240,76 @@ impl PythonExpression {
         Atom::var(Symbol::ABS).into()
     }
 
+    /// The built-in Riemann zeta function.
+    #[classattr]
+    #[pyo3(name = "ZETA")]
+    pub fn zeta_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::zeta()).into()
+    }
+
+    /// The built-in gamma function.
+    #[classattr]
+    #[pyo3(name = "GAMMA")]
+    pub fn gamma_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::gamma()).into()
+    }
+
+    /// The built-in error function.
+    #[classattr]
+    #[pyo3(name = "ERF")]
+    pub fn erf_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::erf()).into()
+    }
+
+    /// The built-in polygamma function.
+    #[classattr]
+    #[pyo3(name = "POLYGAMMA")]
+    pub fn polygamma_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::polygamma()).into()
+    }
+
+    /// The built-in polylogarithm function.
+    #[classattr]
+    #[pyo3(name = "POLYLOG")]
+    pub fn polylog_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::polylog()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_J")]
+    pub fn bessel_j_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_j()).into()
+    }
+
+    /// The built-in cylindrical Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_Y")]
+    pub fn bessel_y_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_y()).into()
+    }
+
+    /// The built-in modified Bessel function of the first kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_I")]
+    pub fn bessel_i_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_i()).into()
+    }
+
+    /// The built-in modified Bessel function of the second kind.
+    #[classattr]
+    #[pyo3(name = "BESSEL_K")]
+    pub fn bessel_k_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::bessel_k()).into()
+    }
+
+    /// The built-in algebraic root function.
+    #[classattr]
+    #[pyo3(name = "ROOT")]
+    pub fn root_attr() -> PythonExpression {
+        Atom::from(crate::transcendental::root()).into()
+    }
+
     /// The built-in complex conjugate function.
     #[classattr]
     #[pyo3(name = "CONJ")]
@@ -3326,6 +4322,13 @@ impl PythonExpression {
     #[pyo3(name = "IF")]
     pub fn if_attr() -> PythonExpression {
         Atom::var(Symbol::IF).into()
+    }
+
+    /// The built-in alternative-pattern function.
+    #[classattr]
+    #[pyo3(name = "ALT")]
+    pub fn alt_attr() -> PythonExpression {
+        Atom::var(Symbol::ALT).into()
     }
 
     /// Return all defined symbol names (function names and variables).
@@ -3393,22 +4396,20 @@ impl PythonExpression {
         Atom::new().into()
     }
 
-    /// Construct an expression from a serialized state.
-    pub fn __setstate__(&mut self, state: Vec<u8>) -> PyResult<()> {
-        unsafe {
-            self.expr = Atom::from_raw(state);
-        }
-        Ok(())
-    }
-
     /// Get a serialized version of the expression.
     pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
         Ok(self.expr.clone().into_raw())
     }
 
-    /// Get the default positional arguments for `__new__`.
-    pub fn __getnewargs__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        Ok(PyTuple::empty(py))
+    /// Reconstruct an expression from a serialized version.
+    pub fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Py<PyAny>, (Py<PyBytes>,))> {
+        let module = py
+            .import("symbolica.symbolica")
+            .or_else(|_| py.import("symbolica"))?;
+        let reconstruct = module.getattr("_reconstruct_expression")?.unbind();
+        let state = PyBytes::new(py, &self.expr.clone().into_raw()).unbind();
+
+        Ok((reconstruct, (state,)))
     }
 
     /// Copy the expression.
@@ -3747,11 +4748,11 @@ impl PythonExpression {
             custom_print_mode,
         );
 
-        Ok(PythonFormattedOutput {
+        Ok(PythonFormattedOutput::new(
             text,
-            html: Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
-            latex: Some(latex),
-        })
+            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(latex),
+        ))
     }
 
     /// Convert the expression into a plain string, useful for importing and exporting.
@@ -3801,7 +4802,7 @@ impl PythonExpression {
     /// >>> a = E('f(x+2i + 3) * 2 / x')
     /// >>> print(a.to_typst())
     ///
-    /// Yields ```(2 op("f")(3+2𝑖+"x"))/"x"```.
+    /// Yields ```(2 op(f)(3+2𝑖+x))/x```.
     ///
     /// Parameters
     /// ----------
@@ -3854,11 +4855,9 @@ impl PythonExpression {
         ))
     }
 
-    /// Hash the expression.
-    pub fn __hash__(&self) -> u64 {
-        let mut hasher = ahash::AHasher::default();
-        self.expr.hash(&mut hasher);
-        hasher.finish()
+    /// Hash the expression, using Python-compatible hashes for scalar numbers.
+    pub fn __hash__(&self, py: Python) -> PyResult<isize> {
+        condition::expression_hash(self.expr.as_view(), py)
     }
 
     /// Save the expression and its state to a binary file.
@@ -3982,6 +4981,27 @@ impl PythonExpression {
         }
     }
 
+    /// Get the function symbol of a function or return the variable itself.
+    /// Throw an error if the current atom is neither a variable nor a function.
+    ///
+    /// Examples
+    /// --------
+    /// >>> x, f = S('x', 'f')
+    /// >>> f(x).get_head() == f
+    /// True
+    /// >>> x.get_head() == x
+    /// True
+    pub fn get_head(&self) -> PyResult<PythonExpression> {
+        match self.expr.as_ref() {
+            Atom::Var(v) => Ok(Atom::var(v.get_symbol()).into()),
+            Atom::Fun(f) => Ok(Atom::var(f.get_symbol()).into()),
+            _ => Err(exceptions::PyTypeError::new_err(format!(
+                "The expression {} is not a variable or function",
+                self.expr
+            ))),
+        }
+    }
+
     /// Get the attributes of a variable or function if the current atom
     /// is a variable or function, otherwise throw an error.
     pub fn get_attributes(&self) -> PyResult<Vec<PythonSymbolAttribute>> {
@@ -4073,17 +5093,23 @@ impl PythonExpression {
 
     /// Check if the expression is a scalar. Symbols must have the scalar attribute.
     ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
+    ///
     /// Examples
     /// --------
     /// >>> x = S('x', is_scalar=True)
     /// >>> e = (x +1)**2 + 5
     /// >>> print(e.is_scalar())
     /// True
-    pub fn is_scalar(&self) -> bool {
-        self.expr.is_scalar()
+    pub fn is_scalar(&self) -> Option<bool> {
+        self.expr.is_scalar().into()
     }
 
     /// Check if the expression is real. Symbols must have the real attribute.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -4091,11 +5117,14 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 / 2 + 5
     /// >>> print(e.is_real())
     /// True
-    pub fn is_real(&self) -> bool {
-        self.expr.is_real()
+    pub fn is_real(&self) -> Option<bool> {
+        self.expr.is_real().into()
     }
 
     /// Check if the expression is integer. Symbols must have the integer attribute.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -4103,11 +5132,15 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 + 5
     /// >>> print(e.is_integer())
     /// True
-    pub fn is_integer(&self) -> bool {
-        self.expr.is_integer()
+    pub fn is_integer(&self) -> Option<bool> {
+        self.expr.is_integer().into()
     }
 
-    /// Check if the expression is a positive scalar. Symbols must have the positive attribute.
+    /// Check if the expression is strictly positive. Zero returns False.
+    /// A real square may vanish: use is_nonnegative() for a weak inequality.
+    ///
+    /// Returns None when the property is unknown. Use `is True` or `is False`
+    /// to distinguish a proof from an inconclusive result.
     ///
     /// Examples
     /// --------
@@ -4115,8 +5148,14 @@ impl PythonExpression {
     /// >>> e = (x + 1)**2 + 5
     /// >>> print(e.is_positive())
     /// True
-    pub fn is_positive(&self) -> bool {
-        self.expr.is_positive()
+    pub fn is_positive(&self) -> Option<bool> {
+        self.expr.is_positive().into()
+    }
+
+    /// Check if the expression is real and greater than or equal to zero.
+    /// Returns None when its sign is unknown. This does not test absence of poles.
+    pub fn is_nonnegative(&self) -> Option<bool> {
+        self.expr.is_nonnegative().into()
     }
 
     /// Check if the expression has no infinities and is not indeterminate.
@@ -4145,7 +5184,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __add__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -4156,7 +5195,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __radd__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__add__(rhs)
@@ -4166,7 +5205,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __sub__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__add__(ConvertibleToExpression(rhs.to_expression().__neg__()?))
@@ -4176,7 +5215,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rsub__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         rhs.to_expression()
@@ -4187,7 +5226,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __mul__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -4198,7 +5237,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rmul__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.__mul__(rhs)
@@ -4208,7 +5247,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __truediv__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let rhs = rhs.to_expression();
@@ -4219,7 +5258,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// rhs: Expression | int | float | complex | Decimal
+    /// rhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
     pub fn __rtruediv__(&self, rhs: ConvertibleToExpression) -> PyResult<PythonExpression> {
         rhs.to_expression()
@@ -4230,7 +5269,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// exponent: Expression | int | float | complex | Decimal
+    /// exponent: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The exponent.
     pub fn __pow__(
         &self,
@@ -4251,7 +5290,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// base: Expression | int | float | complex | Decimal
+    /// base: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The base expression.
     pub fn __rpow__(
         &self,
@@ -4297,8 +5336,19 @@ impl PythonExpression {
             AtomView::Add(a) => a.get_nargs(),
             AtomView::Mul(a) => a.get_nargs(),
             AtomView::Fun(a) => a.get_nargs(),
+            AtomView::Pow(_) => 2,
             _ => 1,
         }
+    }
+
+    /// Numeric truth for scalar numbers; general symbolic truth is ambiguous.
+    fn __bool__(&self, py: Python) -> PyResult<bool> {
+        if let Some((re, im)) = condition::numeric_parts(self.expr.as_view(), py)? {
+            return Ok(re.is_truthy()? || im.is_truthy()?);
+        }
+        Err(exceptions::PyTypeError::new_err(
+            "The truth of a symbolic expression is ambiguous. Compare explicitly or construct a Condition.",
+        ))
     }
 
     fn __int__(&self) -> PyResult<Integer> {
@@ -4307,7 +5357,7 @@ impl PythonExpression {
         }
 
         Err(exceptions::PyTypeError::new_err(format!(
-            "Cannot convert {} to float",
+            "Cannot convert {} to int",
             self.expr
         )))
     }
@@ -4344,7 +5394,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// args: HeldExpression | Expression | int | float | complex | Decimal
+    /// args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The arguments passed to the expression or transformer call.
     #[gen_stub(skip)]
     #[pyo3(signature = (*args,))]
@@ -4585,6 +5635,42 @@ impl PythonExpression {
         self.expr.sqrt().into()
     }
 
+    /// Construct the root with index `index` of the polynomial represented by
+    /// this expression. If `variable` is provided, explicitly select it as the
+    /// polynomial variable.
+    /// Indices start at zero and count multiplicity. Real roots come first in
+    /// increasing order, followed by nonreal roots ordered by real and imaginary
+    /// part. For parametric polynomials, the index selects a root after substitution.
+    ///
+    /// Examples
+    /// --------
+    /// >>> E("x^3-1").root(1) == E("root(x^3-1,1)")
+    /// True
+    ///
+    /// If the polynomial contains parameters, explicitly select the polynomial
+    /// variable:
+    /// >>> x = E("x")
+    /// >>> E("x^2-a").root(1, x) == E("root(x^2-a,x,1)")
+    /// True
+    #[pyo3(signature = (index, variable = None))]
+    pub fn root(
+        &self,
+        index: usize,
+        variable: Option<ConvertibleToExpression>,
+    ) -> PythonExpression {
+        if let Some(variable) = variable {
+            crate::transcendental::root()
+                .call((
+                    self.expr.as_view(),
+                    variable.to_expression().expr.as_view(),
+                    index,
+                ))
+                .into()
+        } else {
+            self.expr.root(index).into()
+        }
+    }
+
     /// Compute the absolute value of the expression.
     pub fn abs(&self) -> PythonExpression {
         self.expr.abs().into()
@@ -4600,6 +5686,12 @@ impl PythonExpression {
     /// `gamma(z)` is meromorphic with simple poles at the non-positive integers.
     pub fn gamma(&self) -> PythonExpression {
         crate::function!(crate::transcendental::gamma(), self.expr.clone()).into()
+    }
+
+    /// Compute the error function of the expression.
+    /// `erf(z)` is entire and odd, with derivative `2*exp(-z^2)/sqrt(pi)`.
+    pub fn erf(&self) -> PythonExpression {
+        crate::function!(crate::transcendental::erf(), self.expr.clone()).into()
     }
 
     /// Compute the polygamma function of order `n` at the expression.
@@ -4695,13 +5787,88 @@ impl PythonExpression {
         Ok(Pattern::Transformer(Box::new((Some(self.expr.to_pattern()), t.chain))).into())
     }
 
-    /// Get the `idx`th component of the expression.
+    /// Create an alternative pattern that matches this expression or any of the
+    /// supplied alternatives.
+    ///
+    /// Examples
+    /// --------
+    /// >>> x, y, z, w_ = S('x', 'y', 'z', 'w_')
+    /// >>> next(E('y*a').match(x.alt(y, z) * w_), None) is not None
+    /// True
     ///
     /// Parameters
     /// ----------
-    /// idx: int
-    ///     The zero-based index to access.
-    fn __getitem__(&self, idx: isize) -> PyResult<PythonExpression> {
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
+    ///     The first alternative.
+    /// others: Expression | int | float | complex | Float | ComplexFloat | Decimal
+    ///     Additional alternatives.
+    #[pyo3(signature = (other, *others))]
+    pub fn alt(
+        &self,
+        other: ConvertibleToExpression,
+        #[gen_stub(override_type(type_repr = "Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal", imports = ("decimal")))]
+        others: &Bound<'_, PyTuple>,
+    ) -> PyResult<PythonExpression> {
+        let mut alternatives = Vec::with_capacity(others.len() + 2);
+        alternatives.push(self.expr.clone());
+        alternatives.push(other.to_expression().expr);
+
+        for alternative in others {
+            alternatives.push(
+                alternative
+                    .extract::<ConvertibleToExpression>()?
+                    .to_expression()
+                    .expr,
+            );
+        }
+
+        Ok(FunctionBuilder::new(Symbol::ALT)
+            .add_args(alternatives)
+            .finish()
+            .into())
+    }
+
+    /// Turn a wildcard into an optional wildcard which will match a default value if the wildcard is not matched.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x, b_, e_ = S('x', 'b_', 'e_')
+    /// >>> x.replace(b_**e_.opt(), 1) # 1
+    pub fn opt(&self) -> PyResult<PythonExpression> {
+        if let AtomView::Var(s) = self.expr.as_view()
+            && let s = s.get_symbol()
+            && s.get_wildcard_level() > 0
+        {
+            Ok(s.optional().into())
+        } else {
+            Err(exceptions::PyValueError::new_err(
+                "Cannot convert non-wildcard symbol to optional",
+            ))
+        }
+    }
+
+    /// Get a component or a slice of the expression's immediate children.
+    ///
+    /// An integer returns one expression; a slice returns a list of expressions
+    /// in the same order as iteration. Negative indices count from the end.
+    /// Slices follow Python's usual bounds and step rules, including reverse slices.
+    /// Leaf expressions cannot be indexed or sliced.
+    ///
+    /// Examples
+    /// --------
+    /// >>> f, x, y, z = S('f', 'x', 'y', 'z')
+    /// >>> f(x, y, z)[1:]
+    /// [y, z]
+    /// >>> f(x, y, z)[::-1]
+    /// [z, y, x]
+    ///
+    /// Parameters
+    /// ----------
+    /// idx: int | slice
+    ///     The zero-based index or slice to access.
+    #[gen_stub(skip)]
+    fn __getitem__(&self, idx: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let slice = match self.expr.as_view() {
             AtomView::Add(a) => a.to_slice(),
             AtomView::Mul(m) => m.to_slice(),
@@ -4710,19 +5877,45 @@ impl PythonExpression {
             _ => Err(PyIndexError::new_err("Cannot access child of leaf node"))?,
         };
 
-        if idx.unsigned_abs() < slice.len() {
-            Ok(if idx < 0 {
-                slice
-                    .get(slice.len() - idx.unsigned_abs())
-                    .to_owned()
-                    .into()
+        if let Ok(range) = idx.cast::<PySlice>() {
+            let indices = range.indices(slice.len() as isize)?;
+            let mut children: Vec<PythonExpression> = if indices.slicelength == 0 {
+                Vec::new()
             } else {
-                slice.get(idx as usize).to_owned().into()
-            })
+                let step = indices.step.unsigned_abs();
+                // Scan the packed children once, even for reverse slices.
+                let start = if indices.step < 0 {
+                    indices.start as usize - (indices.slicelength - 1) * step
+                } else {
+                    indices.start as usize
+                };
+                slice
+                    .fast_forward(start)
+                    .iter()
+                    .step_by(step)
+                    .take(indices.slicelength)
+                    .map(|child| child.to_owned().into())
+                    .collect()
+            };
+            if indices.step < 0 {
+                children.reverse();
+            }
+            return children.into_py_any(idx.py());
+        }
+
+        let index = idx.extract::<isize>()?;
+        let position = if index < 0 {
+            slice.len().checked_sub(index.unsigned_abs())
+        } else {
+            Some(index as usize)
+        };
+        if let Some(position) = position.filter(|&position| position < slice.len()) {
+            let child: PythonExpression = slice.get(position).to_owned().into();
+            child.into_py_any(idx.py())
         } else {
             Err(PyIndexError::new_err(format!(
                 "Index {} out of bounds: the atom only has {} children.",
-                idx,
+                index,
                 slice.len(),
             )))
         }
@@ -4972,6 +6165,7 @@ impl PythonExpression {
                     PythonSymbolAttribute::Antisymmetric => s.is_antisymmetric(),
                     PythonSymbolAttribute::Cyclesymmetric => s.is_cyclesymmetric(),
                     PythonSymbolAttribute::Linear => s.is_linear(),
+                    PythonSymbolAttribute::Flat => s.is_flat(),
                     PythonSymbolAttribute::Scalar => s.is_scalar(),
                     PythonSymbolAttribute::Real => s.is_real(),
                     PythonSymbolAttribute::Integer => s.is_integer(),
@@ -5072,36 +6266,76 @@ impl PythonExpression {
         }
     }
 
-    /// Compare two expressions. If one of the expressions is not a number, an
-    /// internal ordering will be used.
-    fn __richcmp__(&self, o: Py<PyAny>, op: CompareOp, py: Python) -> PyResult<PythonCondition> {
-        let Ok(other) = o.extract::<ConvertibleToPattern>(py) else {
-            return Err(exceptions::PyTypeError::new_err(format!(
-                "Cannot compare {} with {} due to incompatible types.",
-                self.expr, o
-            )));
-        };
+    /// Compare structural equality, or exact values for scalar numbers. Use .eq() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __eq__(
+        &self,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Eq)
+    }
 
-        Ok(match op {
-            CompareOp::Eq => PythonCondition {
-                condition: Relation::Eq(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ne => PythonCondition {
-                condition: Relation::Ne(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Ge => PythonCondition {
-                condition: Relation::Ge(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Gt => PythonCondition {
-                condition: Relation::Gt(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Le => PythonCondition {
-                condition: Relation::Le(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-            CompareOp::Lt => PythonCondition {
-                condition: Relation::Lt(self.expr.to_pattern(), other.to_pattern()?.expr).into(),
-            },
-        })
+    /// Construct a deferred equality Condition for solve, matching, or Transformers.
+    /// Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
+    pub fn eq(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Eq,
+        ))
+    }
+
+    /// Compare structural inequality, or exact values for scalar numbers. Use .ne() for a Condition.
+    #[gen_stub(override_return_type(type_repr = "bool"))]
+    fn __ne__(
+        &self,
+        #[gen_stub(override_type(type_repr = "object"))] other: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Ne)
+    }
+
+    /// Construct a deferred disequality Condition for solve, matching, or Transformers.
+    /// Predicate evaluation compares substituted expressions structurally, with exact-value equality for scalar numbers.
+    pub fn ne(&self, other: ConvertibleToOpenPattern) -> PyResult<PythonCondition> {
+        Ok(condition::relation(
+            self.expr.to_pattern(),
+            other.to_pattern()?.expr,
+            CompareOp::Ne,
+        ))
+    }
+
+    /// Construct a deferred mathematical less-than Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Lt)
+    }
+
+    /// Construct a deferred mathematical less-than-or-equal Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Le)
+    }
+
+    /// Construct a deferred mathematical greater-than Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Gt)
+    }
+
+    /// Construct a deferred mathematical greater-than-or-equal Condition.
+    #[gen_stub(override_return_type(type_repr = "Condition"))]
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        condition::expression_compare(self, other, CompareOp::Ge)
+    }
+
+    /// Compare the internal structural order, returning -1, 0, or 1.
+    /// This is not a mathematical inequality and may change between versions.
+    pub fn compare_structure(&self, other: PythonExpression) -> i8 {
+        match self.expr.as_view().cmp(&other.expr.as_view()) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
     }
 
     /// Create a pattern restriction that passes when the wildcard is smaller than `other`.
@@ -5121,7 +6355,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -5151,7 +6385,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -5181,7 +6415,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -5211,7 +6445,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The value that the match is compared against.
     /// cmp_any_atom: bool
     ///     Whether the comparison may be satisfied by any atom in the expression instead of only the whole match.
@@ -5224,8 +6458,10 @@ impl PythonExpression {
         req_cmp!(self, other, cmp_any_atom, is_ge)
     }
 
-    /// Create a new pattern restriction that calls the function `filter_fn` with the matched
-    /// atom that should return a boolean. If true, the pattern matches.
+    /// Restrict a wildcard using a callback receiving its matched expression.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// A returned `Condition` is evaluated explicitly and may also be undecidable.
+    /// Unknown decisions stay unknown under negation and do not complete a match.
     ///
     /// Examples
     /// --------
@@ -5237,11 +6473,13 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// filter_fn: Callable[[Expression], bool | Condition]
-    ///     A callback that filters partially constructed graphs.
+    /// filter_fn: Callable[[Expression], bool | None | Condition]
+    ///     A callback deciding whether the wildcard value is accepted.
     pub fn req(
         &self,
-        #[gen_stub(override_type(type_repr = "typing.Callable[[Expression], bool | Condition]"))]
+        #[gen_stub(override_type(
+            type_repr = "typing.Callable[[Expression], bool | None | Condition]"
+        ))]
         filter_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
         let id = match self.expr.as_view() {
@@ -5262,21 +6500,17 @@ impl PythonExpression {
         };
 
         Ok(PythonPatternRestriction {
-            condition: (
-                id,
-                WildcardRestriction::Filter(Box::new(move |m| {
-                    let data: PythonExpression = m.to_atom().into();
-
-                    match Python::attach(|py| filter_fn.call(py, (data,), None)?.is_truthy(py)) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            error!("Python pattern filter callback failed: {err}");
-                            false
-                        }
-                    }
-                })),
-            )
-                .into(),
+            condition: PatternRestriction::MatchStack(Box::new(move |stack| {
+                let Some(matched) = stack.get(id) else {
+                    return ConditionResult::Inconclusive;
+                };
+                let data: PythonExpression = matched.to_atom().into();
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = filter_fn.call1(py, (data,))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
+            }))
+            .into(),
         })
     }
 
@@ -5400,8 +6634,10 @@ impl PythonExpression {
         req_wc_cmp!(self, other, cmp_any_atom, is_ge)
     }
 
-    /// Create a new pattern restriction that calls the function `cmp_fn` with another the matched
-    /// atom and the match atom of the `other` wildcard that should return a boolean. If true, the pattern matches.
+    /// Restrict two wildcards using a callback receiving their matched expressions.
+    /// The callback runs only once both wildcards have values.
+    /// Return `True` to accept, `False` to reject, or `None` when undecidable.
+    /// A returned `Condition` is evaluated explicitly and may also be undecidable.
     ///
     /// Examples
     /// --------
@@ -5413,15 +6649,15 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// other: Expression | int | float | complex | Decimal
+    /// other: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The other operand to combine or compare with.
-    /// cmp_fn: Callable[[Expression, Expression], bool | Condition]
+    /// cmp_fn: Callable[[Expression, Expression], bool | None | Condition]
     ///     The comparison callback applied to the matched values.
     pub fn req_cmp(
         &self,
         other: PythonExpression,
         #[gen_stub(override_type(
-            type_repr = "typing.Callable[[Expression, Expression], bool | Condition]"
+            type_repr = "typing.Callable[[Expression, Expression], bool | None | Condition]"
         ))]
         cmp_fn: Py<PyAny>,
     ) -> PyResult<PythonPatternRestriction> {
@@ -5460,33 +6696,24 @@ impl PythonExpression {
         };
 
         Ok(PythonPatternRestriction {
-            condition: (
-                id,
-                WildcardRestriction::Cmp(
-                    other_id,
-                    Box::new(move |m1, m2| {
-                        let data1: PythonExpression = m1.to_atom().into();
-                        let data2: PythonExpression = m2.to_atom().into();
-
-                        match Python::attach(|py| {
-                            cmp_fn.call(py, (data1, data2), None)?.is_truthy(py)
-                        }) {
-                            Ok(value) => value,
-                            Err(err) => {
-                                error!("Python pattern comparison callback failed: {err}");
-                                false
-                            }
-                        }
-                    }),
-                ),
-            )
-                .into(),
+            condition: PatternRestriction::MatchStack(Box::new(move |stack| {
+                let (Some(left), Some(right)) = (stack.get(id), stack.get(other_id)) else {
+                    return ConditionResult::Inconclusive;
+                };
+                let data1: PythonExpression = left.to_atom().into();
+                let data2: PythonExpression = right.to_atom().into();
+                condition::report_match_callback_result(Python::attach(|py| {
+                    let result = cmp_fn.call1(py, (data1, data2))?;
+                    condition::match_callback_decision(result.bind(py))
+                }))
+            }))
+            .into(),
         })
     }
 
     /// Create an iterator over all sub-atoms in the expression.
-    fn __iter__(&self) -> PyResult<PythonAtomIterator> {
-        match self.expr.as_view() {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<PythonAtomIterator> {
+        match slf.expr.as_view() {
             AtomView::Add(_) | AtomView::Mul(_) | AtomView::Fun(_) | AtomView::Pow(_) => {}
             x => {
                 return Err(exceptions::PyValueError::new_err(format!(
@@ -5496,7 +6723,12 @@ impl PythonExpression {
             }
         };
 
-        Ok(PythonAtomIterator::from_expr(self.clone()))
+        Ok(PythonAtomIterator::from_expr(slf.into()))
+    }
+
+    /// Iterator over all terms in the expression.
+    pub fn terms(slf: PyRef<'_, Self>) -> PythonAtomIterator {
+        PythonAtomIterator::term_iter(slf.into())
     }
 
     /// Map the transformations to every term in the expression.
@@ -5541,16 +6773,22 @@ impl PythonExpression {
 
         // release the GIL as Python functions may be called from
         // within the term mapper
+        let failure = Mutex::new(None);
+        let failure_ref = &failure;
         let r = py.detach(move || {
             self.expr.as_view().map_terms(
                 |x| {
+                    if failure_ref.lock().unwrap().is_some() {
+                        return Atom::Zero;
+                    }
                     let mut out = Atom::default();
                     Workspace::get_local().with(|ws| {
-                        let _ = Transformer::execute_chain(x, &op.chain, ws, &state, &mut out)
-                            .unwrap_or_else(|e| {
-                                // TODO: capture and abort the parallel run
-                                panic!("Transformer failed during parallel execution: {e:?}")
-                            });
+                        if let Err(error) =
+                            Transformer::execute_chain(x, &op.chain, ws, &state, &mut out)
+                        {
+                            failure_ref.lock().unwrap().get_or_insert(error);
+                            out = Atom::Zero;
+                        }
                     });
                     out
                 },
@@ -5558,6 +6796,14 @@ impl PythonExpression {
             )
         });
 
+        if let Some(error) = failure.into_inner().unwrap() {
+            return Err(match error {
+                TransformerError::Interrupt => {
+                    exceptions::PyKeyboardInterrupt::new_err("Interrupted by user")
+                }
+                TransformerError::ValueError(message) => exceptions::PyValueError::new_err(message),
+            });
+        }
         Ok(r.into())
     }
 
@@ -6074,7 +7320,8 @@ impl PythonExpression {
         Ok(b.into())
     }
 
-    /// Series expand in `x` around `expansion_point` to depth `depth`.
+    /// Series expand in `x` around `expansion_point`, including powers through
+    /// `depth / depth_denom`. The remainder starts at `Series.get_absolute_order()`.
     ///
     /// Examples
     /// --------
@@ -6082,14 +7329,14 @@ impl PythonExpression {
     /// >>> p = E('cos(x)/(x+1)')
     /// >>> print(p.series(S('x'), 0, 3))
     ///
-    /// yields `-1-x-1/2*x^2-1/2*x^3+𝒪(x^4)`
+    /// yields `1-x+1/2*x^2-1/2*x^3+𝒪(x^4)`
     ///
     /// Parameters
     /// ----------
     ///
     /// x : Expression
     ///     The variable to expand in.
-    /// expansion_point : Expression | int | float | complex | Decimal
+    /// expansion_point : Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The point around which to expand.
     /// depth : int
     ///     The depth of the expansion.
@@ -6130,10 +7377,97 @@ impl PythonExpression {
         result
     }
 
-    /// Compute the partial fraction decomposition in `x`.
+    /// Integrate the expression with respect to `x`.
     ///
-    /// If `None` is passed, the expression will be decomposed in all variables
-    /// which involves a potentially expensive Groebner basis computation.
+    /// If the integral cannot be completely solved, the best-effort result is
+    /// returned and may contain an unevaluated integral.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = 1/(x**2+1)
+    /// >>> print(e.integrate(x))  # atan(x)
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
+    pub fn integrate(&self, x: PythonExpression) -> PyResult<PythonExpression> {
+        let Some(x) = x.expr.get_symbol() else {
+            return Err(exceptions::PyValueError::new_err(
+                "Integration must be done with respect to a variable",
+            ));
+        };
+
+        let functions = python_integration_functions().ok_or_else(|| {
+            exceptions::PyNotImplementedError::new_err(
+                "No symbolic integration backend is linked into this Symbolica build",
+            )
+        })?;
+        let result = (functions.integrate)(&self.expr, x);
+        Ok(match result {
+            Ok(result) | Err(result) => result.into(),
+        })
+    }
+
+    /// Integrate the expression and return the result, an overview of the steps, and each individual transformation step.
+    /// Steps are ordered from the outer transformation to recursively solved
+    /// subintegrals.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = x/(1+x)
+    /// >>> result, overview, steps = e.integrate_with_steps(x)
+    /// >>> print(overview)
+    ///
+    /// yields
+    ///
+    /// ```log
+    /// ∫ x/(1+x) dx = ∫ 1-1/(1+x) dx
+    ///     ∫ 1-1/(1+x) dx = ∫ 1 dx+∫ 1/(-1-x) dx
+    ///         ∫ 1 dx = x
+    ///         ∫ -1/(1+x) dx = -log(1+x)
+    ///     = x-log(1+x)
+    /// ```
+    ///
+    /// Parameters
+    /// ----------
+    /// x: Expression
+    ///     The variable with respect to which to integrate.
+    pub fn integrate_with_steps(
+        &self,
+        x: PythonExpression,
+    ) -> PyResult<(PythonExpression, String, Vec<PythonIntegrationStep>)> {
+        let Some(x) = x.expr.get_symbol() else {
+            return Err(exceptions::PyValueError::new_err(
+                "Integration must be done with respect to a variable",
+            ));
+        };
+
+        let functions = python_integration_functions().ok_or_else(|| {
+            exceptions::PyNotImplementedError::new_err(
+                "No symbolic integration backend is linked into this Symbolica build",
+            )
+        })?;
+        let (result, overview, steps) = (functions.integrate_with_steps)(&self.expr, x);
+        Ok((
+            match result {
+                Ok(result) | Err(result) => result.into(),
+            },
+            overview,
+            steps,
+        ))
+    }
+
+    /// Compute a partial fraction decomposition in the specified variables.
+    ///
+    /// A single variable uses univariate partial fractioning. Multiple variables
+    /// use multivariate partial fractioning in the chosen variables. With no
+    /// arguments, the expression is decomposed in all variables. Multivariate
+    /// decomposition computes a Groebner basis and may be expensive.
     ///
     ///
     /// Examples
@@ -6148,23 +7482,45 @@ impl PythonExpression {
     ///
     /// yields `3/2*y^-1*(x+y)^-1+1/2*y^-1*(-x+y)^-1`
     ///
+    /// Multivariate partial fractioning in chosen variables:
+    /// >>> p = E('(2*y-x)/(y*(x+z*y)*(y-x))')
+    /// >>> print(p.apart(S('x'), S('y')))
+    ///
     /// Parameters
     /// ----------
-    /// x: Expression | None
-    ///     The variable with respect to which to perform the partial-fraction decomposition.
-    #[pyo3(signature = (x = None))]
-    pub fn apart(&self, x: Option<PythonExpression>) -> PyResult<PythonExpression> {
-        if let Some(x) = x {
-            if let Some(r) = x.expr.get_symbol() {
+    /// variables: Expression
+    ///     No variables for decomposition in all variables, one variable for
+    ///     univariate decomposition, or multiple chosen variables for
+    ///     multivariate decomposition.
+    #[pyo3(signature = (*variables))]
+    pub fn apart(
+        &self,
+        #[gen_stub(override_type(type_repr = "Expression"))] variables: &Bound<'_, PyTuple>,
+    ) -> PyResult<PythonExpression> {
+        if variables.is_empty() {
+            return Ok(self.expr.as_view().apart_multivariate(&[]).into());
+        }
+
+        if variables.len() == 1 {
+            let x = variables.get_item(0)?.extract::<PythonExpression>()?;
+            return if let Some(r) = x.expr.get_symbol() {
                 Ok(self.expr.apart(r).into())
             } else {
                 Err(exceptions::PyValueError::new_err(
-                    "Partial fraction decomposition must be done wrt a symbol",
+                    "Univariate partial fraction decomposition must be done with respect to a symbol",
                 ))
-            }
-        } else {
-            Ok(self.apart_multivariate().into())
+            };
         }
+
+        let variables = variables
+            .iter()
+            .map(|variable| -> PyResult<_> {
+                let variable = variable.extract::<PythonExpression>()?;
+                Indeterminate::try_from(variable.expr).map_err(exceptions::PyValueError::new_err)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        Ok(self.expr.as_view().apart_multivariate(&variables).into())
     }
 
     /// Write the expression over a common denominator.
@@ -6193,7 +7549,8 @@ impl PythonExpression {
         Ok(self.expr.cancel().into())
     }
 
-    /// Factor the expression over the rationals.
+    /// Factor the expression over the rationals, over the complex rationals, or
+    /// over an algebraic number field generated by `extension`.
     ///
     /// Examples
     /// --------
@@ -6202,8 +7559,41 @@ impl PythonExpression {
     /// >>> p = E('(6 + x)/(7776 + 6480*x + 2160*x^2 + 360*x^3 + 30*x^4 + x^5)')
     /// >>> print(p.factor())
     /// (x+6)**-4
-    pub fn factor(&self) -> PyResult<PythonExpression> {
-        Ok(self.expr.factor().into())
+    /// >>> E("x^2-2").factor(extension=[E("sqrt(2)")])
+    ///
+    /// Parameters
+    /// ----------
+    /// complex: bool
+    ///     If `True`, factor over the complex rationals.
+    /// extension: Sequence[Expression] | None
+    ///     Algebraic generators to adjoin. Algebraic numbers already present
+    ///     in the expression define the initial field.
+    #[pyo3(signature = (complex = false, extension = None))]
+    pub fn factor(
+        &self,
+        complex: bool,
+        extension: Option<Vec<ConvertibleToExpression>>,
+    ) -> PyResult<PythonExpression> {
+        if let Some(extension) = extension {
+            let mut generators = extension
+                .into_iter()
+                .map(|generator| generator.to_expression().expr)
+                .collect::<Vec<_>>();
+            if complex {
+                generators.push(Atom::i());
+            }
+            self.expr
+                .factor_in_extension(&generators)
+                .map(Into::into)
+                .map_err(exceptions::PyValueError::new_err)
+        } else {
+            Ok(if complex {
+                self.expr.factor_complex()
+            } else {
+                self.expr.factor()
+            }
+            .into())
+        }
     }
 
     /// Convert the expression to a polynomial, optionally, with the variables and the ordering specified in `vars`.
@@ -6215,6 +7605,22 @@ impl PythonExpression {
     ///
     /// If a `minimal_poly` is provided, the Galois field will be created with `minimal_poly` as the minimal polynomial.
     ///
+    /// Set `extensions` to an empty sequence to automatically place algebraic
+    /// coefficients in a common number field. Additional generators in the
+    /// sequence are adjoined to that field. When `extensions` is `None`,
+    /// algebraic expressions such as `sqrt(2)` remain independent polynomial
+    /// variables, preserving the default behavior.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import E, S
+    /// >>> x = S('x')
+    /// >>> default = E('x+sqrt(2)').to_polynomial()
+    /// >>> sqrt_2_is_a_variable = E('sqrt(2)') in default.get_variables()
+    /// >>> automatic = E('x+sqrt(2)').to_polynomial(extensions=[])
+    /// >>> automatic.get_variables() == [x]
+    /// True
+    ///
     /// Parameters
     /// ----------
     /// modulus: int
@@ -6225,14 +7631,19 @@ impl PythonExpression {
     ///     The minimal polynomial that defines the algebraic extension.
     /// vars: Sequence[Expression] | None
     ///     The variables treated as polynomial variables, in the given order.
+    /// extensions: Sequence[Expression] | None
+    ///     If set, automatically construct an algebraic number field and
+    ///     adjoin the supplied generators. An empty sequence enables automatic
+    ///     discovery without adjoining additional generators.
     #[gen_stub(skip)]
-    #[pyo3(signature = (modulus = None, power = None, minimal_poly = None, vars = None))]
+    #[pyo3(signature = (modulus = None, power = None, minimal_poly = None, vars = None, *, extensions = None))]
     pub fn to_polynomial(
         &self,
         modulus: Option<u64>,
         mut power: Option<(u16, Symbol)>,
         minimal_poly: Option<PythonPolynomial>,
         vars: Option<Vec<PythonExpression>>,
+        extensions: Option<Vec<ConvertibleToExpression>>,
         py: Python,
     ) -> PyResult<Py<PyAny>> {
         let mut var_map: Vec<PolyVariable> = vec![];
@@ -6251,6 +7662,36 @@ impl PythonExpression {
         } else {
             Some(Arc::new(var_map))
         };
+
+        if let Some(extensions) = extensions {
+            if modulus.is_some() || power.is_some() || minimal_poly.is_some() {
+                return Err(exceptions::PyValueError::new_err(
+                    "extensions cannot be combined with modulus, power, or minimal_poly",
+                ));
+            }
+
+            let generators = extensions
+                .into_iter()
+                .map(|generator| generator.to_expression().expr)
+                .collect::<Vec<_>>();
+            let mut context = AlgebraicContext::from_atom(self.expr.as_view())
+                .map_err(exceptions::PyValueError::new_err)?;
+            context
+                .adjoin_generators(&generators)
+                .map_err(exceptions::PyValueError::new_err)?;
+            if !context.is_trivial() {
+                let generator = context.field().generator();
+                if let Some(atom) = context.atom_for_element(&generator)
+                    && let Ok(variable) = PolyVariable::try_from(atom)
+                {
+                    context.rename_generator(variable);
+                }
+            }
+            let poly = context
+                .to_polynomial::<u16>(self.expr.as_view(), var_map)
+                .map_err(exceptions::PyValueError::new_err)?;
+            return PythonNumberFieldPolynomial { poly }.into_py_any(py);
+        }
 
         if power.is_some() && modulus.is_none() {
             return Err(exceptions::PyValueError::new_err(
@@ -6467,20 +7908,19 @@ impl PythonExpression {
     /// >>> for match in e.match(f(x_)):
     /// >>>    for map in match:
     /// >>>        print(map[0],'=', map[1])
-    #[pyo3(name = "match", signature = (lhs, cond = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true))]
+    #[pyo3(name = "match", signature = (lhs, cond = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true))]
     pub fn pattern_match(
         &self,
         lhs: ConvertibleToExpression,
         cond: Option<ConvertibleToPatternRestriction>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
     ) -> PyResult<PythonMatchIterator> {
         let conditions = cond.map(|r| r.0).unwrap_or_default();
         let settings = MatchSettings {
-            level_range: level_range.unwrap_or((min_level, max_level)),
+            level_range: (min_level, max_level),
             level_is_tree_depth,
             partial,
             ..MatchSettings::default()
@@ -6507,20 +7947,19 @@ impl PythonExpression {
     /// >>> f = S('f')
     /// >>> if f(1).matches(f(2)):
     /// >>>    print('match')
-    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true))]
+    #[pyo3(signature = (lhs, cond = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true))]
     pub fn matches(
         &self,
         lhs: ConvertibleToExpression,
         cond: Option<ConvertibleToPatternRestriction>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
     ) -> PyResult<PythonCondition> {
         let conditions = cond.map(|r| r.0).unwrap_or_default();
         let settings = MatchSettings {
-            level_range: level_range.unwrap_or((min_level, max_level)),
+            level_range: (min_level, max_level),
             level_is_tree_depth,
             partial,
             ..MatchSettings::default()
@@ -6539,7 +7978,7 @@ impl PythonExpression {
     /// Return an iterator over the pattern `self` matching to `lhs`.
     /// Restrictions on the pattern can be supplied through `cond`.
     ///
-    /// The `level_range` specifies the `[min,max]` level at which the pattern is allowed to match.
+    /// `min_level` and `max_level` specify the inclusive matching bounds.
     /// The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree,
     /// depending on `level_is_tree_depth`.
     ///
@@ -6555,7 +7994,7 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// lhs: Expression | int | float | complex | Decimal
+    /// lhs: Expression | int | float | complex | Float | ComplexFloat | Decimal
     ///     The expression to match against.
     /// cond: PatternRestriction | Condition | None
     ///     An additional restriction that a match or replacement must satisfy.
@@ -6563,13 +8002,11 @@ impl PythonExpression {
     ///     The minimum level at which a match is allowed.
     /// max_level: int | None
     ///     The maximum level at which a match is allowed.
-    /// level_range: tuple[int, int | None] | None
-    ///     The `(min_level, max_level)` range in which matches are allowed.
     /// level_is_tree_depth: bool
     ///     Whether levels should be measured by tree depth instead of function nesting.
     /// partial: bool
     ///     Whether matches are allowed inside larger expressions instead of only at the top level.
-    #[pyo3(signature = (lhs, rhs, cond = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false))]
+    #[pyo3(signature = (lhs, rhs, cond = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false))]
     pub fn replace_iter(
         &self,
         lhs: ConvertibleToExpression,
@@ -6577,14 +8014,13 @@ impl PythonExpression {
         cond: Option<ConvertibleToPatternRestriction>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
         allow_new_wildcards_on_rhs: bool,
     ) -> PyResult<PythonReplaceIterator> {
         let conditions = cond.map(|r| r.0.clone()).unwrap_or_default();
         let settings = MatchSettings {
-            level_range: level_range.unwrap_or((min_level, max_level)),
+            level_range: (min_level, max_level),
             level_is_tree_depth,
             allow_new_wildcards_on_rhs,
             partial,
@@ -6646,9 +8082,6 @@ impl PythonExpression {
     ///     The minimum level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
     /// max_level: int | None, optional
     ///     The maximum level at which the pattern is allowed to match. `None` means no maximum.
-    /// level_range:
-    ///     Specifies the `[min,max]` level at which the pattern is allowed to match. The first level is 0 and the level is increased when going into a function or one level deeper in the expression tree, depending on `level_is_tree_depth`.
-    ///     Prefer setting `min_level` and `max_level` directly over `level_range`, as this argument will be deprecated in the future.
     /// level_is_tree_depth: bool, optional
     ///     If set to `True`, the level is increased when going one level deeper in the expression tree.
     /// partial: bool, optional
@@ -6668,7 +8101,7 @@ impl PythonExpression {
     /// nested: bool, optional
     ///     Replace nested matches, starting from the deepest first and acting on the result of that replacement.
     ///     For example, replacing `f(x_)` with `x_^2` in `f(f(x))` would yield `f(x)^2` with the default settings and `f(x^2)^2` with nested replacement.
-    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_range = None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, repeat = false, once = false, bottom_up = false, nested = false))]
+    #[pyo3(signature = (pattern, rhs, cond = None, non_greedy_wildcards = None, min_level=0, max_level=None, level_is_tree_depth = false, partial=true, allow_new_wildcards_on_rhs = false, rhs_cache_size = None, repeat = false, once = false, bottom_up = false, nested = false))]
     pub fn replace(
         &self,
         pattern: ConvertibleToExpression,
@@ -6677,7 +8110,6 @@ impl PythonExpression {
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
         allow_new_wildcards_on_rhs: bool,
@@ -6712,7 +8144,7 @@ impl PythonExpression {
                 .collect::<Result<_, _>>()?;
         }
 
-        settings.level_range = level_range.unwrap_or((min_level, max_level));
+        settings.level_range = (min_level, max_level);
         settings.partial = partial;
         settings.level_is_tree_depth = level_is_tree_depth;
         settings.allow_new_wildcards_on_rhs = allow_new_wildcards_on_rhs;
@@ -6864,57 +8296,116 @@ impl PythonExpression {
         Ok(res.into())
     }
 
-    /// Solve a linear system in the variables `variables`, where each expression
-    /// in the system is understood to yield 0.
+    /// Find exact solutions to an equation or a system of equations.
     ///
-    /// If the system is underdetermined, a partial solution is returned
-    /// where each bound variable is a linear combination of the free
-    /// variables. The free variables are chosen such that they have the highest index in the `vars` list.
+    /// An expression represents an equation equal to zero; a list asks for solutions
+    /// that satisfy every equation. The returned SolutionSet contains solution
+    /// branches. Each branch maps solved variables directly to Expressions and may
+    /// include conditions on when those assignments are valid.
     ///
     /// Examples
     /// --------
-    /// >>> from symbolica import *
-    /// >>> x, y, c = S('x', 'y', 'c')
-    /// >>> f = S('f')
-    /// >>> x_r, y_r = Expression.solve_linear_system([f(c)*x + y/c - 1, y-c/2], [x, y])
-    /// >>> print('x =', x_r, ', y =', y_r)
+    /// Solve a linear system, then read an individual value or extract a dictionary:
+    ///
+    /// >>> from symbolica import Expression, S, Reals
+    /// >>> x, y, a = S("x", "y", "a")
+    /// >>> result = Expression.solve([x + y - 3, x - y - 1], [x, y])
+    /// >>> result[0][x]
+    /// 2
+    /// >>> dict(result[0])
+    /// {x: 2, y: 1}
+    ///
+    /// Use ``eq`` to write a right-hand side. Python ``==`` tests equality immediately
+    /// instead of constructing an equation:
+    ///
+    /// >>> Expression.solve(x.eq(2), [x])[0][x]
+    /// 2
+    ///
+    /// Nonlinear systems can have several solutions. Iterate over the result to
+    /// collect them; their order is not guaranteed:
+    ///
+    /// >>> result = Expression.solve([x**2 + y**2 - 5, x*y - 2], [x, y])
+    /// >>> len(result)
+    /// 4
+    /// >>> points = [dict(branch) for branch in result]
+    /// >>> {x: 1, y: 2} in points
+    /// True
+    ///
+    /// Solutions are complex by default. Choose Reals to keep only real solutions:
+    ///
+    /// >>> len(Expression.solve(x**2 + 1, [x]))
+    /// 2
+    /// >>> Expression.solve(x**2 + 1, [x], domain=Reals).is_empty()
+    /// True
+    /// >>> roots = Expression.solve(x**2 - 1, [x], domain=Reals)
+    /// >>> {branch[x] for branch in roots} == {-1, 1}
+    /// True
+    ///
+    /// A branch can describe a whole family. Free variables are omitted from its
+    /// dictionary and are available through ``free_variables()``:
+    ///
+    /// >>> family = Expression.solve(x + y - 1, [x, y])
+    /// >>> dict(family[0])
+    /// {x: 1-y}
+    /// >>> family[0].free_variables()
+    /// [y]
+    ///
+    /// Symbols outside the variables list act as parameters. A symbolic answer may
+    /// exclude some parameter values; inspect ``coverage_guard`` before substituting
+    /// values. Excluded values may need to be solved separately:
+    ///
+    /// >>> result = Expression.solve(a*x - 1, [x])
+    /// >>> result[0][x]
+    /// 1/a
+    /// >>> print(result.coverage_guard)
+    /// a != 0
+    ///
+    /// Other restrictions stay with the branch. For example, a denominator must
+    /// remain nonzero even when it no longer appears in the answer:
+    ///
+    /// >>> branch = Expression.solve(x/y, [x, y])[0]
+    /// >>> dict(branch)
+    /// {x: 0}
+    /// >>> print(branch.conditions()[0])
+    /// y != 0
     ///
     /// Parameters
     /// ----------
-    /// system: Sequence[Expression]
-    ///     The equations or polynomials that define the system.
+    /// system: Expression, Condition, bool, number, or sequence of these
+    ///     Equation or equations to satisfy, written as expressions equal to zero
+    ///     or using ``eq``. Supports polynomial and rational equations and some
+    ///     equations involving rational powers. Inequalities and general Boolean
+    ///     combinations are not supported. True and an empty list impose no
+    ///     constraints; False has no solutions. Use exact coefficients, such as
+    ///     ``Expression.parse("1/10")`` instead of the Python float ``0.1``.
     /// variables: Sequence[Expression]
-    ///     The variables to solve for, in order.
-    /// warn_if_underdetermined: bool
-    ///     Whether to warn when the system is underdetermined.
-    #[pyo3(signature = (system, variables, warn_if_underdetermined = true))]
+    ///     Variables to solve for. Earlier variables are solved for preferentially,
+    ///     leaving later ones free when possible. For ``x + y = 1``, ``[x, y]``
+    ///     gives x = 1 - y; ``[y, x]`` gives y = 1 - x. Symbols outside this list
+    ///     are parameters.
+    /// domain: SolveDomain | None
+    ///     Domain of variables and parameters: Complexes (default), Reals,
+    ///     Rationals, or Integers. Symbol attributes, such as ``is_integer=True``,
+    ///     can restrict individual symbols further. For example, Reals also treats
+    ///     parameters as real for this solve, without changing their attributes.
+    ///     Any domain restrictions that cannot be resolved remain in
+    ///     ``branch.conditions()``.
+    #[pyo3(signature = (system, variables, *, domain = None))]
     #[classmethod]
-    pub fn solve_linear_system(
+    pub fn solve(
         _cls: &Bound<'_, PyType>,
-        system: Vec<ConvertibleToExpression>,
+        system: ConvertibleToSolveInput,
         variables: Vec<PythonExpression>,
-        warn_if_underdetermined: bool,
-    ) -> PyResult<Vec<PythonExpression>> {
-        let system: Vec<_> = system.into_iter().map(|x| x.to_expression().expr).collect();
-        let vars: Vec<_> = variables.into_iter().map(|v| v.expr).collect();
-
-        match AtomView::solve_linear_system::<u16, _, Atom>(&system, &vars) {
-            Ok(res) => Ok(res.into_iter().map(|x| x.into()).collect()),
-            Err(SolveError::Underdetermined {
-                rank,
-                partial_solution,
-            }) => {
-                if warn_if_underdetermined {
-                    warn!(
-                        "The system is underdetermined (rank {rank} < size {})",
-                        vars.len()
-                    );
-                }
-
-                Ok(partial_solution.into_iter().map(|x| x.into()).collect())
-            }
-            Err(e) => Err(exceptions::PyValueError::new_err(e.to_string())),
-        }
+        domain: Option<PythonSolveDomain>,
+    ) -> PyResult<PythonSolutionSet> {
+        let domain = domain.unwrap_or(PythonSolveDomain::Complexes).into();
+        let mut builder = Atom::solve(&system.equations).over(domain);
+        builder.denominators = system.denominators;
+        Ok(PythonSolutionSet {
+            set: builder
+                .wrt(&variables.into_iter().map(|v| v.expr).collect::<Vec<_>>())
+                .map_err(solution::solve_error)?,
+        })
     }
 
     /// Find the root of an expression in `x` numerically over the reals using Newton's method.
@@ -6934,13 +8425,13 @@ impl PythonExpression {
     /// ----------
     /// variable: Expression
     ///     The variable to solve for.
-    /// init: Decimal
+    /// init: Float | int | float | str | Decimal
     ///     The initial guess for Newton's method.
     /// prec: float
-    ///     The numerical tolerance for the Newton iteration.
+    ///     The absolute tolerance on the Newton step, independent of the scale of the expression.
     /// max_iterations: int
     ///     The maximum number of Newton iterations.
-    #[gen_stub(override_return_type(type_repr = "decimal.Decimal", imports = ("decimal")))]
+    #[gen_stub(override_return_type(type_repr = "Float"))]
     #[pyo3(signature =
         (variable,
         init,
@@ -6966,7 +8457,7 @@ impl PythonExpression {
                 .map_err(|e| {
                     exceptions::PyValueError::new_err(format!("Could not solve system: {e}"))
                 })?;
-            r.into_inner().into_py_any(py)
+            PythonMultiPrecisionFloat(Float::from(r.into_inner())).into_py_any(py)
         } else {
             PythonMultiPrecisionFloat(
                 self.expr
@@ -6999,10 +8490,10 @@ impl PythonExpression {
     ///     The equations or polynomials that define the system.
     /// variables: Sequence[Expression]
     ///     The variables to solve for, in order.
-    /// init: Sequence[Decimal]
+    /// init: Sequence[Float | int | float | str | Decimal]
     ///     The initial guess for Newton's method.
     /// prec: float
-    ///     The numerical tolerance for the Newton iteration.
+    ///     The absolute tolerance on each component of the Newton step, independent of the scale of the equations.
     /// max_iterations: int
     ///     The maximum number of Newton iterations.
     #[pyo3(signature =
@@ -7072,19 +8563,80 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// constants: dict[Expression, int | float | complex | Decimal | tuple[Decimal, Decimal]]
+    /// constants: dict[Expression, int | float | complex | Float | ComplexFloat | Decimal | tuple[Decimal, Decimal]]
     ///     The constant substitutions applied during evaluation.
     /// decimal_digit_precision: int | None
-    ///     If omitted, uses the f64 backend and returns a complex. If specified,
-    ///     uses arbitrary precision and returns (real, imaginary) as Decimals.
+    ///     If omitted, evaluates at double precision and returns a complex.
+    ///     If specified, sets the working precision in decimal digits and returns a ComplexFloat.
     #[pyo3(signature = (constants, decimal_digit_precision = None))]
-    #[gen_stub(override_return_type(type_repr = "complex | tuple[decimal.Decimal, decimal.Decimal]", imports = ("decimal")))]
+    #[gen_stub(override_return_type(type_repr = "complex | ComplexFloat"))]
     pub fn evaluate(
         &self,
         py: Python,
-        constants: HashMap<PythonExpression, PythonEvaluationValue>,
+        mut constants: HashMap<PythonExpression, PythonEvaluationValue>,
         decimal_digit_precision: Option<u32>,
     ) -> PyResult<Py<PyAny>> {
+        // A root's polynomial is an unevaluated tag. Specialize its parameters
+        // before numerical root isolation, preserving the bound polynomial variable.
+        // Cache the value under the original root so other map keys keep their meaning.
+        if self.expr.contains_symbol(crate::transcendental::root()) && !constants.is_empty() {
+            let root_variable = crate::transcendental::root_var();
+            let replacements: Vec<_> = constants
+                .iter()
+                .filter(|(k, v)| {
+                    !k.expr.contains_symbol(root_variable)
+                        && crate::domains::float::SingleFloat::is_finite(&v.0.0)
+                })
+                .map(|(k, v)| {
+                    (
+                        k.expr.clone(),
+                        Atom::num(Complex::new(v.0.0.re.to_rational(), v.0.0.im.to_rational())),
+                    )
+                })
+                .collect();
+            let mut roots = Vec::new();
+            self.expr.visitor(&mut |atom| {
+                if constants.keys().any(|k| k.expr.as_view() == atom) {
+                    return false;
+                }
+                if let AtomView::Fun(f) = atom
+                    && f.get_symbol() == crate::transcendental::root()
+                    && replacements
+                        .iter()
+                        .any(|(key, _)| atom.contains(key.as_view()))
+                    && !roots.contains(&atom.to_owned())
+                {
+                    roots.push(atom.to_owned());
+                }
+                true
+            });
+            let prec = match decimal_digit_precision {
+                Some(digits) => Float::decimal_digits_to_bits(digits as f64)
+                    .map_err(exceptions::PyValueError::new_err)?,
+                None => 53,
+            };
+            for root in roots {
+                let specialized = root.as_view().replace_map_bottom_up(
+                    |atom, _, out| {
+                        if let Some((_, value)) =
+                            replacements.iter().find(|(key, _)| key.as_view() == atom)
+                        {
+                            **out = value.clone();
+                        }
+                    },
+                    true,
+                );
+                let empty: HashMap<Atom, Complex<Float>> = HashMap::default();
+                // Leave failures to normal evaluation: this root may belong to
+                // an unselected branch of `if`, whose arguments are evaluated lazily.
+                if let Ok(value) = specialized.evaluate_with_prec(&empty, prec) {
+                    constants.insert(
+                        root.into(),
+                        PythonEvaluationValue(PythonMultiPrecisionComplex(value)),
+                    );
+                }
+            }
+        }
         let Some(decimal_digit_precision) = decimal_digit_precision else {
             let constants: HashMap<AtomView, Complex<f64>> = constants
                 .iter()
@@ -7097,7 +8649,8 @@ impl PythonExpression {
             return PyComplex::from_doubles(py, r.re, r.im).into_py_any(py);
         };
 
-        let prec = (decimal_digit_precision as f64 * std::f64::consts::LOG2_10).ceil() as u32;
+        let prec = Float::decimal_digits_to_bits(decimal_digit_precision as f64)
+            .map_err(exceptions::PyValueError::new_err)?;
         let constants: HashMap<AtomView, Complex<Float>> = constants
             .iter()
             .map(|(k, v)| (k.expr.as_view(), v.to_complex_float(prec)))
@@ -7109,17 +8662,11 @@ impl PythonExpression {
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not evaluate expression: {e}"))
             })?;
-        (
-            PythonMultiPrecisionFloat(r.re),
-            PythonMultiPrecisionFloat(r.im),
-        )
-            .into_py_any(py)
+        PythonMultiPrecisionComplex(r).into_py_any(py)
     }
 
     /// Create an evaluator that can evaluate (nested) expressions in an optimized fashion.
-    /// Function definitions can be provided with `functions`, where each key is
-    /// `(name, arguments)` and the value is the function body. For example the function
-    /// `f(x,y)=x^2+y` should be provided as `{(f, (x, y)): x**2 + y}`.
+    /// Function definitions can be provided with `functions`.
     /// All free parameters should be provided in the `params` list.
     ///
     /// If `KeyboardInterrupt` is triggered during the optimization, the optimization will stop and will yield the
@@ -7134,7 +8681,13 @@ impl PythonExpression {
     /// >>> fd = E("y^2 + z^2*y^2")
     /// >>> gd = E("y + 5")
     /// >>>
-    /// >>> ev = e1.evaluator([x], functions={(f, (y, z)): fd, (g, (y,)): gd})
+    /// >>> ev = e1.evaluator(
+    /// >>>     [x],
+    /// >>>     functions=[
+    /// >>>         FunctionDefinition(f, [y, z], fd, inlining="never"),
+    /// >>>         FunctionDefinition(g, [y], gd),
+    /// >>>     ],
+    /// >>> )
     /// >>> res = ev.evaluate([[1.], [2.], [3.]])  # evaluate at x=1, x=2, x=3
     /// >>> print(res)
     ///
@@ -7146,9 +8699,8 @@ impl PythonExpression {
     /// ----------
     /// params: Sequence[Expression]
     ///     A list of free parameters.
-    /// functions: dict[tuple[Expression, Sequence[Expression]], Expression] = {}
-    ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
-    ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// functions: Sequence[FunctionDefinition] = []
+    ///     Function definitions available to the evaluator.
     /// iterations: int, optional
     ///     The number of optimization iterations to perform.
     /// cpe_iterations: Optional[int], optional
@@ -7165,6 +8717,8 @@ impl PythonExpression {
     ///    If set to `True`, JIT compilation directly translates Symbolica instructions to SymJIT IR.
     /// jit_optimization_level: int, optional
     ///    The optimization level to use for JIT compilation.
+    /// jit_options: dict[str, str], optional
+    ///    Additional options to pass to the JIT compiler.
     /// max_horner_scheme_variables: int, optional
     ///     The maximum number of variables in a Horner scheme.
     /// max_common_pair_cache_entries: int, optional
@@ -7174,7 +8728,7 @@ impl PythonExpression {
     #[pyo3(signature =
         (
         params,
-        functions = HashMap::default(),
+        functions = Vec::default(),
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
@@ -7183,6 +8737,7 @@ impl PythonExpression {
         direct_translation = true,
         jit_direct_translation = false,
         jit_optimization_level = 3,
+        jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100),
@@ -7190,7 +8745,7 @@ impl PythonExpression {
     pub fn evaluator(
         &self,
         params: Vec<PythonExpression>,
-        functions: HashMap<(PolyVariable, Vec<PolyVariable>), PythonExpression>,
+        functions: Vec<PythonFunctionDefinition>,
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
@@ -7199,47 +8754,19 @@ impl PythonExpression {
         direct_translation: bool,
         jit_direct_translation: bool,
         jit_optimization_level: u8,
+        jit_options: HashMap<String, String>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
         py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level, &jit_options);
+
         let mut fn_map = FunctionMap::new();
 
-        for ((symbol, args), body) in functions {
-            let args: Vec<_> = args
-                .into_iter()
-                .map(|x| match x {
-                    PolyVariable::Symbol(s) => Ok(Indeterminate::Symbol(s, s.into())),
-                    PolyVariable::Function(s, f) => Ok(Indeterminate::Function(s, f)),
-                    _ => Err(exceptions::PyValueError::new_err(format!(
-                        "Bad function argument {x} in function {symbol}",
-                    ))),
-                })
-                .collect::<Result<_, _>>()?;
-
-            match symbol {
-                PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                PolyVariable::Function(s, fa) => {
-                    let tags = fa
-                        .as_fun_view()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.to_owned())
-                        .collect();
-
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                _ => Err(exceptions::PyValueError::new_err(format!(
-                    "Expected function name instead of {symbol:?}",
-                )))?,
-            }
+        for function in functions {
+            function.register(&mut fn_map)?;
         }
 
         let abort_check = Box::new(move || {
@@ -7289,20 +8816,30 @@ impl PythonExpression {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
 
+        #[cfg(feature = "native_code_generation")]
+        let mut jit_settings = JITCompilationSettings::new()
+            .direct_translation(jit_direct_translation)
+            .optimization_level(jit_optimization_level);
+        #[cfg(feature = "native_code_generation")]
+        for (k, v) in jit_options {
+            jit_settings = jit_settings.with_option(k, v);
+        }
+
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
-            jit_settings: JITCompilationSettings::new()
-                .direct_translation(jit_direct_translation)
-                .optimization_level(jit_optimization_level),
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
+            jit_settings,
         })
     }
 
@@ -7325,9 +8862,8 @@ impl PythonExpression {
     ///     The expressions to compile into a joint evaluator.
     /// params: Sequence[Expression]
     ///     The evaluator parameters, in input order.
-    /// functions: dict[tuple[Expression, Sequence[Expression]], Expression]
-    ///     A dictionary of functions. The key is a tuple of the function name and the argument variables.
-    ///     The value is the function body. If the function name entry contains arguments, these are considered tags.
+    /// functions: Sequence[FunctionDefinition]
+    ///     Function definitions available to the evaluator.
     /// iterations: int
     ///     The number of optimization passes to run.
     /// cpe_iterations: int | None
@@ -7344,6 +8880,8 @@ impl PythonExpression {
     ///     Whether to directly translate Symbolica instructions to SymJIT IR.
     /// jit_optimization_level: int
     ///     The optimization level to use for JIT compilation.
+    /// jit_options: dict[str, str]
+    ///     Additional options to pass to the JIT compiler.
     /// max_horner_scheme_variables: int
     ///     The maximum number of variables considered for Horner-scheme optimization.
     /// max_common_pair_cache_entries: int
@@ -7354,7 +8892,7 @@ impl PythonExpression {
     #[pyo3(signature =
         (exprs,
         params,
-        functions = HashMap::default(),
+        functions = Vec::default(),
         iterations = 1,
         cpe_iterations = None,
         n_cores = 4,
@@ -7363,6 +8901,7 @@ impl PythonExpression {
         direct_translation = true,
         jit_direct_translation = false,
         jit_optimization_level = 3,
+        jit_options = HashMap::default(),
         max_horner_scheme_variables = 500,
         max_common_pair_cache_entries = 1_000_000,
         max_common_pair_distance = 100)
@@ -7371,7 +8910,7 @@ impl PythonExpression {
         _cls: &Bound<'_, PyType>,
         exprs: Vec<PythonExpression>,
         params: Vec<PythonExpression>,
-        functions: HashMap<(PolyVariable, Vec<PolyVariable>), PythonExpression>,
+        functions: Vec<PythonFunctionDefinition>,
         iterations: usize,
         cpe_iterations: Option<usize>,
         n_cores: usize,
@@ -7380,46 +8919,19 @@ impl PythonExpression {
         direct_translation: bool,
         jit_direct_translation: bool,
         jit_optimization_level: u8,
+        jit_options: HashMap<String, String>,
         max_horner_scheme_variables: usize,
         max_common_pair_cache_entries: usize,
         max_common_pair_distance: usize,
+        py: Python,
     ) -> PyResult<PythonExpressionEvaluator> {
+        #[cfg(not(feature = "native_code_generation"))]
+        let _ = (jit_direct_translation, jit_optimization_level, &jit_options);
+
         let mut fn_map = FunctionMap::new();
 
-        for ((symbol, args), body) in functions {
-            let args: Vec<_> = args
-                .into_iter()
-                .map(|x| match x {
-                    PolyVariable::Symbol(s) => Ok(Indeterminate::Symbol(s, s.into())),
-                    PolyVariable::Function(s, f) => Ok(Indeterminate::Function(s, f)),
-                    _ => Err(exceptions::PyValueError::new_err(format!(
-                        "Bad function argument {x} in function {symbol}",
-                    ))),
-                })
-                .collect::<Result<_, _>>()?;
-
-            match symbol {
-                PolyVariable::Symbol(s) => {
-                    fn_map
-                        .add_function(s, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                PolyVariable::Function(s, fa) => {
-                    let tags = fa
-                        .as_fun_view()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.to_owned())
-                        .collect();
-
-                    fn_map
-                        .add_tagged_function(s, tags, args, body.expr)
-                        .map_err(|e| exceptions::PyValueError::new_err(e.to_string()))?;
-                }
-                _ => Err(exceptions::PyValueError::new_err(format!(
-                    "Expected function name instead of {symbol:?}",
-                )))?,
-            }
+        for function in functions {
+            function.register(&mut fn_map)?;
         }
 
         let abort_check = Box::new(move || {
@@ -7455,32 +8967,44 @@ impl PythonExpression {
             ..OptimizationSettings::default()
         };
 
-        let params: Vec<_> = params.iter().map(|x| x.expr.clone()).collect();
+        let params: Vec<_> = params.into_iter().map(|x| x.expr).collect();
+        let exprs: Vec<_> = exprs.into_iter().map(|x| x.expr).collect();
 
-        let exprs = exprs.iter().map(|x| x.expr.as_view()).collect::<Vec<_>>();
-
-        let eval = Atom::evaluator_multiple(&exprs, &params)
-            .function_map(fn_map)
-            .optimization_settings(settings)
-            .build()
+        let eval = py
+            .detach(move || {
+                Atom::evaluator_multiple(&exprs, &params)
+                    .function_map(fn_map)
+                    .optimization_settings(settings)
+                    .build()
+            })
             .map_err(|e| {
                 exceptions::PyValueError::new_err(format!("Could not create evaluator: {e}"))
             })?;
+
+        #[cfg(feature = "native_code_generation")]
+        let mut jit_settings = JITCompilationSettings::new()
+            .direct_translation(jit_direct_translation)
+            .optimization_level(jit_optimization_level);
+        #[cfg(feature = "native_code_generation")]
+        for (k, v) in jit_options {
+            jit_settings = jit_settings.with_option(k, v);
+        }
 
         Ok(PythonExpressionEvaluator {
             rational_constants: eval.get_constants().to_vec(),
             eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
             eval_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_real: None,
+            #[cfg(feature = "native_code_generation")]
             jit_complex: None,
             eval_double_float: None,
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
-            jit_compile,
-            jit_settings: JITCompilationSettings::new()
-                .direct_translation(jit_direct_translation)
-                .optimization_level(jit_optimization_level),
+            jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
+            #[cfg(feature = "native_code_generation")]
+            jit_settings,
         })
     }
 
@@ -7557,7 +9081,7 @@ pub struct PythonReplacement {
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonReplacement {
-    #[pyo3(signature = (pattern, rhs, cond=None, non_greedy_wildcards=None, min_level=0, max_level=None, level_range=None, level_is_tree_depth=false, partial=true, allow_new_wildcards_on_rhs=false, rhs_cache_size=100))]
+    #[pyo3(signature = (pattern, rhs, cond=None, non_greedy_wildcards=None, min_level=0, max_level=None, level_is_tree_depth=false, partial=true, allow_new_wildcards_on_rhs=false, rhs_cache_size=100))]
     #[new]
     pub fn new(
         pattern: ConvertibleToExpression,
@@ -7566,7 +9090,6 @@ impl PythonReplacement {
         non_greedy_wildcards: Option<Vec<PythonExpression>>,
         min_level: usize,
         max_level: Option<usize>,
-        level_range: Option<(usize, Option<usize>)>,
         level_is_tree_depth: bool,
         partial: bool,
         allow_new_wildcards_on_rhs: bool,
@@ -7610,7 +9133,8 @@ impl PythonReplacement {
         Ok(Self {
             replacement: Replacement::new(pattern, rhs)
                 .when(cond.map(|r| r.0).unwrap_or_default())
-                .level_range(level_range.unwrap_or((min_level, max_level)))
+                .min_level(min_level)
+                .max_level(max_level)
                 .partial(partial)
                 .level_is_tree_depth(level_is_tree_depth)
                 .allow_new_wildcards_on_rhs(allow_new_wildcards_on_rhs)
@@ -7648,103 +9172,109 @@ PyMethodsInfo {
             parameters: &[
                 ParameterInfo {
                     name: "name",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::PositionalOnly,
                     default: ParameterDefault::None,
                     type_info: || <&str>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "aliases",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
                 ParameterInfo {
                     name: "normalization",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || Option::<PythonTransformer>::type_input(),
+                    type_info: || Option::<PythonNormalization>::type_input(),
                 },
                 ParameterInfo {
                     name: "print",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
-                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]]]"),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
                 },
                 ParameterInfo {
                     name: "derivative",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
                 },
                 ParameterInfo {
                     name: "series",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
                 },
                 ParameterInfo {
                     name: "eval",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[complex]], complex] | dict[str, typing.Any]]"),
                 },
                 ParameterInfo {
                     name: "data",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
                 },
@@ -7787,8 +9317,8 @@ Define a custom normalization function:
 >>> E("real_log(exp(x)) + real_log(5)")
 
 Define a custom print function:
->>> def print_mu(mu: Expression, latex: bool, **kwargs) -> str | None:
->>>     if latex:
+>>> def print_mu(mu: Expression, mode: PrintMode, **kwargs) -> str | None:
+>>>     if mode == PrintMode.Latex:
 >>>         if mu.get_type() == AtomType.Fn:
 >>>             return "\\mu_{" + ",".join(a.format() for a in mu) + "}"
 >>>         else:
@@ -7850,14 +9380,18 @@ tags: Sequence[str] | None
     A list of tags to associate with the symbol.
 aliases: Sequence[str] | None
     A list of aliases to associate with the symbol.
-normalization : Transformer | None
-    A transformer that is called after every normalization. Note that the symbol
-    name cannot be used in the transformer as this will lead to a definition of the
-    symbol. Use a wildcard with the same attributes instead.
-print : Callable[..., str | None] | None:
+normalization : Transformer | Callable[[Expression], Expression] | None
+    A transformer or callable that is applied after every normalization. A callable
+    receives the normalized function and returns its replacement. The symbol name
+    cannot be used in a transformer, as this would define the symbol recursively;
+    use a wildcard with the same attributes instead.
+print : Callable[..., str | None] | dict[str | PrintMode, str] | None:
     A function that is called when printing the variable/function, which is provided as its first argument.
     This function should return a string, or `None` if the default print function should be used.
     The custom print function takes in keyword arguments that are the same as the arguments of the `format` function.
+    Alternatively, provide a dictionary mapping mode names (case-insensitive strings
+    or `PrintMode` values) to strings, e.g. `{'latex': r'\overline{a}', PrintMode.Typst: '#overline(a)'}`.
+    Values replace the entire variable or function call verbatim. Missing modes use default printing.
 derivative: Callable[[Expression, int], Expression] | None:
     A function that is called when computing the derivative of a function in a given argument.
 series: Callable[[Sequence[Series]], tuple[Expression, Expression] | None] | None:
@@ -7870,19 +9404,19 @@ eval: dict[str, Any] | None:
 
     For arbitrary precision evaluation of constant functions, register a function that
     maps the tags and the requested decimal precision to a number:
-    - `constant`: (Sequence[Expression], int) -> Decimal | float | complex | tuple[Decimal, Decimal]]
+    - `constant`: (Sequence[Expression], int) -> Float | ComplexFloat | Decimal | float | complex | tuple[Decimal, Decimal]
 
     Evaluators for non-constant functions when `tag_count = 0`:
     - `float`: Sequence[float] -> float
     - `complex`: Sequence[complex] -> complex
-    - `decimal`: Sequence[Decimal] -> Decimal
-    - `decimal_complex`: Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal]
+    - `decimal`: Sequence[Float] -> Float
+    - `decimal_complex`: Sequence[ComplexFloat] -> ComplexFloat
 
     Evaluators for non-constant functions when `tag_count > 0` are generators:
     - `float`: Sequence[Expression] -> (Sequence[float] -> float)
     - `complex`: Sequence[Expression] -> (Sequence[complex] -> complex)
-    - `decimal`: Sequence[Expression] -> (Sequence[Decimal] -> Decimal)
-    - `decimal_complex`: Sequence[Expression] -> (Sequence[tuple[Decimal, Decimal]] -> tuple[Decimal, Decimal])
+    - `decimal`: Sequence[Expression] -> (Sequence[Float] -> Float)
+    - `decimal_complex`: Sequence[Expression] -> (Sequence[ComplexFloat] -> ComplexFloat)
 data: str | int | Expression | bytes | list | dict | None = None
     Custom user data to associate with the symbol."#,
             is_async: false,
@@ -7894,6 +9428,18 @@ data: str | int | Expression | bytes | list | dict | None = None
             name: "symbol",
             parameters: &[
                 ParameterInfo {
+                    name: "name0",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
+                    name: "name1",
+                    kind: ParameterKind::PositionalOnly,
+                    default: ParameterDefault::None,
+                    type_info: || <&str>::type_input(),
+                },
+                ParameterInfo {
                     name: "names",
                     kind: ParameterKind::VarPositional,
                     default: ParameterDefault::None,
@@ -7901,61 +9447,109 @@ data: str | int | Expression | bytes | list | dict | None = None
                 },
                 ParameterInfo {
                     name: "is_symmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_antisymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_cyclesymmetric",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_linear",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<bool>::type_input(),
+                },
+                ParameterInfo {
+                    name: "is_flat",
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_scalar",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_real",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_integer",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "is_positive",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<bool>::type_input(),
                 },
                 ParameterInfo {
                     name: "tags",
-                    kind: ParameterKind::PositionalOrKeyword,
+                    kind: ParameterKind::KeywordOnly,
                     default: ParameterDefault::Expr(NONE_ARG),
                     type_info: || Option::<Vec<String>>::type_input(),
                 },
+                ParameterInfo {
+                    name: "aliases",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<Vec<String>>::type_input(),
+                },
+                ParameterInfo {
+                    name: "normalization",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || Option::<PythonNormalization>::type_input(),
+                },
+                ParameterInfo {
+                    name: "print",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[..., typing.Optional[str]] | dict[str, str] | dict[PrintMode, str] | dict[str | PrintMode, str]]"),
+                },
+                ParameterInfo {
+                    name: "derivative",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[Expression, int], Expression]]"),
+                },
+                ParameterInfo {
+                    name: "series",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[Series]], typing.Optional[tuple[Expression, Expression]]]]"),
+                },
+                ParameterInfo {
+                    name: "eval",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[typing.Callable[[typing.Sequence[complex]], complex] | dict[str, typing.Any]]"),
+                },
+                ParameterInfo {
+                    name: "data",
+                    kind: ParameterKind::KeywordOnly,
+                    default: ParameterDefault::Expr(NONE_ARG),
+                    type_info: || TypeInfo::unqualified("typing.Optional[str | int | Expression | bytes | list | dict]"),
+                },
             ],
             r#type: MethodType::Class,
-            r#return: || TypeInfo::unqualified("typing.Sequence[Expression]"),
+            r#return: || TypeInfo::unqualified("list[Expression]"),
             doc:
             r#"Create new symbols from `names`. Symbols can have attributes,
 such as symmetries. If no attributes
@@ -8019,10 +9613,52 @@ submit! {
                 name: "to_polynomial",
                 parameters: &[
                     ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::None,
+                        type_info: || Vec::<ConvertibleToExpression>::type_input(),
+                    },
+                    ParameterInfo {
                         name: "vars",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || PythonNumberFieldPolynomial::type_output(),
+                doc:
+                r#"Convert the expression to a polynomial over an automatically constructed algebraic number field.
+
+An empty `extensions` sequence discovers algebraic coefficients already in the
+expression. Any supplied generators are adjoined to the discovered field.
+
+Parameters
+----------
+extensions: Sequence[Expression]
+    Additional algebraic generators to adjoin. Use an empty sequence for
+    automatic discovery only.
+vars: Sequence[Expression] | None
+    The variables treated as polynomial variables, in the given order."#,
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
+            MethodInfo {
+                name: "to_polynomial",
+                parameters: &[
+                    ParameterInfo {
+                        name: "vars",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,
@@ -8045,15 +9681,21 @@ vars: Sequence[Expression] | None
                 parameters: &[
                     ParameterInfo {
                         name: "minimal_poly",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::None,
                         type_info: || PythonPolynomial::type_input(),
                     },
                     ParameterInfo {
                         name: "vars",
-                        kind: ParameterKind::PositionalOrKeyword,
+                        kind: ParameterKind::KeywordOnly,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,
@@ -8102,6 +9744,12 @@ vars: Sequence[Expression] | None
                         kind: ParameterKind::PositionalOrKeyword,
                         default: ParameterDefault::Expr(NONE_ARG),
                         type_info: || Option::<Vec<PythonExpression>>::type_input(),
+                    },
+                    ParameterInfo {
+                        name: "extensions",
+                        kind: ParameterKind::KeywordOnly,
+                        default: ParameterDefault::Expr(NONE_ARG),
+                        type_info: TypeInfo::none,
                     },
                 ],
                 r#type: MethodType::Instance,
@@ -8169,7 +9817,7 @@ Examples
 
 Parameters
 ----------
-args: Expression | int | float | complex | Decimal
+args: Expression | int | float | complex | Float | ComplexFloat | Decimal
     The arguments passed to the expression call."#,
                 is_async: false,
                 deprecated: None,
@@ -8199,13 +9847,64 @@ Examples
 
 Parameters
 ----------
-args: HeldExpression | Expression | int | float | complex | Decimal
+args: HeldExpression | Expression | int | float | complex | Float | ComplexFloat | Decimal
     The arguments passed to the expression or transformer call."#,
                 is_async: false,
                 deprecated: None,
                 type_ignored: None,
                 is_overload: true,
             }
+        ],
+    }
+}
+
+#[cfg(feature = "python_stubgen")]
+submit! {
+    PyMethodsInfo {
+        struct_id: std::any::TypeId::of::<PythonExpression>,
+        attrs: &[],
+        getters: &[],
+        setters: &[],
+        file: file!(),
+        line: line!(),
+        column: column!(),
+        methods: &[
+            MethodInfo {
+                name: "__getitem__",
+                parameters: &[
+                    ParameterInfo {
+                        name: "idx",
+                        kind: ParameterKind::PositionalOnly,
+                        default: ParameterDefault::None,
+                        type_info: || isize::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || PythonExpression::type_output(),
+                doc: "Get a child expression by index. Negative indices count from the end. Leaf expressions cannot be indexed.",
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
+            MethodInfo {
+                name: "__getitem__",
+                parameters: &[
+                    ParameterInfo {
+                        name: "idx",
+                        kind: ParameterKind::PositionalOnly,
+                        default: ParameterDefault::None,
+                        type_info: || PySlice::type_input(),
+                    },
+                ],
+                r#type: MethodType::Instance,
+                r#return: || Vec::<PythonExpression>::type_output(),
+                doc: "Get a list of immediate children using Python slice bounds and step rules, in iteration order. Leaf expressions cannot be sliced.",
+                is_async: false,
+                deprecated: None,
+                type_ignored: None,
+                is_overload: true,
+            },
         ],
     }
 }

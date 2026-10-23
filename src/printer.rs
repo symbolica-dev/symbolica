@@ -14,6 +14,7 @@ use crate::{
     coefficient::CoefficientView,
     domains::{SelfRing, finite_field::FiniteFieldCore, float::Complex, rational::Rational},
     state::State,
+    utils::minimum_rotation_by,
 };
 
 pub use numerica::printer::*;
@@ -27,9 +28,13 @@ static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
 
 /// Wrap a printable object with ANSI escape codes for coloring and styling in terminal output.
 pub struct AnsiWrap<T> {
+    /// The object to display.
     pub value: T,
+    /// ANSI style code; the styling methods set its bold, dimmed, and italic bits.
     pub mode: u8,
+    /// Foreground color index in the ANSI 256-color palette.
     pub color: u8,
+    /// Policy controlling whether escape codes are emitted.
     pub color_mode: ColorMode,
 }
 
@@ -40,6 +45,7 @@ impl<T: fmt::Display> From<T> for AnsiWrap<T> {
 }
 
 impl<T> AnsiWrap<T> {
+    /// Wrap a value with automatic color detection and no text style.
     pub const fn new(value: T) -> Self {
         Self {
             value,
@@ -49,55 +55,68 @@ impl<T> AnsiWrap<T> {
         }
     }
 
+    /// Wrap a value with a red foreground.
     pub const fn red(value: T) -> Self {
         Self::new(value).color(1)
     }
 
+    /// Wrap a value with a yellow foreground.
     pub const fn yellow(value: T) -> Self {
         Self::new(value).color(3)
     }
 
+    /// Wrap a value with a purple foreground.
     pub const fn purple(value: T) -> Self {
         Self::new(value).color(5)
     }
 
+    /// Wrap a value with a cyan foreground.
     pub const fn cyan(value: T) -> Self {
         Self::new(value).color(6)
     }
 
+    /// Wrap a value with a bright magenta foreground.
     pub const fn bright_magenta(value: T) -> Self {
         Self::new(value).color(13)
     }
 
+    /// Set the foreground color using an ANSI 256-color palette index.
     pub const fn color(mut self, color: u8) -> Self {
         self.color = color;
         self
     }
 
+    /// Set whether styling is automatic, always enabled, or disabled.
     pub const fn color_mode(mut self, color_mode: ColorMode) -> Self {
         self.color_mode = color_mode;
         self
     }
 
+    /// Enable bold styling.
     pub const fn bold(mut self) -> Self {
         self.mode |= 1;
         self
     }
 
+    /// Enable dimmed styling.
     pub const fn dimmed(mut self) -> Self {
         self.mode |= 2;
         self
     }
 
+    /// Enable italic styling.
     pub const fn italic(mut self) -> Self {
         self.mode |= 4;
         self
     }
 
+    /// Return the cached automatic color decision. `SYMBOLICA_COLOR=0` disables
+    /// color, any other value enables it; when unset, stdout must be a terminal.
     pub fn should_colorize() -> bool {
         *SHOULD_COLORIZE
     }
 
+    /// Return whether styling is enabled under the given policy.
     pub fn should_colorize_with_mode(color_mode: ColorMode) -> bool {
         match color_mode {
             ColorMode::Auto => *SHOULD_COLORIZE,
@@ -413,7 +432,9 @@ define_formatters!(
 /// println!("{}", a.printer(PrintOptions::latex()));
 /// ```
 pub struct AtomPrinter<'a> {
+    /// The expression to display.
     pub atom: AtomView<'a>,
+    /// Options controlling expression layout, notation, and styling.
     pub print_opts: PrintOptions,
 }
 
@@ -426,6 +447,7 @@ impl<'a> AtomPrinter<'a> {
         }
     }
 
+    /// Create a printer for `atom` using the supplied formatting options.
     pub fn new_with_options(atom: AtomView<'a>, print_opts: PrintOptions) -> AtomPrinter<'a> {
         AtomPrinter { atom, print_opts }
     }
@@ -437,6 +459,16 @@ impl<'a> AtomPrinter<'a> {
         opts: &PrintOptions,
         print_state: PrintState,
     ) -> fmt::Result {
+        if opts.mode.is_latex() {
+            return if bracket == '(' {
+                f.write_str("\\left(")
+            } else if bracket == ')' {
+                f.write_str("\\right)")
+            } else {
+                f.write_char(bracket)
+            };
+        }
+
         if let Some(bracket_colors) = opts.bracket_level_colors {
             f.write_fmt(format_args!(
                 "{}",
@@ -716,6 +748,7 @@ impl AtomView<'_> {
                 }
             } else if let AtomView::Mul(_) = cur {
                 matches!(s, AtomView::Add(_))
+                    || matches!(s, AtomView::Num(n) if !n.get_coeff_view().is_real())
             } else {
                 false
             }
@@ -726,11 +759,16 @@ impl AtomView<'_> {
             AtomView::Var(v) => {
                 if settings.include_attributes {
                     v.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_with_custom(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            false,
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     v.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -738,14 +776,16 @@ impl AtomView<'_> {
                                 ..PrintOptions::file()
                             },
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
                 } else {
                     v.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
@@ -754,11 +794,16 @@ impl AtomView<'_> {
             AtomView::Fun(f) => {
                 if settings.include_attributes {
                     f.get_symbol()
-                        .format(&PrintOptions::full(), PrintState::default(), out)
+                        .format_with_custom(
+                            &PrintOptions::full(),
+                            PrintState::default(),
+                            false,
+                            out,
+                        )
                         .unwrap();
                 } else if settings.include_namespace {
                     f.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions {
                                 hide_namespace: settings
                                     .hide_namespace
@@ -766,14 +811,16 @@ impl AtomView<'_> {
                                 ..PrintOptions::file()
                             },
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
                 } else {
                     f.get_symbol()
-                        .format(
+                        .format_with_custom(
                             &PrintOptions::file_no_namespace(),
                             PrintState::default(),
+                            false,
                             out,
                         )
                         .unwrap();
@@ -792,6 +839,11 @@ impl AtomView<'_> {
                 // taken into account in the input, by the canonical_string_sign_fix() function
                 if f.is_symmetric() || f.is_antisymmetric() {
                     args.sort();
+                } else if f.is_cyclesymmetric() {
+                    // Atom ordering depends on registration; choose a rotation
+                    // only after recursively rendering the canonical arguments.
+                    let start = minimum_rotation_by(&args, Ord::cmp);
+                    args.rotate_left(start);
                 }
 
                 for (i, arg) in args.iter().enumerate() {
@@ -1081,6 +1133,8 @@ impl FormattedPrintNum for NumView<'_> {
             "\u{1b}\u{5b}\u{33}\u{35}\u{6d}\u{1d456}\u{1b}\u{5b}\u{30}\u{6d}"
         } else if opts.mode.is_mathematica() {
             "I"
+        } else if opts.mode.is_latex() {
+            "i"
         } else {
             "𝑖"
         };
@@ -1115,6 +1169,12 @@ impl FormattedPrintNum for NumView<'_> {
             if need_paren {
                 AtomPrinter::format_bracket('(', f, opts, print_state)?;
             }
+
+            let suppress_imaginary_one =
+                !opts.mode.is_mathematica() && imag.numerator_ref().abs().is_one();
+            // Typst's slash only includes the adjacent factor unless the numerator is grouped.
+            let group_imaginary_numerator =
+                opts.mode.is_typst() && !imag.is_integer() && !suppress_imaginary_one;
 
             if !opts.mode.is_latex()
                 && (opts.number_thousands_separator.is_some() || print_state.superscript)
@@ -1153,13 +1213,21 @@ impl FormattedPrintNum for NumView<'_> {
                     if !global_negative && imag.is_negative() {
                         f.write_char('-')?;
                     }
-                    AtomPrinter::format_digits(
-                        imag.numerator_ref().abs().to_string(),
-                        opts,
-                        &print_state,
-                        f,
-                    )?;
+                    if group_imaginary_numerator {
+                        f.write_char('(')?;
+                    }
+                    if !suppress_imaginary_one {
+                        AtomPrinter::format_digits(
+                            imag.numerator_ref().abs().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
+                    }
                     f.write_str(i_str)?;
+                    if group_imaginary_numerator {
+                        f.write_char(')')?;
+                    }
                     if !imag.is_integer() {
                         f.write_char('/')?;
                         AtomPrinter::format_digits(
@@ -1203,23 +1271,26 @@ impl FormattedPrintNum for NumView<'_> {
                         f.write_char('-')?;
                     }
 
-                    if !imag.is_integer() {
-                        if opts.mode.is_latex() {
-                            f.write_fmt(format_args!(
-                                "\\frac{{{}}}{{{}}}𝑖",
-                                imag.numerator_ref().abs(),
-                                imag.denominator_ref(),
-                            ))?;
-                        } else {
-                            f.write_fmt(format_args!(
-                                "{}{}/{}",
-                                imag.numerator_ref().abs(),
-                                i_str,
-                                imag.denominator_ref()
-                            ))?;
+                    if !imag.is_integer() && opts.mode.is_latex() {
+                        f.write_str("\\frac{")?;
+                        if !suppress_imaginary_one {
+                            f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
                         }
+                        f.write_fmt(format_args!("{i_str}}}{{{}}}", imag.denominator_ref()))?;
                     } else {
-                        f.write_fmt(format_args!("{}{}", imag.numerator_ref().abs(), i_str))?;
+                        if group_imaginary_numerator {
+                            f.write_char('(')?;
+                        }
+                        if !suppress_imaginary_one {
+                            f.write_fmt(format_args!("{}", imag.numerator_ref().abs()))?;
+                        }
+                        f.write_str(i_str)?;
+                        if group_imaginary_numerator {
+                            f.write_char(')')?;
+                        }
+                        if !imag.is_integer() {
+                            f.write_fmt(format_args!("/{}", imag.denominator_ref()))?;
+                        }
                     }
                 }
             }
@@ -1381,6 +1452,8 @@ impl FormattedPrintMul for MulView<'_> {
 
             if opts.mode.is_latex() {
                 f.write_fmt(format_args!("\\frac{{"))?;
+            } else if opts.mode.is_typst() {
+                f.write_fmt(format_args!("frac("))?;
             } else {
                 f.write_char('(')?;
             }
@@ -1529,6 +1602,12 @@ impl FormattedPrintMul for MulView<'_> {
                     if den_count == 1 {
                         print_state.in_product = false;
                     }
+                } else if opts.mode.is_typst() {
+                    f.write_char(',')?;
+
+                    if den_count == 1 {
+                        print_state.in_product = false;
+                    }
                 } else {
                     f.write_char(')')?;
                 }
@@ -1557,11 +1636,11 @@ impl FormattedPrintMul for MulView<'_> {
                 char_count += 2;
             }
 
-            if !opts.mode.is_latex() {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() {
                 f.write_char('/')?;
             }
 
-            if !opts.mode.is_latex() && den_count > 1 {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() && den_count > 1 {
                 AtomPrinter::format_bracket('(', f, opts, print_state)?;
                 print_state.bracket_level += 1;
             }
@@ -1681,13 +1760,15 @@ impl FormattedPrintMul for MulView<'_> {
                 }
             }
 
-            if !opts.mode.is_latex() && den_count > 1 {
+            if !opts.mode.is_latex() && !opts.mode.is_typst() && den_count > 1 {
                 print_state.bracket_level -= 1;
                 AtomPrinter::format_bracket(')', f, opts, print_state)?;
             }
 
             if opts.mode.is_latex() {
                 f.write_str("}")?;
+            } else if opts.mode.is_typst() {
+                f.write_str(")")?;
             }
         }
 
@@ -1707,9 +1788,11 @@ impl FormattedPrintMul for MulView<'_> {
     }
 }
 
-impl FormattedPrintFn for FunView<'_> {
-    fn fmt_output<W: std::fmt::Write>(
+impl FunView<'_> {
+    /// Format the function, potentially with a custom head.
+    pub fn format<W: std::fmt::Write>(
         &self,
+        custom_head: Option<&str>,
         f: &mut W,
         opts: &PrintOptions,
         mut print_state: PrintState,
@@ -1731,7 +1814,9 @@ impl FormattedPrintFn for FunView<'_> {
         }
 
         let id = self.get_symbol();
-        if let Some(custom_print) = &id.get_global_data().custom_print
+
+        if custom_head.is_none()
+            && let Some(custom_print) = &id.get_global_data().custom_print
             && let Some(s) = custom_print(self.as_view(), opts, &print_state)
         {
             f.write_str(&s)?;
@@ -1797,7 +1882,9 @@ impl FormattedPrintFn for FunView<'_> {
             return Ok(false);
         }
 
-        if opts.mode.is_typst() {
+        if let Some(custom_head) = custom_head {
+            f.write_str(custom_head)?;
+        } else if opts.mode.is_typst() {
             f.write_str("op(")?;
             id.format(opts, print_state, f)?;
             f.write_str(")")?;
@@ -1966,6 +2053,17 @@ impl FormattedPrintFn for FunView<'_> {
 
         Ok(false)
     }
+}
+
+impl FormattedPrintFn for FunView<'_> {
+    fn fmt_output<W: std::fmt::Write>(
+        &self,
+        f: &mut W,
+        opts: &PrintOptions,
+        print_state: PrintState,
+    ) -> Result<bool, Error> {
+        self.format(None, f, opts, print_state)
+    }
 
     fn fmt_debug(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("{:?}", self))
@@ -1993,7 +2091,7 @@ impl FormattedPrintPow for PowView<'_> {
             }
         }
 
-        let add_paren = print_state.in_exp_base; // right associative
+        let mut add_paren = print_state.in_exp_base; // right associative
         if add_paren {
             AtomPrinter::format_bracket('(', f, opts, print_state)?;
             print_state.in_exp = false;
@@ -2020,28 +2118,145 @@ impl FormattedPrintPow for PowView<'_> {
 
         print_state.in_exp_base = true;
 
-        // detect denominator
-        if let AtomView::Num(n) = e
-            && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
-            && num < 0
+        // handle n-th roots
+        if (opts.mode.is_latex() || opts.mode.is_typst())
+            && let Ok(r) = Rational::try_from(e)
+            && !r.is_integer()
         {
-            let exp = Rational::new(num, den).neg();
+            let abs_num = r.numerator().abs();
+            let has_pow = abs_num != 1;
+            if r < 0 {
+                if print_state.in_exp && !add_paren {
+                    add_paren = true;
+                    AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                    print_state.in_exp = false;
+                    print_state.bracket_level += 1;
+                }
 
-            if opts.mode.is_latex() {
-                print_state.in_exp_base = !exp.is_one();
-                f.write_str("\\frac{1}{")?;
-            } else {
-                f.write_str("1/")?;
+                if opts.mode.is_latex() {
+                    f.write_str("\\frac{1}{")?;
+                } else {
+                    f.write_str("frac(1,")?;
+                }
             }
 
-            b.format(f, opts, print_state)?;
-
             print_state.in_exp_base = false;
+            if opts.mode.is_latex() {
+                f.write_str("\\sqrt")?;
 
-            if !exp.is_one() {
+                if *r.denominator_ref() != 2 {
+                    f.write_char('[')?;
+                    r.denominator_ref().format(opts, print_state, f)?;
+                    f.write_char(']')?;
+                }
+
+                f.write_char('{')?;
+                b.format(f, opts, print_state)?;
+                f.write_char('}')?;
+            } else if *r.denominator_ref() != 2 {
+                f.write_str("root(")?;
+                r.denominator_ref().format(opts, print_state, f)?;
+                f.write_char(',')?;
+                b.format(f, opts, print_state)?;
+                f.write_char(')')?;
+            } else {
+                f.write_str("sqrt(")?;
+                b.format(f, opts, print_state)?;
+                f.write_char(')')?;
+            }
+
+            if has_pow {
+                if opts.mode.is_latex() {
+                    f.write_str("^{")?;
+                    abs_num.format(opts, print_state, f)?;
+                    f.write_char('}')?;
+                } else {
+                    f.write_char('^')?;
+                    print_state.in_exp = true;
+                    abs_num.format(opts, print_state, f)?;
+                }
+            }
+
+            if r < 0 {
+                if opts.mode.is_latex() {
+                    f.write_str("}")?;
+                } else {
+                    f.write_str(")")?;
+                }
+            }
+        } else {
+            // detect denominator
+            if let AtomView::Num(n) = e
+                && let CoefficientView::Natural(num, den, 0, 1) = n.get_coeff_view()
+                && num < 0
+            {
+                if print_state.in_exp && !add_paren {
+                    add_paren = true;
+                    AtomPrinter::format_bracket('(', f, opts, print_state)?;
+                    print_state.in_exp = false;
+                    print_state.bracket_level += 1;
+                }
+
+                let exp = Rational::new(num, den).neg();
+
+                if opts.mode.is_latex() {
+                    print_state.in_exp_base = !exp.is_one();
+                    f.write_str("\\frac{1}{")?;
+                } else if opts.mode.is_typst() {
+                    print_state.in_exp_base = !exp.is_one();
+                    f.write_str("frac(1,")?;
+                } else {
+                    f.write_str("1/")?;
+                }
+
+                b.format(f, opts, print_state)?;
+
+                print_state.in_exp_base = false;
+
+                if !exp.is_one() {
+                    print_state.in_exp = true;
+
+                    let superscript_exponent = opts.num_exp_as_superscript && den == 1;
+
+                    if !superscript_exponent {
+                        if opts.mode.is_sympy()
+                            || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
+                        {
+                            f.write_str("**")?;
+                        } else {
+                            f.write_char('^')?;
+                        }
+                    }
+
+                    if opts.mode.is_latex() {
+                        f.write_char('{')?;
+                        print_state.in_exp = false;
+                        exp.format(opts, print_state, f)?;
+                        f.write_char('}')?;
+                    } else if superscript_exponent {
+                        print_state.in_exp = false;
+                        print_state.superscript = true;
+                        AtomPrinter::format_digits(
+                            num.unsigned_abs().to_string(),
+                            opts,
+                            &print_state,
+                            f,
+                        )?;
+                    } else {
+                        exp.format(opts, print_state, f)?;
+                    }
+                }
+
+                if opts.mode.is_latex() {
+                    f.write_str("}")?;
+                } else if opts.mode.is_typst() {
+                    f.write_str(")")?;
+                }
+            } else {
+                b.format(f, opts, print_state)?;
+
+                print_state.in_exp_base = false;
                 print_state.in_exp = true;
-
-                let superscript_exponent = opts.num_exp_as_superscript && den == 1;
 
                 if !superscript_exponent {
                     if opts.mode.is_sympy()
@@ -2056,53 +2271,16 @@ impl FormattedPrintPow for PowView<'_> {
                 if opts.mode.is_latex() {
                     f.write_char('{')?;
                     print_state.in_exp = false;
-                    exp.format(opts, print_state, f)?;
+                    e.format(f, opts, print_state)?;
                     f.write_char('}')?;
-                } else if superscript_exponent {
-                    print_state.in_exp = false;
-                    print_state.superscript = true;
-                    AtomPrinter::format_digits(
-                        num.unsigned_abs().to_string(),
-                        opts,
-                        &print_state,
-                        f,
-                    )?;
                 } else {
-                    exp.format(opts, print_state, f)?;
+                    if superscript_exponent {
+                        print_state.in_exp = false;
+                        print_state.superscript = true;
+                    }
+
+                    e.format(f, opts, print_state)?;
                 }
-            }
-
-            if opts.mode.is_latex() {
-                f.write_str("}")?;
-            }
-        } else {
-            b.format(f, opts, print_state)?;
-
-            print_state.in_exp_base = false;
-            print_state.in_exp = true;
-
-            if !superscript_exponent {
-                if opts.mode.is_sympy()
-                    || (!opts.mode.is_latex() && opts.double_star_for_exponentiation)
-                {
-                    f.write_str("**")?;
-                } else {
-                    f.write_char('^')?;
-                }
-            }
-
-            if opts.mode.is_latex() {
-                f.write_char('{')?;
-                print_state.in_exp = false;
-                e.format(f, opts, print_state)?;
-                f.write_char('}')?;
-            } else {
-                if superscript_exponent {
-                    print_state.in_exp = false;
-                    print_state.superscript = true;
-                }
-
-                e.format(f, opts, print_state)?;
             }
         }
 
@@ -2291,6 +2469,108 @@ mod test {
     };
 
     #[test]
+    fn typst_imaginary_fractions() {
+        for separator in [None, Some('_')] {
+            let opts = PrintOptions {
+                number_thousands_separator: separator,
+                ..PrintOptions::typst()
+            };
+            for (input, expected) in [
+                ("81i/64", "(81𝑖)/64"),
+                ("-81i/64", "-(81𝑖)/64"),
+                ("2+81i/64", "2+(81𝑖)/64"),
+                ("2-81i/64", "2-(81𝑖)/64"),
+                ("1i/64", "𝑖/64"),
+                ("-1i/64", "-𝑖/64"),
+                ("81i", "81𝑖"),
+                ("81/64", "81/64"),
+                (
+                    "123456789012345678901234567891i/64",
+                    "(123456789012345678901234567891𝑖)/64",
+                ),
+            ] {
+                let output = parse!(input).format_string(&opts, PrintState::new());
+                assert_eq!(output.replace('_', ""), expected, "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_imaginary_unit() {
+        for separator in [None, Some('_')] {
+            let opts = PrintOptions {
+                number_thousands_separator: separator,
+                ..PrintOptions::file_no_namespace()
+            };
+            for (input, expected) in [
+                ("1i", "𝑖"),
+                ("-1i", "-𝑖"),
+                ("2+1i", "2+𝑖"),
+                ("2-1i", "2-𝑖"),
+                ("2i", "2𝑖"),
+                ("-2i", "-2𝑖"),
+                ("1i/2", "𝑖/2"),
+                ("-1i/2", "-𝑖/2"),
+                ("3-1i/2", "3-𝑖/2"),
+                ("3+1i/2", "3+𝑖/2"),
+                ("3-2i/3", "3-2𝑖/3"),
+                (
+                    "1i/123456789012345678901234567890",
+                    "𝑖/123456789012345678901234567890",
+                ),
+                (
+                    "123456789012345678901234567890+1i",
+                    "123456789012345678901234567890+𝑖",
+                ),
+            ] {
+                let atom = parse!(input);
+                let output = atom.format_string(&opts, PrintState::new());
+                assert_eq!(output.replace('_', ""), expected);
+                assert_eq!(parse!(output), atom);
+            }
+        }
+
+        for input in [
+            "x-1i",
+            "-1i*x",
+            "(2-1i)*x",
+            "(-1i)^x",
+            "x^(1i)",
+            "x-1i/2",
+            "-1i*x/2",
+            "(3-1i/2)*x",
+            "(-1i/2)^x",
+            "x^(1i/2)",
+        ] {
+            let atom = parse!(input);
+            for color_mode in [ColorMode::Never, ColorMode::Always] {
+                let output = atom.format_string(
+                    &PrintOptions {
+                        color_mode,
+                        ..PrintOptions::new()
+                    },
+                    PrintState::new(),
+                );
+                assert!(!output.contains("1𝑖"), "{output}");
+                assert_eq!(parse!(output), atom);
+            }
+        }
+
+        assert_eq!(
+            parse!("-1i").format_string(&PrintOptions::latex(), PrintState::new()),
+            "-i"
+        );
+        assert_eq!(
+            parse!("-1i").format_string(&PrintOptions::mathematica(), PrintState::new()),
+            "-1I"
+        );
+        assert_eq!(
+            parse!("3-1i/2").format_string(&PrintOptions::mathematica(), PrintState::new()),
+            "3-1I/2"
+        );
+    }
+
+    #[test]
     fn ansi_wrap_respects_color_mode() {
         assert_eq!(
             AnsiWrap::yellow("+")
@@ -2390,17 +2670,27 @@ mod test {
 
     #[test]
     fn atoms() {
-        let a = parse!("f(x,y^2)^(x+z)/5+3");
+        // Keep symbol registration order independent of concurrently running tests.
+        const NAMESPACE: &str = "symbolica::printer_test_atoms";
+        let a = parse!("f(x,y^2)^(x+z)/5+3", default_namespace = NAMESPACE);
 
-        if AnsiWrap::<&str>::should_colorize() {
+        // These symbols are in a private namespace, so only operators and brackets are colored.
+        for (color_mode, expected) in [
+            (
+                ColorMode::Always,
+                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*f\u{1b}[0;38;5;25m(\u{1b}[0mx,y^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0mx+z\u{1b}[0;38;5;244m)\u{1b}[0m",
+            ),
+            (ColorMode::Never, "3+1/5*f(x,y^2)^(x+z)"),
+        ] {
             assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3\u{1b}[0;38;5;3m+\u{1b}[0m1/5*\u{1b}[0;38;5;5mf\u{1b}[0m\u{1b}[0;38;5;25m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m,\u{1b}[0;38;5;5my\u{1b}[0m^2\u{1b}[0;38;5;25m)\u{1b}[0m^\u{1b}[0;38;5;244m(\u{1b}[0m\u{1b}[0;38;5;5mx\u{1b}[0m+\u{1b}[0;38;5;5mz\u{1b}[0m\u{1b}[0;38;5;244m)\u{1b}[0m"
-            );
-        } else {
-            assert_eq!(
-                format!("{}", a.printer(PrintOptions::short())),
-                "3+1/5*f(x,y^2)^(x+z)"
+                format!(
+                    "{}",
+                    a.printer(PrintOptions {
+                        color_mode,
+                        ..PrintOptions::short()
+                    })
+                ),
+                expected
             );
         }
 
@@ -2415,12 +2705,18 @@ mod test {
         assert_eq!(
             format!(
                 "{}",
-                AtomPrinter::new_with_options(a.as_view(), PrintOptions::mathematica())
+                AtomPrinter::new_with_options(
+                    a.as_view(),
+                    PrintOptions {
+                        hide_namespace: Some(NAMESPACE.into()),
+                        ..PrintOptions::mathematica()
+                    }
+                )
             ),
             "3+1/5 f[x,y^2]^(x+z)"
         );
 
-        let a = parse!("8127389217 x^2");
+        let a = parse!("8127389217 x^2", default_namespace = NAMESPACE);
         assert_eq!(
             format!(
                 "{}",
@@ -2434,10 +2730,10 @@ mod test {
                     }
                 )
             ),
-            "812_738_921_7 symbolica::x²"
+            "812_738_921_7 symbolica::printer_test_atoms::x²"
         );
 
-        let a = parse!("der(3,5,f,x,y)");
+        let a = parse!("der(3,5,f,x,y)", default_namespace = NAMESPACE);
         assert_eq!(
             format!(
                 "{}",
@@ -2549,6 +2845,80 @@ mod test {
             r2,
             "-3*symbolica::canon_antisymmetric::{antisymmetric,linear}::f_l(symbolica::canon_antisymmetric::{antisymmetric}::f(symbolica::canon_antisymmetric::{}::x,symbolica::canon_antisymmetric::{}::y),symbolica::canon_antisymmetric::{}::x)"
         );
+    }
+
+    #[test]
+    fn canon_cyclic_registration_order() {
+        const CHILD: &str = "SYMBOLICA_CANON_CYCLIC_CHILD";
+        if let Ok(order) = std::env::var(CHILD) {
+            // Each registration order runs in a fresh process: the symbol
+            // registry is global, and in-process reordering cannot test this.
+            if order == "forward" {
+                let _ = symbol!("x", "y", "z");
+            } else {
+                let _ = symbol!("z", "y", "x");
+            }
+            let _ = symbol!("c"; Cyclesymmetric);
+            let _ = symbol!("a"; Antisymmetric);
+            let _ = symbol!("al"; Antisymmetric, Linear);
+            let expressions = [
+                "c(x,y,z)",
+                "c(y,z,x)",
+                "c(z,x,y)",
+                "c(x,z,y)",
+                "c()",
+                "c(x)",
+                "c(x,y,x,y)",
+                "c(y,x,y,x)",
+                "a(c(x,y,z),c(x,z,y))",
+                "a(c(x,z,y),c(x,y,z))",
+                "c(a(x,y),z,x)",
+                "al(c(x,y,z)+x,c(x,z,y))",
+                "(1+2i/3)*c(x+y,y*z,z^-2)^2+c(z,x,y)",
+                "c(canon_other::x,x,y)",
+            ];
+            let atoms: Vec<_> = expressions.iter().map(|input| parse!(input)).collect();
+            assert_eq!(atoms[0], atoms[1]);
+            assert_eq!(atoms[0], atoms[2]);
+            assert_ne!(atoms[0], atoms[3]);
+            assert_eq!(atoms[6], atoms[7]);
+            assert_eq!(atoms[8], -&atoms[9]);
+            for (index, atom) in atoms.iter().enumerate() {
+                let text = atom.to_canonical_string();
+                assert_eq!(parse!(text.as_str()), *atom, "roundtrip {index}");
+                println!("CANONICAL[{index}]={text}");
+            }
+            return;
+        }
+        let outputs: Vec<Vec<String>> = ["forward", "reverse"]
+            .into_iter()
+            .map(|order| {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "printer::test::canon_cyclic_registration_order",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, order)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "child {order}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let rows: Vec<_> = String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| line.starts_with("CANONICAL["))
+                    .map(str::to_owned)
+                    .collect();
+                assert_eq!(rows.len(), 14);
+                rows
+            })
+            .collect();
+        assert_eq!(outputs[0], outputs[1]);
     }
 
     #[test]

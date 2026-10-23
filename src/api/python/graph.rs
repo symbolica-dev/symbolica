@@ -57,13 +57,19 @@ pub struct PythonGraph {
     graph: Graph<Atom, Atom>,
 }
 
+impl From<Graph<Atom, Atom>> for PythonGraph {
+    fn from(graph: Graph<Atom, Atom>) -> Self {
+        Self { graph }
+    }
+}
+
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonGraph {
     /// Create an empty graph.
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             graph: Graph::new(),
         }
@@ -262,6 +268,7 @@ mermaid.run({{ querySelector: "#{id_attr}" }}).catch(() => {{}});
         filter_fn: Option<Py<PyAny>>,
         #[gen_stub(override_type(type_repr = "typing.Optional[typing.Callable[[Graph], bool]]"))]
         progress_fn: Option<Py<PyAny>>,
+        py: Python<'_>,
     ) -> PyResult<HashMap<PythonGraph, PythonExpression>> {
         if max_vertices.is_none() && max_loops.is_none() {
             return Err(exceptions::PyValueError::new_err(
@@ -346,13 +353,13 @@ mermaid.run({{ querySelector: "#{id_attr}" }}).catch(() => {{}});
             }
         }));
 
-        Ok(
+        Ok(py.detach(move || {
             Graph::generate(&external_edges, &vertex_signatures, settings)
                 .unwrap_or_else(|e| e)
                 .into_iter()
                 .map(|(k, v)| (Self { graph: k }, Atom::num(v).into()))
-                .collect(),
-        )
+                .collect()
+        }))
     }
 
     /// Convert the graph to a graphviz dot string.

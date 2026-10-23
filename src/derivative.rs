@@ -10,6 +10,7 @@ use crate::{
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     error,
+    id::Pattern,
     poly::{
         PolyVariable,
         series::{Series, SeriesDepth, SeriesError},
@@ -113,20 +114,10 @@ impl AtomView<'_> {
 
                 // derive special functions
                 if f.get_nargs() == 1
-                    && [
-                        Symbol::EXP,
-                        Symbol::LOG,
-                        Symbol::SIN,
-                        Symbol::COS,
-                        Symbol::SQRT,
-                    ]
-                    .contains(&f.get_symbol())
+                    && [Symbol::LOG, Symbol::SIN, Symbol::COS].contains(&f.get_symbol())
                 {
                     let mut fn_der = workspace.new_atom();
                     match f.get_symbol_id() {
-                        Symbol::EXP_ID => {
-                            fn_der.set_from_view(self);
-                        }
                         Symbol::LOG_ID => {
                             let mut n = workspace.new_atom();
                             n.to_num(-1);
@@ -148,19 +139,6 @@ impl AtomView<'_> {
                             let m = fn_der.to_mul();
                             m.extend(sin.as_view());
                             m.extend(n.as_view());
-                        }
-                        Symbol::SQRT_ID => {
-                            let mut n = workspace.new_atom();
-                            n.to_num((-1, 1));
-
-                            let mut sqrt = workspace.new_atom();
-                            sqrt.to_pow(*self, n.as_view());
-
-                            n.to_num((1, 2));
-
-                            let m = fn_der.to_mul();
-                            m.extend(n.as_view());
-                            m.extend(sqrt.as_view());
                         }
                         _ => unreachable!(),
                     }
@@ -211,9 +189,9 @@ impl AtomView<'_> {
                     if let Some(custom_der) = &f.get_symbol().get_global_data().custom_derivative {
                         let mut setter = fn_der.deref_mut().into();
                         custom_der(*self, index, &mut setter);
-                        if setter.is_set() {
+                        if let Some(value) = setter.get() {
                             let m = mul.to_mul();
-                            m.extend(fn_der.as_view());
+                            m.extend(value.as_view());
                             m.extend(arg_der.as_view());
                             a.extend(m.as_view());
                             continue;
@@ -224,18 +202,9 @@ impl AtomView<'_> {
 
                     if is_der {
                         for (i, x_orig) in f_orig.iter().take(arg_count).enumerate() {
-                            if let AtomView::Num(nn) = x_orig {
-                                let num = nn.get_coeff_view() + (if i == index { 1 } else { 0 });
-                                n.to_num(num);
-                                p.add_arg(n.as_view());
-                            } else {
-                                error!(
-                                    "Derivative function {} must contain numbers for argument derivative counters",
-                                    self.printer(PrintOptions::file())
-                                );
-                                out.to_num(Coefficient::Indeterminate);
-                                return false;
-                            }
+                            n.set_from_view(&x_orig);
+                            *n += if i == index { 1 } else { 0 };
+                            p.add_arg(n.as_view());
                         }
                     } else {
                         for i in 0..f.get_nargs() {
@@ -423,8 +392,8 @@ impl AtomView<'_> {
             order.clone()
         };
 
-        // do not do an expensive statistical zero check at all stages during the series expansion
-        // note that a statistical check will be used in the case of negative exponents in the expansion
+        // Preserve unresolved symbolic coefficients during expansion. Negative
+        // exponents below retry only when the trailing coefficient is proven zero.
         let field = AtomField {
             statistical_zero_test: false,
             ..Default::default()
@@ -447,6 +416,21 @@ impl AtomView<'_> {
                 series.truncate_absolute_order(order + &(1.into(), order.denominator()).into());
                 break Ok(series);
             } else {
+                // An empty truncation alone does not prove the input zero.
+                // Check the exact stored coefficients before retrying a
+                // relative expansion whose leading term may not exist.
+                if !depth.is_absolute()
+                    && series.is_zero()
+                    && self
+                        .check_zero_with(
+                            &crate::atom::ZeroTestSettings::new()
+                                .treat_floats_as_exact(true)
+                                .numerical_samples(0),
+                        )
+                        .is_true()
+                {
+                    return Atom::Zero.as_view().series(x, expansion_point, depth);
+                }
                 // increase the expansion depth
                 // TODO: find better heuristic
                 current_depth = &current_depth * &2.into();
@@ -512,9 +496,7 @@ impl AtomView<'_> {
                 match f.get_symbol_id() {
                     Symbol::COS_ID => args_series[0].cos(),
                     Symbol::SIN_ID => args_series[0].sin(),
-                    Symbol::EXP_ID => args_series[0].exp(),
                     Symbol::LOG_ID => args_series[0].log(),
-                    Symbol::SQRT_ID => args_series[0].rpow((1, 2).into()),
                     _ => {
                         if let Some(custom_series) = &f.get_symbol().get_series_function()
                             && let Some((singular, regularized)) = custom_series(&args_series)
@@ -545,7 +527,9 @@ impl AtomView<'_> {
                         }
                         let a = f_eval.finish();
 
-                        let constant = a.replace(x.clone()).with(expansion_point.to_owned());
+                        let constant = a
+                            .replace(Pattern::Literal(Atom::from(x.clone())))
+                            .with(Pattern::Literal(expansion_point.to_owned()));
 
                         // TODO: depth is an overestimate
                         let order = info.absolute_order();
@@ -558,16 +542,16 @@ impl AtomView<'_> {
 
                         let mut d = a.clone();
                         for i in 1..=depth {
-                            d = d.as_view().derivative(x);
+                            // Collect repeated calls before differentiating again, to prevent exponential growth.
+                            d = d.as_view().derivative(x).collect_symbol::<i32>(symbol);
 
                             if d.is_zero() {
                                 break;
                             }
 
                             let rep = d
-                                .replace(x.clone())
-                                .with(expansion_point.to_owned())
-                                .expand();
+                                .replace(Pattern::Literal(Atom::from(x.clone())))
+                                .with(Pattern::Literal(expansion_point.to_owned()));
 
                             result = &result
                                 + &info
@@ -598,21 +582,14 @@ impl AtomView<'_> {
                             // it could be that the base series is exactly zero,
                             // to prevent an infinite loop, we stop the loop at ep^-1000
                             let mut current_depth = info.relative_order();
-                            let mut first_attempt = true;
 
-                            // make sure the trailing coefficient is not zero with a statistical test
-                            while first_attempt
-                                && !base_series
-                                    .get_trailing_coefficient()
-                                    .zero_test(10, 1e-5)
-                                    .is_false()
-                                || !first_attempt && base_series.is_zero() && current_depth < 1000
-                            {
+                            // Remove exact cancellations before choosing the leading power.
+                            // Unresolved function coefficients must survive.
+                            base_series.normalize_trailing_coefficient();
+                            while base_series.is_zero() && current_depth < 1000 {
+                                current_depth = &current_depth * &2.into();
                                 let info = Series::new(
-                                    &AtomField {
-                                        statistical_zero_test: true,
-                                        ..info.get_field().clone()
-                                    },
+                                    info.get_field(),
                                     None,
                                     info.get_variable().clone(),
                                     info.get_expansion_point().clone(),
@@ -621,8 +598,7 @@ impl AtomView<'_> {
                                 );
 
                                 base_series = base.series_impl(x, expansion_point, &info)?;
-                                current_depth = &current_depth * &2.into();
-                                first_attempt = false;
+                                base_series.normalize_trailing_coefficient();
                             }
                         }
 
@@ -1095,7 +1071,7 @@ mod test {
             "series_custom_function::f",
             series = |args| {
                 let [arg] = args else { unreachable!() };
-                let point = arg.coefficient(0.into());
+                let point = arg.coefficient(0.into())?;
                 let delta = arg.to_atom() - &point;
                 Some((Atom::num(1), Atom::num(1) / (Atom::num(1) - &delta)))
             }
@@ -1164,6 +1140,52 @@ mod test {
 
         assert_eq!(t.relative_order(), (4, 1));
         assert_eq!(t.to_atom(), parse!("v1^-1+1+1/2*v1"));
+    }
+
+    #[test]
+    fn series_relative_noncanonical_exact_zero() {
+        let x = symbol!("relative_exact_zero_x");
+        let depth = SeriesDepth::relative(4);
+        let expected = Atom::Zero.series(x, 0, depth.clone()).unwrap();
+        for text in [
+            "0.125*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
+            "1/8*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
+        ] {
+            let input = parse!(text).expand();
+            assert!(!input.is_zero());
+            let result = input.series(x, 0, depth.clone()).unwrap();
+            assert!(result.to_atom().is_zero());
+            assert_eq!(result.relative_order(), expected.relative_order());
+            assert_eq!(result.absolute_order(), expected.absolute_order());
+        }
+    }
+
+    #[test]
+    fn series_relative_zero_proof_preserves_nonzero_and_unresolved_terms() {
+        let x = symbol!("relative_zero_control_x");
+        let zero = parse!(
+            "0.125*(1/(relative_zero_control_x*(relative_zero_control_x-1))-1/(relative_zero_control_x-1)+1/relative_zero_control_x)"
+        )
+        .expand();
+        for remainder in [
+            parse!("relative_zero_control_x^12"),
+            parse!("relative_zero_control_a"),
+            parse!("relative_zero_control_f(0)"),
+        ] {
+            let input = &zero + &remainder;
+            let result = input.series(x, 0, SeriesDepth::relative(1)).unwrap();
+            assert_eq!(result.to_atom(), remainder);
+        }
+        let tiny = &zero + parse!("1e-1000");
+        assert!(
+            !tiny
+                .check_zero_with(
+                    &crate::atom::ZeroTestSettings::new()
+                        .treat_floats_as_exact(true)
+                        .numerical_samples(0),
+                )
+                .is_true()
+        );
     }
 
     #[test]

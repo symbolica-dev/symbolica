@@ -111,8 +111,10 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
         if self.im.is_zero() {
             self.re.export_wrapped_with(wrapper)
         } else {
+            // Components are already wrapped as complex values. Combine them
+            // arithmetically to retain exact divisions and custom number types.
             format!(
-                "{}, {}",
+                "({} + {wrapper}(0, 1) * {})",
                 self.re.export_wrapped_with(wrapper),
                 self.im.export_wrapped_with(wrapper)
             )
@@ -126,7 +128,7 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
     fn to_complex_double(&self) -> Complex<f64> {
         Complex {
             re: self.re.to_complex_double().re,
-            im: self.im.to_complex_double().im,
+            im: self.im.to_complex_double().re,
         }
     }
 }
@@ -134,7 +136,9 @@ impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
 /// The number class used for exporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumberClass {
+    /// Real double-precision values.
     RealF64,
+    /// Complex values with double-precision real and imaginary components.
     ComplexF64,
 }
 
@@ -190,11 +194,126 @@ impl ExportSettings {
 }
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    pub(super) fn external_cpp_name(
+        external_fns: &[ExternalFunctionContainer<T>],
+        index: usize,
+    ) -> String {
+        let external = &external_fns[index];
+        if external.body.is_some() {
+            format!(
+                "{}_{}",
+                external
+                    .symbol
+                    .get_stripped_ascii_name()
+                    .expect("exportable function should have an ASCII name"),
+                index
+            )
+        } else {
+            external.export_name().to_owned()
+        }
+    }
+
+    fn export_external_cpps(&self) -> String {
+        self.export_external_cpps_for_target(false, None)
+    }
+
+    fn export_external_cpps_cuda(&self) -> String {
+        self.export_external_cpps_for_target(true, None)
+    }
+
+    fn export_external_asm_cpps(&self, number_class: NumberClass, asm: InlineASM) -> String {
+        self.export_external_cpps_for_target(false, Some((number_class, asm)))
+    }
+
+    fn export_external_cpps_for_target(
+        &self,
+        cuda: bool,
+        asm: Option<(NumberClass, InlineASM)>,
+    ) -> String {
+        let mut seen = HashSet::default();
+        let mut output = String::new();
+        for (external_index, external) in self.external_fns.iter().enumerate() {
+            if external.constant_index.is_some() {
+                continue;
+            }
+
+            if let Some(body) = &external.body {
+                let body = body.program::<T>();
+                let name =
+                    ExpressionEvaluator::<T>::external_cpp_name(&self.external_fns, external_index);
+                if let Some((number_class, asm)) = asm {
+                    output.push_str(&body.export_asm_body(
+                        &self.external_fns,
+                        &name,
+                        number_class,
+                        asm,
+                    ));
+                    continue;
+                }
+
+                output.push_str("template<typename T>\n");
+                if cuda {
+                    output.push_str("__device__ __noinline__ ");
+                } else {
+                    output.push_str("__attribute__((noinline)) ");
+                }
+                output.push_str(&format!(
+                    "T {name}({}) {{\n",
+                    (0..body.param_count)
+                        .map(|index| format!("T p{index}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+
+                if body.param_count == 0 {
+                    output.push_str("\tT params[1] = {};\n");
+                } else {
+                    output.push_str(&format!(
+                        "\tT params[{}] = {{{}}};\n",
+                        body.param_count,
+                        (0..body.param_count)
+                            .map(|index| format!("p{index}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                output.push_str(&format!("\tT Z[{}];\n", body.stack_size.max(1)));
+                body.export_cpp_impl(&self.external_fns, "", "T", true, &mut output);
+
+                let result = body.result_indices[0];
+                output.push_str("\treturn ");
+                if result < body.param_count {
+                    output.push_str(&format!("params[{result}]"));
+                } else {
+                    output.push_str(&format!("Z[{result}]"));
+                }
+                output.push_str(";\n}\n\n");
+                continue;
+            }
+
+            let Some(snippet) = external.cpp() else {
+                continue;
+            };
+            if seen.insert(format!("external:{snippet}")) {
+                output.push_str(&snippet);
+                if !snippet.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push('\n');
+            }
+        }
+        output
+    }
+
     /// Create a C++ code representation of the evaluation tree.
     /// The resulting source code can be compiled and loaded.
     ///
     /// You can also call `export_cpp` with types [f64], [wide::f64x4] for SIMD, [Complex] over [f64] and [wide::f64x4] for Complex SIMD, and [CudaRealf64] or
     /// [CudaComplexf64] for CUDA output.
+    ///
+    /// When calling generated C++ functions directly, the input, scratch-buffer,
+    /// and output memory regions must not overlap. The Rust compiled-evaluator
+    /// wrappers provide separate storage and uphold this requirement.
     ///
     /// # Examples
     ///
@@ -247,6 +366,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
     }
 
     /// Write the evaluation tree to a C++ source string.
+    ///
+    /// Direct callers must provide non-overlapping input, scratch-buffer, and
+    /// output memory regions, as described in [`Self::export_cpp`].
     pub fn export_cpp_str<F: CompiledNumber>(
         &self,
         function_name: &str,
@@ -256,6 +378,23 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         F::export_cpp(self, &function_name, settings)
     }
 
+    /// Export scalar input/output dimensions for this entry point, independent of batch size.
+    fn export_dimensions_cpp(&self, function_name: &str) -> String {
+        format!(
+            "#include <cstddef>\n\nextern \"C\" std::size_t {function_name}_get_input_len() {{ return {input_len}; }}\n\
+             extern \"C\" std::size_t {function_name}_get_output_len() {{ return {output_len}; }}\n\n",
+            input_len = self.param_count,
+            output_len = self.result_indices.len(),
+        )
+    }
+
+    /// Generate C++ source for a SIMD evaluator under the supplied exported
+    /// function name. Set `complex` for complex arithmetic; `asm` selects the
+    /// inline-assembly implementation. The C++ implementation uses xsimd.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the requested assembly mode is unsupported for SIMD export.
     pub fn export_simd_str(
         &self,
         function_name: &str,
@@ -277,7 +416,12 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
 
         match asm {
             InlineASM::AVX2 => {
-                res += &self.export_external_cpps();
+                let number_class = if complex {
+                    NumberClass::ComplexF64
+                } else {
+                    NumberClass::RealF64
+                };
+                res += &self.export_external_asm_cpps(number_class, asm);
 
                 res += &format!(
                     "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
@@ -285,11 +429,13 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                     self.stack.len()
                 );
 
+                res += &self.export_dimensions_cpp(function_name);
+
                 if complex {
                     res += &format!(
                         "static const simd {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
                         function_name,
-                        self.reserved_indices - self.param_count + 2,
+                        self.reserved_indices - self.param_count + 3,
                         {
                             let mut nums = (self.param_count..self.reserved_indices)
                                 .map(|i| {
@@ -302,6 +448,10 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                                 .collect::<Vec<_>>();
                             nums.push("-0.".to_string()); // used for inversion
                             nums.push("1".to_string()); // used for real inversion
+                            nums.push(format!(
+                                "simd(std::complex<double>({0:e}, {0:e}))",
+                                f64::MAX
+                            ));
                             nums.join(",")
                         }
                     );
@@ -327,15 +477,30 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
                 );
 
                 if complex {
-                    self.export_asm_complex_impl(&self.instructions, function_name, asm, &mut res);
+                    self.program().export_asm_complex_impl(
+                        &self.external_fns,
+                        function_name,
+                        asm,
+                        &mut res,
+                    );
                 } else {
-                    self.export_asm_double_impl(&self.instructions, function_name, asm, &mut res);
+                    self.program().export_asm_double_impl(
+                        &self.external_fns,
+                        function_name,
+                        asm,
+                        &mut res,
+                    );
                 }
 
                 res += "\treturn;\n}\n";
             }
             InlineASM::None => {
-                res += &self.export_generic_cpp_str(function_name, &settings, NumberClass::RealF64);
+                let number_class = if complex {
+                    NumberClass::ComplexF64
+                } else {
+                    NumberClass::RealF64
+                };
+                res += &self.export_generic_cpp_str(function_name, &settings, number_class);
 
                 res += &format!(
                     "\nextern \"C\" {{\n\tvoid {function_name}(simd *params, simd *buffer, simd *out) {{\n\t\t{function_name}_gen(params, buffer, out);\n\t\treturn;\n\t}}\n}}\n"
@@ -347,6 +512,9 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         res
     }
 
+    /// Generate CUDA source and host entry points for batched evaluation under
+    /// `function_name`, using the requested real or complex number class.
+    /// `settings` controls included headers and custom source.
     pub fn export_cuda_str(
         &self,
         function_name: &str,
@@ -379,7 +547,8 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             res += "typedef double CudaNumber;\n";
             res += "typedef double Number;\n";
         }
-        res += &self.export_external_cpps();
+        res += &self.export_external_cpps_cuda();
+        res += &self.export_dimensions_cpp(function_name);
 
         res += &format!(
             "\n__device__ void {}(CudaNumber* params, CudaNumber* out, size_t index) {{\n",
@@ -400,7 +569,13 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
             self.result_indices.len()
         );
 
-        self.export_cpp_impl("params_offset + ", "CudaNumber", false, &mut res);
+        self.program().export_cpp_impl(
+            &self.external_fns,
+            "params_offset + ",
+            "CudaNumber",
+            false,
+            &mut res,
+        );
 
         for (i, r) in &mut self.result_indices.iter().enumerate() {
             res += &format!("\tout[out_offset + {i}] = ");
@@ -589,11 +764,22 @@ extern "C" {{
             self.stack.len()
         );
 
+        res += &self.export_dimensions_cpp(function_name);
+
+        // C++ has no standard restrict keyword. Keep the compiler-specific
+        // qualifier local to this exported template, including headerless exports.
+        let restrict = format!("{function_name}_RESTRICT");
         res += &format!(
-            "\ntemplate<typename T>\nvoid {function_name}_gen(T* params, T* Z, T* out) {{\n"
+            "\n#if defined(_MSC_VER)\n#define {restrict} __restrict\n\
+             #elif defined(__GNUC__) || defined(__clang__)\n#define {restrict} __restrict__\n\
+             #else\n#define {restrict}\n#endif\n\n\
+             // Input, scratch, and output memory regions must not overlap.\n\
+             template<typename T>\n\
+             void {function_name}_gen(T* {restrict} params, T* {restrict} Z, T* {restrict} out) {{\n"
         );
 
-        self.export_cpp_impl("", "T", true, &mut res);
+        self.program()
+            .export_cpp_impl(&self.external_fns, "", "T", true, &mut res);
 
         for (i, r) in &mut self.result_indices.iter().enumerate() {
             res += &format!("\tout[{i}] = ");
@@ -609,6 +795,7 @@ extern "C" {{
         }
 
         res += "\treturn;\n}\n";
+        res += &format!("#undef {restrict}\n");
 
         // if there are non-reals we can not use double evaluation
         assert!(
@@ -619,8 +806,234 @@ extern "C" {{
         res
     }
 
+    pub(super) fn export_asm_real_str(
+        &self,
+        function_name: &str,
+        settings: &ExportSettings,
+    ) -> String {
+        let mut res = String::new();
+        if settings.include_header {
+            res += "#include <iostream>\n#include <cmath>\n\n#include <complex>\n";
+        };
+
+        if let Some(header) = &settings.custom_header {
+            res += header;
+            res += "\n";
+        }
+        res += &self.export_external_asm_cpps(NumberClass::RealF64, settings.inline_asm);
+
+        res += &format!(
+            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
+            function_name,
+            self.stack.len()
+        );
+
+        res += &self.export_dimensions_cpp(function_name);
+
+        if self.stack.iter().all(|x| x.is_real()) {
+            res += &format!(
+                "static const double {}_CONSTANTS_double[{}] = {{{}}};\n\n",
+                function_name,
+                self.reserved_indices - self.param_count + 1,
+                {
+                    let mut nums = (self.param_count..self.reserved_indices)
+                        .map(|i| self.stack[i].to_complex_double().re.export())
+                        .collect::<Vec<_>>();
+                    nums.push("1".to_string()); // used for inversion
+                    nums.join(",")
+                }
+            );
+
+            res += &format!(
+                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n"
+            );
+
+            self.program().export_asm_double_impl(
+                &self.external_fns,
+                function_name,
+                settings.inline_asm,
+                &mut res,
+            );
+
+            res += "\treturn;\n}\n";
+        } else {
+            res += &format!(
+                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n\tstd::cout << \"Cannot evaluate complex function with doubles\" << std::endl;\n\treturn; \n}}",
+            );
+        }
+        res
+    }
+
+    pub(super) fn export_asm_complex_str(
+        &self,
+        function_name: &str,
+        settings: &ExportSettings,
+    ) -> String {
+        let mut res = String::new();
+        if settings.include_header {
+            res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
+        };
+
+        if let Some(header) = &settings.custom_header {
+            res += header;
+            res += "\n";
+        }
+        res += &self.export_external_asm_cpps(NumberClass::ComplexF64, settings.inline_asm);
+
+        res += &format!(
+            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
+            function_name,
+            self.stack.len()
+        );
+
+        res += &self.export_dimensions_cpp(function_name);
+
+        res += &format!(
+            "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
+            function_name,
+            self.reserved_indices - self.param_count + 3,
+            {
+                let mut nums = (self.param_count..self.reserved_indices)
+                    .map(|i| {
+                        let c = self.stack[i].to_complex_double();
+                        format!("std::complex<double>({:e}, {:e})", c.re, c.im)
+                    })
+                    .collect::<Vec<_>>();
+                nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
+                nums.push("1".to_string()); // used for real inversion
+                nums.push(format!("std::complex<double>({0:e}, {0:e})", f64::MAX));
+                nums.join(",")
+            }
+        );
+
+        res += &format!(
+            "extern \"C\" void {function_name}(const std::complex<double> *params, std::complex<double> *Z, std::complex<double> *out)\n{{\n"
+        );
+
+        self.program().export_asm_complex_impl(
+            &self.external_fns,
+            function_name,
+            settings.inline_asm,
+            &mut res,
+        );
+
+        res + "\treturn;\n}\n\n"
+    }
+}
+
+impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
+    fn export_asm_body(
+        &self,
+        external_fns: &[ExternalFunctionContainer<T>],
+        function_name: &str,
+        number_class: NumberClass,
+        asm: InlineASM,
+    ) -> String {
+        debug_assert_ne!(asm, InlineASM::None);
+        debug_assert_eq!(self.result_indices.len(), 1);
+
+        let number_type = if asm == InlineASM::AVX2 {
+            "simd"
+        } else if number_class == NumberClass::ComplexF64 {
+            "std::complex<double>"
+        } else {
+            "double"
+        };
+
+        let mut output = String::new();
+        match number_class {
+            NumberClass::RealF64 => {
+                let mut constants = self
+                    .constants
+                    .iter()
+                    .map(|constant| {
+                        let value = constant.to_complex_double().re;
+                        if asm == InlineASM::AVX2 {
+                            format!("simd({value:e})")
+                        } else {
+                            value.export()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                constants.push("1".to_string());
+                output.push_str(&format!(
+                    "static const {number_type} {function_name}_CONSTANTS_double[{}] = {{{}}};\n\n",
+                    constants.len(),
+                    constants.join(",")
+                ));
+            }
+            NumberClass::ComplexF64 => {
+                let mut constants = self
+                    .constants
+                    .iter()
+                    .map(|constant| {
+                        let value = constant.to_complex_double();
+                        if asm == InlineASM::AVX2 {
+                            format!("simd(std::complex<double>({:e}, {:e}))", value.re, value.im)
+                        } else {
+                            format!("std::complex<double>({:e}, {:e})", value.re, value.im)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                constants.push(if asm == InlineASM::AVX2 {
+                    "-0.".to_string()
+                } else {
+                    "std::complex<double>(0, -0.)".to_string()
+                });
+                constants.push("1".to_string());
+                let limit = format!("std::complex<double>({0:e}, {0:e})", f64::MAX);
+                constants.push(if asm == InlineASM::AVX2 {
+                    format!("simd({limit})")
+                } else {
+                    limit
+                });
+                output.push_str(&format!(
+                    "static const {number_type} {function_name}_CONSTANTS_complex[{}] = {{{}}};\n\n",
+                    constants.len(),
+                    constants.join(",")
+                ));
+            }
+        }
+
+        output.push_str(&format!(
+            "__attribute__((noinline)) {number_type} {function_name}({}) {{\n",
+            (0..self.param_count)
+                .map(|index| format!("{number_type} p{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        if self.param_count == 0 {
+            output.push_str(&format!("\t{number_type} params[1] = {{}};\n"));
+        } else {
+            output.push_str(&format!(
+                "\t{number_type} params[{}] = {{{}}};\n",
+                self.param_count,
+                (0..self.param_count)
+                    .map(|index| format!("p{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push_str(&format!(
+            "\t{number_type} Z[{}];\n\t{number_type} out[1];\n",
+            self.stack_size.max(1)
+        ));
+
+        match number_class {
+            NumberClass::RealF64 => {
+                self.export_asm_double_impl(external_fns, function_name, asm, &mut output);
+            }
+            NumberClass::ComplexF64 => {
+                self.export_asm_complex_impl(external_fns, function_name, asm, &mut output);
+            }
+        }
+        output.push_str("\treturn out[0];\n}\n\n");
+        output
+    }
+
     fn export_cpp_impl(
         &self,
+        external_fns: &[ExternalFunctionContainer<T>],
         param_offset: &str,
         number_wrapper: &str,
         tmp_array: bool,
@@ -631,7 +1044,7 @@ extern "C" {{
                 if $i < self.param_count {
                     format!("params[{}{}]", param_offset, $i)
                 } else if $i < self.reserved_indices {
-                    self.stack[$i].export_wrapped_with(number_wrapper)
+                    self.constants[$i - self.param_count].export_wrapped_with(number_wrapper)
                 } else {
                     // TODO: subtract reserved indices
                     if tmp_array {
@@ -654,7 +1067,7 @@ extern "C" {{
         }
 
         let mut close_else_branch = 0;
-        for (ins, _c) in &self.instructions {
+        for (ins, _c) in self.instructions {
             match ins {
                 Instr::Add(o, a) => {
                     let args = a
@@ -720,7 +1133,7 @@ extern "C" {{
                     _ => unreachable!(),
                 },
                 Instr::ExternalFun(o, s, a) => {
-                    let name = &self.external_fns[*s];
+                    let name = ExpressionEvaluator::<T>::external_cpp_name(external_fns, *s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out +=
@@ -754,122 +1167,14 @@ extern "C" {{
         }
     }
 
-    pub(super) fn export_asm_real_str(
-        &self,
-        function_name: &str,
-        settings: &ExportSettings,
-    ) -> String {
-        let mut res = String::new();
-        if settings.include_header {
-            res += "#include <iostream>\n#include <cmath>\n\n#include <complex>\n";
-        };
-
-        if let Some(header) = &settings.custom_header {
-            res += header;
-            res += "\n";
-        }
-        res += &self.export_external_cpps();
-
-        res += &format!(
-            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
-            function_name,
-            self.stack.len()
-        );
-
-        if self.stack.iter().all(|x| x.is_real()) {
-            res += &format!(
-                "static const double {}_CONSTANTS_double[{}] = {{{}}};\n\n",
-                function_name,
-                self.reserved_indices - self.param_count + 1,
-                {
-                    let mut nums = (self.param_count..self.reserved_indices)
-                        .map(|i| self.stack[i].to_complex_double().re.export())
-                        .collect::<Vec<_>>();
-                    nums.push("1".to_string()); // used for inversion
-                    nums.join(",")
-                }
-            );
-
-            res += &format!(
-                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n"
-            );
-
-            self.export_asm_double_impl(
-                &self.instructions,
-                function_name,
-                settings.inline_asm,
-                &mut res,
-            );
-
-            res += "\treturn;\n}\n";
-        } else {
-            res += &format!(
-                "extern \"C\" void {function_name}(const double *params, double* Z, double *out)\n{{\n\tstd::cout << \"Cannot evaluate complex function with doubles\" << std::endl;\n\treturn; \n}}",
-            );
-        }
-        res
-    }
-
-    pub(super) fn export_asm_complex_str(
-        &self,
-        function_name: &str,
-        settings: &ExportSettings,
-    ) -> String {
-        let mut res = String::new();
-        if settings.include_header {
-            res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";
-        };
-
-        if let Some(header) = &settings.custom_header {
-            res += header;
-            res += "\n";
-        }
-        res += &self.export_external_cpps();
-
-        res += &format!(
-            "extern \"C\" unsigned long {}_get_buffer_len()\n{{\n\treturn {};\n}}\n\n",
-            function_name,
-            self.stack.len()
-        );
-
-        res += &format!(
-            "static const std::complex<double> {}_CONSTANTS_complex[{}] = {{{}}};\n\n",
-            function_name,
-            self.reserved_indices - self.param_count + 2,
-            {
-                let mut nums = (self.param_count..self.reserved_indices)
-                    .map(|i| {
-                        let c = self.stack[i].to_complex_double();
-                        format!("std::complex<double>({:e}, {:e})", c.re, c.im)
-                    })
-                    .collect::<Vec<_>>();
-                nums.push("std::complex<double>(0, -0.)".to_string()); // used for complex inversion
-                nums.push("1".to_string()); // used for real inversion
-                nums.join(",")
-            }
-        );
-
-        res += &format!(
-            "extern \"C\" void {function_name}(const std::complex<double> *params, std::complex<double> *Z, std::complex<double> *out)\n{{\n"
-        );
-
-        self.export_asm_complex_impl(
-            &self.instructions,
-            function_name,
-            settings.inline_asm,
-            &mut res,
-        );
-
-        res + "\treturn;\n}\n\n"
-    }
-
     fn export_asm_double_impl(
         &self,
-        instr: &[(Instr, ComplexPhase)],
+        external_fns: &[ExternalFunctionContainer<T>],
         function_name: &str,
         asm_flavour: InlineASM,
         out: &mut String,
     ) -> bool {
+        let instr = self.instructions;
         let mut second_index = 0;
 
         macro_rules! get_input {
@@ -1052,7 +1357,7 @@ extern "C" {{
             }
         }
 
-        for x in &self.result_indices {
+        for x in self.result_indices {
             if x >= &self.reserved_indices {
                 reg_last_use[stack_to_reg[x]] = self.instructions.len();
             }
@@ -1278,7 +1583,20 @@ extern "C" {{
 
                     match o {
                         MemOrReg::Reg(out_reg) => {
-                            if let Some(j) = a.iter().find(|x| **x == MemOrReg::Reg(*out_reg)) {
+                            let destination = *out_reg;
+                            // A repeated input must retain its original value throughout
+                            // the operation, even when its register is reused for the output.
+                            let out_reg = if a
+                                .iter()
+                                .filter(|x| **x == MemOrReg::Reg(destination))
+                                .count()
+                                > 1
+                            {
+                                15 // reserved scratch register
+                            } else {
+                                destination
+                            };
+                            if let Some(j) = a.iter().find(|x| **x == MemOrReg::Reg(out_reg)) {
                                 // we can recycle the register completely
                                 let mut first_skipped = false;
                                 for i in a {
@@ -1455,6 +1773,26 @@ extern "C" {{
                                             InlineASM::None => unreachable!(),
                                         }
                                     }
+                                }
+                            }
+                            if out_reg != destination {
+                                match asm_flavour {
+                                    InlineASM::X64 => {
+                                        *out += &format!(
+                                            "\t\t\"movapd %%xmm{out_reg}, %%xmm{destination}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::AVX2 => {
+                                        *out += &format!(
+                                            "\t\t\"vmovapd %%ymm{out_reg}, %%ymm{destination}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::AArch64 => {
+                                        *out += &format!(
+                                            "\t\t\"fmov d{destination}, d{out_reg}\\n\\t\"\n"
+                                        );
+                                    }
+                                    InlineASM::None => unreachable!(),
                                 }
                             }
                         }
@@ -1660,7 +1998,7 @@ extern "C" {{
                                                 );
 
                                                 *out += &format!(
-                                                    "\t\t\"vdivsd %%ymm{tmp_reg}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
+                                                    "\t\t\"vdivpd %%ymm{tmp_reg}, %%ymm{out_reg}, %%ymm{out_reg}\\n\\t\"\n"
                                                 );
                                             } else {
                                                 panic!("No free registers for division")
@@ -1961,7 +2299,7 @@ extern "C" {{
                 RegInstr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = ExpressionEvaluator::<T>::external_cpp_name(external_fns, *s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
@@ -2106,11 +2444,12 @@ extern "C" {{
 
     fn export_asm_complex_impl(
         &self,
-        instr: &[(Instr, ComplexPhase)],
+        external_fns: &[ExternalFunctionContainer<T>],
         function_name: &str,
         asm_flavour: InlineASM,
         out: &mut String,
     ) -> bool {
+        let instr = self.instructions;
         let mut second_index = 0;
 
         macro_rules! get_input {
@@ -2233,7 +2572,7 @@ extern "C" {{
                             *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"ymm0\", \"ymm1\", \"ymm2\", \"ymm3\", \"ymm4\", \"ymm5\", \"ymm6\", \"ymm7\", \"ymm8\", \"ymm9\", \"ymm10\", \"ymm11\", \"ymm12\", \"ymm13\", \"ymm14\", \"ymm15\");\n",  function_name);
                         }
                         InlineASM::AArch64 => {
-                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n",  function_name);
+                            *out += &format!("\t\t:\n\t\t: \"r\"(Z), \"r\"({}_CONSTANTS_complex), \"r\"(params)\n\t\t: \"memory\", \"x8\", \"v0\", \"v1\", \"v2\", \"v3\", \"v4\", \"v5\", \"v6\", \"v7\", \"v8\", \"v9\", \"v10\", \"v11\", \"v12\", \"v13\", \"v14\", \"v15\", \"v16\", \"v17\", \"v18\", \"v19\", \"v20\", \"v21\", \"v22\", \"v23\", \"v24\", \"v25\", \"v26\", \"v27\", \"v28\", \"v29\", \"v30\", \"v31\");\n",  function_name);
                             #[allow(unused_assignments)] { second_index = 0;} // the second index in x8 will be lost after the block, so reset it
                         }
                         InlineASM::None => unreachable!(),
@@ -2322,17 +2661,37 @@ extern "C" {{
                             *out += &format!("\t\t\"vmovupd %%ymm1, {imag_addr}\\n\\t\"\n");
                         }
                         InlineASM::AArch64 => {
-                            let (addr, _) = asm_load!(a[0]);
-                            *out += &format!("\t\t\"ldr q0, {addr}\\n\\t\"\n");
+                            if let ComplexPhase::Real = *c {
+                                let (addr, _) = asm_load!(a[0]);
+                                *out += &format!("\t\t\"ldr d0, {addr}\\n\\t\"\n");
 
-                            for i in &a[1..] {
-                                let (addr, _) = asm_load!(*i);
-                                *out += &format!("\t\t\"ldr q1, {addr}\\n\\t\"\n");
-                                *out += "\t\t\"fadd v0.2d, v1.2d, v0.2d\\n\\t\"\n";
+                                for i in &a[1..] {
+                                    let (addr, _) = asm_load!(*i);
+                                    *out += &format!("\t\t\"ldr d1, {addr}\\n\\t\"\n");
+                                    *out += "\t\t\"fadd d0, d1, d0\\n\\t\"\n";
+                                }
+
+                                *out += "\t\t\"fmov d1, xzr\\n\\t\"";
+                                let (addr_re, addr_im) = asm_load!(*o);
+                                if *o * 16 < 450 {
+                                    *out += &format!("\t\t\"stp d0, d1, {addr_re}\\n\\t\"\n");
+                                } else {
+                                    *out += &format!("\t\t\"str d0, {addr_re}\\n\\t\"\n");
+                                    *out += &format!("\t\t\"str d1, {addr_im}\\n\\t\"\n");
+                                }
+                            } else {
+                                let (addr, _) = asm_load!(a[0]);
+                                *out += &format!("\t\t\"ldr q0, {addr}\\n\\t\"\n");
+
+                                for i in &a[1..] {
+                                    let (addr, _) = asm_load!(*i);
+                                    *out += &format!("\t\t\"ldr q1, {addr}\\n\\t\"\n");
+                                    *out += "\t\t\"fadd v0.2d, v1.2d, v0.2d\\n\\t\"\n";
+                                }
+
+                                let (addr, _) = asm_load!(*o);
+                                *out += &format!("\t\t\"str q0, {addr}\\n\\t\"\n");
                             }
-
-                            let (addr, _) = asm_load!(*o);
-                            *out += &format!("\t\t\"str q0, {addr}\\n\\t\"\n");
                         }
                         InlineASM::None => unreachable!(),
                     }
@@ -2417,8 +2776,8 @@ extern "C" {{
                                 InlineASM::AVX2 => {
                                     if $real {
                                         *out += &format!(
-                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0\\n\\t\"\n",
-                                            $i + 1
+                                            "\t\t\"vmulpd %%ymm{0}, %%ymm0, %%ymm0\\n\\t\"\n",
+                                            2 * $i
                                         );
                                         *out +=
                                             &format!("\t\t\"vxorpd %%ymm1, %%ymm1, %%ymm1\\n\\t\""); // im = 0
@@ -2494,6 +2853,9 @@ extern "C" {{
                             *out += &format!("\t\t\"vmovupd %%ymm1, {addr_im}\\n\\t\"\n");
                         }
                         InlineASM::AArch64 => {
+                            if let ComplexPhase::Real = *c {
+                                *out += "\t\t\"fmov d3, xzr\\n\\t\"";
+                            }
                             if *o * 16 < 450 {
                                 *out += &format!("\t\t\"stp d2, d3, {addr_re}\\n\\t\"\n");
                             } else {
@@ -2512,9 +2874,9 @@ extern "C" {{
                         }
 
                         let addr_b = asm_load!(*b);
-                        let addr_o = asm_load!(*o);
                         match asm_flavour {
                             InlineASM::X64 => {
+                                let addr_o = asm_load!(*o);
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"movupd {}, %%xmm0\\n\\t\"
@@ -2526,22 +2888,38 @@ extern "C" {{
                                         addr_o.0
                                     );
                                 } else {
+                                    // Normalize by the largest component before squaring,
+                                    // then divide by that scale after the normalized norm.
+                                    // Clamp infinite scales to retain non-finite division behavior.
                                     *out += &format!(
                                         "\t\t\"movupd {}, %%xmm0\\n\\t\"
 \t\t\"movupd {}(%1), %%xmm1\\n\\t\"
 \t\t\"movapd %%xmm0, %%xmm2\\n\\t\"
+\t\t\"xorpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"subpd %%xmm2, %%xmm3\\n\\t\"
+\t\t\"maxpd %%xmm3, %%xmm2\\n\\t\"
+\t\t\"movapd %%xmm2, %%xmm3\\n\\t\"
+\t\t\"shufpd $1, %%xmm3, %%xmm3\\n\\t\"
+\t\t\"maxpd %%xmm3, %%xmm2\\n\\t\"
+\t\t\"movupd {}(%1), %%xmm4\\n\\t\"
+\t\t\"minpd %%xmm4, %%xmm2\\n\\t\"
+\t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
 \t\t\"xorpd %%xmm1, %%xmm0\\n\\t\"
-\t\t\"mulpd %%xmm2, %%xmm2\\n\\t\"
-\t\t\"haddpd %%xmm2, %%xmm2\\n\\t\"
+\t\t\"movapd %%xmm0, %%xmm3\\n\\t\"
+\t\t\"mulpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"haddpd %%xmm3, %%xmm3\\n\\t\"
+\t\t\"divpd %%xmm3, %%xmm0\\n\\t\"
 \t\t\"divpd %%xmm2, %%xmm0\\n\\t\"
 \t\t\"movupd %%xmm0, {}\\n\\t\"\n",
                                         addr_b.0,
                                         (self.reserved_indices - self.param_count) * 16,
+                                        (self.reserved_indices - self.param_count + 2) * 16,
                                         addr_o.0
                                     );
                                 }
                             }
                             InlineASM::AVX2 => {
+                                let addr_o = asm_load!(*o);
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
@@ -2560,6 +2938,16 @@ extern "C" {{
                                     *out += &format!(
                                         "\t\t\"vmovupd {0}, %%ymm0\\n\\t\"
 \t\t\"vmovupd {1}, %%ymm1\\n\\t\"
+\t\t\"vxorpd %%ymm2, %%ymm2, %%ymm2\\n\\t\"
+\t\t\"vsubpd %%ymm0, %%ymm2, %%ymm3\\n\\t\"
+\t\t\"vmaxpd %%ymm3, %%ymm0, %%ymm3\\n\\t\"
+\t\t\"vsubpd %%ymm1, %%ymm2, %%ymm4\\n\\t\"
+\t\t\"vmaxpd %%ymm4, %%ymm1, %%ymm4\\n\\t\"
+\t\t\"vmaxpd %%ymm4, %%ymm3, %%ymm2\\n\\t\"
+\t\t\"vbroadcastsd {5}(%1), %%ymm5\\n\\t\"
+\t\t\"vminpd %%ymm5, %%ymm2, %%ymm2\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm0, %%ymm0\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vmulpd %%ymm0, %%ymm0, %%ymm3\\n\\t\"
 \t\t\"vmulpd %%ymm1, %%ymm1, %%ymm4\\n\\t\"
 \t\t\"vaddpd %%ymm3, %%ymm4, %%ymm3\\n\\t\"
@@ -2567,13 +2955,16 @@ extern "C" {{
 \t\t\"vbroadcastsd {2}(%1), %%ymm4\\n\\t\"
 \t\t\"vxorpd %%ymm4, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vdivpd %%ymm3, %%ymm1, %%ymm1\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm0, %%ymm0\\n\\t\"
+\t\t\"vdivpd %%ymm2, %%ymm1, %%ymm1\\n\\t\"
 \t\t\"vmovupd %%ymm0, {3}\\n\\t\"
 \t\t\"vmovupd %%ymm1, {4}\\n\\t\"\n",
                                         addr_b.0,
                                         addr_b.1,
                                         (self.reserved_indices - self.param_count) * 64,
                                         addr_o.0,
-                                        addr_o.1
+                                        addr_o.1,
+                                        (self.reserved_indices - self.param_count + 2) * 64
                                     );
                                 }
                             }
@@ -2588,18 +2979,32 @@ extern "C" {{
                                 if let ComplexPhase::Real = *c {
                                     *out += &format!(
                                         "\t\t\"ldr    d2, [%1, {}]\\n\\t\"
-\t\t\"fdiv    d0, d2, d0\\n\\t\"\n",
+\t\t\"fdiv    d0, d2, d0\\n\\t\"
+\t\t\"fmov    d1, xzr\\n\\t\"\n",
                                         (self.reserved_indices - self.param_count + 1) * 16
                                     );
                                 } else {
-                                    *out += "
-\t\t\"fmul    d2, d0, d0\\n\\t\"
-\t\t\"fmadd   d2, d1, d1, d2\\n\\t\"
-\t\t\"fneg    d1, d1\\n\\t\"
+                                    *out += &format!(
+                                        "
+\t\t\"fabs    d2, d0\\n\\t\"
+\t\t\"fabs    d3, d1\\n\\t\"
+\t\t\"fmax    d2, d2, d3\\n\\t\"
+\t\t\"ldr     d4, [%1, {}]\\n\\t\"
+\t\t\"fminnm  d2, d2, d4\\n\\t\"
 \t\t\"fdiv    d0, d0, d2\\n\\t\"
-\t\t\"fdiv    d1, d1, d2\\n\\t\"\n";
+\t\t\"fdiv    d1, d1, d2\\n\\t\"
+\t\t\"fmul    d3, d0, d0\\n\\t\"
+\t\t\"fmadd   d3, d1, d1, d3\\n\\t\"
+\t\t\"fneg    d1, d1\\n\\t\"
+\t\t\"fdiv    d0, d0, d3\\n\\t\"
+\t\t\"fdiv    d1, d1, d3\\n\\t\"
+\t\t\"fdiv    d0, d0, d2\\n\\t\"
+\t\t\"fdiv    d1, d1, d2\\n\\t\"\n",
+                                        (self.reserved_indices - self.param_count + 2) * 16
+                                    );
                                 }
 
+                                let addr_o = asm_load!(*o);
                                 if *o * 16 < 450 {
                                     *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
                                 } else {
@@ -2635,10 +3040,10 @@ extern "C" {{
                         && let ComplexPhase::Real = *c
                     {
                         let addr_a = asm_load!(*a);
-                        let addr_o = asm_load!(*o);
 
                         match asm_flavour {
                             InlineASM::X64 => {
+                                let addr_o = asm_load!(*o);
                                 *out += &format!(
                                     "\t\t\"movupd {}, %%xmm0\\n\\t\"
 \t\t\"sqrtsd %%xmm0, %%xmm0\\n\\t\"
@@ -2647,6 +3052,7 @@ extern "C" {{
                                 );
                             }
                             InlineASM::AVX2 => {
+                                let addr_o = asm_load!(*o);
                                 *out += &format!(
                                     "\t\t\"vmovupd {}, %%ymm0\\n\\t\"
 \t\t\"vsqrtpd %%ymm0, %%ymm0\\n\\t\"
@@ -2660,9 +3066,16 @@ extern "C" {{
                                 *out += &format!(
                                     "\t\t\"ldr d0, {}\\n\\t\"
 \t\t\"fsqrt d0, d0\\n\\t\"
-\t\t\"str d0, {}\\n\\t\"\n",
-                                    addr_a.0, addr_o.0
+\t\t\"fmov d1, xzr\\n\\t\"\n",
+                                    addr_a.0
                                 );
+                                let addr_o = asm_load!(*o);
+                                if *o * 16 < 450 {
+                                    *out += &format!("\t\t\"stp d0, d1, {}\\n\\t\"\n", addr_o.0);
+                                } else {
+                                    *out += &format!("\t\t\"str d0, {}\\n\\t\"\n", addr_o.0);
+                                    *out += &format!("\t\t\"str d1, {}\\n\\t\"\n", addr_o.1);
+                                }
                             }
                             InlineASM::None => unreachable!(),
                         }
@@ -2710,7 +3123,7 @@ extern "C" {{
                 Instr::ExternalFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let name = &self.external_fns[*s];
+                    let name = ExpressionEvaluator::<T>::external_cpp_name(external_fns, *s);
                     let args = a.iter().map(|x| get_input!(*x)).collect::<Vec<_>>();
 
                     *out += format!("\tZ[{}] = {}({});\n", o, name, args.join(", ")).as_str();
@@ -2847,7 +3260,7 @@ extern "C" {{
             }
             InlineASM::AArch64 => {
                 *out += &format!(
-                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"d0\", \"d1\", \"d2\", \"d3\", \"d4\", \"d5\", \"d6\", \"d7\", \"d8\", \"d9\", \"d10\", \"d11\", \"d12\", \"d13\", \"d14\", \"d15\", \"d16\", \"d17\", \"d18\", \"d19\", \"d20\", \"d21\", \"d22\", \"d23\", \"d24\", \"d25\", \"d26\", \"d27\", \"d28\", \"d29\", \"d30\", \"d31\");\n"
+                    "\t\t:\n\t\t: \"r\"(Z), \"r\"({function_name}_CONSTANTS_complex), \"r\"(params), \"r\"(out)\n\t\t: \"memory\", \"x8\", \"v0\", \"v1\", \"v2\", \"v3\", \"v4\", \"v5\", \"v6\", \"v7\", \"v8\", \"v9\", \"v10\", \"v11\", \"v12\", \"v13\", \"v14\", \"v15\", \"v16\", \"v17\", \"v18\", \"v19\", \"v20\", \"v21\", \"v22\", \"v23\", \"v24\", \"v25\", \"v26\", \"v27\", \"v28\", \"v29\", \"v30\", \"v31\");\n"
                 );
             }
             InlineASM::None => unreachable!(),

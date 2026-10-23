@@ -8,7 +8,8 @@ fn main() {
     for (loc, view) in AtomTreeIterator::new(
         expr.as_view(),
         MatchSettings::new()
-            .level_range((1, Some(2)))
+            .min_level(1)
+            .max_level(2)
             .level_is_tree_depth(false),
     ) {
         println!("\tAtom at location {loc:?}: {view}");

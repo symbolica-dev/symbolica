@@ -4,25 +4,32 @@
 use ahash::{AHasher, HashMap, HashMapExt, HashSet};
 use dyn_clone::DynClone;
 use rand::Rng;
+#[cfg(feature = "native_code_generation")]
 use self_cell::self_cell;
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, hash_map::Entry},
     hash::{Hash, Hasher},
-    os::raw::{c_ulong, c_void},
     panic,
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+#[cfg(feature = "native_code_generation")]
+use std::{
+    os::raw::{c_ulong, c_void},
+    path::{Path, PathBuf},
+};
+#[cfg(feature = "native_code_generation")]
 use symjit::{Applet, Composer, Config, Defuns, Storage, Translator};
 
+#[cfg(feature = "native_code_generation")]
 mod backend;
 mod domain;
 mod dual;
 mod evaluator;
+#[cfg(feature = "native_code_generation")]
 mod export;
 mod external;
 mod function_map;
@@ -30,16 +37,18 @@ mod instruction;
 mod optimize;
 mod tree;
 
+#[cfg(feature = "native_code_generation")]
 pub use backend::*;
 pub use domain::*;
 pub use dual::*;
 pub use evaluator::*;
+#[cfg(feature = "native_code_generation")]
 pub use export::*;
 pub use external::*;
 pub use function_map::*;
 pub use instruction::{
-    ComplexPhase, ExportedInstructions, Instruction, InstructionList, Label, Slot,
-    VectorInstruction,
+    ComplexPhase, ExportedConstantFunction, ExportedInstructions, ExportedSubEvaluator,
+    Instruction, InstructionList, Label, Slot, VectorInstruction,
 };
 pub use optimize::*;
 pub use tree::*;
@@ -48,7 +57,6 @@ use function_map::Expr;
 use instruction::Instr;
 
 use crate::{
-    LicenseManager, OperationCount,
     atom::{Atom, AtomCore, AtomView, EvaluationInfo, Indeterminate, KeyLookup, Symbol},
     coefficient::CoefficientView,
     combinatorics::unique_permutations,
@@ -63,18 +71,98 @@ use crate::{
         rational::Rational,
     },
     error, get_symbol,
-    id::ConditionResult,
     info,
+    license::LicenseManager,
     numerical_integration::MonteCarloRng,
-    state::State,
     utils::AbortCheck,
 };
+
+/// The number of operations needed by an evaluator or expression tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct OperationCount {
+    /// The number of additions.
+    pub additions: usize,
+    /// The number of multiplications.
+    pub multiplications: usize,
+    /// The number of inversions.
+    pub inversions: usize,
+    /// The number of function calls.
+    pub function_calls: usize,
+}
+
+impl OperationCount {
+    /// Create a new operation count.
+    pub fn new(
+        additions: usize,
+        multiplications: usize,
+        inversions: usize,
+        function_calls: usize,
+    ) -> Self {
+        Self {
+            additions,
+            multiplications,
+            inversions,
+            function_calls,
+        }
+    }
+
+    /// Add the cost of raising a value to an integer power.
+    ///
+    /// Negative powers count as one inversion plus the multiplications required for the absolute
+    /// power. For example, `x^-3` counts as one inversion and two multiplications.
+    pub fn add_integer_power(&mut self, exponent: i64) {
+        if exponent < 0 {
+            self.inversions += 1;
+        }
+
+        self.multiplications += exponent.unsigned_abs().saturating_sub(1) as usize;
+    }
+
+    /// Add one function call.
+    pub fn add_function_call(&mut self) {
+        self.function_calls += 1;
+    }
+}
+
+impl std::ops::Add for OperationCount {
+    type Output = OperationCount;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        OperationCount {
+            additions: self.additions + rhs.additions,
+            multiplications: self.multiplications + rhs.multiplications,
+            inversions: self.inversions + rhs.inversions,
+            function_calls: self.function_calls + rhs.function_calls,
+        }
+    }
+}
+
+impl std::ops::AddAssign for OperationCount {
+    fn add_assign(&mut self, rhs: Self) {
+        self.additions += rhs.additions;
+        self.multiplications += rhs.multiplications;
+        self.inversions += rhs.inversions;
+        self.function_calls += rhs.function_calls;
+    }
+}
+
+impl std::fmt::Display for OperationCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} +, {} ×, {} x⁻¹, {} f(·)",
+            self.additions, self.multiplications, self.inversions, self.function_calls
+        )
+    }
+}
 
 #[cfg(test)]
 mod test {
     use ahash::HashMap;
     use numerica::domains::{dual::HyperDual, float::Real};
 
+    #[cfg(feature = "native_code_generation")]
+    use crate::evaluate::{CompileOptions, ExportSettings, InlineASM, JITCompilationSettings};
     use crate::{
         atom::{Atom, AtomCore, EvaluationInfo},
         create_hyperdual_from_components,
@@ -83,10 +171,9 @@ mod test {
             rational::Rational,
         },
         evaluate::{
-            Dualizer, EvaluationError, ExportSettings, FunctionMap, Instruction,
-            JITCompilationSettings, OptimizationSettings,
+            Dualizer, EvaluationError, ExportedInstructions, FunctionMap,
+            FunctionRegistrationOptions, InliningPolicy, Instruction, OptimizationSettings, Slot,
         },
-        id::ConditionResult,
         parse, symbol,
     };
 
@@ -117,7 +204,7 @@ mod test {
     #[test]
     fn eval_fun() {
         let _ = symbol!(
-            "e",
+            "symbolica::eval_fun::e",
             eval = EvaluationInfo::constant(|_tags, prec| { Ok(Float::new(prec).e().into()) })
         );
 
@@ -128,10 +215,10 @@ mod test {
                 .register(|args: &[f64]| args[0].atanh())
         );
 
-        let a = parse!("e*symbolica::eval_fun::atanh(x)");
+        let a = parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(x)");
 
         assert!(
-            (parse!("e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
+            (parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
                 - parse!("2.7273975248950224505081204947890e-1`32"))
             .abs()
                 < parse!("1e-30`32")
@@ -145,12 +232,15 @@ mod test {
         r_f64.evaluate(&[0.1], &mut res);
         assert_eq!(res[0], 0.2727397524895022);
 
-        let mut jit_compiled = r_f64
-            .jit_compile(JITCompilationSettings::default())
-            .unwrap();
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit_compiled = r_f64
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
 
-        jit_compiled.evaluate(&[0.1], &mut res);
-        assert_eq!(res[0], 0.2727397524895022);
+            jit_compiled.evaluate(&[0.1], &mut res);
+            assert_eq!(res[0], 0.2727397524895022);
+        }
 
         let mut r_wide = r_f64.map_coeff(&|x| (*x).into());
 
@@ -240,14 +330,948 @@ mod test {
     }
 
     #[test]
-    fn zero_test() {
-        let e = parse!(
-            "(sin(v1)^2-sin(v1))(sin(v1)^2+sin(v1))^2 - (1/4 sin(2v1)^2-1/2 sin(2v1)cos(v1)-2 cos(v1)^2+1/2 sin(2v1)cos(v1)^3+3 cos(v1)^4-cos(v1)^6)"
-        );
-        assert_eq!(e.zero_test(10, f64::EPSILON), ConditionResult::Inconclusive);
+    fn non_inlined_function_uses_sub_evaluator() {
+        fn execute_exported(
+            exported: &ExportedInstructions<f64>,
+            params: &[f64],
+            output_count: usize,
+        ) -> Vec<f64> {
+            fn read(
+                slot: Slot,
+                params: &[f64],
+                constants: &[f64],
+                temporaries: &[f64],
+                outputs: &[f64],
+            ) -> f64 {
+                match slot {
+                    Slot::Param(i) => params[i],
+                    Slot::Const(i) => constants[i],
+                    Slot::Temp(i) => temporaries[i],
+                    Slot::Out(i) => outputs[i],
+                }
+            }
 
-        let e = parse!("x + (1+x)^2 + (x+2)*5");
-        assert_eq!(e.zero_test(10, f64::EPSILON), ConditionResult::False);
+            fn write(slot: Slot, value: f64, temporaries: &mut [f64], outputs: &mut [f64]) {
+                match slot {
+                    Slot::Temp(i) => temporaries[i] = value,
+                    Slot::Out(i) => outputs[i] = value,
+                    Slot::Param(_) | Slot::Const(_) => panic!("cannot write to {slot}"),
+                }
+            }
+
+            let mut temporaries = vec![0.; exported.temporary_count];
+            let mut outputs = vec![0.; output_count];
+            for instruction in &exported.instructions {
+                let value = |slot| read(slot, params, &exported.constants, &temporaries, &outputs);
+                match instruction {
+                    Instruction::Add(out, args, _) => {
+                        let result = args.iter().map(|arg| value(*arg)).sum();
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Mul(out, args, _) => {
+                        let result = args.iter().map(|arg| value(*arg)).product();
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Pow(out, base, exponent, _) => {
+                        let result = value(*base).powi((*exponent).try_into().unwrap());
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Powf(out, base, exponent, _) => {
+                        let result = value(*base).powf(value(*exponent));
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Fun(out, function, _) => {
+                        let (symbol, tags, args) = &**function;
+                        let sub_evaluator = exported
+                            .sub_evaluators
+                            .iter()
+                            .find(|sub| sub.symbol == *symbol && sub.tags == *tags)
+                            .expect("test expression should only call exported sub-evaluators");
+                        let arguments = args.iter().map(|arg| value(*arg)).collect::<Vec<_>>();
+                        assert_eq!(arguments.len(), sub_evaluator.input_count);
+                        let result = execute_exported(
+                            &sub_evaluator.instructions,
+                            &arguments,
+                            sub_evaluator.output_count,
+                        );
+                        assert_eq!(result.len(), 1);
+                        write(*out, result[0], &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Assign(out, input) => {
+                        let result = value(*input);
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
+                    Instruction::IfElse(_, _)
+                    | Instruction::Goto(_)
+                    | Instruction::Label(_)
+                    | Instruction::Join(_, _, _, _) => {
+                        panic!("control flow is not used by this test")
+                    }
+                }
+            }
+            outputs
+        }
+
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::helper"),
+                vec![symbol!("z")],
+                parse!("z^2 + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::large"),
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::helper(y) + x + 5"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_tagged_function_with_options(
+                symbol!("symbolica::sub_eval::tagged"),
+                vec![Atom::num(1)],
+                vec![symbol!("y")],
+                parse!("3*y + 7"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::captured"),
+                vec![symbol!("q")],
+                parse!("q + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function(
+                symbol!("symbolica::sub_eval::outer"),
+                vec![symbol!("q")],
+                parse!("symbolica::sub_eval::captured(q)"),
+            )
+            .unwrap();
+
+        let expressions = [
+            parse!("symbolica::sub_eval::large(x)"),
+            parse!("symbolica::sub_eval::large(x + 1)"),
+            parse!("symbolica::sub_eval::tagged(1, x)"),
+            parse!("symbolica::sub_eval::outer(x)"),
+        ];
+        let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+            .function_map(fn_map)
+            // The legacy tree optimizer also falls back to direct translation when a function is
+            // explicitly kept out of line.
+            .direct_translation(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(evaluator.count_operations().function_calls, 4);
+        assert_eq!(evaluator.external_fns.len(), 4);
+        assert!(
+            evaluator
+                .external_fns
+                .iter()
+                .all(|external| external.body.is_some())
+        );
+
+        let exported = evaluator
+            .clone()
+            .map_coeff(&|c| c.re.to_f64())
+            .export_instructions();
+        assert_eq!(exported.input_count, 1);
+        assert_eq!(exported.output_count, 4);
+        assert_eq!(exported.sub_evaluators.len(), 3);
+        assert!(
+            exported
+                .sub_evaluators
+                .iter()
+                .find(|sub| sub.symbol == symbol!("symbolica::sub_eval::large"))
+                .unwrap()
+                .tags
+                .is_empty()
+        );
+        assert_eq!(
+            exported
+                .sub_evaluators
+                .iter()
+                .find(|sub| sub.symbol == symbol!("symbolica::sub_eval::tagged"))
+                .unwrap()
+                .tags,
+            ["1"]
+        );
+        assert_eq!(
+            execute_exported(&exported, &[2.], exported.output_count),
+            [13., 18., 13., 3.]
+        );
+
+        let large = exported
+            .sub_evaluators
+            .iter()
+            .find(|sub| sub.symbol == symbol!("symbolica::sub_eval::large"))
+            .unwrap();
+        // Explicit arguments, captured values, and hoisted coefficients are all passed through the
+        // function instruction in exactly the order described by `input_count`.
+        assert_eq!(large.input_count, 4);
+        assert_eq!(large.output_count, 1);
+        assert_eq!(large.instructions.input_count, large.input_count);
+        assert_eq!(large.instructions.output_count, large.output_count);
+        assert!(large.instructions.constants.is_empty());
+        assert_eq!(large.instructions.sub_evaluators.len(), 1);
+        let helper = &large.instructions.sub_evaluators[0];
+        assert_eq!(helper.symbol, symbol!("symbolica::sub_eval::helper"));
+        let helper_argument_count = large
+            .instructions
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                Instruction::Fun(_, function, _)
+                    if function.0 == helper.symbol && function.1 == helper.tags =>
+                {
+                    Some(function.2.len())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(helper.input_count, helper_argument_count);
+        assert_eq!(helper.instructions.input_count, helper.input_count);
+        assert_eq!(helper.instructions.output_count, helper.output_count);
+        assert!(helper.instructions.sub_evaluators.is_empty());
+
+        let rational_constants = evaluator.get_constants().to_vec();
+        let mut evaluator_f64 = evaluator.clone().map_coeff(&|c| c.re.to_f64());
+        let mut out = [0.; 4];
+        evaluator_f64.evaluate(&[2.], &mut out);
+        assert_eq!(out, [13., 18., 13., 3.]);
+
+        let mut remapped = evaluator_f64
+            .set_coeff(&rational_constants)
+            .map_coeff(&|c| c.re.to_f64());
+        remapped.evaluate(&[2.], &mut out);
+        assert_eq!(out, [13., 18., 13., 3.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
+            let (decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
+            decoded.evaluate(&[2.], &mut out);
+            assert_eq!(out, [13., 18., 13., 3.]);
+        }
+
+        #[cfg(feature = "native_code_generation")]
+        {
+            let base = std::env::temp_dir()
+                .join(format!("symbolica_sub_evaluator_{}", std::process::id()));
+            let source = base.with_extension("cpp");
+            let library = base.with_extension("so");
+            let mut compiled = evaluator
+                .map_coeff(&|c| c.re.to_f64())
+                .export_cpp::<f64>(&source, "sub_evaluator", ExportSettings::default())
+                .unwrap()
+                .compile(&library, CompileOptions::default().compiler("c++"))
+                .unwrap()
+                .load()
+                .unwrap();
+
+            compiled.evaluate(&[2.], &mut out);
+            assert_eq!(out, [13., 18., 13., 3.]);
+
+            let _ = std::fs::remove_file(source);
+            let _ = std::fs::remove_file(library);
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_discovers_only_required_captures() {
+        // Every level introduces a new argument and drops the arguments of its ancestors.
+        // Rebuilding after capture pruning recursively duplicates the rest of this chain.
+        let depth = 32;
+        let functions = (0..depth)
+            .map(|i| symbol!(format!("symbolica::sub_eval::deep_f{i}")))
+            .collect::<Vec<_>>();
+        let arguments = (0..depth)
+            .map(|i| symbol!(format!("symbolica::sub_eval::deep_x{i}")))
+            .collect::<Vec<_>>();
+        let mut fn_map = FunctionMap::new();
+        for i in 0..depth {
+            let argument = Atom::var(arguments[i]);
+            let body = if i + 1 == depth {
+                argument + Atom::num(1)
+            } else {
+                functions[i + 1].call(&[argument][..])
+            };
+            fn_map
+                .add_function_with_options(
+                    functions[i],
+                    vec![arguments[i]],
+                    body,
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap();
+        }
+
+        let evaluator = functions[0]
+            .call(&[parse!("x")][..])
+            .evaluator(&[parse!("unused"), parse!("x")])
+            .function_map(fn_map)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(evaluator.external_fns.len(), depth);
+        for (external, function) in evaluator.external_fns.iter().zip(functions.iter().rev()) {
+            assert_eq!(external.symbol, *function);
+            let sub = external.body.as_ref().unwrap();
+            assert_eq!(sub.param_count, 2);
+        }
+        let mut evaluator = evaluator.map_coeff(&|c| c.re.to_f64());
+        assert_eq!(evaluator.evaluate_single(&[123., 4.]), 5.);
+    }
+
+    #[test]
+    fn non_inlined_function_capture_inputs() {
+        let function = symbol!("symbolica::sub_eval::compact_captures");
+        let _ = symbol!(
+            "symbolica::sub_eval::compact_external",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0] + 1.)
+        );
+        let params = [
+            parse!("a"),
+            parse!("b"),
+            parse!("c"),
+            parse!("d"),
+            parse!("y"),
+        ];
+        let expression = function.call(&[parse!("c"), parse!("a")][..]);
+        for (body, capture_count) in [
+            ("b", 1),
+            ("y", 0),
+            ("7", 0),
+            ("if(b, sin(y) + d*y^b + 1/y, d)", 2),
+            ("symbolica::sub_eval::compact_external(y)", 0),
+        ] {
+            let build = |policy| {
+                expression
+                    .evaluator(&params)
+                    .add_function_with_options(
+                        function,
+                        vec![symbol!("y"), symbol!("unused_arg")],
+                        parse!(body),
+                        FunctionRegistrationOptions::new().inlining(policy),
+                    )
+                    .unwrap()
+                    .horner_iterations(0)
+                    .build()
+                    .unwrap()
+                    .map_coeff(&|c| c.re.to_f64())
+            };
+            let mut evaluator = build(InliningPolicy::Never);
+            let mut inlined = build(InliningPolicy::Always);
+            let sub = evaluator
+                .external_fns
+                .iter()
+                .find(|e| e.symbol == function)
+                .unwrap()
+                .body
+                .as_ref()
+                .unwrap();
+            // Keep unused explicit arguments and discover only referenced globals.
+            // The enclosing y must be shadowed by the explicit y.
+            assert_eq!(
+                sub.param_count,
+                capture_count + 2 + evaluator.get_constants().len()
+            );
+            for inputs in [[11., 2., 3., 5., 100.], [11., 0., 3., 5., 200.]] {
+                assert_eq!(
+                    evaluator.evaluate_single(&inputs),
+                    inlined.evaluate_single(&inputs),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_reuses_body_across_scopes() {
+        let q = symbol!("symbolica::pure_scope::q");
+        let g = symbol!("symbolica::pure_scope::g");
+        let f = symbol!("symbolica::pure_scope::f");
+        let expressions = [
+            parse!("symbolica::pure_scope::g()"),
+            parse!("symbolica::pure_scope::f(x) + x"),
+        ];
+        for policy in [InliningPolicy::Always, InliningPolicy::Never] {
+            for reverse in [false, true] {
+                let mut expressions = expressions.clone();
+                if reverse {
+                    expressions.reverse();
+                }
+                let evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+                    .add_function(q, Vec::<crate::atom::Symbol>::new(), Atom::num(1))
+                    .unwrap()
+                    .add_function_with_options(
+                        f,
+                        vec![q],
+                        parse!("symbolica::pure_scope::g()"),
+                        FunctionRegistrationOptions::new().inlining(policy),
+                    )
+                    .unwrap()
+                    .add_function_with_options(
+                        g,
+                        Vec::<crate::atom::Symbol>::new(),
+                        parse!("symbolica::pure_scope::q + 1"),
+                        FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                let sub = evaluator
+                    .external_fns
+                    .iter()
+                    .find(|e| e.symbol == g)
+                    .unwrap()
+                    .body
+                    .as_ref()
+                    .unwrap();
+                // q resolves to its registered definition in both calling scopes.
+                assert_eq!(sub.param_count, 1);
+                let mut evaluator = evaluator.map_coeff(&|c| c.re.to_f64());
+                let expected = if reverse { [5., 2.] } else { [2., 5.] };
+                let mut output = [0.; 2];
+                evaluator.evaluate(&[3.], &mut output);
+                assert_eq!(output, expected);
+                #[cfg(feature = "native_code_generation")]
+                {
+                    let mut compiled = evaluator
+                        .jit_compile(JITCompilationSettings::default())
+                        .unwrap();
+                    compiled.evaluate(&[3.], &mut output);
+                    assert_eq!(output, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_resolves_capture_alias_with_explicit_arguments() {
+        let mut evaluator = parse!("symbolica::pure_alias::g(x)")
+            .evaluator(&[parse!("x"), parse!("symbolica::pure_alias::y")])
+            .add_aliases([(
+                parse!("symbolica::pure_alias::q"),
+                parse!("symbolica::pure_alias::y^2"),
+            )])
+            .unwrap()
+            .add_function_with_options(
+                symbol!("symbolica::pure_alias::g"),
+                vec![symbol!("symbolica::pure_alias::y")],
+                parse!("symbolica::pure_alias::q + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        assert_eq!(evaluator.evaluate_single(&[3., 100.]), 10.);
+    }
+
+    #[test]
+    fn non_inlined_function_ignores_caller_function_parameters() {
+        let q = crate::atom::Indeterminate::try_from(parse!("symbolica::pure_fun_capture::q(1)"))
+            .unwrap();
+        let expressions = [
+            parse!("symbolica::pure_fun_capture::g()"),
+            parse!("symbolica::pure_fun_capture::f(x)"),
+        ];
+        let mut evaluator = Atom::evaluator_multiple(&expressions, &[parse!("x")])
+            .add_function(q.clone(), Vec::<crate::atom::Symbol>::new(), Atom::num(2))
+            .unwrap()
+            .add_function(
+                symbol!("symbolica::pure_fun_capture::f"),
+                vec![q],
+                parse!("symbolica::pure_fun_capture::g()"),
+            )
+            .unwrap()
+            .add_function_with_options(
+                symbol!("symbolica::pure_fun_capture::g"),
+                Vec::<crate::atom::Symbol>::new(),
+                parse!("symbolica::pure_fun_capture::q(1) + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 2];
+        evaluator.evaluate(&[5.], &mut output);
+        assert_eq!(output, [3., 3.]);
+    }
+
+    #[test]
+    fn non_inlined_function_reuses_body_for_repeated_nested_calls() {
+        let depth = 24;
+        let functions = (0..depth)
+            .map(|i| symbol!(format!("symbolica::pure_repeated::f{i}")))
+            .collect::<Vec<_>>();
+        let y = symbol!("symbolica::pure_repeated::y");
+        let mut fn_map = FunctionMap::new();
+        for i in 0..depth {
+            let argument = Atom::var(y);
+            let body = if i + 1 == depth {
+                argument
+            } else {
+                functions[i + 1].call((&argument,))
+                    + functions[i + 1].call((argument + Atom::num(1),))
+            };
+            fn_map
+                .add_function_with_options(
+                    functions[i],
+                    vec![y],
+                    body,
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap();
+        }
+        let evaluator = functions[0]
+            .call((parse!("x"),))
+            .evaluator(&[parse!("x")])
+            .function_map(fn_map)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        // The expanded call tree has millions of nodes, but there are only `depth` bodies.
+        // Inspect the stored bodies without executing that exponentially large call tree.
+        assert_eq!(evaluator.external_fns.len(), depth);
+        for (i, external) in evaluator.external_fns.iter().enumerate() {
+            assert_eq!(external.symbol, functions[depth - i - 1]);
+            let sub = external.body.as_ref().unwrap();
+            assert_eq!(
+                sub.instructions
+                    .iter()
+                    .filter(|(i, _)| matches!(i, super::Instr::ExternalFun(..)))
+                    .count(),
+                if i == 0 { 0 } else { 2 }
+            );
+            for (instruction, _) in &sub.instructions {
+                if let super::Instr::ExternalFun(_, target, _) = instruction {
+                    assert!(*target < i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_hoists_external_constants_without_changing_call_indices() {
+        let _ = symbol!(
+            "symbolica::pure_external::h",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0] + 2.)
+        );
+        let mut evaluator =
+            parse!("symbolica::pure_external::g(x) + symbolica::pure_external::g(x+1)")
+                .evaluator(&[parse!("x")])
+                .add_function_with_options(
+                    symbol!("symbolica::pure_external::g"),
+                    vec![symbol!("y")],
+                    parse!("symbolica::pure_external::h(0) + symbolica::pure_external::h(y)"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map_coeff(&|c| c.re.to_f64());
+        assert_eq!(evaluator.evaluate_single(&[3.]), 15.);
+    }
+
+    #[test]
+    fn non_inlined_recursive_function_returns_error() {
+        for body in [
+            "symbolica::pure_recursive::f()",
+            "symbolica::pure_recursive::q",
+        ] {
+            let result = parse!("symbolica::pure_recursive::f()")
+                .evaluator(&Vec::<Atom>::new())
+                .add_aliases([(
+                    parse!("symbolica::pure_recursive::q"),
+                    parse!("symbolica::pure_recursive::f()"),
+                )])
+                .unwrap()
+                .add_function_with_options(
+                    symbol!("symbolica::pure_recursive::f"),
+                    Vec::<crate::atom::Symbol>::new(),
+                    parse!(body),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build();
+            assert!(matches!(
+                result,
+                Err(EvaluationError::EvaluatorConstructionFailed { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_requires_declared_arguments_when_used_as_a_variable() {
+        let function = symbol!("symbolica::pure_missing_arg::f");
+        let result = Atom::var(function)
+            .evaluator(&[parse!("y")])
+            .add_function_with_options(
+                function,
+                vec![symbol!("y")],
+                parse!("y + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build();
+        assert!(
+            matches!(result, Err(EvaluationError::WrongNumberOfArguments {
+            function: found, expected: 1, actual: 0,
+        }) if found == function)
+        );
+    }
+
+    #[test]
+    fn non_inlined_alias_recursion_cannot_be_broken_by_caller_bindings() {
+        let result = parse!("symbolica::pure_bound_capture::g()")
+            .evaluator(&Vec::<Atom>::new())
+            .add_aliases([(
+                parse!("symbolica::pure_bound_capture::q"),
+                parse!("symbolica::pure_bound_capture::f(2)"),
+            )])
+            .unwrap()
+            .add_function(
+                symbol!("symbolica::pure_bound_capture::f"),
+                vec![symbol!("symbolica::pure_bound_capture::q")],
+                parse!("symbolica::pure_bound_capture::g()"),
+            )
+            .unwrap()
+            .add_function_with_options(
+                symbol!("symbolica::pure_bound_capture::g"),
+                Vec::<crate::atom::Symbol>::new(),
+                parse!("symbolica::pure_bound_capture::q + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build();
+        assert!(matches!(
+            result,
+            Err(EvaluationError::EvaluatorConstructionFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn function_registration_options_control_inlining() {
+        let never = symbol!("symbolica::sub_eval::options_never");
+        let always = symbol!("symbolica::sub_eval::options_always");
+        let auto = symbol!("symbolica::sub_eval::options_auto");
+        let evaluator = parse!(
+            "symbolica::sub_eval::options_never(x) + symbolica::sub_eval::options_always(x) + symbolica::sub_eval::options_auto(x)"
+        )
+        .evaluator(&[parse!("x")])
+        .add_function_with_options(
+            never,
+            vec![symbol!("y")],
+            parse!("y^2 + 1"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+        )
+        .unwrap()
+        .add_function_with_options(
+            always,
+            vec![symbol!("y")],
+            parse!("2*y"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Always),
+        )
+        .unwrap()
+        .add_function_with_options(
+            auto,
+            vec![symbol!("y")],
+            parse!("y + 3"),
+            FunctionRegistrationOptions::new().inlining(InliningPolicy::Auto),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(evaluator.external_fns.len(), 1);
+        assert_eq!(evaluator.external_fns[0].symbol, never);
+        assert!(evaluator.external_fns[0].body.is_some());
+
+        let mut evaluator = evaluator.map_coeff(&|coefficient| coefficient.re.to_f64());
+        let mut out = [0.];
+        evaluator.evaluate(&[2.], &mut out);
+        assert_eq!(out, [14.]);
+    }
+
+    #[cfg(feature = "bincode")]
+    #[test]
+    fn function_registration_options_can_be_serialized() {
+        let options = FunctionRegistrationOptions::new().inlining(InliningPolicy::Auto);
+        let bytes = bincode::encode_to_vec(&options, bincode::config::standard()).unwrap();
+        let (decoded, _) = bincode::decode_from_slice::<FunctionRegistrationOptions, _>(
+            &bytes,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!(decoded, options);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_non_inlined_function_registered_with_options() {
+        let function = symbol!("symbolica::sub_eval::jit_options");
+        let evaluator =
+            parse!("symbolica::sub_eval::jit_options(x) + symbolica::sub_eval::jit_options(x + 1)")
+                .evaluator(&[parse!("x")])
+                .add_function_with_options(
+                    function,
+                    vec![symbol!("y")],
+                    parse!("y^2 + 2"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .map_coeff(&|coefficient| coefficient.re.to_f64());
+
+        let mut compiled = evaluator
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [0.];
+        compiled.evaluate(&[3.], &mut out);
+        assert_eq!(out, [29.]);
+        compiled.evaluate(&[5.], &mut out);
+        assert_eq!(out, [65.]);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_nested_sub_evaluators() {
+        let evaluator = parse!("symbolica::sub_eval::jit_f(x) + 1")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::jit_g"),
+                vec![symbol!("z")],
+                parse!("z^2 + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .add_function_with_options(
+                symbol!("symbolica::sub_eval::jit_f"),
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::jit_g(y)*y + 5"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(
+            evaluator
+                .external_fns
+                .iter()
+                .all(|external| { external.body.is_some() && external.imp.is_none() })
+        );
+
+        let mut compiled = evaluator
+            .jit_compile::<f64>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [0.];
+        compiled.evaluate(&[3.], &mut out);
+        assert_eq!(out, [39.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[4.], &mut out);
+            assert_eq!(out, [78.]);
+        }
+
+        let mut compiled = evaluator
+            .jit_compile::<Complex<f64>>(JITCompilationSettings::default())
+            .unwrap();
+        let mut out = [Complex::new(0., 0.)];
+        compiled.evaluate(&[Complex::new(3., 1.)], &mut out);
+        assert_eq!(out, [Complex::new(30., 28.)]);
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn jit_compiles_repeated_nested_sub_evaluator_calls() {
+        let mut fn_map = FunctionMap::new();
+        fn_map
+            .add_function_with_options(
+                symbol!("f"),
+                vec![symbol!("y")],
+                parse!("3 + y^2 + g(y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+        fn_map
+            .add_function_with_options(
+                symbol!("g"),
+                vec![symbol!("z")],
+                parse!("z"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap();
+
+        let evaluator = parse!("f(x) + f(2)")
+            .evaluator(&[parse!("x")])
+            .function_map(fn_map)
+            .build()
+            .unwrap();
+
+        let mut evaluator = evaluator.map_coeff(&|x| x.to_real().unwrap().into());
+        let mut out = [0.];
+        evaluator.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        let mut compiled = evaluator
+            .jit_compile(JITCompilationSettings::default())
+            .unwrap();
+        compiled.evaluate(&[5.], &mut out);
+        assert_eq!(out, [42.]);
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&compiled, bincode::config::standard()).unwrap();
+            let (mut decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::JITCompiledEvaluator<f64>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            decoded.evaluate(&[7.], &mut out);
+            assert_eq!(out, [68.]);
+        }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn cpp_asm_export_includes_nested_sub_evaluators() {
+        fn assert_asm_wrapper(source: &str, name: &str, number_type: &str) {
+            let signature = format!("__attribute__((noinline)) {number_type} {name}(");
+            let start = source
+                .find(&signature)
+                .unwrap_or_else(|| panic!("missing sub-evaluator wrapper '{signature}'"));
+            let body = &source[start..];
+            let end = body
+                .find("\n}\n")
+                .expect("sub-evaluator wrapper should have a function body");
+            assert!(
+                body[..end].contains("__asm__("),
+                "sub-evaluator '{name}' should contain inline ASM"
+            );
+        }
+
+        let f = symbol!("non_inlined_functions::f");
+        let g = symbol!("non_inlined_functions::g");
+        let evaluator = parse!("non_inlined_functions::f(x)")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                g,
+                vec![symbol!("z")],
+                parse!("z*z + 2"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .add_function_with_options(
+                f,
+                vec![symbol!("y")],
+                parse!("non_inlined_functions::g(y) + y*y + 1"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let (f_index, _) = evaluator
+            .external_fns
+            .iter()
+            .enumerate()
+            .find(|(_, external)| external.symbol == f)
+            .unwrap();
+        let f_name =
+            super::ExpressionEvaluator::external_cpp_name(&evaluator.external_fns, f_index);
+        let (g_index, _) = evaluator
+            .external_fns
+            .iter()
+            .enumerate()
+            .find(|(_, external)| external.symbol == g)
+            .unwrap();
+        let g_name =
+            super::ExpressionEvaluator::external_cpp_name(&evaluator.external_fns, g_index);
+        assert_eq!(f_name, "f_1");
+        assert_eq!(g_name, "g_0");
+
+        let settings = ExportSettings::new().inline_asm(InlineASM::X64);
+        let real_source = evaluator
+            .export_cpp_str::<f64>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&real_source, &f_name, "double");
+        assert_asm_wrapper(&real_source, &g_name, "double");
+
+        let complex_source = evaluator
+            .export_cpp_str::<Complex<f64>>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&complex_source, &f_name, "std::complex<double>");
+        assert_asm_wrapper(&complex_source, &g_name, "std::complex<double>");
+
+        let simd_source = evaluator
+            .export_cpp_str::<wide::f64x4>("asm_sub_evaluator", settings.clone())
+            .unwrap();
+        assert_asm_wrapper(&simd_source, &f_name, "simd");
+        assert_asm_wrapper(&simd_source, &g_name, "simd");
+
+        let complex_simd_source = evaluator
+            .export_cpp_str::<Complex<wide::f64x4>>("asm_sub_evaluator", settings)
+            .unwrap();
+        assert_asm_wrapper(&complex_simd_source, &f_name, "simd");
+        assert_asm_wrapper(&complex_simd_source, &g_name, "simd");
+    }
+
+    #[test]
+    fn exported_sub_evaluator_preserves_external_calls() {
+        let external = symbol!(
+            "symbolica::sub_eval::exported_external",
+            eval = EvaluationInfo::new().register(|args: &[f64]| args[0] + 1.)
+        );
+        let wrapper = symbol!("symbolica::sub_eval::external_wrapper");
+        let evaluator = parse!("symbolica::sub_eval::external_wrapper(x)")
+            .evaluator(&[parse!("x")])
+            .add_function_with_options(
+                wrapper,
+                vec![symbol!("y")],
+                parse!("symbolica::sub_eval::exported_external(y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let exported = evaluator.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let wrapper = &exported.sub_evaluators[0].instructions;
+        assert!(wrapper.sub_evaluators.is_empty());
+        let (symbol, tags, _) = wrapper
+            .instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                Instruction::Fun(_, function, _) => Some(function.as_ref()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(*symbol, external);
+        assert!(tags.is_empty());
     }
 
     #[test]
@@ -367,6 +1391,7 @@ mod test {
         assert!((exported.constants[0] - numerical).abs() / numerical < f64::EPSILON);
     }
 
+    #[cfg(feature = "native_code_generation")]
     #[test]
     fn export_cpp_includes_evaluation_info_snippet() {
         let _ = symbol!(
@@ -389,6 +1414,7 @@ mod test {
         assert!(code.contains("cpp_external(params[0])"));
     }
 
+    #[cfg(feature = "native_code_generation")]
     #[test]
     fn jit_compile() {
         use crate::parse;

@@ -13,20 +13,25 @@
 //!
 //! An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 //! Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+//! Rings with a meaningful random distribution can separately implement [`SampleableRing`].
 pub mod backend;
 pub mod dual;
 pub mod finite_field;
 pub mod float;
 pub mod integer;
+mod polynomial_layouts;
 pub mod rational;
 
 use std::borrow::Borrow;
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::hash::Hash;
-use std::ops::{Add, Deref, Div, Mul, Sub};
+use std::ops::{Add, Deref, Div, Mul, RangeInclusive, Sub};
 
-use integer::Integer;
+use rand_core::RngCore;
 
+use integer::{Integer, Z};
+
+use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 /// The internal ordering trait is used to compare elements of a ring.
@@ -148,6 +153,7 @@ pub trait RingOps<T>: Set {
 ///
 /// An extension of the ring trait is the [`EuclideanDomain`] trait, which adds the ability to compute remainders, quotients, and gcds.
 /// Another extension is the [`Field`] trait, which adds the ability to divide and invert elements.
+/// Random sampling is provided separately by [`SampleableRing`].
 pub trait Ring:
     Set + RingOps<<Self as Set>::Element> + for<'a> RingOps<&'a <Self as Set>::Element>
 {
@@ -155,8 +161,53 @@ pub trait Ring:
     fn zero(&self) -> Self::Element;
     /// Return the multiplicative identity `1`.
     fn one(&self) -> Self::Element;
-    /// Return the nth element by computing `n * 1`.
+
+    /// Add owned elements, returning zero for an empty iterator.
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        let mut elements = elements.into_iter();
+        let Some(mut sum) = elements.next() else {
+            return self.zero();
+        };
+        for element in elements {
+            self.add_assign(&mut sum, element);
+        }
+        sum
+    }
+
+    /// Embed the integer `n` as `n * 1`.
+    ///
+    /// In a field extension, the result lies in its prime subfield.
     fn nth(&self, n: Integer) -> Self::Element;
+    /// Uniformly sample a small integer from an inclusive range and embed it in this ring.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is empty.
+    #[inline]
+    fn sample_small_integer<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        range: RangeInclusive<i64>,
+    ) -> Self::Element {
+        let (lower, upper) = range.into_inner();
+        self.sample_integer(rng, lower.into()..=upper.into())
+    }
+    /// Uniformly sample an arbitrary-precision integer from an inclusive range
+    /// and embed it in this ring.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is empty.
+    fn sample_integer<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        range: RangeInclusive<Integer>,
+    ) -> Self::Element {
+        self.nth(Z.sample(rng, &range))
+    }
     /// Return `b` raised to the power of `e`.
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element;
     /// Return `true` iff `a` is the additive identity `0`.
@@ -179,7 +230,45 @@ pub trait Ring:
     /// For example, in [Z](type@integer::Z), `4/2` is possible but `3/2` is not.
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element>;
 
-    fn sample(&self, rng: &mut impl rand::RngCore, range: (i64, i64)) -> Self::Element;
+    /// Divide an owned numerator exactly, allowing implementations to reuse its storage.
+    #[inline]
+    fn try_div_owned(&self, a: Self::Element, b: &Self::Element) -> Option<Self::Element> {
+        self.try_div(&a, b)
+    }
+
+    /// Divide an owned numerator that is known to be exactly divisible by `b`.
+    ///
+    /// Specialized domains can use a faster exact-division primitive that omits remainder
+    /// construction and validation.
+    #[inline]
+    fn exact_div_owned(&self, a: Self::Element, b: &Self::Element) -> Self::Element {
+        self.try_div_owned(a, b)
+            .expect("exact division produced a remainder")
+    }
+
+    /// Return coefficient-domain-specific bulk operation kernels.
+    ///
+    /// Algorithms query the relevant capability once per bulk operation; its implementation
+    /// performs the inner coefficient loop.
+    #[inline]
+    fn kernels(&self) -> RingKernels<'_, Self::Element> {
+        RingKernels::empty()
+    }
+
+    /// Subtract several coefficient products from one accumulator.
+    ///
+    /// Domains with tagged or multiprecision elements can override this to select the
+    /// accumulator representation once for the entire chain.
+    #[inline]
+    fn sub_mul_assign_many<'a, I>(&self, accumulator: &mut Self::Element, products: I)
+    where
+        Self::Element: 'a,
+        I: IntoIterator<Item = (&'a Self::Element, &'a Self::Element)>,
+    {
+        for (left, right) in products {
+            self.sub_mul_assign(accumulator, left, right);
+        }
+    }
 
     /// Format a ring element with custom [PrintOptions] and [PrintState].
     fn format<W: std::fmt::Write>(
@@ -235,10 +324,132 @@ pub trait Ring:
     }
 }
 
+/// A ring whose elements can be sampled according to a ring-specific policy.
+pub trait SampleableRing: Ring {
+    /// Configuration that defines the distribution over ring elements.
+    type SamplingPolicy;
+
+    /// Sample an element according to `policy`.
+    fn sample<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element;
+
+    /// Sample according to `policy`, conditioned on the result being nonzero.
+    ///
+    /// The policy must give nonzero elements positive probability.
+    ///
+    /// ```
+    /// use numerica::domains::{Ring, SampleableRing, finite_field::Zp};
+    /// let field = Zp::new(17);
+    /// let value = field.sample_nonzero(&mut rand::rng(), &Default::default());
+    /// assert!(!field.is_zero(&value));
+    /// ```
+    fn sample_nonzero<R: RngCore + ?Sized>(
+        &self,
+        rng: &mut R,
+        policy: &Self::SamplingPolicy,
+    ) -> Self::Element {
+        loop {
+            let sample = self.sample(rng, policy);
+            if !self.is_zero(&sample) {
+                return sample;
+            }
+        }
+    }
+}
+
+/// A finite ring whose elements can be sampled uniformly.
+pub trait UniformlySampleableRing: SampleableRing {
+    /// Return a policy that gives every ring element equal probability.
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy;
+
+    /// Uniformly sample any element, including zero.
+    fn sample_uniform<R: RngCore + ?Sized>(&self, rng: &mut R) -> Self::Element {
+        self.sample(rng, &self.uniform_sampling_policy())
+    }
+
+    /// Uniformly sample a nonzero element.
+    ///
+    /// The ring must contain at least one nonzero element.
+    fn sample_uniform_nonzero<R: RngCore + ?Sized>(&self, rng: &mut R) -> Self::Element {
+        self.sample_nonzero(rng, &self.uniform_sampling_policy())
+    }
+}
+
+/// A ring equipped with a total order compatible with its ring operations.
+pub trait OrderedRing: Ring {
+    /// Compare two elements in the ring's mathematical order.
+    fn cmp(&self, a: &Self::Element, b: &Self::Element) -> std::cmp::Ordering;
+
+    /// Compare an element with zero.
+    ///
+    /// [`std::cmp::Ordering::Less`] denotes a negative element,
+    /// [`std::cmp::Ordering::Equal`] zero, and
+    /// [`std::cmp::Ordering::Greater`] a positive element.
+    fn sign(&self, a: &Self::Element) -> std::cmp::Ordering {
+        self.cmp(a, &self.zero())
+    }
+}
+
+/// A ring with a distinguished embedding for which real comparisons can be
+/// attempted.
+///
+/// Unlike [`OrderedRing`], this trait does not assert that every pair of ring
+/// elements is comparable. Comparison may fail, for example when an element
+/// has a non-real image or when an implementation cannot certify its sign.
+pub trait RealEmbedding: Ring {
+    /// The error returned when a real comparison cannot be established.
+    type Error;
+
+    /// Try to compare an element's image with zero.
+    ///
+    /// [`std::cmp::Ordering::Less`] denotes a negative image,
+    /// [`std::cmp::Ordering::Equal`] zero, and
+    /// [`std::cmp::Ordering::Greater`] a positive image.
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error>;
+
+    /// Try to compare the images of two elements.
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        self.try_sign(&self.sub(a, b))
+    }
+}
+
+impl<R: OrderedRing> RealEmbedding for R {
+    type Error = std::convert::Infallible;
+
+    fn try_sign(&self, a: &Self::Element) -> Result<std::cmp::Ordering, Self::Error> {
+        Ok(OrderedRing::sign(self, a))
+    }
+
+    fn try_cmp(
+        &self,
+        a: &Self::Element,
+        b: &Self::Element,
+    ) -> Result<std::cmp::Ordering, Self::Error> {
+        Ok(OrderedRing::cmp(self, a, b))
+    }
+}
+
 /// A Euclidean domain is a ring that supports division with remainder, quotients, and gcds.
 pub trait EuclideanDomain: Ring {
     fn rem(&self, a: &Self::Element, b: &Self::Element) -> Self::Element;
     fn quot_rem(&self, a: &Self::Element, b: &Self::Element) -> (Self::Element, Self::Element);
+
+    /// Divide an owned numerator, allowing implementations to reuse its storage.
+    #[inline]
+    fn quot_rem_owned(
+        &self,
+        a: Self::Element,
+        b: &Self::Element,
+    ) -> (Self::Element, Self::Element) {
+        self.quot_rem(&a, b)
+    }
 
     fn quot(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         self.quot_rem(a, b).0
@@ -541,7 +752,63 @@ pub trait Derivable: Ring {
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{Field, Ring, rational::Q};
+    use rand::SeedableRng;
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    use crate::domains::{
+        Field, Ring, SampleableRing,
+        integer::{Integer, Z},
+        rational::{Q, Rational},
+    };
+
+    #[test]
+    fn ring_sum_uses_the_identity_and_owned_elements() {
+        assert_eq!(Z.sum([]), Integer::from(0));
+        assert_eq!(Z.sum([Integer::from(7)]), Integer::from(7));
+        let values = [(1, 2), (2, 3), (3, 4)].map(Rational::from);
+        assert_eq!(Q.sum(values), Rational::from((23, 12)));
+    }
+
+    #[test]
+    fn small_integer_sampling_is_available_for_every_ring() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(1);
+        for _ in 0..100 {
+            let value = Q.sample_small_integer(&mut rng, -4..=7);
+            assert_eq!(value.denominator_ref(), &Z.one());
+            assert!((-4..=7).contains(&value.numerator_ref().to_i64().unwrap()));
+        }
+    }
+
+    #[test]
+    fn integer_ring_sampling_uses_its_policy() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(2);
+        let policy = Integer::from(5)..=Integer::from(9);
+        for _ in 0..100 {
+            assert!((5..=9).contains(&Z.sample(&mut rng, &policy).to_i64().unwrap()));
+        }
+    }
+
+    #[test]
+    fn samples_arbitrary_precision_integer_ranges() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(3);
+        let magnitude = Integer::one() << 200u32;
+        let lower = -&magnitude + Integer::from(17);
+        let upper = &magnitude + Integer::from(23);
+
+        for _ in 0..100 {
+            let value = Z.sample_integer(&mut rng, lower.clone()..=upper.clone());
+            assert!(
+                value >= lower && value <= upper,
+                "sample {value} is outside {lower}..={upper}"
+            );
+        }
+
+        let singleton = Integer::one() << 256u32;
+        assert_eq!(
+            Z.sample_integer(&mut rng, singleton.clone()..=singleton.clone()),
+            singleton
+        );
+    }
 
     #[test]
     fn linear_recurrence() {

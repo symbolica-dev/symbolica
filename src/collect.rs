@@ -8,8 +8,18 @@ use numerica::domains::{
 use crate::{
     atom::{Add, Atom, AtomCore, AtomOrView, AtomView, Indeterminate, Symbol},
     coefficient::{Coefficient, CoefficientView},
-    domains::{algebraic_number::AlgebraicExtension, float::FloatLike, integer::Z, rational::Q},
-    poly::{Exponent, factor::Factorize, polynomial::MultivariatePolynomial},
+    domains::{
+        algebraic::AlgebraicExtension,
+        float::FloatLike,
+        integer::Z,
+        rational::Q,
+        rational_polynomial::{
+            FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
+        },
+    },
+    poly::{
+        Exponent, PolynomialConversionError, factor::Factorize, polynomial::MultivariatePolynomial,
+    },
     state::Workspace,
     utils::Settable,
 };
@@ -117,11 +127,7 @@ impl<'a> AtomView<'a> {
                 let mut handle = workspace.new_atom();
                 let mut set = Settable::from(handle.deref_mut());
                 key_map(key, &mut set);
-                if set.is_set() {
-                    mul.extend(handle.as_view());
-                } else {
-                    mul.extend(key);
-                }
+                mul.extend(set.as_view_or(key));
             } else {
                 mul.extend(key);
             }
@@ -130,11 +136,7 @@ impl<'a> AtomView<'a> {
                 let mut handle = workspace.new_atom();
                 let mut set = Settable::from(handle.deref_mut());
                 coeff_map(coeff.as_view(), &mut set);
-                if set.is_set() {
-                    mul.extend(handle.as_view());
-                } else {
-                    mul.extend(coeff.as_view());
-                }
+                mul.extend(set.as_view_or(coeff.as_view()));
             } else {
                 mul.extend(coeff.as_view());
             }
@@ -157,13 +159,25 @@ impl<'a> AtomView<'a> {
             .map(|x| x.as_atom_view().to_owned().try_into().unwrap())
             .collect::<Vec<_>>();
 
-        let p = self.to_polynomial_in_vars::<E>(&Arc::new(vars));
+        // Coefficients can contain opaque functions; an unresolved identity must
+        // not cause collection to discard them.
+        let p = self.to_polynomial_in_vars_with_field::<E>(
+            &Arc::new(vars),
+            &crate::domains::atom::AtomField {
+                statistical_zero_test: false,
+                ..crate::domains::atom::AtomField::new()
+            },
+        );
 
         let mut coeffs = vec![];
         for t in p.into_iter() {
             let mut key = Atom::num(1);
 
             for (p, v) in t.exponents.iter().zip(xs) {
+                if p.is_zero() {
+                    continue;
+                }
+
                 let mut pow = Atom::new();
                 pow.to_pow(v.as_atom_view(), Atom::num(p.to_i32() as i64).as_view());
                 key *= pow;
@@ -257,37 +271,73 @@ impl<'a> AtomView<'a> {
     /// Write the expression over a common denominator.
     pub fn together_into(&self, out: &mut Atom) {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
-            if let Ok(p) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
-                let num = p.numerator.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
-
-                let den = p.denominator.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
-
-                *out = num.to_expression() / den.to_expression();
-                return;
-            } else {
+            let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&f, &f, None);
+            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
                 out.set_from_view(self);
+                return;
             }
-        } else if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) {
-            poly.to_expression_into(out);
-            return;
+            if let Ok(p) = poly {
+                let num = Atom::num(Complex::new(
+                    p.numer_coeff.poly.get_constant(),
+                    p.numer_coeff
+                        .poly
+                        .coefficient(&[1])
+                        .unwrap_or(Rational::zero()),
+                )) * p
+                    .numerator
+                    .map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        f2.clone(),
+                    )
+                    .to_expression();
+
+                let mut den = Atom::num(Complex::new(
+                    p.denom_coeff.poly.get_constant(),
+                    p.denom_coeff
+                        .poly
+                        .coefficient(&[1])
+                        .unwrap_or(Rational::zero()),
+                ));
+                for (x, e) in p.denominators {
+                    let d = x.map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        f2.clone(),
+                    );
+                    den *= d.to_expression().pow(e);
+                }
+
+                *out = num / den;
+                return;
+            }
+        } else {
+            let poly = self.try_to_factorized_rational_polynomial::<_, _, u32>(&Q, &Z, None);
+            if matches!(&poly, Err(PolynomialConversionError::ZeroDenominator { .. })) {
+                out.set_from_view(self);
+                return;
+            }
+            if let Ok(poly) = poly {
+                let num = Atom::num(poly.numer_coeff) * poly.numerator.to_expression();
+
+                let mut den = Atom::num(poly.denom_coeff);
+                for (x, e) in poly.denominators {
+                    den *= x.to_expression().pow(e);
+                }
+
+                *out = num / den;
+                return;
+            }
         }
 
         // expression contains floats or cannot be converted to rational polynomial for other reasons
@@ -384,7 +434,21 @@ impl<'a> AtomView<'a> {
     /// Write the expression as a sum of terms with minimal denominators.
     pub fn apart_with_ws_into(&self, x: &Indeterminate, ws: &Workspace, out: &mut Atom) {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            macro_rules! map_coeff {
+                ($p: expr, $f: expr) => {
+                    $p.map_coeff(
+                        |c| {
+                            Complex::new(
+                                c.poly.get_constant(),
+                                c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                            )
+                        },
+                        $f.clone(),
+                    )
+                };
+            }
+
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
                 if let Some(v) = poly.get_variables().iter().position(|v| v == x) {
@@ -392,31 +456,30 @@ impl<'a> AtomView<'a> {
                     let add = a.to_add();
 
                     let mut numa = ws.new_atom();
+                    let mut num_dena = ws.new_atom();
                     let mut dena = ws.new_atom();
-                    for x in poly.apart(v) {
-                        let num = x.numerator.map_coeff(
-                            |c| {
-                                Complex::new(
-                                    c.poly.get_constant(),
-                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                                )
-                            },
-                            f2.clone(),
-                        );
-
-                        let den = x.denominator.map_coeff(
-                            |c| {
-                                Complex::new(
-                                    c.poly.get_constant(),
-                                    c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                                )
-                            },
-                            f2.clone(),
-                        );
+                    let mut den_dena = ws.new_atom();
+                    for (numerator, denominator, exponent) in poly.apart_factored_denominators(v) {
+                        let num = map_coeff!(numerator.numerator, f2);
+                        let num_den = map_coeff!(numerator.denominator, f2);
+                        let den = map_coeff!(denominator.numerator, f2);
+                        let den_den = map_coeff!(denominator.denominator, f2);
 
                         num.to_expression_into(&mut numa);
+                        num_den.to_expression_into(&mut num_dena);
                         den.to_expression_into(&mut dena);
-                        add.extend(numa.as_view().div(dena.as_view()).as_view());
+                        den_den.to_expression_into(&mut den_dena);
+
+                        let numerator = numa.as_view().div_no_norm(ws, num_dena.as_view());
+                        let denominator = dena.as_view().div_no_norm(ws, den_dena.as_view());
+                        let exponent = ws.new_num(Integer::from(exponent));
+                        let denominator = denominator.as_view().pow_no_norm(ws, exponent.as_view());
+                        add.extend(
+                            numerator
+                                .as_view()
+                                .div_no_norm(ws, denominator.as_view())
+                                .as_view(),
+                        );
                     }
 
                     add.as_view().normalize(ws, out);
@@ -431,10 +494,19 @@ impl<'a> AtomView<'a> {
                 let mut a = ws.new_atom();
                 let add = a.to_add();
 
-                let mut a = ws.new_atom();
-                for x in poly.apart(v) {
-                    x.to_expression_into(&mut a);
-                    add.extend(a.as_view());
+                let mut numa = ws.new_atom();
+                let mut dena = ws.new_atom();
+                for (numerator, denominator, exponent) in poly.apart_factored_denominators(v) {
+                    numerator.to_expression_into(&mut numa);
+                    denominator.to_expression_into(&mut dena);
+
+                    let exponent = ws.new_num(Integer::from(exponent));
+                    let denominator = dena.as_view().pow_no_norm(ws, exponent.as_view());
+                    add.extend(
+                        numa.as_view()
+                            .div_no_norm(ws, denominator.as_view())
+                            .as_view(),
+                    );
                 }
 
                 add.as_view().normalize(ws, out);
@@ -446,21 +518,28 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
-    pub fn apart_multivariate(&self) -> Atom {
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// An empty variable slice decomposes in all variables.
+    pub fn apart_multivariate(&self, variables: &[Indeterminate]) -> Atom {
         let mut out = Atom::new();
 
         Workspace::get_local().with(|ws| {
-            self.apart_multivariate_with_ws_into(ws, &mut out);
+            self.apart_multivariate_with_ws_into(ws, variables, &mut out);
         });
 
         out
     }
 
-    /// Write the expression as a sum of terms with minimal denominators in all variables.
-    pub fn apart_multivariate_with_ws_into(&self, ws: &Workspace, out: &mut Atom) {
-        if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+    /// Write the expression as a sum of terms with minimal denominators in the chosen variables.
+    /// An empty variable slice decomposes in all variables.
+    pub fn apart_multivariate_with_ws_into(
+        &self,
+        ws: &Workspace,
+        variables: &[Indeterminate],
+        out: &mut Atom,
+    ) {
+        if variables.is_empty() && self.has_complex_coefficients() {
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) {
                 let mut a = ws.new_atom();
@@ -498,7 +577,9 @@ impl<'a> AtomView<'a> {
             } else {
                 out.set_from_view(self);
             }
-        } else if let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) {
+        } else if variables.is_empty()
+            && let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None)
+        {
             let mut a = ws.new_atom();
             let add = a.to_add();
 
@@ -506,6 +587,66 @@ impl<'a> AtomView<'a> {
             for x in poly.apart_multivariate() {
                 x.to_expression_into(&mut a);
                 add.extend(a.as_view());
+            }
+
+            add.as_view().normalize(ws, out);
+        } else if !variables.is_empty() {
+            let var_map = Arc::new(
+                variables
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect::<Vec<_>>(),
+            );
+            let Ok(poly) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, Some(var_map))
+            else {
+                out.set_from_view(self);
+                return;
+            };
+
+            let vars = (0..variables.len()).collect::<Vec<_>>();
+            let coefficient_field = RationalPolynomialField::new(Z);
+            let lift_coefficient = |c: &MultivariatePolynomial<_, u32>| {
+                RationalPolynomial::from_num_den(c.clone(), c.one(), &Z, false)
+            };
+
+            let p1 = poly
+                .numerator
+                .to_polynomial_in(&vars)
+                .map_coeff(lift_coefficient, coefficient_field.clone());
+            let p2 = poly
+                .denominator
+                .to_polynomial_in(&vars)
+                .map_coeff(lift_coefficient, coefficient_field.clone());
+
+            let factors = poly
+                .denominator
+                .factor()
+                .into_iter()
+                .map(|(factor, power)| {
+                    (
+                        factor
+                            .to_polynomial_in(&vars)
+                            .map_coeff(lift_coefficient, coefficient_field.clone()),
+                        power,
+                    )
+                })
+                .collect();
+
+            let rp = RationalPolynomial {
+                numerator: p1,
+                denominator: p2,
+            };
+
+            let mut a = ws.new_atom();
+            let add = a.to_add();
+            for part in rp.apart_multivariate_with_factors(factors) {
+                add.extend(
+                    part.to_expression_with_coeff_map(|_, coefficient, out| {
+                        coefficient.to_expression_into(out)
+                    })
+                    .as_view(),
+                );
             }
 
             add.as_view().normalize(ws, out);
@@ -545,7 +686,7 @@ impl<'a> AtomView<'a> {
                 let mut den_changed = vec![];
                 let mut rest = vec![];
 
-                let complex = AlgebraicExtension::new_complex(Q);
+                let complex = AlgebraicExtension::complex(Q);
 
                 for a in m {
                     if let AtomView::Pow(p) = a {
@@ -690,107 +831,112 @@ impl<'a> AtomView<'a> {
     /// Factor the expression over the rationals.
     pub fn factor(&self) -> Atom {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
-            let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
-            let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
-                return self.to_owned();
-            };
-
-            if r.is_zero() {
-                return Atom::num(0);
-            }
-
-            let f_n = r.numerator.factor();
-            let f_d = r.denominator.factor();
-
-            let mut out = Atom::new();
-            let mul = out.to_mul();
-
-            let mut pow = Atom::new();
-            for (k, v) in f_n {
-                let k = k.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
-                if v > 1 {
-                    let exp = Atom::num(v as i64);
-                    pow.to_pow(k.to_expression().as_view(), exp.as_view());
-                    mul.extend(pow.as_view());
-                } else {
-                    mul.extend(k.to_expression().as_view());
-                }
-            }
-
-            for (k, v) in f_d {
-                let k = k.map_coeff(
-                    |c| {
-                        Complex::new(
-                            c.poly.get_constant(),
-                            c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
-                        )
-                    },
-                    f2.clone(),
-                );
-
-                let exp = Atom::num(-(v as i64));
-                pow.to_pow(k.to_expression().as_view(), exp.as_view());
-                mul.extend(pow.as_view());
-            }
-
-            Workspace::get_local().with(|ws| {
-                out.as_view().normalize(ws, &mut pow);
-            });
-
-            pow
-        } else {
-            let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) else {
-                return self.to_owned();
-            };
-
-            if r.is_zero() {
-                return Atom::num(0);
-            }
-
-            let f_n = r.numerator.factor();
-            let f_d = r.denominator.factor();
-
-            let mut out = Atom::new();
-            let mul = out.to_mul();
-
-            let mut pow = Atom::new();
-            for (k, v) in f_n {
-                if v > 1 {
-                    let exp = Atom::num(v as i64);
-                    pow.to_pow(k.to_expression().as_view(), exp.as_view());
-                    mul.extend(pow.as_view());
-                } else {
-                    mul.extend(k.to_expression().as_view());
-                }
-            }
-
-            for (k, v) in f_d {
-                let exp = Atom::num(-(v as i64));
-                pow.to_pow(k.to_expression().as_view(), exp.as_view());
-                mul.extend(pow.as_view());
-            }
-
-            Workspace::get_local().with(|ws| {
-                out.as_view().normalize(ws, &mut pow);
-            });
-
-            pow
+            return self.factor_complex();
         }
+
+        let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&Q, &Z, None) else {
+            return self.to_owned();
+        };
+
+        if r.is_zero() {
+            return Atom::num(0);
+        }
+
+        let f_n = r.numerator.factor();
+        let f_d = r.denominator.factor();
+
+        let mut out = Atom::new();
+        let mul = out.to_mul();
+
+        let mut pow = Atom::new();
+        for (k, v) in f_n {
+            if v > 1 {
+                let exp = Atom::num(v as i64);
+                pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                mul.extend(pow.as_view());
+            } else {
+                mul.extend(k.to_expression().as_view());
+            }
+        }
+
+        for (k, v) in f_d {
+            let exp = Atom::num(-(v as i64));
+            pow.to_pow(k.to_expression().as_view(), exp.as_view());
+            mul.extend(pow.as_view());
+        }
+
+        Workspace::get_local().with(|ws| {
+            out.as_view().normalize(ws, &mut pow);
+        });
+
+        pow
+    }
+
+    /// Factor the expression over complex rationals.
+    pub fn factor_complex(&self) -> Atom {
+        let f = AlgebraicExtension::complex(Q);
+        let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
+        let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
+            return self.to_owned();
+        };
+
+        if r.is_zero() {
+            return Atom::num(0);
+        }
+
+        let f_n = r.numerator.factor();
+        let f_d = r.denominator.factor();
+
+        let mut out = Atom::new();
+        let mul = out.to_mul();
+
+        let mut pow = Atom::new();
+        for (k, v) in f_n {
+            let k = k.map_coeff(
+                |c| {
+                    Complex::new(
+                        c.poly.get_constant(),
+                        c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                    )
+                },
+                f2.clone(),
+            );
+            if v > 1 {
+                let exp = Atom::num(v as i64);
+                pow.to_pow(k.to_expression().as_view(), exp.as_view());
+                mul.extend(pow.as_view());
+            } else {
+                mul.extend(k.to_expression().as_view());
+            }
+        }
+
+        for (k, v) in f_d {
+            let k = k.map_coeff(
+                |c| {
+                    Complex::new(
+                        c.poly.get_constant(),
+                        c.poly.coefficient(&[1]).unwrap_or(Rational::zero()),
+                    )
+                },
+                f2.clone(),
+            );
+
+            let exp = Atom::num(-(v as i64));
+            pow.to_pow(k.to_expression().as_view(), exp.as_view());
+            mul.extend(pow.as_view());
+        }
+
+        Workspace::get_local().with(|ws| {
+            out.as_view().normalize(ws, &mut pow);
+        });
+
+        pow
     }
 
     /// Square-free factor the expression over the rationals.
     pub fn factor_square_free(&self) -> Atom {
         if self.has_complex_coefficients() {
-            let f = AlgebraicExtension::new_complex(Q);
+            let f = AlgebraicExtension::complex(Q);
             let f2 = FloatField::from_rep(Complex::new(Rational::zero(), Rational::one()));
             let Ok(r) = self.try_to_rational_polynomial::<_, _, u32>(&f, &f, None) else {
                 return self.to_owned();
@@ -1049,9 +1195,9 @@ impl<'a> AtomView<'a> {
                 |term, _, out| {
                     term.collect_num_exact_no_norm_impl(ws, out);
 
-                    if out.is_set() {
+                    if let Some(value) = out.get() {
                         let mut n = ws.new_atom();
-                        out.as_view().normalize(ws, &mut n);
+                        value.as_view().normalize(ws, &mut n);
                         std::mem::swap(&mut **out, &mut n);
                     }
                 },
@@ -1082,16 +1228,16 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        let old_len = unique_constants.len();
         unique_constants.retain(|_, v| v.1 != 1);
 
         if unique_constants.is_empty() {
             return;
         }
 
-        let mut outs = vec![(*self, ws.new_atom()); old_len];
+        let mut outs = Vec::with_capacity(unique_constants.len());
         for (k, v) in &mut unique_constants {
-            outs[v.0].0 = *k;
+            v.0 = outs.len();
+            outs.push((*k, ws.new_atom()));
         }
 
         let mut outs_add = outs.iter_mut().map(|x| x.1.to_add()).collect::<Vec<_>>();
@@ -1184,28 +1330,25 @@ impl<'a> AtomView<'a> {
                     subfactors.push(h);
                 }
 
-                let mut first = true;
+                let mut powers = HashMap::default();
                 for f in &subfactors {
                     for (k, v) in f {
-                        if let Some(p) = factors.get_mut(k) {
-                            *p = (*p).min(*v);
-                        } else if first {
-                            factors.insert(k.clone(), *v);
-                        } else {
-                            factors.insert(k.clone(), 0.min(*v));
-                        }
+                        let (power, count) = powers.entry(k).or_insert((*v, 0));
+                        *power = (*power).min(*v);
+                        *count += 1;
                     }
-
-                    first = false;
                 }
 
-                for (ff, p) in &mut *factors {
-                    for f in &subfactors {
-                        if !f.contains_key(ff) {
-                            *p = 0.min(*p)
-                        }
+                for (k, (mut power, count)) in powers {
+                    if count < subfactors.len() {
+                        power = power.min(0);
                     }
+                    if power != 0 {
+                        factors.insert(k.clone(), power);
+                    }
+                }
 
+                for (ff, p) in &*factors {
                     for f in &mut subfactors {
                         if let Some(v) = f.get_mut(ff) {
                             *v -= *p;
@@ -1214,8 +1357,6 @@ impl<'a> AtomView<'a> {
                         }
                     }
                 }
-
-                factors.retain(|_, p| *p != 0);
 
                 // construct the sum factor
                 let mut sum = ws.new_atom();
@@ -1294,68 +1435,6 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Get the lowest positive power of `x` in all the terms in which `x` appears.
-    /// Returns 0 if `x` does not appear in the expression.
-    fn get_lowest_power(&self, x: AtomView) -> Integer {
-        if *self == x {
-            return 1.into();
-        }
-
-        match self {
-            AtomView::Num(_) | AtomView::Var(_) | AtomView::Fun(_) => 0.into(),
-            AtomView::Add(a) => {
-                let mut lowest_power = 0.into();
-                for arg in a {
-                    let p = arg.get_lowest_power(x);
-                    if p > 0 && (lowest_power == 0 || p < lowest_power) {
-                        lowest_power = p;
-
-                        if lowest_power == 1 {
-                            return lowest_power;
-                        }
-                    }
-                }
-
-                lowest_power
-            }
-            AtomView::Mul(m) => {
-                for arg in m {
-                    if arg == x {
-                        return 1.into();
-                    }
-
-                    if let AtomView::Pow(p) = arg
-                        && let (b, e) = p.get_base_exp()
-                        && b == x
-                        && let AtomView::Num(n) = e
-                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                        && ni == 0
-                        && d == 1
-                        && n > 0
-                    {
-                        return n.into();
-                    }
-                }
-
-                0.into()
-            }
-            AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
-                if b == x
-                    && let AtomView::Num(n) = e
-                    && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                    && ni == 0
-                    && d == 1
-                    && n > 0
-                {
-                    n.into()
-                } else {
-                    0.into()
-                }
-            }
-        }
-    }
-
     /// Construct a Horner scheme for the given variables. If no variables are provided,
     /// a heuristically determined near-optimal ordering is used.
     pub(crate) fn horner_scheme<'b>(
@@ -1393,8 +1472,14 @@ impl<'a> AtomView<'a> {
         xs: &[Indeterminate],
         enter_functions: bool,
     ) -> Atom {
+        // map every indeterminate to its position in the ordering, the first position wins
+        let mut index = HashMap::default();
+        for (i, x) in xs.iter().enumerate() {
+            index.entry(x.as_view()).or_insert(i);
+        }
+
         Workspace::get_local().with(|ws| {
-            let r = self.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+            let r = self.horner_scheme_impl_no_norm(ws, xs, &index, 0, enter_functions);
 
             let mut out = Atom::new();
             r.as_view().normalize(ws, &mut out);
@@ -1402,13 +1487,87 @@ impl<'a> AtomView<'a> {
         })
     }
 
-    pub(crate) fn horner_scheme_impl_no_norm(
+    /// If `atom` is the indeterminate `x` or `x^n` with a positive integer `n`, return `n`.
+    fn horner_power_of(atom: AtomView, x: AtomView) -> Option<i64> {
+        if atom == x {
+            return Some(1);
+        }
+
+        if let AtomView::Pow(p) = atom
+            && let (b, e) = p.get_base_exp()
+            && b == x
+            && let AtomView::Num(n) = e
+            && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
+            && n > 0
+        {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// If `atom` is an indeterminate `x` at position `start` or later in the ordering, or
+    /// `x^n` with a positive integer `n`, return the position of `x` and the power `n`.
+    fn horner_indeterminate<'b>(
+        atom: AtomView<'b>,
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
+    ) -> Option<(usize, i64)> {
+        match atom {
+            AtomView::Var(_) | AtomView::Fun(_) => {
+                index.get(&atom).filter(|&&i| i >= start).map(|&i| (i, 1))
+            }
+            AtomView::Pow(p) => {
+                let (b, e) = p.get_base_exp();
+                if matches!(b, AtomView::Var(_) | AtomView::Fun(_))
+                    && let AtomView::Num(n) = e
+                    && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
+                    && n > 0
+                    && let Some(&i) = index.get(&b)
+                    && i >= start
+                {
+                    Some((i, n))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Find the first indeterminate in the ordering, at position `start` or later, that `term`
+    /// contains as a factor with a positive integer power. Return its position and power.
+    fn horner_first_indeterminate<'b>(
+        term: AtomView<'b>,
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
+    ) -> Option<(usize, i64)> {
+        if let AtomView::Mul(m) = term {
+            let mut first: Option<(usize, i64)> = None;
+            for arg in m {
+                if let Some((i, p)) = Self::horner_indeterminate(arg, index, start)
+                    && first.is_none_or(|(j, _)| i < j)
+                {
+                    first = Some((i, p));
+                }
+            }
+            first
+        } else {
+            Self::horner_indeterminate(term, index, start)
+        }
+    }
+
+    /// Apply the Horner scheme for the indeterminates `xs[start..]`, where `index` maps every
+    /// indeterminate to its position in `xs`. The result is not normalized.
+    fn horner_scheme_impl_no_norm<'b>(
         &self,
         ws: &Workspace,
-        mut xs: &[Indeterminate],
+        xs: &'b [Indeterminate],
+        index: &HashMap<AtomView<'b>, usize>,
+        start: usize,
         enter_functions: bool,
     ) -> AtomOrView<'a> {
-        if xs.is_empty() {
+        if start >= xs.len() {
             return self.into();
         }
 
@@ -1420,7 +1579,8 @@ impl<'a> AtomView<'a> {
                     let fun = tmp.to_fun(f.get_symbol());
 
                     for arg in f {
-                        let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                        let r =
+                            arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
                         fun.add_arg(r.as_view());
                     }
 
@@ -1432,8 +1592,8 @@ impl<'a> AtomView<'a> {
             AtomView::Pow(p) => {
                 let (b, e) = p.get_base_exp();
 
-                let bb = b.horner_scheme_impl_no_norm(ws, xs, enter_functions);
-                let ee = e.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                let bb = b.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
+                let ee = e.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
 
                 if matches!(bb, AtomOrView::Atom(_)) || matches!(ee, AtomOrView::Atom(_)) {
                     let mut pow = Atom::new();
@@ -1449,7 +1609,7 @@ impl<'a> AtomView<'a> {
 
                 let mut changed = false;
                 for arg in m {
-                    let r = arg.horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                    let r = arg.horner_scheme_impl_no_norm(ws, xs, index, start, enter_functions);
                     changed |= matches!(r, AtomOrView::Atom(_));
                     mul.extend(r.as_view());
                 }
@@ -1461,118 +1621,108 @@ impl<'a> AtomView<'a> {
                 }
             }
             AtomView::Add(a) => {
-                let mut min_power = self.get_lowest_power(xs[0].as_view());
-                while min_power == 0 {
-                    xs = &xs[1..];
-
-                    if xs.is_empty() {
-                        return self.into();
+                // Partition the terms by the first indeterminate in the ordering that they
+                // contain. Terms without any indeterminate are kept as they are. This is
+                // done in a single pass so that the cost does not grow with the number of
+                // indeterminates and no copies of the remaining terms are made.
+                let mut rest = Vec::new();
+                let mut grouped = Vec::new();
+                for term in a {
+                    match Self::horner_first_indeterminate(term, index, start) {
+                        Some((i, p)) => grouped.push((i, p, term)),
+                        None => rest.push(term),
                     }
-
-                    min_power = self.get_lowest_power(xs[0].as_view());
                 }
 
-                let x = xs[0].as_view();
+                if grouped.is_empty() {
+                    return self.into();
+                }
 
-                let mut coeff = ws.new_atom();
-                let coeff_sum = coeff.to_add();
+                let mut res = ws.new_atom();
+                let res_sum = res.to_add();
+                for term in rest {
+                    res_sum.extend(term);
+                }
 
-                let mut rest = ws.new_atom();
-                let rest_sum = rest.to_add();
+                // the stable sort keeps the order of the terms within every group
+                grouped.sort_by_key(|(i, _, _)| *i);
 
+                // divide every group by the lowest power of its indeterminate
+                let mut coeffs = Vec::new();
                 let mut new_arg = ws.new_atom();
-                for sum_arg in a {
-                    if sum_arg == x {
-                        coeff_sum.extend(ws.new_num(1).as_view());
-                        continue;
-                    } else if let AtomView::Pow(p) = sum_arg
-                        && let (b, e) = p.get_base_exp()
-                        && b == x
-                        && let AtomView::Num(n) = e
-                        && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                        && ni == 0
-                        && d == 1
-                        && n > 0
-                    {
-                        if n == min_power {
+                let mut pow = ws.new_atom();
+                for group in grouped.chunk_by(|a, b| a.0 == b.0) {
+                    let i = group[0].0;
+                    let x = xs[i].as_view();
+                    let min_power = group.iter().map(|(_, p, _)| *p).min().unwrap();
+
+                    let mut coeff = ws.new_atom();
+                    let coeff_sum = coeff.to_add();
+                    for &(_, p, term) in group {
+                        if let AtomView::Mul(m) = term {
+                            let new_mul = new_arg.to_mul();
+                            for m_arg in m {
+                                if let Some(n) = Self::horner_power_of(m_arg, x) {
+                                    if n > min_power {
+                                        let exp = ws.new_num(n - min_power);
+                                        pow.to_pow(x, exp.as_view());
+                                        new_mul.extend(pow.as_view());
+                                    }
+                                } else {
+                                    new_mul.extend(m_arg);
+                                }
+                            }
+                            coeff_sum.extend(new_arg.as_view());
+                        } else if p == min_power {
                             coeff_sum.extend(ws.new_num(1).as_view());
                         } else {
-                            let exp = ws.new_num(n - &min_power);
+                            let exp = ws.new_num(p - min_power);
                             new_arg.to_pow(x, exp.as_view());
                             coeff_sum.extend(new_arg.as_view());
                         }
-                    } else if let AtomView::Mul(m) = sum_arg {
-                        let new_mul = new_arg.to_mul();
-
-                        let mut found = false;
-                        let mut pow = ws.new_atom();
-                        for m_arg in m {
-                            if m_arg == x {
-                                found = true;
-                            } else if let AtomView::Pow(p) = m_arg
-                                && let (b, e) = p.get_base_exp()
-                                && b == x
-                                && let AtomView::Num(n) = e
-                                && let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view()
-                                && ni == 0
-                                && d == 1
-                                && n > 0
-                            {
-                                if n > min_power {
-                                    let exp = ws.new_num(n - &min_power);
-                                    pow.to_pow(x, exp.as_view());
-                                    new_mul.extend(pow.as_view());
-                                }
-                                found = true;
-                            } else {
-                                new_mul.extend(m_arg);
-                            }
-                        }
-
-                        if found {
-                            coeff_sum.extend(new_arg.as_view());
-                        } else {
-                            rest_sum.extend(sum_arg);
-                        }
-                    } else {
-                        rest_sum.extend(sum_arg);
                     }
+
+                    coeffs.push((i, min_power, coeff));
                 }
 
-                let mut res = rest
-                    .as_view()
-                    .horner_scheme_impl_no_norm(ws, &xs[1..], enter_functions)
-                    .into_owned();
-                if min_power > 0 {
-                    let new_key = (if coeff_sum.get_nargs() == 1 {
-                        coeff_sum.to_add_view().iter().next().unwrap()
+                // free the bookkeeping before recursing, as the recursion may be deep
+                drop(grouped);
+
+                for (i, min_power, coeff) in coeffs {
+                    let x = xs[i].as_view();
+
+                    // higher powers of x may remain in the coefficient, so start from x again
+                    let new_key = (if let AtomView::Add(c) = coeff.as_view()
+                        && c.get_nargs() == 1
+                    {
+                        c.iter().next().unwrap()
                     } else {
                         coeff.as_view()
                     })
-                    .horner_scheme_impl_no_norm(ws, xs, enter_functions);
+                    .horner_scheme_impl_no_norm(
+                        ws,
+                        xs,
+                        index,
+                        i,
+                        enter_functions,
+                    );
+
                     let v = if min_power == 1 {
                         new_key.as_view().mul_no_norm(ws, x)
                     } else {
-                        new_key
-                            .as_view()
-                            .mul_no_norm(ws, x.pow(min_power).as_view())
+                        let exp = ws.new_num(min_power);
+                        let xp = x.pow_no_norm(ws, exp.as_view());
+                        new_key.as_view().mul_no_norm(ws, xp.as_view())
                     };
-
-                    if let Atom::Add(a) = &mut res {
-                        a.extend(v.as_view());
-                    } else {
-                        res = res.as_view().add_no_norm(ws, v.as_view()).into_inner();
-                    }
+                    res_sum.extend(v.as_view());
                 }
 
-                if let AtomView::Add(a) = res.as_view()
-                    && a.get_nargs() == 1
-                {
-                    new_arg.set_from_view(&a.iter().next().unwrap());
-                    std::mem::swap(&mut res, &mut new_arg);
+                if res_sum.get_nargs() == 1 {
+                    new_arg.set_from_view(&res_sum.to_add_view().iter().next().unwrap());
+                    return new_arg.into_inner().into();
                 }
 
-                res.into()
+                res.into_inner().into()
             }
         }
     }
@@ -1584,6 +1734,14 @@ mod test {
         atom::{Atom, AtomCore, representation::InlineVar},
         function, parse, symbol,
     };
+
+    #[test]
+    fn collect_denominator_factors() {
+        let expr = parse!("1/(v1*v2) + 1/(v1*v3) + v3/v1");
+        let collected = expr.as_view().collect_factors();
+        println!("{}", collected);
+        assert!(matches!(collected, Atom::Mul(_)));
+    }
 
     #[test]
     fn collect_by_coefficient() {
@@ -1705,7 +1863,8 @@ mod test {
         let input = parse!("v1^2/2+v1^3/v4*v2+v3/(1+v4)");
         let out = input.together();
 
-        let ref_out = parse!("(2*v4+2*v4^2)^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
+        let ref_out =
+            parse!("1/2*(v4*(1+v4))^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
 
         assert_eq!(out, ref_out);
     }
@@ -1716,6 +1875,22 @@ mod test {
         let out = input.apart(symbol!("v4"));
 
         let ref_out = parse!("1/2*v1^2+v3*(v4+1)^-1+v1^3*v2*v4^-1");
+
+        assert_eq!(out, ref_out);
+    }
+
+    #[test]
+    fn apart_multivariate_in_selected_variables() {
+        let input = parse!("(2*y-x)/(y*(x+z*y)*(y-x))");
+        let out = input.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+
+        let ref_out = parse!("(z+2)/((z+1)*(y*x+y^2*z)) - 1/((z+1)*(y*x-y^2))");
+
+        assert_eq!(out, ref_out);
+
+        let input = parse!("(2*y-x)/((w+1)*y*(x+z*y)*(y-x))");
+        let out = input.apart_multivariate(&[symbol!("x"), symbol!("y")]);
+        let ref_out = parse!("(z+2)/((1+z+z*w+w)*(y*x+y^2*z)) - 1/((1+z+z*w+w)*(y*x-y^2))");
 
         assert_eq!(out, ref_out);
     }

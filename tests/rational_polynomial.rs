@@ -2,12 +2,236 @@ use std::sync::Arc;
 
 use symbolica::{
     atom::AtomCore,
-    domains::{integer::Z, rational_polynomial::RationalPolynomial},
+    domains::{
+        Ring,
+        integer::Z,
+        rational::Q,
+        rational_polynomial::{RationalPolynomial, RationalPolynomialField},
+    },
     parse,
     parser::{ParseSettings, Token},
     poly::{PolyVariable, polynomial::MultivariatePolynomial},
     symbol,
 };
+
+#[test]
+fn rational_polynomial_power_uses_exact_binary_exponentiation() {
+    let variables = Arc::new(vec![PolyVariable::Symbol(symbol!("x"))]);
+    let value: RationalPolynomial<_> =
+        parse!("(x+1)/(x-2)").to_rational_polynomial(&Z, &Z, Some(variables.clone()));
+
+    let one = value.pow(0);
+    assert!(one.numerator.is_one());
+    assert!(one.denominator.is_one());
+    assert_eq!(one.get_variables(), &variables);
+    assert_eq!(value.pow(1), value);
+
+    let expected: RationalPolynomial<_> =
+        parse!("(x+1)^13/(x-2)^13").to_rational_polynomial(&Z, &Z, Some(variables));
+    assert_eq!(value.pow(13), expected);
+
+    let field = RationalPolynomialField::from_poly(&value.numerator);
+    assert_eq!(field.pow(&value, 13), expected);
+}
+
+#[test]
+fn integer_factors_in_non_polynomial_exponents() {
+    let exp_x = parse!("exp(x)");
+    let exp_x_var = PolyVariable::Power(exp_x.clone());
+    let var_map = Arc::new(vec![exp_x_var.clone()]);
+
+    let p = parse!("exp(3*x)").to_polynomial_in_vars::<u16>(var_map.clone());
+    let term = (&p).into_iter().next().unwrap();
+    assert_eq!(p.nterms(), 1);
+    assert_eq!(term.exponents, &[3]);
+
+    let r = parse!("exp(x)+exp(2*x)+exp(3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[exp_x_var.clone()]);
+
+    let r_inv = parse!("exp(-3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_inv.get_variables().as_ref(), &[exp_x_var.clone()]);
+    let term = (&r_inv.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[3]);
+
+    let r_inv_one = parse!("exp(-x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_inv_one.get_variables().as_ref(), &[exp_x_var.clone()]);
+    let term = (&r_inv_one.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1]);
+
+    let r_den = parse!("1/(1+exp(3*x))").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_den.get_variables().as_ref(), &[exp_x_var.clone()]);
+
+    let f = parse!("exp(x)+exp(2*x)+exp(3*x)")
+        .to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[exp_x_var.clone()]);
+
+    let f_inv = parse!("exp(-3*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_inv.get_variables(), &[exp_x_var.clone()]);
+
+    let f_inv_one = parse!("exp(-x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_inv_one.get_variables(), &[exp_x_var.clone()]);
+
+    let f_den =
+        parse!("1/(1+exp(3*x))").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_den.get_variables(), &[exp_x_var]);
+}
+
+#[test]
+fn integer_content_of_rational_and_complex_exponents() {
+    let exp_ix_var = PolyVariable::Power(parse!("exp(i*x)"));
+    let exp_third_x_var = PolyVariable::Power(parse!("exp(1/3*x)"));
+    let exp_third_var = PolyVariable::Power(parse!("exp(1/3)"));
+
+    let p_i = parse!("exp(2*i*x)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p_i.get_vars_ref(), &[exp_ix_var.clone()]);
+    let term = (&p_i).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let p_fraction = parse!("exp(2/3*x)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p_fraction.get_vars_ref(), &[exp_third_x_var.clone()]);
+    let term = (&p_fraction).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_i = parse!("exp(2*i*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_i.get_variables().as_ref(), &[exp_ix_var.clone()]);
+    let term = (&r_i.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_neg_i = parse!("exp(-2*i*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r_neg_i.get_variables().as_ref(), &[exp_ix_var.clone()]);
+    let term = (&r_neg_i.denominator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[2]);
+
+    let r_fraction = parse!("exp(2/3*x)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_fraction.get_variables().as_ref(),
+        &[exp_third_x_var.clone()]
+    );
+
+    let r_numeric_fraction = parse!("exp(2/3)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_numeric_fraction.get_variables().as_ref(),
+        &[exp_third_var]
+    );
+
+    let f_i = parse!("exp(2*i*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_i.get_variables(), &[exp_ix_var]);
+
+    let f_fraction =
+        parse!("exp(2/3*x)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f_fraction.get_variables(), &[exp_third_x_var]);
+}
+
+#[test]
+fn split_exponential_sums() {
+    let exp_x = PolyVariable::Power(parse!("exp(x)"));
+    let exp_y = PolyVariable::Power(parse!("exp(y)"));
+
+    let p = parse!("exp(x+y)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[exp_x.clone(), exp_y.clone()]);
+    let term = (&p).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let p_in_vars = parse!("exp(x+y)")
+        .to_polynomial_in_vars::<u16>(Arc::new(vec![exp_x.clone(), exp_y.clone()]));
+    let term = (&p_in_vars).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let r = parse!("exp(x+y)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[exp_x.clone(), exp_y.clone()]);
+    let term = (&r.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+
+    let f = parse!("exp(x+y)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[exp_x, exp_y]);
+    let term = (&f.numerator).into_iter().next().unwrap();
+    assert_eq!(term.exponents, &[1, 1]);
+}
+
+#[test]
+fn split_additive_power_exponents() {
+    let x_to_a = PolyVariable::Power(parse!("x^a"));
+    let x_to_b = PolyVariable::Power(parse!("x^b"));
+
+    let p = parse!("x^(a+b)").to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[x_to_a.clone(), x_to_b.clone()]);
+    assert_eq!((&p).into_iter().next().unwrap().exponents, &[1, 1]);
+
+    let p_in_vars = parse!("x^(a+b)")
+        .to_polynomial_in_vars::<u16>(Arc::new(vec![x_to_a.clone(), x_to_b.clone()]));
+    assert_eq!((&p_in_vars).into_iter().next().unwrap().exponents, &[1, 1]);
+
+    let r = parse!("x^(a+b)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r.get_variables().as_ref(),
+        &[x_to_a.clone(), x_to_b.clone()]
+    );
+    assert_eq!(
+        (&r.numerator).into_iter().next().unwrap().exponents,
+        &[1, 1]
+    );
+
+    let f = parse!("x^(a+b)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[x_to_a, x_to_b]);
+    assert_eq!(
+        (&f.numerator).into_iter().next().unwrap().exponents,
+        &[1, 1]
+    );
+}
+
+#[test]
+fn common_rational_power_basis() {
+    let root = PolyVariable::Power(parse!("x^(1/6)"));
+    let input = parse!("x+x^(1/2)+x^(1/3)");
+
+    let p = input.to_polynomial::<_, u16>(&Q, None);
+    assert_eq!(p.get_vars_ref(), &[root.clone()]);
+    assert_eq!(
+        (&p).into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let r = input.to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(r.get_variables().as_ref(), &[root.clone()]);
+    assert_eq!(
+        (&r.numerator)
+            .into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let f = input.to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(f.get_variables(), &[root]);
+    assert_eq!(
+        (&f.numerator)
+            .into_iter()
+            .map(|term| term.exponents[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 6]
+    );
+
+    let inverse_input = parse!("1/(1+x^(1/2)+x^(1/3))");
+    let r_inverse = inverse_input.to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        r_inverse.get_variables().as_ref(),
+        &[PolyVariable::Power(parse!("x^(1/6)"))]
+    );
+    let f_inverse = inverse_input.to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    assert_eq!(
+        f_inverse.get_variables(),
+        &[PolyVariable::Power(parse!("x^(1/6)"))]
+    );
+    assert!(
+        f_inverse
+            .denominators
+            .iter()
+            .all(|(denominator, _)| denominator.get_vars_ref()
+                == [PolyVariable::Power(parse!("x^(1/6)"))])
+    );
+}
 
 #[test]
 fn default_exponent_and_variable_inputs() {
@@ -24,12 +248,12 @@ fn default_exponent_and_variable_inputs() {
 
     let poly: MultivariatePolynomial<_> = parse!("x+y").to_polynomial(&Z, &[x, y]);
     assert_eq!(
-        *poly.variables,
-        vec![PolyVariable::from(x), PolyVariable::from(y)]
+        poly.get_vars_ref(),
+        &[PolyVariable::from(x), PolyVariable::from(y)]
     );
 
     let single_var_poly: MultivariatePolynomial<_> = parse!("x+1").to_polynomial(&Z, x);
-    assert_eq!(*single_var_poly.variables, vec![PolyVariable::from(x)]);
+    assert_eq!(single_var_poly.get_vars_ref(), &[PolyVariable::from(x)]);
 }
 
 #[test]

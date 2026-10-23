@@ -33,9 +33,11 @@ read the [documentation](https://symbolica.io/docs/), or see
 - Native Python and Rust APIs for the same symbolic core
 - Optimized numerical evaluators, with JIT, C++, SIMD, ASM, and CUDA code generation
 - Fast multivariate polynomial arithmetic for large symbolic workloads
+- Exact solutions of polynomial and rational equation systems
 - Pattern matching and rewrites for domain-specific algebra
 - Mixed exact and numerical computation with error propagation
 - Streaming tools for expressions too large to keep in memory
+- Run symbolic computations directly in the browser with WebAssembly
 
 # Installation
 
@@ -51,7 +53,7 @@ pip install symbolica
 
 ## Rust
 
-If you want to use Symbolica as a library in Rust, simply include it:
+Add Symbolica to a Rust project:
 
 ```sh
 cargo add symbolica
@@ -59,10 +61,8 @@ cargo add symbolica
 
 # Example
 
-Here is one compact workflow that combines symbolic manipulation, series
-expansion, replacement, solving a parameterized linear system, and numerical
-evaluation. Check the [guide](https://symbolica.io/docs/) for a complete
-overview.
+Go from a physical model to a calibrated result in a few steps.
+Explore more in the [guide](https://symbolica.io/docs/).
 
 ### Pendulum calibration
 
@@ -104,10 +104,12 @@ measurement angles using `replace`, and solve the resulting linear system:
 
 τ_model = τ_small.to_expression() + τ0
 
-κ_fit, τ0_fit = Expression.solve_linear_system([
+solution = Expression.solve([
     τ_model.replace(θ, θ1) - τ1,
     τ_model.replace(θ, θ2) - τ2,
-], [κ, τ0])
+], [κ, τ0])[0]
+
+κ_fit, τ0_fit = solution[κ], solution[τ0]
 
 κ_fit
 ```
@@ -133,4 +135,4 @@ Finally, plug in measured values:
 
 ## Development
 
-Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica) and [graphica](https://github.com/symbolica-dev/graphica) on [Zulip](https://zulip.symbolica.io)!
+Follow the development of Symbolica and the open-source spin-off projects [numerica](https://github.com/symbolica-dev/numerica), [graphica](https://github.com/symbolica-dev/graphica), and [symbolica-integrate](https://github.com/symbolica-dev/symbolica-integrate) on [Zulip](https://zulip.symbolica.io)!

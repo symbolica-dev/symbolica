@@ -1,13 +1,20 @@
 use super::*;
 
+/// A registered external function together with its symbolic tags, numerical
+/// implementation, and optional shared instruction body. Each evaluator owns one
+/// entry per function, including its reusable evaluation stack; cloned evaluators
+/// share bodies but have independent stacks.
 pub struct ExternalFunctionContainer<T> {
     pub(super) export_name: String,
     pub(super) symbol: Symbol,
     pub(super) tags: Vec<Atom>,
     pub(super) fixed_args: Vec<Complex<Rational>>,
     pub(super) imp: Option<Box<dyn ExternalFunction<T>>>,
-    pub(super) cache: Vec<T>,
     pub(super) constant_index: Option<usize>,
+    // Reusable body stack, or argument buffer for callbacks. Allocated on first
+    // use and grown for larger callback arities; never shared or serialized.
+    pub(super) stack: Vec<T>,
+    pub(super) body: Option<Arc<FunctionBody>>,
 }
 
 #[cfg(feature = "serde")]
@@ -22,6 +29,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
                 .collect::<Vec<_>>(),
             &self.fixed_args,
             &self.constant_index,
+            &self.body.as_deref(),
         )
             .serialize(serializer)
     }
@@ -30,12 +38,13 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
 #[cfg(feature = "serde")]
 impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionContainer<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (export_name, symbol, tags, fixed_args, constant_index): (
+        let (export_name, symbol, tags, fixed_args, constant_index, body): (
             String,
             Symbol,
             Vec<String>,
             Vec<Complex<Rational>>,
             Option<usize>,
+            Option<Box<FunctionBody>>,
         ) = serde::Deserialize::deserialize(deserializer)?;
 
         let mut external = Self {
@@ -44,10 +53,13 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index,
+            body: body.map(Arc::from),
         };
-        external.imp = external.fetch_impl_for::<T>();
+        if external.body.is_none() {
+            external.imp = external.fetch_impl_for::<T>();
+        }
         Ok(external)
     }
 }
@@ -69,7 +81,8 @@ impl<T> bincode::Encode for ExternalFunctionContainer<T> {
             encoder,
         )?;
         bincode::Encode::encode(&self.fixed_args, encoder)?;
-        bincode::Encode::encode(&self.constant_index, encoder)
+        bincode::Encode::encode(&self.constant_index, encoder)?;
+        bincode::Encode::encode(&self.body.as_deref(), encoder)
     }
 }
 
@@ -83,6 +96,7 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
         let tags: Vec<String> = bincode::Decode::decode(decoder)?;
         let fixed_args: Vec<Complex<Rational>> = bincode::Decode::decode(decoder)?;
         let constant_index: Option<usize> = bincode::Decode::decode(decoder)?;
+        let body: Option<Box<FunctionBody>> = bincode::Decode::decode(decoder)?;
 
         let mut external = Self {
             export_name,
@@ -90,10 +104,13 @@ impl<Context, T: EvaluationDomain> bincode::Decode<Context> for ExternalFunction
             tags: tags.iter().map(|s| crate::parse!(s)).collect(),
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index,
+            body: body.map(Arc::from),
         };
-        external.imp = external.fetch_impl_for::<T>();
+        if external.body.is_none() {
+            external.imp = external.fetch_impl_for::<T>();
+        }
 
         Ok(external)
     }
@@ -106,7 +123,27 @@ impl<'de, Context, T: EvaluationDomain> bincode::BorrowDecode<'de, Context>
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
-        <Self as bincode::Decode<Context>>::decode(decoder)
+        let export_name: String = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let symbol: Symbol = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let tags: Vec<String> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let fixed_args: Vec<Complex<Rational>> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let constant_index: Option<usize> = bincode::BorrowDecode::borrow_decode(decoder)?;
+        let body: Option<Box<FunctionBody>> = bincode::BorrowDecode::borrow_decode(decoder)?;
+
+        let mut external = Self {
+            export_name,
+            symbol,
+            tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            fixed_args,
+            imp: None,
+            stack: Vec::new(),
+            constant_index,
+            body: body.map(Arc::from),
+        };
+        if external.body.is_none() {
+            external.imp = external.fetch_impl_for::<T>();
+        }
+        Ok(external)
     }
 }
 
@@ -118,8 +155,9 @@ impl<T> Clone for ExternalFunctionContainer<T> {
             tags: self.tags.clone(),
             fixed_args: self.fixed_args.clone(),
             imp: self.imp.clone(),
-            cache: vec![],
+            stack: Vec::new(),
             constant_index: self.constant_index,
+            body: self.body.clone(),
         }
     }
 }
@@ -132,8 +170,8 @@ impl<T> std::fmt::Debug for ExternalFunctionContainer<T> {
             .field("tags", &self.tags)
             .field("fixed_args", &self.fixed_args)
             .field("imp", &self.imp.is_some())
-            .field("cache_len", &self.cache.len())
             .field("constant_index", &self.constant_index)
+            .field("body", &self.body.is_some())
             .finish()
     }
 }
@@ -170,10 +208,27 @@ impl<T> ExternalFunctionContainer<T> {
             })
             .unwrap();
 
-        // TODO: escape minus signs, etc
+        // A generator receives the chosen name, so it can use escaped tags.
+        // Preserve the historical names for fixed snippets and externally
+        // supplied functions, whose definitions may already depend on them.
+        let escape_tags = symbol
+            .get_evaluation_info()
+            .is_some_and(EvaluationInfo::has_cpp_generator);
         for t in &tags {
             export_name += "_";
-            export_name += &t.to_canonical_string();
+            let tag = t.to_canonical_string();
+            if escape_tags {
+                // Escape underscores as well to keep the encoding injective.
+                for byte in tag.bytes() {
+                    if byte.is_ascii_alphanumeric() {
+                        export_name.push(byte as char);
+                    } else {
+                        export_name += &format!("_{byte:02x}");
+                    }
+                }
+            } else {
+                export_name += &tag;
+            }
         }
 
         Self {
@@ -182,9 +237,16 @@ impl<T> ExternalFunctionContainer<T> {
             tags,
             fixed_args,
             imp: None,
-            cache: vec![],
+            stack: Vec::new(),
             constant_index: None,
+            body: None,
         }
+    }
+
+    pub(super) fn with_body(symbol: Symbol, tags: Vec<Atom>, body: Arc<FunctionBody>) -> Self {
+        let mut container = Self::new(symbol, tags, vec![]);
+        container.body = Some(body);
+        container
     }
 
     pub(super) fn export_name(&self) -> &str {
@@ -195,16 +257,55 @@ impl<T> ExternalFunctionContainer<T> {
         self.tags.iter().map(|x| x.as_view()).collect()
     }
 
+    /// Resolve a registered constant or fixed-argument function in the target domain.
+    pub(super) fn evaluate_constant<T2: EvaluationDomain>(
+        &self,
+        binary_prec: u32,
+    ) -> Result<T2, String> {
+        let info = self
+            .symbol
+            .get_evaluation_info()
+            .ok_or_else(|| format!("External constant '{}' does not have evaluation info", self))?;
+        let tags = self.tag_views();
+        if self.fixed_args.is_empty() {
+            T2::try_from_complex_float(info.evaluate_constant(&tags, binary_prec)?)
+        } else {
+            let args = self
+                .fixed_args
+                .iter()
+                .map(|c| {
+                    T2::try_from_complex_float(Complex::new(
+                        c.re.to_multi_prec_float(binary_prec),
+                        c.im.to_multi_prec_float(binary_prec),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let eval = T2::resolve_function(&tags, info)
+                .ok_or_else(|| format!("External constant '{}' has no implementation", self))?;
+            Ok(eval(&args))
+        }
+    }
+
     pub(super) fn map<T2: EvaluationDomain>(&self) -> ExternalFunctionContainer<T2> {
         ExternalFunctionContainer {
             export_name: self.export_name.clone(),
             symbol: self.symbol,
             tags: self.tags.clone(),
             fixed_args: self.fixed_args.clone(),
-            imp: self.fetch_impl_for::<T2>(),
-            cache: vec![],
+            imp: if self.body.is_none() {
+                self.fetch_impl_for::<T2>()
+            } else {
+                None
+            },
+            stack: Vec::new(),
             constant_index: self.constant_index,
+            body: self.body.clone(),
         }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    pub(super) fn callable(&self) -> Option<Box<dyn ExternalFunction<T>>> {
+        self.imp.clone()
     }
 
     pub(super) fn fetch_impl_for<T2: EvaluationDomain>(
@@ -215,8 +316,11 @@ impl<T> ExternalFunctionContainer<T> {
         T2::resolve_function(&tags, info)
     }
 
-    pub(super) fn cpp(&self) -> Option<&str> {
-        self.symbol.get_evaluation_info()?.get_cpp()
+    #[cfg(feature = "native_code_generation")]
+    pub(super) fn cpp(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.symbol
+            .get_evaluation_info()?
+            .generate_cpp(self.export_name(), &self.tag_views())
     }
 }
 

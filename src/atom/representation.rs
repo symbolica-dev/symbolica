@@ -15,12 +15,19 @@ use crate::{
     atom::{UserData, UserDataKey},
     coefficient::{Coefficient, CoefficientView},
     state::{State, StateMap, Workspace},
+    utils::Settable,
 };
 
 use super::{
-    Atom, AtomView, SliceType, Symbol,
-    coefficient::{PackedRationalNumberReader, PackedRationalNumberWriter},
+    Atom, AtomOrView, AtomView, SliceType, Symbol,
+    coefficient::{
+        PackedRationalNumberReader, PackedRationalNumberWriter, read_packed_denominator,
+        read_packed_numerator, read_packed_pair, skip_packed_function, skip_packed_list,
+    },
 };
+
+/// The current export format identifier for atom data.
+const ATOM_EXPORT_FORMAT: u8 = 1;
 
 const NUM_ID: u8 = 1;
 const VAR_ID: u8 = 2;
@@ -43,10 +50,113 @@ const SYM_EXTRA_WILDCARD_LEVEL_MASK: u32 = 0b11_000;
 const SYM_EXTRA_WILDCARD_LEVEL_1: u32 = 0b01_000;
 const SYM_EXTRA_WILDCARD_LEVEL_2: u32 = 0b10_000;
 const SYM_EXTRA_WILDCARD_LEVEL_3: u32 = 0b11_000;
+const SYM_EXTRA_FLAT_FLAG: u32 = 0b1_00_000;
 
 const MUL_HAS_COEFF_FLAG: u8 = 0b01000000;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
+
+// Fun: packed(byte length, 1), packed(symbol/attributes, argument count), arguments.
+// Mul/Add: packed(argument count, byte length), arguments.
+// Byte lengths exclude their own header. All lengths use the full u64 range.
+#[inline(always)]
+fn resize_header(data: &mut Vec<u8>, old_end: usize, new_end: usize) {
+    if old_end != new_end {
+        resize_header_slow(data, old_end, new_end);
+    }
+}
+
+#[cold]
+fn resize_header_slow(data: &mut Vec<u8>, old_end: usize, new_end: usize) {
+    match new_end.cmp(&old_end) {
+        Ordering::Equal => {}
+        Ordering::Less => {
+            data.copy_within(old_end.., new_end);
+            data.truncate(data.len() - (old_end - new_end));
+        }
+        Ordering::Greater => {
+            let old_len = data.len();
+            data.resize(old_len + (new_end - old_end), 0);
+            data.copy_within(old_end..old_len, new_end);
+        }
+    }
+}
+
+#[inline(always)]
+fn update_list_header(data: &mut Vec<u8>, old_end: usize, nargs: u64) {
+    let size = (data.len() - old_end) as u64;
+    if (nargs | size) <= u8::MAX as u64 && size != 1 {
+        resize_header(data, old_end, 4);
+        data[1..4].copy_from_slice(&[0x11, nargs as u8, size as u8]);
+        return;
+    }
+    update_large_list_header(data, old_end, nargs, size);
+}
+
+#[cold]
+fn update_large_list_header(data: &mut Vec<u8>, old_end: usize, nargs: u64, size: u64) {
+    let header = (nargs, size);
+    let new_end = 1 + header.get_packed_size() as usize;
+    resize_header(data, old_end, new_end);
+    header.write_packed_fixed(&mut data[1..new_end]);
+}
+
+#[inline(always)]
+fn function_metadata(data: &[u8]) -> &[u8] {
+    if data[1] == 1 {
+        return &data[3..];
+    }
+    if data[1] == 2 {
+        return &data[4..];
+    }
+    // The length is an unsigned packed integer with no denominator.
+    let size = 1usize << (data[1] - 1);
+    &data[2 + size..]
+}
+
+#[inline(always)]
+fn update_function_size(data: &mut Vec<u8>, old_end: usize) {
+    let size = (data.len() - old_end) as u64;
+    if size <= u8::MAX as u64 {
+        resize_header(data, old_end, 3);
+        data[1] = 1;
+        data[2] = size as u8;
+        return;
+    }
+    if size <= u16::MAX as u64 {
+        resize_header(data, old_end, 4);
+        data[1] = 2;
+        data[2..4].copy_from_slice(&(size as u16).to_le_bytes());
+        return;
+    }
+    update_large_function_size(data, old_end, size);
+}
+
+#[cold]
+fn update_large_function_size(data: &mut Vec<u8>, old_end: usize, size: u64) {
+    let header = (size, 1);
+    let new_end = 1 + header.get_packed_size() as usize;
+    resize_header(data, old_end, new_end);
+    header.write_packed_fixed(&mut data[1..new_end]);
+}
+
+/// Reject unsupported storage layouts before reading or interpreting atom data.
+fn check_atom_format(format: u8) -> Result<(), std::io::Error> {
+    if format != ATOM_EXPORT_FORMAT {
+        if format == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Cannot load legacy atom format. Please export the expression using strings in the older version.",
+            ));
+        }
+
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Unsupported atom storage format {format}; expected {ATOM_EXPORT_FORMAT}"),
+        ));
+    }
+    Ok(())
+}
 
 /// The underlying slice of expression data.
 pub type BorrowedRawAtom = [u8];
@@ -111,6 +221,10 @@ impl Symbol {
             extra |= SYM_EXTRA_POSITIVE_FLAG;
         }
 
+        if self.is_flat {
+            extra |= SYM_EXTRA_FLAT_FLAG;
+        }
+
         match self.wildcard_level {
             0 => {}
             1 => extra |= SYM_EXTRA_WILDCARD_LEVEL_1,
@@ -132,6 +246,7 @@ impl Symbol {
         let is_real = (extra & SYM_EXTRA_REAL_FLAG) != 0;
         let is_integer = (extra & SYM_EXTRA_INTEGER_FLAG) != 0;
         let is_positive = (extra & SYM_EXTRA_POSITIVE_FLAG) != 0;
+        let is_flat = (extra & SYM_EXTRA_FLAT_FLAG) != 0;
         let wildcard_level = match extra & SYM_EXTRA_WILDCARD_LEVEL_MASK {
             SYM_EXTRA_WILDCARD_LEVEL_1 => 1,
             SYM_EXTRA_WILDCARD_LEVEL_2 => 2,
@@ -145,6 +260,7 @@ impl Symbol {
             is_linear,
             is_antisymmetric,
             is_cyclesymmetric,
+            is_flat,
             is_scalar,
             is_real,
             is_integer,
@@ -155,6 +271,9 @@ impl Symbol {
 }
 
 impl UserDataKey {
+    /// Read a user-data key written by [`Self::write`]. Embedded expressions
+    /// refer to the current symbol state; invalid tags, UTF-8, or truncated data
+    /// produce an I/O error.
     pub fn read<R: Read>(source: &mut R) -> Result<UserDataKey, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
@@ -171,8 +290,9 @@ impl UserDataKey {
                 Ok(UserDataKey::String(s))
             }
             3 => {
-                let data = Atom::import(source, None)?;
-                Ok(UserDataKey::Atom(data))
+                let mut a = Atom::new();
+                a.read(source)?;
+                Ok(UserDataKey::Atom(a))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -181,6 +301,8 @@ impl UserDataKey {
         }
     }
 
+    /// Write this key in binary form. Embedded expressions are written without
+    /// the symbol state, which must be transferred separately across sessions.
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
             UserDataKey::Integer(value) => {
@@ -201,6 +323,8 @@ impl UserDataKey {
 }
 
 impl UserData {
+    /// Read user data written by [`Self::write`], recursively decoding lists
+    /// and maps. Embedded expressions require the corresponding symbol state.
     pub fn read<R: Read>(source: &mut R) -> Result<UserData, std::io::Error> {
         let tag = source.read_u8()?;
         match tag {
@@ -253,6 +377,8 @@ impl UserData {
         }
     }
 
+    /// Write this value in binary form, recursively encoding lists and maps.
+    /// Embedded expressions are written without the symbol state.
     pub fn write<W: std::io::Write>(&self, target: &mut W) -> Result<(), std::io::Error> {
         match self {
             UserData::None => target.write_u8(0),
@@ -351,20 +477,24 @@ impl InlineVar {
         InlineVar { data, size }
     }
 
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         self.as_var_view().get_symbol()
     }
 
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &[u8] {
         &self.data[..self.size as usize]
     }
 
+    /// Borrow a typed view without copying the underlying storage.
     pub fn as_var_view(&self) -> VarView<'_> {
         VarView {
             data: &self.data[..self.size as usize],
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Var(VarView {
             data: &self.data[..self.size as usize],
@@ -433,16 +563,39 @@ impl InlineNum {
         InlineNum { data, size }
     }
 
+    /// Create the exact number zero in inline storage.
+    pub const fn zero() -> InlineNum {
+        InlineNum {
+            data: [
+                NUM_ID, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            size: 3,
+        }
+    }
+
+    /// Create the exact number one in inline storage.
+    pub const fn one() -> InlineNum {
+        InlineNum {
+            data: [
+                NUM_ID, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            size: 3,
+        }
+    }
+
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &[u8] {
         &self.data[..self.size as usize]
     }
 
+    /// Borrow a typed view without copying the underlying storage.
     pub fn as_num_view(&self) -> NumView<'_> {
         NumView {
             data: &self.data[..self.size as usize],
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Num(NumView {
             data: &self.data[..self.size as usize],
@@ -460,8 +613,8 @@ impl bincode::Encode for Atom {
 
         let d = self.as_view().get_data();
         let writer = encoder.writer();
-        writer.write(&[0])?;
-        writer.write(&d.len().to_le_bytes())?;
+        writer.write(&[ATOM_EXPORT_FORMAT])?;
+        writer.write(&(d.len() as u64).to_le_bytes())?;
         writer.write(d)
     }
 }
@@ -473,22 +626,24 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
     ) -> Result<Self, bincode::error::DecodeError> {
         use bincode::de::read::Reader;
         let atom = {
-            // equivalent to Atom::read
+            // Equivalent to Atom::read; remapping follows below.
             let source = decoder.reader();
 
             let mut dest = Atom::Zero.into_raw();
 
-            // should also set whether rat poly coefficient needs to be converted
             let mut flags_buf = [0; 1];
             let mut size_buf = [0; 8];
 
             source.read(&mut flags_buf)?;
+            check_atom_format(flags_buf[0])
+                .map_err(|e| bincode::error::DecodeError::OtherString(e.to_string()))?;
             source.read(&mut size_buf)?;
 
             let n_size = u64::from_le_bytes(size_buf);
+            let n_size = usize::try_from(n_size)
+                .map_err(|_| bincode::error::DecodeError::OutsideUsizeRange(n_size))?;
 
-            dest.extend(size_buf);
-            dest.resize(n_size as usize, 0);
+            dest.resize(n_size, 0);
             source.read(&mut dest)?;
 
             unsafe {
@@ -510,22 +665,22 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
 }
 
 impl Atom {
-    /// Read from a binary stream. The format is the byte-length first
-    /// followed by the data.
+    /// Read an expression in the current storage format without normalization.
+    /// Imported symbols must be remapped before using the expression.
     pub(crate) fn read<R: Read>(&mut self, source: &mut R) -> Result<(), std::io::Error> {
+        let format = source.read_u8()?;
+        check_atom_format(format)?;
+
         let mut dest = std::mem::replace(self, Atom::Zero).into_raw();
+        let n_size = source.read_u64::<LittleEndian>()?;
+        let n_size = usize::try_from(n_size).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Atom byte length does not fit in usize",
+            )
+        })?;
 
-        // should also set whether rat poly coefficient needs to be converted
-        let mut flags_buf = [0; 1];
-        let mut size_buf = [0; 8];
-
-        source.read_exact(&mut flags_buf)?;
-        source.read_exact(&mut size_buf)?;
-
-        let n_size = u64::from_le_bytes(size_buf);
-
-        dest.extend(size_buf);
-        dest.resize(n_size as usize, 0);
+        dest.resize(n_size, 0);
         source.read_exact(&mut dest)?;
 
         unsafe {
@@ -554,10 +709,7 @@ impl Atom {
     ) -> Result<Atom, std::io::Error> {
         let state_map = State::import(source, conflict_fn)?;
 
-        let mut n_terms_buf = [0; 8];
-        source.read_exact(&mut n_terms_buf)?;
-        let n_terms = u64::from_le_bytes(n_terms_buf);
-
+        let n_terms = source.read_u64::<LittleEndian>()?;
         if n_terms == 1 {
             let mut a = Atom::new();
             a.read(source)?;
@@ -567,13 +719,22 @@ impl Atom {
             let a = res.to_add();
 
             let mut tmp = Atom::new();
+            let mut tmp2 = Atom::new();
 
-            for _ in 0..n_terms {
-                tmp.read(&mut *source)?;
-                a.extend(tmp.as_view());
-            }
+            Workspace::get_local().with(|ws| {
+                for _ in 0..n_terms {
+                    tmp.read(&mut *source)?;
 
-            Ok(res.as_view().rename(&state_map))
+                    let mut settable = Settable::from(&mut tmp2);
+
+                    tmp.as_view().rename_no_norm(&state_map, ws, &mut settable);
+
+                    a.extend(settable.as_view_or(tmp.as_view()));
+                }
+
+                a.as_view().normalize(ws, &mut tmp);
+                Ok(tmp)
+            })
         }
     }
 
@@ -624,6 +785,7 @@ pub struct Num {
 
 impl Num {
     #[inline(always)]
+    /// Create the number zero, clearing and reusing `buffer`.
     pub fn zero(mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.put_u8(NUM_ID);
@@ -633,6 +795,7 @@ impl Num {
     }
 
     #[inline]
+    /// Create an owned number from a coefficient.
     pub fn new(num: Coefficient) -> Num {
         let mut buffer = Vec::new();
         buffer.put_u8(NUM_ID);
@@ -641,6 +804,7 @@ impl Num {
     }
 
     #[inline(always)]
+    /// Create a number from a coefficient, clearing and reusing `buffer`.
     pub fn new_into(num: Coefficient, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.put_u8(NUM_ID);
@@ -649,6 +813,7 @@ impl Num {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &NumView<'_>, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(a.data);
@@ -656,6 +821,7 @@ impl Num {
     }
 
     #[inline]
+    /// Replace this number with `num`, reusing its allocation.
     pub fn set_from_coeff(&mut self, num: Coefficient) {
         self.data.clear();
         self.data.put_u8(NUM_ID);
@@ -663,11 +829,13 @@ impl Num {
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, a: &NumView<'_>) {
         self.data.clear();
         self.data.extend(a.data);
     }
 
+    /// Add `other` to this number in place. The coefficient domains must support addition.
     pub fn add(&mut self, other: &NumView<'_>) {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
@@ -678,6 +846,7 @@ impl Num {
         n.write_packed(&mut self.data);
     }
 
+    /// Multiply this number by `other` in place. The coefficient domains must support multiplication.
     pub fn mul(&mut self, other: &NumView<'_>) {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
@@ -689,16 +858,19 @@ impl Num {
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_num_view(&self) -> NumView<'_> {
         NumView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Num(self.to_num_view())
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -717,11 +889,13 @@ pub struct Var {
 
 impl Var {
     #[inline]
+    /// Create an owned variable with the given symbol.
     pub fn new(symbol: Symbol) -> Var {
         Self::new_into(symbol, RawAtom::new())
     }
 
     #[inline]
+    /// Create a variable with the given symbol, clearing and reusing `buffer`.
     pub fn new_into(symbol: Symbol, buffer: RawAtom) -> Var {
         let mut f = Var { data: buffer };
         f.set_from_symbol(symbol);
@@ -729,6 +903,7 @@ impl Var {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &VarView<'_>, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(a.data);
@@ -736,6 +911,7 @@ impl Var {
     }
 
     #[inline]
+    /// Replace this variable's symbol, reusing its allocation.
     pub fn set_from_symbol(&mut self, symbol: Symbol) {
         self.data.clear();
 
@@ -747,27 +923,32 @@ impl Var {
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_var_view(&self) -> VarView<'_> {
         VarView { data: &self.data }
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &VarView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Var(self.to_var_view())
     }
 
     #[inline]
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         self.to_var_view().get_symbol()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -793,6 +974,7 @@ impl Fun {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &FunView<'_>, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(a.data);
@@ -806,15 +988,12 @@ impl Fun {
         let (flags, extra) = symbol.encode_flags();
         self.data.put_u8(flags | FUN_ID | NOT_NORMALIZED);
 
-        self.data.put_u32_le(0_u32);
-
-        let buf_pos = self.data.len();
+        (0u64, 1).write_packed(&mut self.data);
+        let header_end = self.data.len();
 
         ((extra as u64) << 32 | symbol.id as u64, 0).write_packed(&mut self.data);
 
-        let new_buf_pos = self.data.len();
-        let mut cursor = &mut self.data[1..];
-        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+        update_function_size(&mut self.data, header_end);
     }
 
     #[inline]
@@ -828,118 +1007,94 @@ impl Fun {
 
     pub(crate) fn add_arg(&mut self, other: AtomView) {
         self.data[0] |= NOT_NORMALIZED;
-
-        // may increase size of the num of args
-        let mut c = &self.data[1 + 4..];
-
-        let buf_pos = 1 + 4;
-
-        let name;
-        let mut n_args;
-        (name, n_args, c) = c.get_frac_u64();
-
-        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
-
-        n_args += 1;
-
-        let new_size = (name, n_args).get_packed_size() as usize;
-
-        match new_size.cmp(&old_size) {
-            Ordering::Equal => {}
-            Ordering::Less => {
-                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
-            }
-            Ordering::Greater => {
-                let old_len = self.data.len();
-                self.data.resize(old_len + new_size - old_size, 0);
-                self.data
-                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
-            }
-        }
-
-        // size should be ok now
-        (name, n_args).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
-
-        self.data.extend(other.get_data());
-
-        let new_buf_pos = self.data.len();
-
-        let mut cursor = &mut self.data[1..];
-        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+        let metadata = function_metadata(&self.data);
+        let header_end = self.data.len() - metadata.len();
+        let (name, n_args, args) = read_packed_pair(metadata);
+        let old_end = self.data.len() - args.len();
+        self.data.extend_from_slice(other.get_data());
+        self.finish_append(header_end, old_end, name, n_args + 1);
     }
 
     pub(crate) fn add_args<'a>(&mut self, other: &[AtomView<'a>]) {
+        self.add_args_iter(other.iter().copied().map(AtomOrView::from));
+    }
+
+    pub(crate) fn add_args_iter<'a>(&mut self, other: impl IntoIterator<Item = AtomOrView<'a>>) {
         self.data[0] |= NOT_NORMALIZED;
 
-        // may increase size of the num of args
-        let mut c = &self.data[1 + 4..];
+        let metadata = function_metadata(&self.data);
+        let header_end = self.data.len() - metadata.len();
+        let (name, mut n_args, args) = read_packed_pair(metadata);
+        let old_end = self.data.len() - args.len();
 
-        let buf_pos = 1 + 4;
-
-        let name;
-        let mut n_args;
-        (name, n_args, c) = c.get_frac_u64();
-
-        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
-
-        n_args += other.len() as u64;
-
-        let new_size = (name, n_args).get_packed_size() as usize;
-
-        match new_size.cmp(&old_size) {
-            Ordering::Equal => {}
-            Ordering::Less => {
-                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
-            }
-            Ordering::Greater => {
-                let old_len = self.data.len();
-                self.data.resize(old_len + new_size - old_size, 0);
-                self.data
-                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
+        // Iterator/conversion code may panic. Until the headers are updated,
+        // roll back appended bytes on unwind so the function stays valid.
+        struct AppendGuard<'a> {
+            data: &'a mut Vec<u8>,
+            original_len: usize,
+        }
+        impl Drop for AppendGuard<'_> {
+            fn drop(&mut self) {
+                self.data.truncate(self.original_len);
             }
         }
-
-        // size should be ok now
-        (name, n_args).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
-
+        let original_len = self.data.len();
+        let mut guard = AppendGuard {
+            data: &mut self.data,
+            original_len,
+        };
         for item in other {
-            self.data.extend(item.get_data());
+            guard.data.extend_from_slice(item.as_view().get_data());
+            n_args += 1;
         }
+        guard.original_len = guard.data.len();
+        drop(guard);
 
-        let new_buf_pos = self.data.len();
+        self.finish_append(header_end, old_end, name, n_args);
+    }
 
-        let mut cursor = &mut self.data[1..];
-        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+    #[inline]
+    fn finish_append(&mut self, header_end: usize, old_end: usize, name: u64, n_args: u64) {
+        let header = (name, n_args);
+        let new_end = header_end + header.get_packed_size() as usize;
+        resize_header(&mut self.data, old_end, new_end);
+        header.write_packed_fixed(&mut self.data[header_end..new_end]);
+
+        update_function_size(&mut self.data, header_end);
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_fun_view(&self) -> FunView<'_> {
         FunView { data: &self.data }
     }
 
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &FunView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Fun(self.to_fun_view())
     }
 
     #[inline(always)]
+    /// Return the head symbol of this function call.
     pub fn get_symbol(&self) -> Symbol {
         self.to_fun_view().get_symbol()
     }
 
     #[inline(always)]
+    /// Return the number of function arguments.
     pub fn get_nargs(&self) -> usize {
         self.to_fun_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -965,6 +1120,7 @@ impl Pow {
     }
 
     #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &PowView<'_>, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(a.data);
@@ -989,22 +1145,26 @@ impl Pow {
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_pow_view(&self) -> PowView<'_> {
         PowView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &PowView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Pow(self.to_pow_view())
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1034,18 +1194,22 @@ impl Mul {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Mul {
-        buffer.clear();
-        buffer.put_u8(MUL_ID | NOT_NORMALIZED);
-        buffer.put_u32_le(0_u32);
-        (0u64, 1).write_packed(&mut buffer);
-        let len = buffer.len() as u32 - 1 - 4;
-        (&mut buffer[1..]).put_u32_le(len);
-
-        Mul { data: buffer }
+    pub(crate) fn new_into(buffer: RawAtom) -> Mul {
+        let mut value = Mul { data: buffer };
+        value.clear();
+        value
     }
 
     #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        self.data
+            .extend_from_slice(&[MUL_ID | NOT_NORMALIZED, 0x11, 0, 0]);
+    }
+
+    #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &MulView<'_>, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(a.data);
@@ -1062,6 +1226,7 @@ impl Mul {
     }
 
     #[inline]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: &MulView) {
         self.data.clear();
         self.data.extend(view.data);
@@ -1071,21 +1236,12 @@ impl Mul {
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
 
-        // may increase size of the num of args
-        let mut c = &self.data[1 + 4..];
-
-        let buf_pos = 1 + 4;
-
-        let mut n_args;
-        (n_args, _, c) = c.get_frac_u64(); // TODO: pack size and n_args
-
-        let old_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize - 1 - 4;
+        let (mut n_args, _, c) = read_packed_pair(&self.data[1..]);
+        let old_end = self.data.len() - c.len();
 
         let data_start = match other {
             AtomView::Mul(m) => {
-                let mut sd = &m.data[1 + 4..];
-                let sub_n_args;
-                (sub_n_args, _, sd) = sd.get_frac_u64();
+                let (sub_n_args, _, sd) = read_packed_pair(&m.data[1..]);
 
                 n_args += sub_n_args;
                 sd
@@ -1096,39 +1252,13 @@ impl Mul {
             }
         };
 
-        let new_size = (n_args, 1).get_packed_size() as usize;
-
-        match new_size.cmp(&old_size) {
-            Ordering::Equal => {}
-            Ordering::Less => {
-                self.data.copy_within(1 + 4 + old_size.., 1 + 4 + new_size);
-                self.data.resize(self.data.len() - old_size + new_size, 0);
-            }
-            Ordering::Greater => {
-                let old_len = self.data.len();
-                self.data.resize(old_len + new_size - old_size, 0);
-                self.data
-                    .copy_within(1 + 4 + old_size..old_len, 1 + 4 + new_size);
-            }
-        }
-
-        // size should be ok now
-        (n_args, 1).write_packed_fixed(&mut self.data[1 + 4..1 + 4 + new_size]);
-
         self.data.extend_from_slice(data_start);
-
-        let new_buf_pos = self.data.len();
-
-        let mut cursor = &mut self.data[1..];
-        cursor.put_u32_le((new_buf_pos - buf_pos) as u32);
+        update_list_header(&mut self.data, old_end, n_args);
     }
 
     pub(crate) fn replace_first(&mut self, other: AtomView) {
-        let mut c = &self.data[1 + 4..];
-
-        (_, _, c) = c.get_frac_u64(); // TODO: pack size and n_args
-
-        let first_arg_start = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize;
+        let (n_args, _, c) = read_packed_pair(&self.data[1..]);
+        let first_arg_start = self.data.len() - c.len();
 
         // get size of first arg
         let aa = self.to_mul_view().to_slice().get(0);
@@ -1139,27 +1269,30 @@ impl Mul {
         match new_first_len.cmp(&old_first_len) {
             Ordering::Equal => {}
             Ordering::Less => {
-                self.data
-                    .copy_within(1 + 4 + old_first_len.., 1 + 4 + new_first_len);
+                self.data.copy_within(
+                    first_arg_start + old_first_len..,
+                    first_arg_start + new_first_len,
+                );
                 let new_len = self.data.len() - old_first_len + new_first_len;
                 self.data.truncate(new_len);
-                (&mut self.data[1..]).put_u32_le((new_len - 1 - 4) as u32);
             }
             Ordering::Greater => {
                 let old_len = self.data.len();
                 self.data.resize(old_len + new_first_len - old_first_len, 0);
-                self.data
-                    .copy_within(1 + 4 + old_first_len..old_len, 1 + 4 + new_first_len);
-                (&mut self.data[1..])
-                    .put_u32_le((old_len - 1 - 4 + new_first_len - old_first_len) as u32);
+                self.data.copy_within(
+                    first_arg_start + old_first_len..old_len,
+                    first_arg_start + new_first_len,
+                );
             }
         }
 
         self.data[first_arg_start..first_arg_start + new_first_len]
             .copy_from_slice(other.get_data());
+        update_list_header(&mut self.data, first_arg_start, n_args);
     }
 
     #[inline]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_mul_view(&self) -> MulView<'_> {
         MulView { data: &self.data }
     }
@@ -1173,16 +1306,19 @@ impl Mul {
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Mul(self.to_mul_view())
     }
 
     #[inline(always)]
+    /// Return the number of factors in the product.
     pub fn get_nargs(&self) -> usize {
         self.to_mul_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1212,14 +1348,22 @@ impl Add {
     }
 
     #[inline]
-    pub(crate) fn new_into(mut buffer: RawAtom) -> Add {
-        buffer.clear();
-        buffer.put_u8(ADD_ID | NOT_NORMALIZED);
-        (0u64, 0).write_packed(&mut buffer);
-        Add { data: buffer }
+    pub(crate) fn new_into(buffer: RawAtom) -> Add {
+        let mut value = Add { data: buffer };
+        value.clear();
+        value
     }
 
     #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.data.clear();
+        // The packed (argument count, byte size) pair (0, 0) is [0x11, 0, 0].
+        self.data
+            .extend_from_slice(&[ADD_ID | NOT_NORMALIZED, 0x11, 0, 0]);
+    }
+
+    #[inline]
+    /// Copy the view into owned storage, clearing and reusing `buffer`.
     pub fn from_view_into(a: &AddView<'_>, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(a.data);
@@ -1239,18 +1383,13 @@ impl Add {
     pub(crate) fn extend(&mut self, other: AtomView<'_>) {
         self.data[0] |= NOT_NORMALIZED;
 
-        let mut c = &self.data[1..];
-
-        let mut n_args;
-        (n_args, _, c) = c.get_frac_u64();
+        let (mut n_args, _, c) = read_packed_pair(&self.data[1..]);
 
         let old_header_size = unsafe { c.as_ptr().offset_from(self.data.as_ptr()) } as usize;
 
         match other {
             AtomView::Add(m) => {
-                let mut sd = &m.data[1..];
-                let sub_n_args;
-                (sub_n_args, _, sd) = sd.get_frac_u64();
+                let (sub_n_args, _, sd) = read_packed_pair(&m.data[1..]);
 
                 n_args += sub_n_args;
                 self.data.extend_from_slice(sd);
@@ -1261,50 +1400,36 @@ impl Add {
             }
         };
 
-        let new_len = self.data.len() - old_header_size;
-        let new_header_size = (n_args, new_len as u64).get_packed_size() as usize + 1;
-
-        match new_header_size.cmp(&old_header_size) {
-            Ordering::Equal => {}
-            Ordering::Less => {
-                self.data.copy_within(old_header_size.., new_header_size);
-                self.data
-                    .resize(self.data.len() - old_header_size + new_header_size, 0);
-            }
-            Ordering::Greater => {
-                let old_len = self.data.len();
-                self.data
-                    .resize(old_len + new_header_size - old_header_size, 0);
-                self.data
-                    .copy_within(old_header_size..old_len, new_header_size);
-            }
-        }
-
-        (n_args, new_len as u64).write_packed_fixed(&mut self.data[1..new_header_size]);
+        update_list_header(&mut self.data, old_header_size, n_args);
     }
 
     #[inline(always)]
+    /// Borrow a typed view without copying the underlying storage.
     pub fn to_add_view(&self) -> AddView<'_> {
         AddView { data: &self.data }
     }
 
     #[inline(always)]
+    /// Replace this value with a copy of the view, reusing its allocation.
     pub fn set_from_view(&mut self, view: AddView) {
         self.data.clear();
         self.data.extend(view.data);
     }
 
     #[inline(always)]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         AtomView::Add(self.to_add_view())
     }
 
     #[inline(always)]
+    /// Return the number of terms in the sum.
     pub fn get_nargs(&self) -> usize {
         self.to_add_view().get_nargs()
     }
 
     #[inline(always)]
+    /// Consume this value and return its encoded byte buffer.
     pub fn into_raw(self) -> RawAtom {
         self.data
     }
@@ -1324,16 +1449,19 @@ impl Add {
 
 impl<'a> VarView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Var {
         Var::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Var) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Var {
         buffer.clear();
         buffer.extend(self.data);
@@ -1341,6 +1469,7 @@ impl<'a> VarView<'a> {
     }
 
     #[inline(always)]
+    /// Return the symbol represented by this variable.
     pub fn get_symbol(&self) -> Symbol {
         let (id, attrs, _) = self.data[1..].get_frac_u64();
 
@@ -1349,21 +1478,26 @@ impl<'a> VarView<'a> {
     }
 
     #[inline(always)]
+    /// Return the variable's session-local symbol identifier.
     pub fn get_symbol_id(&self) -> u32 {
         let (id_and_attrs, _, _) = self.data[1..].get_frac_u64();
         id_and_attrs as u32
     }
 
     #[inline(always)]
+    /// Return the symbol's wildcard level: zero for an ordinary symbol,
+    /// or one, two, or three for its wildcard suffix.
     pub fn get_wildcard_level(&self) -> u8 {
         self.get_symbol().get_wildcard_level()
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Var(*self)
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1414,14 +1548,17 @@ impl<'a> IntoIterator for &FunView<'a> {
 }
 
 impl<'a> FunView<'a> {
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Fun {
         Fun::from_view_into(self, Vec::new())
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Fun) {
         target.set_from_view(self);
     }
 
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Fun {
         buffer.clear();
         buffer.extend(self.data);
@@ -1429,8 +1566,9 @@ impl<'a> FunView<'a> {
     }
 
     #[inline(always)]
+    /// Return the head symbol of this function call.
     pub fn get_symbol(&self) -> Symbol {
-        let (id_and_attrs, _, _) = self.data[1 + 4..].get_frac_u64();
+        let id_and_attrs = read_packed_numerator(function_metadata(self.data));
         Symbol::decode_flags(
             id_and_attrs as u32,
             self.data[0],
@@ -1441,7 +1579,7 @@ impl<'a> FunView<'a> {
     /// Get the symbol ID of the function. Slightly faster than [get_symbol](Self::get_symbol) if only the ID is needed.
     #[inline(always)]
     pub fn get_symbol_id(&self) -> u32 {
-        let (id_and_attrs, _, _) = self.data[1 + 4..].get_frac_u64();
+        let id_and_attrs = read_packed_numerator(function_metadata(self.data));
         id_and_attrs as u32
     }
 
@@ -1459,33 +1597,39 @@ impl<'a> FunView<'a> {
     }
 
     #[inline(always)]
+    /// Return whether the function has the symmetric attribute.
     pub fn is_symmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_SYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the antisymmetric attribute.
     pub fn is_antisymmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_ANTISYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the cyclic-symmetry attribute.
     pub fn is_cyclesymmetric(&self) -> bool {
         self.data[0] & SYM_CYCLESYMMETRIC_FLAG == SYM_CYCLESYMMETRIC_FLAG
     }
 
     #[inline(always)]
+    /// Return whether the function has the linear attribute.
     pub fn is_linear(&self) -> bool {
         self.data[0] & SYM_LINEAR_FLAG == SYM_LINEAR_FLAG
     }
 
     #[inline(always)]
+    /// Return the function symbol's wildcard level, or zero for an ordinary symbol.
     pub fn get_wildcard_level(&self) -> u8 {
         self.get_symbol().get_wildcard_level()
     }
 
     #[inline(always)]
+    /// Return the number of function arguments.
     pub fn get_nargs(&self) -> usize {
-        self.data[1 + 4..].get_frac_u64().1 as usize
+        read_packed_denominator(function_metadata(self.data)).0 as usize
     }
 
     #[inline(always)]
@@ -1494,31 +1638,24 @@ impl<'a> FunView<'a> {
     }
 
     #[inline]
+    /// Iterate over the function arguments in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
-        let mut c = self.data;
-        c.get_u8();
-        c.get_u32_le(); // size
-
-        let n_args;
-        (_, n_args, c) = c.get_frac_u64(); // name
+        let (n_args, c) = read_packed_denominator(function_metadata(self.data));
 
         ListIterator {
             data: c,
-            length: n_args as u32,
+            length: n_args as usize,
         }
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Fun(*self)
     }
 
+    /// Borrow the function arguments as an argument slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
-        let mut c = self.data;
-        c.get_u8();
-        c.get_u32_le(); // size
-
-        let n_args;
-        (_, n_args, c) = c.get_frac_u64(); // name
+        let (n_args, c) = read_packed_denominator(function_metadata(self.data));
 
         ListSlice {
             data: c,
@@ -1527,6 +1664,7 @@ impl<'a> FunView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1550,17 +1688,33 @@ impl<'b> PartialEq<NumView<'b>> for NumView<'_> {
 }
 
 impl<'a> NumView<'a> {
+    /// Inspect small signed integer exponents without general coefficient decoding.
     #[inline]
+    pub(crate) fn small_integer(&self) -> Option<i64> {
+        super::coefficient::small_integer_atom(self.data)
+    }
+
+    /// The identity check can keep canonical small integers on their existing
+    /// header-only path without dispatching the general coefficient encoding.
+    #[inline]
+    pub(crate) fn small_integer_is_zero(&self) -> Option<bool> {
+        self.data.is_small_int().then(|| self.data.is_zero_rat())
+    }
+
+    #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Num {
         Num::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Num) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Num {
         buffer.clear();
         buffer.extend(self.data);
@@ -1568,6 +1722,7 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether this coefficient is zero.
     pub fn is_zero(&self) -> bool {
         if self.data.is_small_int() {
             self.data.is_zero_rat()
@@ -1577,6 +1732,7 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether this coefficient is one.
     pub fn is_one(&self) -> bool {
         if self.data.is_small_int() {
             self.data.is_one_rat()
@@ -1586,14 +1742,23 @@ impl<'a> NumView<'a> {
     }
 
     #[inline]
+    /// Return whether the coefficient is stored as a rational polynomial.
+    pub fn is_rational_polynomial(&self) -> bool {
+        self.data.is_rational_polynomial()
+    }
+
+    #[inline]
+    /// Borrow the coefficient representation without allocating an owned coefficient.
     pub fn get_coeff_view(&self) -> CoefficientView<'a> {
         self.data[1..].get_coeff_view().0
     }
 
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Num(*self)
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1634,16 +1799,19 @@ impl<'b> PartialEq<PowView<'b>> for PowView<'_> {
 
 impl<'a> PowView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Pow {
         Pow::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Pow) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Pow {
         buffer.clear();
         buffer.extend(self.data);
@@ -1651,12 +1819,13 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow the base of this power.
     pub fn get_base(&self) -> AtomView<'a> {
-        let (b, _) = self.get_base_exp();
-        b
+        self.iter().next().unwrap()
     }
 
     #[inline]
+    /// Borrow the exponent of this power.
     pub fn get_exp(&self) -> AtomView<'a> {
         let (_, e) = self.get_base_exp();
         e
@@ -1668,6 +1837,7 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow the base and exponent, in that order.
     pub fn get_base_exp(&self) -> (AtomView<'a>, AtomView<'a>) {
         let mut it = self.iter();
 
@@ -1675,6 +1845,7 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Iterate over the base followed by the exponent.
     pub fn iter(&self) -> ListIterator<'a> {
         ListIterator {
             data: &self.data[1..],
@@ -1683,11 +1854,13 @@ impl<'a> PowView<'a> {
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Pow(*self)
     }
 
     #[inline]
+    /// Borrow a two-element slice containing the base followed by the exponent.
     pub fn to_slice(&self) -> ListSlice<'a> {
         ListSlice {
             data: &self.data[1..],
@@ -1696,6 +1869,7 @@ impl<'a> PowView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1736,16 +1910,19 @@ impl<'a> IntoIterator for &MulView<'a> {
 
 impl<'a> MulView<'a> {
     #[inline]
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Mul {
         Mul::from_view_into(self, Vec::new())
     }
 
     #[inline]
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Mul) {
         target.set_from_view(self);
     }
 
     #[inline]
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Mul {
         buffer.clear();
         buffer.extend(self.data);
@@ -1757,37 +1934,31 @@ impl<'a> MulView<'a> {
         (self.data[0] & NOT_NORMALIZED) == 0
     }
 
+    /// Return the number of factors, including an explicit coefficient when present.
     pub fn get_nargs(&self) -> usize {
-        self.data[1 + 4..].get_frac_u64().0 as usize
+        read_packed_numerator(&self.data[1..]) as usize
     }
 
     #[inline]
+    /// Iterate over the factors in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
-        let mut c = self.data;
-        c.get_u8();
-        c.get_u32_le(); // size
-
-        let n_args;
-        (n_args, _, c) = c.get_frac_u64();
+        let (n_args, _, c) = read_packed_pair(&self.data[1..]);
 
         ListIterator {
             data: c,
-            length: n_args as u32,
+            length: n_args as usize,
         }
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Mul(*self)
     }
 
+    /// Borrow the factors as a product slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
-        let mut c = self.data;
-        c.get_u8();
-        c.get_u32_le(); // size
-
-        let n_args;
-        (n_args, _, c) = c.get_frac_u64();
+        let (n_args, _, c) = read_packed_pair(&self.data[1..]);
 
         ListSlice {
             data: c,
@@ -1797,11 +1968,14 @@ impl<'a> MulView<'a> {
     }
 
     #[inline]
+    /// Return whether this product stores an explicit numerical coefficient.
     pub fn has_coefficient(&self) -> bool {
         self.data[0] & MUL_HAS_COEFF_FLAG == MUL_HAS_COEFF_FLAG
     }
 
     #[inline]
+    /// Borrow the explicit numerical coefficient, or return `None` when it is
+    /// absent (the implicit coefficient is one).
     pub fn get_coefficient(&self) -> Option<AtomView<'a>> {
         if self.has_coefficient() {
             self.iter().next()
@@ -1810,6 +1984,7 @@ impl<'a> MulView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
@@ -1849,14 +2024,17 @@ impl<'a> IntoIterator for &AddView<'a> {
 }
 
 impl<'a> AddView<'a> {
+    /// Copy this view into a new owned value.
     pub fn to_owned(&self) -> Add {
         Add::from_view_into(self, Vec::new())
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Add) {
         target.set_from_view(*self);
     }
 
+    /// Copy this view into owned storage, clearing and reusing `buffer`.
     pub fn clone_into_raw(&self, mut buffer: RawAtom) -> Add {
         buffer.clear();
         buffer.extend(self.data);
@@ -1869,35 +2047,31 @@ impl<'a> AddView<'a> {
     }
 
     #[inline(always)]
+    /// Return the number of terms in the sum.
     pub fn get_nargs(&self) -> usize {
-        self.data[1..].get_frac_u64().0 as usize
+        read_packed_numerator(&self.data[1..]) as usize
     }
 
     #[inline]
+    /// Iterate over the terms in their stored order.
     pub fn iter(&self) -> ListIterator<'a> {
-        let mut c = self.data;
-        c.get_u8();
-
-        let n_args;
-        (n_args, _, c) = c.get_frac_u64();
+        let (n_args, _, c) = read_packed_pair(&self.data[1..]);
 
         ListIterator {
             data: c,
-            length: n_args as u32,
+            length: n_args as usize,
         }
     }
 
     #[inline]
+    /// Borrow this value as an expression view without copying its storage.
     pub fn as_view(&self) -> AtomView<'a> {
         AtomView::Add(*self)
     }
 
+    /// Borrow the terms as a sum slice.
     pub fn to_slice(&self) -> ListSlice<'a> {
-        let mut c = self.data;
-        c.get_u8();
-
-        let n_args;
-        (n_args, _, c) = c.get_frac_u64();
+        let (n_args, _, c) = read_packed_pair(&self.data[1..]);
 
         ListSlice {
             data: c,
@@ -1906,14 +2080,21 @@ impl<'a> AddView<'a> {
         }
     }
 
+    /// Return the size in bytes of the encoded expression, excluding symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         self.data.len()
     }
 }
 
 impl<'a> AtomView<'a> {
+    /// A view of the exact number zero backed by static storage.
     pub const ZERO: Self = Self::Num(NumView { data: &ZERO_DATA });
 
+    /// Interpret `source` as one complete expression in Symbolica's encoded
+    /// representation. The bytes must already be valid, such as those returned
+    /// by [`Self::get_data`], and reference the current symbol state.
+    /// This does not validate or import serialized input; use [`Atom::import`]
+    /// for expressions transferred between sessions.
     pub fn from(source: &'a [u8]) -> AtomView<'a> {
         match source[0] & TYPE_MASK {
             VAR_ID => AtomView::Var(VarView { data: source }),
@@ -1927,6 +2108,7 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
+    /// Borrow the encoded expression bytes. Symbol metadata is stored separately.
     pub fn get_data(&self) -> &'a [u8] {
         match self {
             AtomView::Num(n) => n.data,
@@ -1938,18 +2120,16 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    /// Export the atom and state to a binary stream. It can be loaded
+    /// Export the atom and the required state to a binary stream. It can be loaded
     /// with [Atom::import].
     #[inline(always)]
     pub fn export<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
-        State::export(dest)?;
+        let active_symbols = self.get_all_symbols(true);
+        State::export_partial(dest, active_symbols)?;
 
         dest.write_u64::<LittleEndian>(1)?; // export a single expression
 
-        let d = self.get_data();
-        dest.write_u8(0)?;
-        dest.write_u64::<LittleEndian>(d.len() as u64)?;
-        dest.write_all(d)
+        self.write(dest)
     }
 
     /// Write the expression to a binary stream. The byte-length is written first,
@@ -1959,91 +2139,141 @@ impl<'a> AtomView<'a> {
     #[inline(always)]
     pub fn write<W: Write>(&self, dest: &mut W) -> Result<(), std::io::Error> {
         let d = self.get_data();
-        dest.write_u8(0)?;
+        dest.write_u8(ATOM_EXPORT_FORMAT)?;
         dest.write_u64::<LittleEndian>(d.len() as u64)?;
         dest.write_all(d)
     }
 
+    /// Rename all symbols in this (imported) atom using the given state map.
+    /// Normalization can only take place after all symbols have been renamed.
     pub(crate) fn rename(&self, state_map: &StateMap) -> Atom {
+        let mut out = Atom::new();
+
         Workspace::get_local().with(|ws| {
-            let mut a = ws.new_atom();
-            self.rename_no_norm(state_map, ws, &mut a);
-            let mut r = Atom::new();
-            a.as_view().normalize(ws, &mut r);
-            r
-        })
+            let mut set = Settable::from(&mut out);
+            self.rename_no_norm(state_map, ws, &mut set);
+
+            if let Some(value) = set.get() {
+                let mut a = ws.new_atom();
+                value.as_view().normalize(ws, &mut a);
+                std::mem::swap(&mut out, &mut a);
+            } else {
+                self.normalize(ws, &mut out);
+            }
+        });
+
+        out
     }
 
-    fn rename_no_norm(&self, state_map: &StateMap, ws: &Workspace, out: &mut Atom) {
+    pub(crate) fn rename_no_norm(
+        &self,
+        state_map: &StateMap,
+        ws: &Workspace,
+        out: &mut Settable<'_, Atom>,
+    ) {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::FiniteField(e, i) => {
                     if let Some(s) = state_map.finite_fields.get(&i) {
                         out.to_num(Coefficient::FiniteField(e, *s));
-                    } else {
-                        out.set_from_view(self);
                     }
                 }
                 CoefficientView::RationalPolynomial(r) => {
                     let (old_id, _, _) = r.0.get_frac_u64();
 
-                    if let Some(nv) = state_map.variables_lists.get(&old_id) {
-                        let mut rr = r.deserialize();
-                        rr.numerator.variables = nv.clone();
-                        rr.denominator.variables = nv.clone();
+                    if let Some(nv) = state_map.get_variable_list(old_id) {
+                        let rr = r.deserialize_with_variables(nv);
                         out.to_num(Coefficient::RationalPolynomial(rr));
-                    } else {
-                        out.set_from_view(self);
                     }
                 }
-                _ => out.set_from_view(self),
+                _ => {}
             },
             AtomView::Var(v) => {
                 if let Some(s) = state_map.symbols.get(&v.get_symbol_id()) {
                     out.to_var(*s);
-                } else {
-                    out.set_from_view(self);
                 }
             }
             AtomView::Fun(f) => {
-                if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
-                    let nf = out.to_fun(*s);
-
-                    let mut na = ws.new_atom();
-                    for a in f {
-                        a.rename_no_norm(state_map, ws, &mut na);
-                        nf.add_arg(na.as_view());
-                    }
+                let mut fun = if let Some(s) = state_map.symbols.get(&f.get_symbol_id()) {
+                    Some(out.to_fun(*s))
                 } else {
-                    out.set_from_view(self);
+                    None
+                };
+
+                let mut arg_h = ws.new_atom();
+                for (i, arg) in f.iter().enumerate() {
+                    let mut set = Settable::from(&mut *arg_h);
+                    arg.rename_no_norm(state_map, ws, &mut set);
+
+                    if fun.is_none() && set.is_set() {
+                        let fun_o = out.to_fun(f.get_symbol());
+
+                        for child in f.iter().take(i) {
+                            fun_o.add_arg(child);
+                        }
+
+                        fun_o.add_arg(set.as_view());
+                        fun = Some(fun_o);
+                    } else if let Some(fun) = &mut fun {
+                        fun.add_arg(set.as_view_or(arg));
+                    }
                 }
             }
             AtomView::Pow(p) => {
-                let (b, e) = p.get_base_exp();
+                let (base, exp) = p.get_base_exp();
 
-                let mut nb = ws.new_atom();
-                b.rename_no_norm(state_map, ws, &mut nb);
-                let mut ne = ws.new_atom();
-                e.rename_no_norm(state_map, ws, &mut ne);
+                let mut base_h = ws.new_atom();
+                let mut base_set = Settable::from(&mut *base_h);
+                base.rename_no_norm(state_map, ws, &mut base_set);
 
-                out.to_pow(nb.as_view(), ne.as_view());
-            }
-            AtomView::Mul(m) => {
-                let nm = out.to_mul();
+                let mut exp_h = ws.new_atom();
+                let mut exp_set = Settable::from(&mut *exp_h);
+                exp.rename_no_norm(state_map, ws, &mut exp_set);
 
-                let mut na = ws.new_atom();
-                for a in m {
-                    a.rename_no_norm(state_map, ws, &mut na);
-                    nm.extend(na.as_view());
+                if base_set.is_set() || exp_set.is_set() {
+                    out.to_pow(base_set.as_view_or(base), exp_set.as_view_or(exp));
                 }
             }
-            AtomView::Add(add) => {
-                let nm = out.to_add();
+            AtomView::Mul(mm) => {
+                let mut mul = None;
 
-                let mut na = ws.new_atom();
-                for a in add {
-                    a.rename_no_norm(state_map, ws, &mut na);
-                    nm.extend(na.as_view());
+                let mut child_h = ws.new_atom();
+                for (i, child) in mm.iter().enumerate() {
+                    let mut set = Settable::from(&mut *child_h);
+                    child.rename_no_norm(state_map, ws, &mut set);
+
+                    if mul.is_none() && set.is_set() {
+                        let mul_o = out.to_mul();
+
+                        for child in mm.iter().take(i) {
+                            mul_o.extend(child);
+                        }
+                        mul_o.extend(set.as_view());
+                        mul = Some(mul_o);
+                    } else if let Some(mul_o) = &mut mul {
+                        mul_o.extend(set.as_view_or(child));
+                    }
+                }
+            }
+            AtomView::Add(a) => {
+                let mut add = None;
+
+                let mut child_h = ws.new_atom();
+                for (i, child) in a.iter().enumerate() {
+                    let mut set = Settable::from(&mut *child_h);
+                    child.rename_no_norm(state_map, ws, &mut set);
+
+                    if add.is_none() && set.is_set() {
+                        let add_o = out.to_add();
+
+                        for child in a.iter().take(i) {
+                            add_o.extend(child);
+                        }
+                        add_o.extend(set.as_view());
+                        add = Some(add_o);
+                    } else if let Some(mul_o) = &mut add {
+                        mul_o.extend(set.as_view_or(child));
+                    }
                 }
             }
         }
@@ -2054,11 +2284,47 @@ impl<'a> AtomView<'a> {
 #[derive(Debug, Copy, Clone)]
 pub struct ListIterator<'a> {
     data: &'a [u8],
-    length: u32,
+    length: usize,
+}
+
+impl<'a> ListIterator<'a> {
+    /// Resume at a previously visited boundary within this list.
+    ///
+    /// # Safety
+    /// `data` must be a suffix of this iterator's original data starting at an
+    /// atom boundary, and `length` must be the exact number of remaining atoms.
+    /// The underlying expression must not have changed since recording it.
+    pub unsafe fn resume_at(self, data: &'a [u8], length: usize) -> Self {
+        assert!(data.as_ptr() >= self.data.as_ptr());
+        assert_eq!(data.as_ptr_range().end, self.data.as_ptr_range().end);
+        assert!(length <= self.length);
+        Self { data, length }
+    }
 }
 
 impl<'a> Iterator for ListIterator<'a> {
     type Item = AtomView<'a>;
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.length, Some(self.length))
+    }
+
+    #[inline(always)]
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        if n >= self.length {
+            self.data = &[];
+            self.length = 0;
+            return None;
+        }
+
+        // Keep constant indices as easy to inline and unroll as repeated next()
+        // calls. The upfront length check also handles oversized indices in O(1).
+        for _ in 0..n {
+            self.next();
+        }
+        self.next()
+    }
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
@@ -2068,6 +2334,11 @@ impl<'a> Iterator for ListIterator<'a> {
 
         self.length -= 1;
 
+        if self.length == 0 {
+            // The remaining slice contains exactly the final atom.
+            return Some(AtomView::from(std::mem::take(&mut self.data)));
+        }
+
         let start = self.data;
 
         let start_id = self.data.get_u8() & TYPE_MASK;
@@ -2075,20 +2346,18 @@ impl<'a> Iterator for ListIterator<'a> {
 
         // store how many more atoms to read
         // can be used instead of storing the byte length of an atom
-        let mut skip_count = 1;
+        let mut skip_count = 1usize;
         loop {
             match cur_id {
                 NUM_ID | VAR_ID => {
                     self.data = self.data.skip_rational();
                 }
-                FUN_ID | MUL_ID => {
-                    let n_size = self.data.get_u32_le();
-                    self.data.advance(n_size as usize);
+                FUN_ID => {
+                    // Views contain complete, valid atoms, including the payload.
+                    self.data = unsafe { skip_packed_function(self.data) };
                 }
-                ADD_ID => {
-                    let (_, size, np) = self.data.get_frac_u64();
-                    self.data = np;
-                    self.data.advance(size as usize);
+                MUL_ID | ADD_ID => {
+                    self.data = unsafe { skip_packed_list(self.data) };
                 }
                 POW_ID => {
                     skip_count += 2;
@@ -2123,7 +2392,7 @@ impl<'a> Iterator for ListIterator<'a> {
 impl<'a> ExactSizeIterator for ListIterator<'a> {
     #[inline]
     fn len(&self) -> usize {
-        self.length as usize
+        self.length
     }
 }
 
@@ -2145,11 +2414,13 @@ impl<'a, const N: usize> TryInto<[AtomView<'a>; N]> for ListIterator<'a> {
 
 impl<'a> ListIterator<'a> {
     #[inline]
+    /// Return the number of expressions still to be yielded.
     pub fn len(&self) -> usize {
-        self.length as usize
+        self.length
     }
 
     #[inline]
+    /// Create an iterator that yields `atom` exactly once.
     pub fn from_one(atom: AtomView<'a>) -> Self {
         ListIterator {
             data: atom.get_data(),
@@ -2168,7 +2439,7 @@ pub struct ListSlice<'a> {
 
 impl<'a> ListSlice<'a> {
     #[inline(always)]
-    fn skip(mut pos: &[u8], n: u32) -> &[u8] {
+    fn skip(mut pos: &[u8], n: usize) -> &[u8] {
         // store how many more atoms to read
         // can be used instead of storing the byte length of an atom
         let mut skip_count = n;
@@ -2181,23 +2452,11 @@ impl<'a> ListSlice<'a> {
                 NUM_ID | VAR_ID => {
                     pos = pos.skip_rational();
                 }
-                FUN_ID | MUL_ID => {
-                    let n_size = unsafe {
-                        u32::from_le_bytes([
-                            *pos.get_unchecked(0),
-                            *pos.get_unchecked(1),
-                            *pos.get_unchecked(2),
-                            *pos.get_unchecked(3),
-                        ])
-                    };
-
-                    pos = unsafe { pos.get_unchecked(n_size as usize + 4..) };
+                FUN_ID => {
+                    pos = unsafe { skip_packed_function(pos) };
                 }
-                ADD_ID => {
-                    let (_, size, np) = pos.get_frac_u64();
-                    pos = np;
-
-                    pos = unsafe { pos.get_unchecked(size as usize..) };
+                MUL_ID | ADD_ID => {
+                    pos = unsafe { skip_packed_list(pos) };
                 }
                 POW_ID => {
                     skip_count += 2;
@@ -2209,6 +2468,8 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the suffix after skipping `index` elements, preserving the slice type.
+    /// The caller must ensure `index <= self.len()`.
     pub fn fast_forward(&self, index: usize) -> ListSlice<'a> {
         if index == 0 {
             return *self;
@@ -2216,7 +2477,7 @@ impl<'a> ListSlice<'a> {
 
         let mut pos = self.data;
 
-        pos = Self::skip(pos, index as u32);
+        pos = Self::skip(pos, index);
 
         ListSlice {
             data: pos,
@@ -2246,6 +2507,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the first element and the remaining slice. The slice must be nonempty.
     pub fn pop_first(&self) -> (AtomView<'a>, ListSlice<'a>) {
         let (res, end) = Self::get_entry(self.data);
 
@@ -2259,21 +2521,25 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the number of expressions in the slice.
     pub fn len(&self) -> usize {
         self.length
     }
 
     #[inline]
+    /// Borrow the element at `index`. The caller must ensure `index < self.len()`.
     pub fn get(&self, index: usize) -> AtomView<'a> {
         let start = self.fast_forward(index);
         Self::get_entry(start.data).0
     }
 
+    /// Borrow the elements in the half-open range, preserving the slice type.
+    /// The range must be ordered and contained in `0..self.len()`.
     pub fn get_subslice(&self, range: std::ops::Range<usize>) -> Self {
         let start = self.fast_forward(range.start);
 
         let mut s = start.data;
-        s = Self::skip(s, range.len() as u32);
+        s = Self::skip(s, range.len());
 
         let len = unsafe { s.as_ptr().offset_from(start.data.as_ptr()) } as usize;
         ListSlice {
@@ -2284,11 +2550,13 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Return the operation from which this slice was taken.
     pub fn get_type(&self) -> SliceType {
         self.slice_type
     }
 
     #[inline]
+    /// Create a one-element slice containing `view`.
     pub fn from_one(view: AtomView<'a>) -> Self {
         ListSlice {
             data: view.get_data(),
@@ -2298,6 +2566,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Create an empty slice with [`SliceType::Empty`].
     pub fn empty() -> Self {
         ListSlice {
             data: &[],
@@ -2307,6 +2576,7 @@ impl<'a> ListSlice<'a> {
     }
 
     #[inline]
+    /// Iterate over the expressions in this slice.
     pub fn iter(&self) -> ListSliceIterator<'a> {
         ListSliceIterator { data: *self }
     }
@@ -2344,7 +2614,329 @@ impl<'a> Iterator for ListSliceIterator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{atom::AtomView, parse};
+    use super::*;
+    use crate::{parse, symbol};
+
+    fn check_list(atom: AtomView<'_>, expected: &[AtomView<'_>]) {
+        let slice = match atom {
+            AtomView::Fun(f) => f.to_slice(),
+            AtomView::Mul(m) => m.to_slice(),
+            AtomView::Add(a) => a.to_slice(),
+            _ => panic!("expected a list"),
+        };
+        assert_eq!(slice.len(), expected.len());
+        assert_eq!(slice.iter().collect::<Vec<_>>(), expected);
+        let mut iter = match atom {
+            AtomView::Fun(f) => f.iter(),
+            AtomView::Mul(m) => m.iter(),
+            AtomView::Add(a) => a.iter(),
+            _ => unreachable!(),
+        };
+        assert_eq!(iter.size_hint(), (expected.len(), Some(expected.len())));
+        iter.next();
+        let remaining = expected.len().saturating_sub(1);
+        assert_eq!(iter.size_hint(), (remaining, Some(remaining)));
+        assert_eq!(slice.fast_forward(expected.len()).len(), 0);
+        assert_eq!(ListIterator::from_one(atom).next().unwrap(), atom);
+        if !expected.is_empty() {
+            let last = expected.len() - 1;
+            assert_eq!(slice.get(last), expected[last]);
+            assert_eq!(slice.get_subslice(last..last + 1).get(0), expected[last]);
+        }
+    }
+
+    #[test]
+    fn packed_length_boundaries() {
+        use super::super::coefficient::{read_packed_denominator, read_packed_u64};
+        let values = [
+            0,
+            1,
+            255,
+            256,
+            65535,
+            65536,
+            u32::MAX as u64,
+            1u64 << 32,
+            u64::MAX,
+        ];
+        for size in values {
+            let mut data = Vec::new();
+            (size, 1).write_packed(&mut data);
+            data.push(123);
+            assert_eq!(read_packed_u64(&data), (size, &[123][..]));
+            assert_eq!(read_packed_numerator(&data), size);
+            for count in values {
+                data.clear();
+                (count, size).write_packed(&mut data);
+                data.push(123);
+                assert_eq!(read_packed_denominator(&data), (size, &[123][..]));
+                assert_eq!(read_packed_pair(&data), (count, size, &[123][..]));
+                assert_eq!(read_packed_numerator(&data), count);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_skip_load_boundaries() {
+        // Exercise each width, including non-minimal encodings and a buffer
+        // that ends exactly at the payload's last byte.
+        for size in [0u64, 1, 2, 3, 7, 8, 9, 255, 256, 65535, 65536] {
+            for width_tag in 1..=4u8 {
+                let width = 1usize << (width_tag - 1);
+                if width < 8 && size >= 1u64 << (8 * width) {
+                    continue;
+                }
+                let mut fun = vec![width_tag];
+                fun.extend_from_slice(&size.to_le_bytes()[..width]);
+                fun.resize(fun.len() + size as usize, 0xff);
+                let fun = fun.into_boxed_slice();
+                assert!(unsafe { skip_packed_function(&fun) }.is_empty());
+                for count_tag in 1..=4u8 {
+                    let count_width = 1usize << (count_tag - 1);
+                    let mut list = vec![count_tag | (width_tag << 4)];
+                    list.extend_from_slice(&1u64.to_le_bytes()[..count_width]);
+                    list.extend_from_slice(&size.to_le_bytes()[..width]);
+                    list.resize(list.len() + size as usize, 0xff);
+                    let list = list.into_boxed_slice();
+                    assert!(unsafe { skip_packed_list(&list) }.is_empty());
+                    if size == 1 {
+                        let mut implicit = vec![count_tag];
+                        implicit.extend_from_slice(&1u64.to_le_bytes()[..count_width]);
+                        implicit.push(0xff);
+                        assert!(unsafe { skip_packed_list(&implicit) }.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_function_append_and_unwind() {
+        let x = parse!("x");
+        let head = symbol!("batch_function_append");
+        for count in [0, 1, 2, 84, 85, 255, 256, 22000, 65536] {
+            let mut incremental = Fun::new_into(head, Vec::new());
+            for _ in 0..count {
+                incremental.add_arg(x.as_view());
+            }
+            let mut batch = Fun::new_into(head, Vec::new());
+            batch.add_args_iter((0..count).map(|_| AtomOrView::from(x.clone())));
+            assert_eq!(batch, incremental);
+
+            let before = batch.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                batch.add_args_iter((0..10).map(|i| {
+                    assert_ne!(i, 5, "test iterator panic");
+                    AtomOrView::from(x.as_view())
+                }));
+            }));
+            assert!(result.is_err());
+            assert_eq!(batch, before);
+            batch.add_arg(x.as_view());
+            incremental.add_arg(x.as_view());
+            assert_eq!(batch, incremental);
+        }
+    }
+
+    #[test]
+    fn growing_packed_headers() {
+        let x = parse!("x");
+        let mut fun = Fun::new_into(symbol!("packed_headers"), Vec::new());
+        let mut mul = Mul::new();
+        let mut add = Add::new();
+        check_list(fun.as_view(), &[]);
+        check_list(mul.as_view(), &[]);
+        check_list(add.as_view(), &[]);
+        for i in 1..=65537 {
+            fun.add_arg(x.as_view());
+            mul.extend(x.as_view());
+            add.extend(x.as_view());
+            if [
+                1, 2, 83, 84, 85, 86, 255, 256, 257, 21843, 21844, 21845, 21846, 65535, 65536,
+                65537,
+            ]
+            .contains(&i)
+            {
+                let expected = vec![x.as_view(); i];
+                for atom in [fun.as_view(), mul.as_view(), add.as_view()] {
+                    check_list(atom, &expected);
+                }
+                assert_eq!(fun.to_fun_view().iter().count(), i);
+                assert_eq!(mul.to_mul_view().iter().count(), i);
+                assert_eq!(add.to_add_view().iter().count(), i);
+            }
+        }
+        let mut batched = Fun::new_into(fun.get_symbol(), Vec::new());
+        batched.add_args(&vec![x.as_view(); 65537]);
+        assert_eq!(batched, fun);
+        let mut merged = Mul::new();
+        merged.extend(mul.as_view());
+        assert_eq!(merged.as_view(), mul.as_view());
+    }
+
+    #[test]
+    fn replace_first_across_header_widths() {
+        let x = parse!("x");
+        let small = Atom::num(2);
+        let mut large = Fun::new_into(symbol!("large_first"), Vec::new());
+        large.add_args(&vec![x.as_view(); 22000]);
+        let mut medium = Fun::new_into(large.get_symbol(), Vec::new());
+        medium.add_args(&vec![x.as_view(); 100]);
+        let mut product = Mul::new();
+        product.extend(small.as_view());
+        product.extend(x.as_view());
+        product.set_has_coefficient(true);
+        for first in [
+            large.as_view(),
+            medium.as_view(),
+            small.as_view(),
+            medium.as_view(),
+            large.as_view(),
+            small.as_view(),
+        ] {
+            product.replace_first(first);
+            check_list(product.as_view(), &[first, x.as_view()]);
+            assert!(product.to_mul_view().has_coefficient());
+            assert_eq!(product.to_mul_view().get_coefficient(), Some(first));
+            let mut fresh = Mul::new();
+            fresh.extend(first);
+            fresh.extend(x.as_view());
+            fresh.set_has_coefficient(true);
+            assert_eq!(product.as_view(), fresh.as_view());
+        }
+    }
+
+    #[test]
+    fn packed_lengths_roundtrip() {
+        for expr in [
+            "0",
+            "x",
+            "f()",
+            "f(x)",
+            "f(x,y)",
+            "3*x*y",
+            "x+y",
+            "f((x+y)^(2*x),g(x,3*y))+2*x",
+        ] {
+            let atom = parse!(expr);
+            let mut bytes = Vec::new();
+            atom.as_view().write(&mut bytes).unwrap();
+            assert_eq!(bytes[0], ATOM_EXPORT_FORMAT);
+            assert_eq!(
+                &bytes[1..9],
+                &(atom.as_view().get_data().len() as u64).to_le_bytes()
+            );
+            assert_eq!(&bytes[9..], atom.as_view().get_data());
+            let mut decoded = Atom::new();
+            decoded.read(&mut &bytes[..]).unwrap();
+            assert_eq!(decoded, atom);
+
+            #[cfg(feature = "bincode")]
+            {
+                let config = bincode::config::standard();
+                let encoded = bincode::encode_to_vec(&atom, config).unwrap();
+                assert_eq!(encoded, bytes);
+                let (decoded, read): (Atom, usize) =
+                    bincode::decode_from_slice_with_context(&encoded, config, StateMap::default())
+                        .unwrap();
+                assert_eq!(read, encoded.len());
+                assert_eq!(decoded, atom);
+            }
+
+            let mut exported = Vec::new();
+            atom.as_view().export(&mut exported).unwrap();
+            assert_eq!(Atom::import(&mut &exported[..], None).unwrap(), atom);
+        }
+    }
+
+    #[test]
+    fn import_normalizes_after_remapping() {
+        // This ID is only meaningful in the source state. Normalizing before
+        // remapping would try to look up a nonexistent function in this state.
+        let foreign_head = Symbol::decode_flags(u32::MAX, 0, 0);
+        let head = symbol!("remapped_function");
+        let x = parse!("x");
+        let mut fun = Fun::new_into(foreign_head, Vec::new());
+        fun.add_arg(x.as_view());
+        fun.set_normalized(true);
+        let mut bytes = Vec::new();
+        fun.as_view().write(&mut bytes).unwrap();
+        let mut state_map = StateMap::default();
+        state_map.symbols.insert(foreign_head.get_id(), head);
+        let expected = parse!("remapped_function(x)");
+        let imported = Atom::import_with_map(&mut &bytes[..], &state_map).unwrap();
+        assert_eq!(imported, expected);
+        assert!(!imported.as_view().needs_normalization());
+
+        // User data is read while importing symbol definitions, before the
+        // state map is complete. Defer normalization recursively, including keys.
+        let mut user_data = vec![4]; // list
+        user_data.put_u32_le(1);
+        user_data.push(5); // map
+        user_data.put_u32_le(1);
+        for _ in 0..2 {
+            user_data.push(3); // atom key/value
+            user_data.extend_from_slice(&bytes);
+        }
+        let imported = UserData::read(&mut &user_data[..])
+            .unwrap()
+            .rename_symbols(&state_map);
+        assert_eq!(
+            imported,
+            UserData::List(vec![UserData::Map(HashMap::from_iter([(
+                UserDataKey::Atom(expected.clone()),
+                UserData::Atom(expected.clone()),
+            )]))])
+        );
+
+        #[cfg(feature = "bincode")]
+        {
+            let (imported, read): (Atom, usize) = bincode::decode_from_slice_with_context(
+                &bytes,
+                bincode::config::standard(),
+                state_map,
+            )
+            .unwrap();
+            assert_eq!(read, bytes.len());
+            assert_eq!(imported, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn iterator_count_is_not_truncated() {
+        let count = u32::MAX as usize + 1;
+        let iterator = ListIterator {
+            data: &[],
+            length: count,
+        };
+        assert_eq!(iterator.len(), count);
+        assert_eq!(ExactSizeIterator::len(&iterator), count);
+        assert_eq!(iterator.size_hint(), (count, Some(count)));
+    }
+
+    #[test]
+    #[ignore = "allocates about 12 GiB to exercise actual >4 GiB atoms"]
+    #[cfg(target_pointer_width = "64")]
+    fn products_and_functions_over_four_gib() {
+        // [NUM_ID, U8_NUM, 1] is the encoding of one, so the large payload
+        // consists entirely of valid atoms without needing billions of appends.
+        let count = u32::MAX as u64 / 3 + 1;
+        let mut data = vec![ADD_ID | NOT_NORMALIZED];
+        (count, count * 3).write_packed(&mut data);
+        data.resize(data.len() + (count * 3) as usize, 1);
+        let add = Add { data };
+        let x = Atom::num(2);
+        let mut product = Mul::new();
+        product.extend(add.as_view());
+        product.extend(x.as_view());
+        check_list(product.as_view(), &[add.as_view(), x.as_view()]);
+        let mut fun = Fun::new_into(symbol!("large_packed_function"), Vec::new());
+        fun.add_arg(product.as_view());
+        fun.add_arg(x.as_view());
+        check_list(fun.as_view(), &[product.as_view(), x.as_view()]);
+        assert!(fun.to_fun_view().get_byte_size() > u32::MAX as usize);
+    }
 
     #[test]
     fn list_iterator_try_into_array() {

@@ -125,18 +125,30 @@ impl PythonSeries {
 #[pymethods]
 impl PythonSeries {
     /// Get the coefficient of the `exp`th power of the expansion variable.
+    /// Exponents refer to powers of `(x - expansion_point)`, including negative
+    /// and rational powers. Raises `IndexError` at or above the absolute order.
     pub fn __getitem__(&self, exp: ConvertibleToExpression) -> PyResult<PythonExpression> {
         self.get_coefficient(exp)
     }
 
     /// Get the coefficient of the term with exponent `exp`. Alternatively, use `series[exp]`.
+    /// Known absent terms return zero. Raises `IndexError` when `exp` is at or
+    /// above the absolute order, where the coefficient is unknown.
     pub fn get_coefficient(&self, exp: ConvertibleToExpression) -> PyResult<PythonExpression> {
         let idx = exp.to_expression().expr;
         let r: Rational = idx
             .try_into()
             .map_err(|e| exceptions::PyTypeError::new_err(e))?;
 
-        Ok(self.series.coefficient(r).into())
+        self.series
+            .coefficient(r.clone())
+            .map(Into::into)
+            .ok_or_else(|| {
+                exceptions::PyIndexError::new_err(format!(
+                "Coefficient at exponent {r} is unknown: series is known only below exponent {}",
+                self.series.absolute_order()
+            ))
+            })
     }
 
     /// Iterate over the terms of the series, yielding pairs of exponent and coefficient.
@@ -589,11 +601,11 @@ impl PythonSeries {
             custom_print_mode,
         );
 
-        Ok(PythonFormattedOutput {
+        Ok(PythonFormattedOutput::new(
             text,
-            html: Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
-            latex: Some(latex),
-        })
+            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(latex),
+        ))
     }
 
     pub fn sin(&self) -> PyResult<Self> {
@@ -704,7 +716,7 @@ impl PythonSeries {
         Err(exceptions::PyValueError::new_err("Order is too large"))
     }
 
-    /// Convert the series into an expression.
+    /// Convert the stored terms into an expression, discarding the unknown remainder.
     pub fn to_expression(&self) -> PythonExpression {
         self.series.to_atom().into()
     }
@@ -945,7 +957,7 @@ self_cell!(
     #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
     #[pyclass(skip_from_py_object, name = "AtomIterator", module = "symbolica.core")]
     pub struct PythonAtomIterator {
-        owner: Atom,
+        owner: Py<PythonExpression>,
         #[covariant]
         dependent: ListIterator,
     }
@@ -953,13 +965,21 @@ self_cell!(
 
 impl PythonAtomIterator {
     /// Create a self-referential structure for the iterator.
-    pub fn from_expr(expr: PythonExpression) -> PythonAtomIterator {
-        PythonAtomIterator::new(expr.expr.clone(), |expr| match expr.as_view() {
+    pub fn from_expr(expr: Py<PythonExpression>) -> PythonAtomIterator {
+        PythonAtomIterator::new(expr, |expr| match expr.get().expr.as_view() {
             AtomView::Add(a) => a.iter(),
             AtomView::Mul(m) => m.iter(),
             AtomView::Fun(f) => f.iter(),
             AtomView::Pow(p) => p.iter(),
             _ => unreachable!(),
+        })
+    }
+
+    /// Create a self-referential structure for the iterator.
+    pub fn term_iter(expr: Py<PythonExpression>) -> PythonAtomIterator {
+        PythonAtomIterator::new(expr, |expr| match expr.get().expr.as_view() {
+            AtomView::Add(a) => a.iter(),
+            e => ListIterator::from_one(e),
         })
     }
 }

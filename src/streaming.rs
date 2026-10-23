@@ -13,8 +13,8 @@ use rayon::{ThreadPool, prelude::*};
 use smartstring::{LazyCompact, SmartString};
 
 use crate::{
-    LicenseManager,
     atom::{Atom, AtomView},
+    license::LicenseManager,
     state::{RecycledAtom, State, Workspace},
 };
 
@@ -22,6 +22,8 @@ static TEMP_FILES_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// A stream that can be read from by using `name`.
 pub trait ReadableNamedStream: Read + Send {
+    /// Open the named stream for reading. The supplied file implementations
+    /// panic if the file cannot be opened.
     fn open(name: &str) -> Self;
 }
 
@@ -39,8 +41,11 @@ impl ReadableNamedStream for Decompressor<BufReader<File>> {
 
 /// A stream that can be written to by using `name`.
 pub trait WriteableNamedStream: Write + Send {
+    /// The reader that decodes streams produced by this writer.
     type Reader: ReadableNamedStream;
 
+    /// Create the named stream for writing. The supplied file implementations
+    /// truncate an existing file and panic if it cannot be opened.
     fn create(name: &str) -> Self;
 }
 
@@ -243,11 +248,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             filename,
             thread_pool: Arc::new(
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(if LicenseManager::is_licensed() {
-                        config.n_cores
-                    } else {
-                        1
-                    })
+                    .num_threads(LicenseManager::max_threads(config.n_cores))
                     .build()
                     .unwrap(),
             ),
@@ -590,14 +591,18 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         let reader = self.reader();
 
         let out_wrap = Mutex::new(new_out);
+        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
         t.install(
             #[inline(always)]
             || {
-                reader.par_bridge().for_each(|x| {
-                    let r = f(x);
-                    out_wrap.lock().unwrap().push(r);
-                });
+                reader.par_bridge().for_each_init(
+                    || inherited_unlock.activate(),
+                    |_, x| {
+                        let r = f(x);
+                        out_wrap.lock().unwrap().push(r);
+                    },
+                );
             },
         );
 
@@ -671,7 +676,8 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         n_cores: usize,
     ) -> Atom {
-        if n_cores < 2 || !LicenseManager::is_licensed() {
+        let n_cores = LicenseManager::max_threads(n_cores);
+        if n_cores < 2 {
             return self.map_terms_single_core(f);
         }
 
@@ -693,21 +699,25 @@ impl AtomView<'_> {
         f: impl Fn(AtomView) -> Atom + Send + Sync,
         p: &ThreadPool,
     ) -> Atom {
-        if !LicenseManager::is_licensed() {
+        if LicenseManager::max_threads(p.current_num_threads()) < 2 {
             return self.map_terms_single_core(f);
         }
 
         if let AtomView::Add(aa) = self {
             let out_wrap = Mutex::new(vec![]);
             let args = aa.iter().collect::<Vec<_>>();
+            let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
             p.install(
                 #[inline(always)]
                 || {
-                    args.par_iter().for_each(|x| {
-                        let r = f(*x);
-                        out_wrap.lock().unwrap().push(r);
-                    });
+                    args.par_iter().for_each_init(
+                        || inherited_unlock.activate(),
+                        |_, x| {
+                            let r = f(*x);
+                            out_wrap.lock().unwrap().push(r);
+                        },
+                    );
                 },
             );
 

@@ -41,9 +41,11 @@
 mod alias;
 mod coefficient;
 mod core;
+mod properties;
 pub mod representation;
+mod zero_test;
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use numerica::domains::float::Float;
 use smartstring::{LazyCompact, SmartString};
@@ -55,7 +57,7 @@ use crate::{
     parser::{ParseSettings, Token},
     poly::series::Series,
     printer::{AnsiWrap, AtomPrinter, PrintFunction, PrintOptions, PrintState},
-    state::{RecycledAtom, State, SymbolData, Workspace},
+    state::{CustomFunctionDefinitionKeys, RecycledAtom, State, StateMap, SymbolData, Workspace},
     transformer::StatsOptions,
     utils::{BorrowedOrOwned, Settable},
     warn,
@@ -63,7 +65,7 @@ use crate::{
 
 use std::{
     any::{Any, TypeId},
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     cmp::Ordering,
     hash::Hash,
     io::{Read, Write},
@@ -78,6 +80,7 @@ pub use self::representation::{
     NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
+pub use self::zero_test::ZeroTestSettings;
 pub use crate::{
     evaluate::EvaluationError,
     poly::{PolynomialConversionError, series::SeriesError},
@@ -89,9 +92,13 @@ pub use crate::{
 /// written as `namespace::symbol`.
 #[derive(Clone)]
 pub struct NamespacedSymbol {
+    /// The namespace containing the symbol.
     pub namespace: Cow<'static, str>,
+    /// The fully qualified symbol name, including its namespace.
     pub symbol: Cow<'static, str>,
+    /// The source file of the definition, or an empty string when unavailable.
     pub file: Cow<'static, str>,
+    /// The source line of the definition, or zero when unavailable.
     pub line: usize,
 }
 
@@ -192,19 +199,46 @@ macro_rules! wrap_symbol {
 /// A string representation of an expression with a namespace, and optional positional data (file and line).
 /// Can be created with the [wrap_input!](crate::wrap_input) macro.
 pub struct DefaultNamespace<T> {
+    /// The default namespace for unqualified symbols in the input.
     pub namespace: Cow<'static, str>,
+    /// The expression input to parse.
     pub data: T,
+    /// The source file of the input, or an empty string when unavailable.
     pub file: Cow<'static, str>,
+    /// The source line of the input, or zero when unavailable.
     pub line: usize,
 }
 
 impl<T> DefaultNamespace<T> {
     /// Parse a string into a namespaced string, not checking if the name is built-in.
+    pub(crate) fn attach_namespace_no_builtin(&self, s: &str) -> NamespacedSymbol {
+        if let Some(mut s) = NamespacedSymbol::try_parse(s) {
+            s.file = self.file.clone();
+            s.line = self.line;
+            s
+        } else {
+            NamespacedSymbol {
+                symbol: format!("{}::{}", self.namespace, s).into(),
+                namespace: self.namespace.clone(),
+                file: self.file.clone(),
+                line: self.line,
+            }
+        }
+    }
+
+    /// Parse a string into a namespaced string.
     pub fn attach_namespace(&self, s: &str) -> NamespacedSymbol {
         if let Some(mut s) = NamespacedSymbol::try_parse(s) {
             s.file = self.file.clone();
             s.line = self.line;
             s
+        } else if State::is_builtin(s) {
+            NamespacedSymbol {
+                symbol: format!("symbolica::{}", s).into(),
+                namespace: "symbolica".into(),
+                file: self.file.clone(),
+                line: self.line,
+            }
         } else {
             NamespacedSymbol {
                 symbol: format!("{}::{}", self.namespace, s).into(),
@@ -381,14 +415,20 @@ pub struct EvaluationInfo {
     constant_eval_cache: OnceLock<Result<Complex<Float>, String>>,
     /// A map from the evaluation result type to either a direct tagless implementation or a tagged generator.
     eval_fns: HashMap<TypeId, ErasedEvalFn>,
-    /// A C++ snippet that defines this external function for exported code.
-    cpp: Option<String>,
+    /// C++ source, or a generator for tag-dependent C++ source.
+    cpp: Option<CppCode>,
 }
 
+/// A boxed numerical implementation of an external symbolic function.
 pub type EvalFn<T> = Box<dyn ExternalFunction<T>>;
 type ErasedConstantEval =
     Box<dyn Fn(&[AtomView], u32) -> Result<Complex<Float>, String> + Send + Sync>;
 type ErasedTaggedEvalGen = Box<dyn Fn(&[AtomView]) -> Box<dyn Any> + Send + Sync>;
+
+enum CppCode {
+    Snippet(String),
+    Generated(Box<dyn Fn(&str, &[AtomView]) -> String + Send + Sync>),
+}
 
 enum ErasedEvalFn {
     Direct(Box<dyn Any + Send + Sync>),
@@ -459,13 +499,48 @@ impl EvaluationInfo {
     /// call to this symbol as an external function. It should define a function
     /// with the exported name, which is derived from the symbol's ASCII name.
     pub fn with_cpp(mut self, snippet: impl Into<String>) -> Self {
-        self.cpp = Some(snippet.into());
+        self.cpp = Some(CppCode::Snippet(snippet.into()));
         self
     }
 
-    /// Return the attached C++ snippet, if any.
+    /// Generate a C++ definition for each exported specialization of this function.
+    ///
+    /// The callback receives the exported C++ function name and the leading symbolic
+    /// tags. It should return source defining that function, with the tags embedded
+    /// in its body; only numeric arguments are passed at evaluation time.
+    /// The generated source is inserted verbatim, just like [`Self::with_cpp`].
+    /// Calling this method replaces any previously attached snippet or generator.
+    pub fn with_cpp_generator(
+        mut self,
+        generator: impl Fn(&str, &[AtomView]) -> String + Send + Sync + 'static,
+    ) -> Self {
+        self.cpp = Some(CppCode::Generated(Box::new(generator)));
+        self
+    }
+
+    /// Return the attached fixed C++ snippet, if any. Generators are not invoked.
     pub fn get_cpp(&self) -> Option<&str> {
-        self.cpp.as_deref()
+        match self.cpp.as_ref()? {
+            CppCode::Snippet(snippet) => Some(snippet),
+            CppCode::Generated(_) => None,
+        }
+    }
+
+    pub(crate) fn has_cpp_generator(&self) -> bool {
+        matches!(self.cpp, Some(CppCode::Generated(_)))
+    }
+
+    /// Return the C++ source for a particular exported name and set of tags.
+    pub fn generate_cpp(&self, name: &str, tags: &[AtomView]) -> Option<Cow<'_, str>> {
+        Some(match self.cpp.as_ref()? {
+            CppCode::Snippet(snippet) => Cow::Borrowed(snippet),
+            CppCode::Generated(generator) => Cow::Owned(generator(name, tags)),
+        })
+    }
+
+    /// Return true if a precision-aware constant evaluator is registered.
+    pub fn has_constant_evaluator(&self) -> bool {
+        self.constant_eval.is_some()
     }
 
     /// Register a tagless numeric implementation for type `T`.
@@ -588,6 +663,58 @@ pub enum UserData {
     Serialized(Vec<u8>),
 }
 
+impl UserData {
+    /// Returns all symbols used in this user data, including those from nested atoms and lists.
+    pub fn get_symbols(&self, symbols: &mut HashSet<Symbol>) {
+        match self {
+            UserData::Atom(atom) => {
+                atom.as_view().get_all_symbols_impl(true, symbols);
+            }
+            UserData::List(list) => {
+                for item in list {
+                    item.get_symbols(symbols);
+                }
+            }
+            UserData::Map(map) => {
+                for (key, item) in map {
+                    if let UserDataKey::Atom(atom) = key {
+                        atom.as_view().get_all_symbols_impl(true, symbols);
+                    }
+                    item.get_symbols(symbols);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Rename all symbols in this user data using the given state map.
+    pub(crate) fn rename_symbols(self, state_map: &StateMap) -> Self {
+        match self {
+            UserData::Atom(atom) => UserData::Atom(atom.as_view().rename(state_map)),
+            UserData::List(list) => UserData::List(
+                list.into_iter()
+                    .map(|item| item.rename_symbols(state_map))
+                    .collect(),
+            ),
+            UserData::Map(map) => UserData::Map(
+                map.into_iter()
+                    .map(|(key, item)| {
+                        if let UserDataKey::Atom(atom) = key {
+                            (
+                                UserDataKey::Atom(atom.as_view().rename(state_map)),
+                                item.rename_symbols(state_map),
+                            )
+                        } else {
+                            (key, item.rename_symbols(state_map))
+                        }
+                    })
+                    .collect(),
+            ),
+            x => x,
+        }
+    }
+}
+
 /// Attributes that can be assigned to symbols.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SymbolAttribute {
@@ -599,6 +726,8 @@ pub enum SymbolAttribute {
     Cyclesymmetric,
     /// The function is linear.
     Linear,
+    /// The function is flat (associative). A flat function removes nesting.
+    Flat,
     /// The symbol represents a scalar. It will be moved out of linear functions.
     Scalar,
     /// The symbol represents a real number.
@@ -633,6 +762,7 @@ pub struct Symbol {
     is_antisymmetric: bool,
     is_cyclesymmetric: bool,
     is_linear: bool,
+    is_flat: bool,
     is_scalar: bool,
     is_real: bool,
     is_integer: bool,
@@ -761,6 +891,7 @@ pub struct SymbolBuilder {
     derivative_function: Option<DerivativeFunction>,
     series_function: Option<Box<SeriesExpansionFunction>>,
     evaluation_function: Option<EvaluationInfo>,
+    custom_function_keys: CustomFunctionDefinitionKeys,
     generator: Option<Box<dyn Fn(&[Symbol], SymbolBuilder) -> SymbolBuilder + Send + Sync>>,
     user_data: Option<UserData>,
 }
@@ -779,6 +910,7 @@ impl SymbolBuilder {
             derivative_function: None,
             series_function: None,
             evaluation_function: None,
+            custom_function_keys: CustomFunctionDefinitionKeys::default(),
             generator: None,
             user_data: None,
         }
@@ -816,6 +948,7 @@ impl SymbolBuilder {
     }
 
     /// Set symbol aliases. All aliases will refer to the same symbol.
+    /// Aliases must satisfy the same namespace and name rules as symbols.
     ///
     /// # Examples
     ///
@@ -848,6 +981,18 @@ impl SymbolBuilder {
         normalization_function: impl Fn(AtomView, &mut Settable<Atom>) + Send + Sync + 'static,
     ) -> Self {
         self.normalization_function = Some(Box::new(normalization_function));
+        self.custom_function_keys.normalization = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_normalization_function(
+        mut self,
+        normalization_function: impl Fn(AtomView, &mut Settable<Atom>) + Send + Sync + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.normalization_function = Some(Box::new(normalization_function));
+        self.custom_function_keys.normalization = Some(key);
         self
     }
 
@@ -870,6 +1015,21 @@ impl SymbolBuilder {
         + 'static,
     ) -> Self {
         self.print_function = Some(Box::new(print_function));
+        self.custom_function_keys.print = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_print_function(
+        mut self,
+        print_function: impl Fn(AtomView, &PrintOptions, &PrintState) -> Option<String>
+        + Send
+        + Sync
+        + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.print_function = Some(Box::new(print_function));
+        self.custom_function_keys.print = Some(key);
         self
     }
 
@@ -893,6 +1053,18 @@ impl SymbolBuilder {
         derivative_function: impl Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync + 'static,
     ) -> Self {
         self.derivative_function = Some(Box::new(derivative_function));
+        self.custom_function_keys.derivative = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_derivative_function(
+        mut self,
+        derivative_function: impl Fn(AtomView, usize, &mut Settable<Atom>) + Send + Sync + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.derivative_function = Some(Box::new(derivative_function));
+        self.custom_function_keys.derivative = Some(key);
         self
     }
 
@@ -905,12 +1077,39 @@ impl SymbolBuilder {
         + 'static,
     ) -> Self {
         self.series_function = Some(Box::new(series_function));
+        self.custom_function_keys.series = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_series_function(
+        mut self,
+        series_function: impl for<'a> Fn(&'a [Series<AtomField>]) -> Option<(Atom, Atom)>
+        + Send
+        + Sync
+        + 'static,
+        key: Vec<u8>,
+    ) -> Self {
+        self.series_function = Some(Box::new(series_function));
+        self.custom_function_keys.series = Some(key);
         self
     }
 
     /// Add evaluation info.
     pub fn with_evaluation_info(mut self, evaluation_info: EvaluationInfo) -> Self {
         self.evaluation_function = Some(evaluation_info);
+        self.custom_function_keys.evaluation = None;
+        self
+    }
+
+    #[cfg(any(feature = "python_api", feature = "python_export"))]
+    pub(crate) fn with_keyed_evaluation_info(
+        mut self,
+        evaluation_info: EvaluationInfo,
+        key: Vec<u8>,
+    ) -> Self {
+        self.evaluation_function = Some(evaluation_info);
+        self.custom_function_keys.evaluation = Some(key);
         self
     }
 
@@ -947,6 +1146,7 @@ impl SymbolBuilder {
                     attr.contains(&SymbolAttribute::Antisymmetric),
                     attr.contains(&SymbolAttribute::Cyclesymmetric),
                     attr.contains(&SymbolAttribute::Linear),
+                    attr.contains(&SymbolAttribute::Flat),
                     attr.contains(&SymbolAttribute::Scalar),
                     attr.contains(&SymbolAttribute::Real),
                     attr.contains(&SymbolAttribute::Integer),
@@ -1028,6 +1228,7 @@ impl SymbolBuilder {
                 self.derivative_function,
                 self.series_function,
                 self.evaluation_function,
+                self.custom_function_keys,
                 self.tags,
                 self.aliases,
                 self.user_data,
@@ -1062,6 +1263,10 @@ impl Symbol {
     pub const IF: Symbol = State::IF;
     /// The built-in function that represents a logical separator of function arguments.
     pub const SEP: Symbol = State::SEP;
+    /// The built-in function that represents an optional pattern.
+    pub const OPT: Symbol = State::OPT;
+    /// The built-in function that represents an alternative pattern.
+    pub const ALT: Symbol = State::ALT;
     /// The built-in function that represents an abstract derivative.
     pub const DERIVATIVE: Symbol = State::DERIVATIVE;
     /// The constant `𝑒`, the base of the natural logarithm, approximately `2.7182`.
@@ -1090,6 +1295,9 @@ impl Symbol {
 
     /// Parse a symbol from a string with optional namespace and attributes.
     ///
+    /// Existing symbols are reused if they have all specified attributes and tags,
+    /// preserving any additional properties such as aliases and custom functions.
+    ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
     pub fn parse<T: AsRef<str>>(
         name: T,
@@ -1110,6 +1318,9 @@ impl Symbol {
 
     /// Parse a symbol from a string with optional namespace and attributes.
     ///
+    /// Existing symbols are reused if they have all specified attributes and tags,
+    /// preserving any additional properties such as aliases and custom functions.
+    ///
     /// Use the [symbol!](crate::symbol) macro instead to define symbols in the current namespace.
     pub fn parse_with_default_namespace<T: AsRef<str>>(
         name: DefaultNamespace<T>,
@@ -1123,7 +1334,7 @@ impl Symbol {
     }
 
     /// Looks up a symbol by its namespaced name without creating it.
-    /// Use the [get_symbol!](crate::get_symbol) macro instead to define symbols in the current namespace.
+    /// Use the [get_symbol!](crate::get_symbol) macro instead to get symbols in the current namespace.
     pub fn get_symbol(name: NamespacedSymbol) -> Option<Symbol> {
         State::get_global_state()
             .read()
@@ -1365,7 +1576,23 @@ impl Symbol {
         self.is_linear
     }
 
-    /// Check if the symbol is scalar.
+    /// Check if the symbol is flat (associative).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let f = symbol!("f"; Flat);
+    /// assert!(f.is_flat());
+    /// ```
+    pub fn is_flat(&self) -> bool {
+        self.is_flat
+    }
+
+    /// Check whether the symbol carries the `Scalar` attribute.
+    /// `false` means the attribute is absent, not that nonscalarity is proven.
+    /// Use [`AtomCore::is_scalar`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1379,7 +1606,9 @@ impl Symbol {
         self.is_scalar
     }
 
-    /// Check if the symbol is real.
+    /// Check whether the symbol carries the `Real` attribute.
+    /// `false` means the attribute is absent, not that nonrealness is proven.
+    /// Use [`AtomCore::is_real`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1393,7 +1622,9 @@ impl Symbol {
         self.is_real
     }
 
-    /// Check if the symbol is integer.
+    /// Check whether the symbol carries the `Integer` attribute.
+    /// `false` means the attribute is absent, not that nonintegrality is proven.
+    /// Use [`AtomCore::is_integer`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1407,7 +1638,9 @@ impl Symbol {
         self.is_integer
     }
 
-    /// Check if the symbol is positive.
+    /// Check whether the symbol carries the `Positive` attribute.
+    /// `false` means the attribute is absent, not that nonpositivity is proven.
+    /// Use [`AtomCore::is_positive`] to query an expression's mathematical property.
     ///
     /// # Examples
     ///
@@ -1419,6 +1652,23 @@ impl Symbol {
     /// ```
     pub fn is_positive(&self) -> bool {
         self.is_positive
+    }
+
+    /// Turn a wildcard symbol into an optional wildcard which will match a default value if the wildcard is not matched.
+    /// Identical to wrapping `x_` in `opt(x_)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    ///
+    /// let b_ = symbol!("b_");
+    /// let p_ = symbol!("p_").optional();
+    /// let result = parse!("x").replace(b_.pow(p_)).with(1);
+    /// assert_eq!(result, 1);
+    /// ```
+    pub fn optional(&self) -> Atom {
+        Symbol::OPT.call(self)
     }
 
     /// Returns `true` iff this identifier is a hardcoded definition by Symbolica.
@@ -1436,6 +1686,7 @@ impl Symbol {
         &self.get_global_data().tags
     }
 
+    /// Return the registered alternative names for this symbol.
     pub fn get_aliases(&self) -> &[String] {
         &self.get_global_data().aliases
     }
@@ -1496,6 +1747,9 @@ impl Symbol {
         if self.is_linear {
             attrs.push(SymbolAttribute::Linear);
         }
+        if self.is_flat {
+            attrs.push(SymbolAttribute::Flat);
+        }
         if self.is_scalar {
             attrs.push(SymbolAttribute::Scalar);
         }
@@ -1531,6 +1785,7 @@ impl Symbol {
             && (!s.is_symmetric() || self.is_symmetric())
             && (!s.is_cyclesymmetric() || self.is_cyclesymmetric())
             && (!s.is_linear() || self.is_linear())
+            && (!s.is_flat() || self.is_flat())
             && (!s.is_positive() || self.is_positive())
             && (!s.is_integer() || self.is_integer())
             && (!s.is_real() || self.is_real())
@@ -1549,6 +1804,7 @@ impl Symbol {
             || self.is_symmetric()
             || self.is_cyclesymmetric()
             || self.is_linear()
+            || self.is_flat()
             || self.is_positive()
             || self.is_integer()
             || self.is_real()
@@ -1647,6 +1903,9 @@ impl Symbol {
         if s.is_linear() {
             attributes.push(SymbolAttribute::Linear);
         }
+        if s.is_flat() {
+            attributes.push(SymbolAttribute::Flat);
+        }
         if s.is_scalar() {
             attributes.push(SymbolAttribute::Scalar);
         }
@@ -1744,6 +2003,7 @@ impl Symbol {
             is_antisymmetric: false,
             is_cyclesymmetric: false,
             is_linear: false,
+            is_flat: false,
             is_scalar: false,
             is_real: false,
             is_integer: false,
@@ -1762,6 +2022,7 @@ impl Symbol {
         is_antisymmetric: bool,
         is_cyclesymmetric: bool,
         is_linear: bool,
+        is_flat: bool,
         is_scalar: bool,
         is_real: bool,
         is_integer: bool,
@@ -1774,6 +2035,7 @@ impl Symbol {
             is_antisymmetric,
             is_cyclesymmetric,
             is_linear,
+            is_flat,
             is_scalar,
             is_real: is_real || is_integer || is_positive,
             is_integer,
@@ -1781,12 +2043,13 @@ impl Symbol {
         }
     }
 
-    fn get_attributes_tuple_str(&self) -> [(&'static str, bool); 8] {
+    fn get_attributes_tuple_str(&self) -> [(&'static str, bool); 9] {
         [
             ("symmetric", self.is_symmetric),
             ("antisymmetric", self.is_antisymmetric),
             ("cyclesymmetric", self.is_cyclesymmetric),
             ("linear", self.is_linear),
+            ("flat", self.is_flat),
             ("scalar", self.is_scalar),
             ("real", self.is_real),
             ("integer", self.is_integer),
@@ -1795,12 +2058,13 @@ impl Symbol {
     }
 
     /// Get the attributes of the symbol as a tuple of (attribute, bool).
-    pub fn get_attributes_tuple(&self) -> [(SymbolAttribute, bool); 8] {
+    pub fn get_attributes_tuple(&self) -> [(SymbolAttribute, bool); 9] {
         [
             (SymbolAttribute::Symmetric, self.is_symmetric),
             (SymbolAttribute::Antisymmetric, self.is_antisymmetric),
             (SymbolAttribute::Cyclesymmetric, self.is_cyclesymmetric),
             (SymbolAttribute::Linear, self.is_linear),
+            (SymbolAttribute::Flat, self.is_flat),
             (SymbolAttribute::Scalar, self.is_scalar),
             (SymbolAttribute::Real, self.is_real),
             (SymbolAttribute::Integer, self.is_integer),
@@ -1808,16 +2072,29 @@ impl Symbol {
         ]
     }
 
+    /// Write the symbol using `opts` and the surrounding formatting `state`,
+    /// including its custom formatter when one is registered.
     pub fn format<W: std::fmt::Write>(
         &self,
         opts: &PrintOptions,
         state: PrintState,
         f: &mut W,
     ) -> Result<(), std::fmt::Error> {
+        self.format_with_custom(opts, state, true, f)
+    }
+
+    pub(crate) fn format_with_custom<W: std::fmt::Write>(
+        &self,
+        opts: &PrintOptions,
+        state: PrintState,
+        with_custom: bool,
+        f: &mut W,
+    ) -> Result<(), std::fmt::Error> {
         let data = self.get_global_data();
         let (namespace, name) = (&data.namespace, &data.name[data.namespace.len() + 2..]);
 
-        if let Some(custom_print) = &data.custom_print
+        if with_custom
+            && let Some(custom_print) = &data.custom_print
             && let Some(s) = custom_print(InlineVar::new(*self).as_view(), opts, &state)
         {
             f.write_str(&s)?;
@@ -1850,14 +2127,17 @@ impl Symbol {
                 Symbol::EXP_ID => f.write_str("exp"),
                 Symbol::LOG_ID => f.write_str("log"),
                 _ => {
-                    f.write_char('"')?;
-
-                    if !opts.hide_all_namespaces {
+                    if opts.hide_all_namespaces && name.chars().count() == 1 {
+                        f.write_str(name)
+                    } else if !opts.hide_all_namespaces {
+                        f.write_char('"')?;
                         f.write_fmt(format_args!("{}::{}", namespace, name))?;
+                        f.write_char('"')
                     } else {
+                        f.write_char('"')?;
                         f.write_str(name)?;
+                        f.write_char('"')
                     }
-                    f.write_char('"')
                 }
             }
         } else {
@@ -1980,7 +2260,13 @@ impl Symbol {
                     AnsiWrap::purple(name).color_mode(opts.color_mode)
                 ))
             } else if opts.mode.is_mathematica() {
-                if self.is_fixed_builtin() {
+                let ascii_name = self.get_stripped_ascii_name().unwrap_or(name);
+                if namespace == "symbolica"
+                    && let Some(mathematica_name) =
+                        crate::parser::symbolica_to_mathematica_name(ascii_name)
+                {
+                    f.write_str(mathematica_name)
+                } else if self.is_fixed_builtin() {
                     match self.get_id() {
                         Symbol::E_ID => f.write_str("E"),
                         Symbol::PI_ID => f.write_str("Pi"),
@@ -2123,6 +2409,7 @@ impl Indeterminate {
         }
     }
 
+    /// Borrow this indeterminate as a variable or function-call expression.
     pub fn as_view(&self) -> AtomView<'_> {
         match self {
             Indeterminate::Symbol(_, v) => v.as_view(),
@@ -2134,11 +2421,17 @@ impl Indeterminate {
 /// The type (variant) of an atom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AtomType {
+    /// A numerical coefficient.
     Num,
+    /// A symbolic variable.
     Var,
+    /// A sum.
     Add,
+    /// A product.
     Mul,
+    /// A power.
     Pow,
+    /// A function call.
     Fun,
 }
 
@@ -2158,21 +2451,33 @@ impl std::fmt::Display for AtomType {
 /// The type (variant) of a slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SliceType {
+    /// Terms taken from a sum.
     Add,
+    /// Factors taken from a product.
     Mul,
+    /// Arguments taken from a function call.
     Arg,
+    /// A single expression viewed as a one-element slice.
     One,
+    /// The base and exponent of a power, in that order.
     Pow,
+    /// An empty slice with no parent operation.
     Empty,
 }
 
 /// A (immutable) view of an [Atom].
 pub enum AtomView<'a> {
+    /// A borrowed numerical coefficient.
     Num(NumView<'a>),
+    /// A borrowed symbolic variable.
     Var(VarView<'a>),
+    /// A borrowed function call.
     Fun(FunView<'a>),
+    /// A borrowed power.
     Pow(PowView<'a>),
+    /// A borrowed product.
     Mul(MulView<'a>),
+    /// A borrowed sum.
     Add(AddView<'a>),
 }
 
@@ -2186,27 +2491,254 @@ impl Copy for AtomView<'_> {}
 
 impl Eq for AtomView<'_> {}
 
-impl<'a, T> PartialEq<T> for AtomView<'a>
-where
-    for<'b> &'b T: Into<AtomOrView<'a>>,
-{
+impl<T: AtomCore> PartialEq<T> for AtomView<'_> {
+    #[inline]
     fn eq(&self, other: &T) -> bool {
-        self.get_data() == other.into().as_view().get_data()
+        self.get_data() == other.as_atom_view().get_data()
     }
 }
 
-impl<'a, T> PartialOrd<T> for AtomView<'a>
-where
-    for<'b> &'b T: Into<AtomOrView<'a>>,
-{
-    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.cmp(&other.into().as_view()))
+impl<T: AtomCore> PartialEq<T> for Atom {
+    #[inline]
+    fn eq(&self, other: &T) -> bool {
+        self.as_view() == other.as_atom_view()
     }
 }
+
+impl<T: AtomCore> PartialOrd<T> for AtomView<'_> {
+    #[inline]
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        Some(self.cmp(&other.as_atom_view()))
+    }
+}
+
+impl<T: AtomCore> PartialOrd<T> for Atom {
+    #[inline]
+    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
+        Some(self.as_view().cmp(&other.as_atom_view()))
+    }
+}
+
+macro_rules! impl_atom_eq_for_symbol {
+    ($rhs:ty, $symbol:expr) => {
+        impl PartialEq<$rhs> for AtomView<'_> {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                let other = InlineVar::new($symbol(other));
+                *self == other.as_view()
+            }
+        }
+
+        impl PartialEq<$rhs> for Atom {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                let other = InlineVar::new($symbol(other));
+                self.as_view() == other.as_view()
+            }
+        }
+
+        impl PartialOrd<$rhs> for AtomView<'_> {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                let other = InlineVar::new($symbol(other));
+                Some(self.cmp(&other.as_view()))
+            }
+        }
+
+        impl PartialOrd<$rhs> for Atom {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                let other = InlineVar::new($symbol(other));
+                Some(self.as_view().cmp(&other.as_view()))
+            }
+        }
+    };
+}
+
+impl_atom_eq_for_symbol!(Symbol, |other: &Symbol| *other);
+impl_atom_eq_for_symbol!(&Symbol, |other: &&Symbol| **other);
+
+impl PartialEq<Symbol> for &Atom {
+    #[inline]
+    fn eq(&self, other: &Symbol) -> bool {
+        let other = InlineVar::new(*other);
+        self.as_view() == other.as_view()
+    }
+}
+
+impl PartialOrd<Symbol> for &Atom {
+    #[inline]
+    fn partial_cmp(&self, other: &Symbol) -> Option<Ordering> {
+        let other = InlineVar::new(*other);
+        Some(self.as_view().cmp(&other.as_view()))
+    }
+}
+
+macro_rules! impl_ref_atom_eq {
+    ($($rhs:ty),+ $(,)?) => {
+        $(
+            impl PartialEq<$rhs> for &Atom {
+                #[inline]
+                fn eq(&self, other: &$rhs) -> bool {
+                    self.as_view() == other.as_atom_view()
+                }
+            }
+        )+
+    };
+}
+
+impl_ref_atom_eq!(
+    AtomView<'_>,
+    AtomOrView<'_>,
+    InlineVar,
+    InlineNum,
+    Indeterminate,
+    RecycledAtom,
+    AliasedAtom,
+);
+
+#[inline]
+fn eq_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> bool {
+    let rhs = Atom::num(rhs);
+    lhs == rhs.as_view()
+}
+
+#[inline]
+fn cmp_atom_num<T: Into<Coefficient>>(lhs: AtomView<'_>, rhs: T) -> Ordering {
+    let rhs = Atom::num(rhs);
+    lhs.cmp(&rhs.as_view())
+}
+
+macro_rules! impl_atom_eq_for_num {
+    ($($ty:ty, $num:expr, $ref_num:expr;)+) => {
+        $(
+            impl PartialEq<$ty> for AtomView<'_> {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(*self, ($num)(other))
+                }
+            }
+
+            impl PartialEq<&$ty> for AtomView<'_> {
+                #[inline]
+                fn eq(&self, other: &&$ty) -> bool {
+                    eq_atom_num(*self, ($ref_num)(other))
+                }
+            }
+
+            impl PartialEq<$ty> for Atom {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($num)(other))
+                }
+            }
+
+            impl PartialEq<&$ty> for Atom {
+                #[inline]
+                fn eq(&self, other: &&$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($ref_num)(other))
+                }
+            }
+
+            impl PartialEq<$ty> for &Atom {
+                #[inline]
+                fn eq(&self, other: &$ty) -> bool {
+                    eq_atom_num(self.as_view(), ($num)(other))
+                }
+            }
+
+            impl PartialOrd<$ty> for AtomView<'_> {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(*self, ($num)(other)))
+                }
+            }
+
+            impl PartialOrd<&$ty> for AtomView<'_> {
+                #[inline]
+                fn partial_cmp(&self, other: &&$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(*self, ($ref_num)(other)))
+                }
+            }
+
+            impl PartialOrd<$ty> for Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($num)(other)))
+                }
+            }
+
+            impl PartialOrd<&$ty> for Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &&$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($ref_num)(other)))
+                }
+            }
+
+            impl PartialOrd<$ty> for &Atom {
+                #[inline]
+                fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                    Some(cmp_atom_num(self.as_view(), ($num)(other)))
+                }
+            }
+        )+
+    };
+}
+
+macro_rules! impl_atom_eq_for_coefficient {
+    ($($ty:ty),+ $(,)?) => {
+        impl_atom_eq_for_num!(
+            $($ty, |other: &$ty| other.clone(), |other: &&$ty| (*other).clone();)+
+        );
+    };
+}
+
+impl_atom_eq_for_coefficient!(
+    Coefficient,
+    Integer,
+    Rational,
+    Float,
+    Complex<Rational>,
+    Complex<Float>,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    isize,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    usize,
+    f64,
+    (i8, i8),
+    (i16, i16),
+    (i32, i32),
+    (i64, i64),
+    (i128, i128),
+    (isize, isize),
+    (u8, u8),
+    (u16, u16),
+    (u32, u32),
+    (u64, u64),
+    (u128, u128),
+    (usize, usize),
+);
+
+impl_atom_eq_for_num!(
+    crate::coefficient::CoefficientView<'_>,
+    |other: &crate::coefficient::CoefficientView<'_>| other.to_owned(),
+    |other: &&crate::coefficient::CoefficientView<'_>| (*other).to_owned();
+);
+
+#[cfg(feature = "integer-gmp")]
+impl_atom_eq_for_coefficient!(rug::Integer, rug::Rational);
 
 impl Ord for AtomView<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.cmp(other)
+        self.get_data().cmp(other.get_data())
     }
 }
 
@@ -2284,10 +2816,21 @@ impl<'a> From<AddView<'a>> for AtomView<'a> {
 /// A copy-on-write structure for `Atom` and `AtomView`.
 #[derive(Clone, Debug)]
 pub enum AtomOrView<'a> {
+    /// An owned expression.
     Atom(Atom),
+    /// A variable stored inline without a heap allocation.
     InlineVar(InlineVar),
+    /// A borrowed expression.
     View(AtomView<'a>),
 }
+
+impl Borrow<[u8]> for AtomOrView<'_> {
+    fn borrow(&self) -> &[u8] {
+        self.as_view().get_data()
+    }
+}
+
+impl KeyLookup for AtomOrView<'_> {}
 
 impl std::fmt::Display for AtomOrView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2381,6 +2924,8 @@ impl<'a> From<&AtomView<'a>> for AtomOrView<'a> {
 }
 
 impl<'a> AtomOrView<'a> {
+    /// Return an owned expression, copying the contents only when they are borrowed
+    /// or stored as an inline variable.
     pub fn into_owned(self) -> Atom {
         match self {
             AtomOrView::Atom(a) => a,
@@ -2390,6 +2935,7 @@ impl<'a> AtomOrView<'a> {
     }
 
     #[inline(always)]
+    /// Borrow the expression without allocating.
     pub fn as_view(&'a self) -> AtomView<'a> {
         match self {
             AtomOrView::Atom(a) => a.as_view(),
@@ -2398,6 +2944,8 @@ impl<'a> AtomOrView<'a> {
         }
     }
 
+    /// Return mutable owned storage, first copying a borrowed expression or
+    /// materializing an inline variable when necessary.
     pub fn as_mut(&mut self) -> &mut Atom {
         match self {
             AtomOrView::Atom(a) => a,
@@ -2423,13 +2971,38 @@ impl<'a> AtomOrView<'a> {
     }
 }
 
+impl<'a> AtomView<'a> {
+    /// Returns the `index`-th child of this atom, if it exists.
+    pub fn index(&self, index: usize) -> Option<AtomView<'a>> {
+        match self {
+            AtomView::Num(_) => None,
+            AtomView::Var(_) => None,
+            AtomView::Fun(f) => f.iter().nth(index),
+            AtomView::Pow(p) => p.iter().nth(index),
+            AtomView::Mul(m) => m.iter().nth(index),
+            AtomView::Add(a) => a.iter().nth(index),
+        }
+    }
+
+    /// Returns the `index[0]`-th child of this atom, and recursively applies `multi_index` to the remaining indices.
+    pub fn multi_index(&self, index: &[usize]) -> Option<AtomView<'a>> {
+        if index.is_empty() {
+            return Some(*self);
+        }
+        self.index(index[0])
+            .and_then(|view| view.multi_index(&index[1..]))
+    }
+}
+
 impl AtomView<'_> {
+    /// Copy this view into a new owned expression.
     pub fn to_owned(&self) -> Atom {
         let mut a = Atom::default();
         a.set_from_view(self);
         a
     }
 
+    /// Replace `target` with a copy of this view, reusing its allocation.
     pub fn clone_into(&self, target: &mut Atom) {
         target.set_from_view(self);
     }
@@ -2461,6 +3034,11 @@ impl AtomView<'_> {
         out
     }
 
+    /// Return whether the expression is already the number zero.
+    ///
+    /// An expression that is mathematically zero but has not simplified to zero
+    /// returns `false`. Use [`check_zero`](Self::check_zero) to test such identities.
+    /// See [`AtomCore::is_zero`] for examples.
     #[inline]
     pub fn is_zero(&self) -> bool {
         if let AtomView::Num(n) = self {
@@ -2471,23 +3049,13 @@ impl AtomView<'_> {
     }
 
     #[inline]
+    /// Return whether this view is a numerical one; no symbolic simplification is performed.
     pub fn is_one(&self) -> bool {
         if let AtomView::Num(n) = self {
             n.is_one()
         } else {
             false
         }
-    }
-
-    /// Add two atoms and return the buffer that contains the unnormalized result.
-    pub(crate) fn add_no_norm(&self, workspace: &Workspace, rhs: AtomView<'_>) -> RecycledAtom {
-        let mut e = workspace.new_atom();
-        let a = e.to_add();
-
-        // TODO: check if self or rhs is add
-        a.extend(*self);
-        a.extend(rhs);
-        e
     }
 
     /// Subtract two atoms and return the buffer that contains the unnormalized result.
@@ -2573,6 +3141,8 @@ impl AtomView<'_> {
             .normalize(workspace, out);
     }
 
+    /// Return the size in bytes of the expression's encoded representation,
+    /// excluding separately stored symbol metadata.
     pub fn get_byte_size(&self) -> usize {
         match self {
             AtomView::Num(n) => n.get_byte_size(),
@@ -2659,12 +3229,19 @@ impl AtomView<'_> {
     trait_decode(trait = crate::state::HasStateMap)
 )]
 pub enum Atom {
+    /// An owned numerical coefficient.
     Num(Num),
+    /// An owned symbolic variable.
     Var(Var),
+    /// An owned function call.
     Fun(Fun),
+    /// An owned power.
     Pow(Pow),
+    /// An owned product.
     Mul(Mul),
+    /// An owned sum.
     Add(Add),
+    /// The exact number zero, requiring no heap allocation.
     Zero,
 }
 
@@ -2744,7 +3321,7 @@ impl Eq for Atom {}
 impl Hash for Atom {
     #[inline(always)]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_view().hash(state)
+        self.as_view().get_data().hash(state)
     }
 }
 
@@ -2754,21 +3331,47 @@ impl Ord for Atom {
     }
 }
 
-impl<T> PartialEq<T> for Atom
-where
-    for<'a> &'a T: Into<AtomOrView<'a>>,
-{
-    fn eq(&self, other: &T) -> bool {
-        self.as_view() == other.into().as_view()
+/// Access a child expression by a single index or by a path of nested indices.
+pub trait AtomIndex<T> {
+    /// Returns the `index`-th sub-atom of this atom
+    fn index(&self, index: T) -> Option<AtomView<'_>>;
+}
+
+impl<T: AtomCore> AtomIndex<usize> for T {
+    fn index(&self, index: usize) -> Option<AtomView<'_>> {
+        self.as_atom_view().index(index)
     }
 }
 
-impl<T> PartialOrd<T> for Atom
-where
-    for<'a> &'a T: Into<AtomOrView<'a>>,
-{
-    fn partial_cmp(&self, other: &T) -> Option<Ordering> {
-        Some(self.as_view().cmp(&other.into().as_view()))
+impl<T: AtomCore, I: AsRef<[usize]> + ?Sized> AtomIndex<&I> for T {
+    fn index(&self, index: &I) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index.as_ref())
+    }
+}
+
+impl<T: AtomCore, const N: usize> AtomIndex<[usize; N]> for T {
+    fn index(&self, index: [usize; N]) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(index.as_slice())
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize)> for T {
+    fn index(&self, index: (usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view().multi_index(&[index.0, index.1])
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize, usize)> for T {
+    fn index(&self, index: (usize, usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view()
+            .multi_index(&[index.0, index.1, index.2])
+    }
+}
+
+impl<T: AtomCore> AtomIndex<(usize, usize, usize, usize)> for T {
+    fn index(&self, index: (usize, usize, usize, usize)) -> Option<AtomView<'_>> {
+        self.as_atom_view()
+            .multi_index(&[index.0, index.1, index.2, index.3])
     }
 }
 
@@ -2855,12 +3458,64 @@ impl Atom {
         }
     }
 
+    /// Return whether the expression is already the number zero.
+    ///
+    /// An expression that is mathematically zero but has not simplified to zero
+    /// returns `false`. Use [`check_zero`](Self::check_zero) to test such identities.
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// assert!(parse!("0").is_zero());
+    /// let identity = parse!("(x+1)^2-x^2-2*x-1");
+    /// assert!(!identity.is_zero());
+    /// assert_eq!(identity.check_zero(), ConditionResult::True);
+    /// ```
     #[inline]
     pub fn is_zero(&self) -> bool {
         self.as_view().is_zero()
     }
 
+    /// Test whether this expression is identically zero using the default settings.
+    ///
+    /// Returns `True` for a zero identity, `False` for a nonzero result, or
+    /// `Inconclusive` if undecided. See [`AtomCore::check_zero`] for examples and
+    /// the numerical and user-defined function limitations on nonzero results.
     #[inline]
+    pub fn check_zero(&self) -> crate::id::ConditionResult {
+        self.as_view().check_zero()
+    }
+
+    /// Test for an identically zero expression with configurable sampling and precision.
+    /// Defaults match [`check_zero`](Self::check_zero). See [`AtomCore::check_zero_with`]
+    /// for examples and the interpretation of floating coefficients.
+    #[inline]
+    pub fn check_zero_with(&self, settings: &ZeroTestSettings) -> crate::id::ConditionResult {
+        self.as_view().check_zero_with(settings)
+    }
+
+    /// Test whether two expressions are mathematically equal using the default settings.
+    ///
+    /// Returns `True`, `False`, or `Inconclusive`. See [`AtomCore::check_equal`]
+    /// for examples and the numerical and user-defined function limitations.
+    #[inline]
+    pub fn check_equal<'a, T: Into<AtomOrView<'a>>>(&self, other: T) -> crate::id::ConditionResult {
+        self.as_view().check_equal(other)
+    }
+
+    /// Test mathematical equality with configurable sampling and precision.
+    /// See [`AtomCore::check_equal_with`] for examples and the interpretation of
+    /// floating coefficients in both expressions.
+    #[inline]
+    pub fn check_equal_with<'a, T: Into<AtomOrView<'a>>>(
+        &self,
+        other: T,
+        settings: &ZeroTestSettings,
+    ) -> crate::id::ConditionResult {
+        self.as_view().check_equal_with(other, settings)
+    }
+
+    #[inline]
+    /// Return whether this atom is a numerical one; no symbolic simplification is performed.
     pub fn is_one(&self) -> bool {
         self.as_view().is_one()
     }
@@ -2893,17 +3548,27 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with a coefficient, reusing its allocation, and return
+    /// mutable access to the new number.
     pub fn to_num<T: Into<Coefficient>>(&mut self, coeff: T) -> &mut Num {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Num(Num::new_into(coeff.into(), buffer));
-        if let Atom::Num(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Num(value) => {
+                value.set_from_coeff(coeff.into());
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Num(Num::new_into(coeff.into(), buffer));
+                let Atom::Num(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
     #[inline]
+    /// Replace this atom with the variable `id`, reusing its allocation.
     pub fn to_var(&mut self, id: Symbol) -> &mut Var {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Var(Var::new_into(id, buffer));
@@ -2915,6 +3580,8 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with an empty function call headed by `id`, reusing
+    /// its allocation. Normalize after adding arguments.
     pub fn to_fun(&mut self, id: Symbol) -> &mut Fun {
         let buffer = std::mem::replace(self, Atom::Zero).into_raw();
         *self = Atom::Fun(Fun::new_into(id, buffer));
@@ -2926,39 +3593,67 @@ impl Atom {
     }
 
     #[inline]
+    /// Replace this atom with the unnormalized power `base^exp`, reusing its allocation.
     pub fn to_pow(&mut self, base: AtomView, exp: AtomView) -> &mut Pow {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Pow(Pow::new_into(base, exp, buffer));
-        if let Atom::Pow(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Pow(value) => {
+                value.set_from_base_and_exp(base, exp);
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Pow(Pow::new_into(base, exp, buffer));
+                let Atom::Pow(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
     #[inline]
+    /// Replace this atom with an empty, unnormalized product, reusing its allocation.
+    /// Normalize after adding factors.
     pub fn to_mul(&mut self) -> &mut Mul {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Mul(Mul::new_into(buffer));
-        if let Atom::Mul(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Mul(value) => {
+                value.clear();
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Mul(Mul::new_into(buffer));
+                let Atom::Mul(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
     #[inline]
+    /// Replace this atom with an empty, unnormalized sum, reusing its allocation.
+    /// Normalize after adding terms.
     pub fn to_add(&mut self) -> &mut Add {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        *self = Atom::Add(Add::new_into(buffer));
-        if let Atom::Add(n) = self {
-            n
-        } else {
-            unreachable!()
+        match self {
+            Atom::Add(value) => {
+                value.clear();
+                value
+            }
+            atom => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = Atom::Add(Add::new_into(buffer));
+                let Atom::Add(value) = atom else {
+                    unreachable!()
+                };
+                value
+            }
         }
     }
 
     #[inline(always)]
+    /// Consume the atom and return its underlying byte buffer. The allocation-free
+    /// zero variant returns an empty buffer.
     pub fn into_raw(self) -> RawAtom {
         match self {
             Atom::Num(n) => n.into_raw(),
@@ -2972,19 +3667,31 @@ impl Atom {
     }
 
     #[inline(always)]
+    /// Replace this atom with a copy of `view`, reusing its allocation.
     pub fn set_from_view(&mut self, view: &AtomView) {
-        let buffer = std::mem::replace(self, Atom::Zero).into_raw();
-        match view {
-            AtomView::Num(n) => *self = Atom::Num(Num::from_view_into(n, buffer)),
-            AtomView::Var(v) => *self = Atom::Var(Var::from_view_into(v, buffer)),
-            AtomView::Fun(f) => *self = Atom::Fun(Fun::from_view_into(f, buffer)),
-            AtomView::Pow(p) => *self = Atom::Pow(Pow::from_view_into(p, buffer)),
-            AtomView::Mul(m) => *self = Atom::Mul(Mul::from_view_into(m, buffer)),
-            AtomView::Add(a) => *self = Atom::Add(Add::from_view_into(a, buffer)),
+        match (self, view) {
+            (Atom::Num(out), AtomView::Num(input)) => out.set_from_view(input),
+            (Atom::Var(out), AtomView::Var(input)) => out.set_from_view(input),
+            (Atom::Fun(out), AtomView::Fun(input)) => out.set_from_view(input),
+            (Atom::Pow(out), AtomView::Pow(input)) => out.set_from_view(input),
+            (Atom::Mul(out), AtomView::Mul(input)) => out.set_from_view(input),
+            (Atom::Add(out), AtomView::Add(input)) => out.set_from_view(*input),
+            (atom, _) => {
+                let buffer = std::mem::replace(atom, Atom::Zero).into_raw();
+                *atom = match view {
+                    AtomView::Num(n) => Atom::Num(Num::from_view_into(n, buffer)),
+                    AtomView::Var(v) => Atom::Var(Var::from_view_into(v, buffer)),
+                    AtomView::Fun(f) => Atom::Fun(Fun::from_view_into(f, buffer)),
+                    AtomView::Pow(p) => Atom::Pow(Pow::from_view_into(p, buffer)),
+                    AtomView::Mul(m) => Atom::Mul(Mul::from_view_into(m, buffer)),
+                    AtomView::Add(a) => Atom::Add(Add::from_view_into(a, buffer)),
+                };
+            }
         }
     }
 
     #[inline(always)]
+    /// Borrow the expression without copying its storage.
     pub fn as_view(&self) -> AtomView<'_> {
         match self {
             Atom::Num(n) => AtomView::Num(n.to_num_view()),
@@ -3083,9 +3790,7 @@ impl FunctionBuilder {
         T: Into<AtomOrView<'a>>,
     {
         if let Atom::Fun(f) = self.handle.deref_mut() {
-            for a in args {
-                f.add_arg(a.into().as_view());
-            }
+            f.add_args_iter(args.into_iter().map(Into::into));
         }
 
         self
@@ -3103,11 +3808,13 @@ impl FunctionBuilder {
 
 /// A trait that allows to add an argument to a function builder.
 pub trait FunctionArgument {
+    /// Append this value as an argument and return the updated builder.
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder;
 }
 
 /// A trait that allows to add multiple arguments to a function builder.
 pub trait FunctionArguments {
+    /// Append these values as arguments and return the updated builder.
     fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder;
 }
 
@@ -3254,6 +3961,21 @@ impl_function_arguments!(
     (K, k),
     (L, l)
 );
+
+impl<T: FunctionArgument> FunctionArguments for &[T] {
+    fn add_args_to_function_builder(self, mut f: FunctionBuilder) -> FunctionBuilder {
+        for x in self {
+            f = x.add_arg_to_function_builder(f);
+        }
+        f
+    }
+}
+
+impl<T: FunctionArgument> FunctionArguments for &Vec<T> {
+    fn add_args_to_function_builder(self, f: FunctionBuilder) -> FunctionBuilder {
+        self.as_slice().add_args_to_function_builder(f)
+    }
+}
 
 impl FunctionArgument for Atom {
     fn add_arg_to_function_builder(&self, f: FunctionBuilder) -> FunctionBuilder {
@@ -4038,11 +4760,96 @@ impl AsRef<Atom> for Atom {
 #[cfg(test)]
 mod test {
     use crate::{
-        atom::{Atom, AtomCore, Symbol, UserData},
+        atom::{Atom, AtomCore, AtomView, Symbol, SymbolAttribute, UserData},
+        coefficient::Coefficient,
         domains::{integer::Integer, rational::Rational},
     };
 
     use super::FunctionBuilder;
+
+    #[test]
+    fn copying_views_preserves_content_and_normalization() {
+        let mut values = vec![
+            Atom::Zero,
+            Atom::num((-7, 13)),
+            parse!("copy_view_x"),
+            parse!("copy_view_f(x,y)"),
+            parse!("copy_view_x^3"),
+            parse!("2*copy_view_x*copy_view_y"),
+            parse!("copy_view_x+copy_view_y+3"),
+        ];
+        let dirty: Vec<_> = values
+            .iter()
+            .cloned()
+            .filter_map(|mut atom| {
+                atom.set_normalized(false);
+                atom.as_view().needs_normalization().then_some(atom)
+            })
+            .collect();
+        values.extend(dirty);
+
+        for initial in &values {
+            for source in &values {
+                let mut out = initial.clone();
+                for expected in [source, initial, source] {
+                    out.set_from_view(&expected.as_view());
+                    assert_eq!(out.as_view().get_data(), expected.as_view().get_data());
+                    assert_eq!(
+                        out.as_view().needs_normalization(),
+                        expected.as_view().needs_normalization()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constructors_reuse_and_reset_atom_variants() {
+        let base = parse!("reuse_base(x)");
+        let exp = Atom::num(3);
+        let inputs = [
+            Atom::Zero,
+            Atom::num(42),
+            parse!("reuse_x"),
+            parse!("reuse_f(x,y)"),
+            parse!("reuse_x^2"),
+            parse!("reuse_x*reuse_y"),
+            parse!("reuse_x+reuse_y"),
+        ];
+        for initial in inputs {
+            for kind in 0..4 {
+                let mut out = initial.clone();
+                // First convert from each possible variant, then reset the
+                // matching variant after it contains a nonempty expression.
+                for _ in 0..2 {
+                    let mut fresh = Atom::new();
+                    for atom in [&mut out, &mut fresh] {
+                        match kind {
+                            0 => {
+                                atom.to_num((-7, 13));
+                            }
+                            1 => {
+                                atom.to_pow(base.as_view(), exp.as_view());
+                            }
+                            2 => {
+                                let mul = atom.to_mul();
+                                assert_eq!(mul.to_mul_view().get_nargs(), 0);
+                                mul.extend(base.as_view());
+                            }
+                            _ => {
+                                let add = atom.to_add();
+                                assert_eq!(add.to_add_view().get_nargs(), 0);
+                                add.extend(base.as_view());
+                            }
+                        }
+                    }
+                    assert_eq!(out.as_view().get_data(), fresh.as_view().get_data());
+                    assert_eq!(out.as_view().needs_normalization(), kind != 0);
+                    out.set_normalized(true);
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_macro() {
@@ -4078,7 +4885,7 @@ mod test {
         let x = parse!("v1+f1(v2)");
         assert_eq!(
             format!("{x:#?}"),
-            "AddView { data: [5, 17, 2, 13, 2, 1, 15, 3, 5, 0, 0, 0, 1, 45, 2, 1, 16] }"
+            "AddView { data: [5, 17, 2, 11, 2, 1, 17, 3, 1, 5, 1, 47, 2, 1, 18] }"
         );
         assert_eq!(
             x.get_all_symbols(true),
@@ -4086,7 +4893,7 @@ mod test {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(x.as_view().get_byte_size(), 17);
+        assert_eq!(x.as_view().get_byte_size(), 15);
     }
 
     #[test]
@@ -4122,6 +4929,48 @@ mod test {
             .add_arg(parse!("a"))
             .add_arg(parse!("a").as_view())
             .finish();
+    }
+
+    #[test]
+    fn generic_atom_comparisons() {
+        let x = symbol!("generic_atom_comparisons::x");
+        let a = Atom::var(x);
+        let view = a.as_view();
+
+        assert!(view == a.clone());
+        assert!(view == &a);
+        assert!(view == a.as_view());
+        assert!(view == x);
+        assert!(view >= x);
+        assert!(a == view);
+        assert!(a == &a);
+        assert!(a >= x);
+        assert!(&a == view);
+        assert!(&a >= x);
+
+        let n = Atom::num(2);
+        let n_view = n.as_view();
+        let integer = Integer::from(2);
+        let one = Integer::from(1);
+        let rational = Rational::from((2, 1));
+        let coefficient = Coefficient::from(2);
+
+        assert!(n_view == 2);
+        assert!(n_view == (2, 1));
+        assert!(n_view == integer);
+        assert!(n_view == rational);
+        assert!(n_view == coefficient);
+        assert!(n_view == &Integer::from(2));
+        assert!(n == 2);
+        assert!(&n == 2);
+        assert!(n == &Integer::from(2));
+        assert!(&n == &Integer::from(2));
+        assert!(n != 3);
+        assert!(n_view > 1);
+        assert!(n_view > &one);
+        assert!(n > 1);
+        assert!(&n > 1);
+        assert!(n < 3);
     }
 
     #[test]
@@ -4210,5 +5059,32 @@ mod test {
         let imported = Symbol::import(&mut e.as_slice()).unwrap();
         assert_eq!(s, imported);
         assert_eq!(s.get_data(), imported.get_data());
+    }
+
+    #[test]
+    fn flat_symbol_encoding_roundtrip() {
+        let flat = crate::symbol!("flat_encoding::f_"; Flat);
+        assert!(flat.is_flat());
+        assert_eq!(flat.get_attributes(), vec![SymbolAttribute::Flat]);
+
+        let variable = Atom::var(flat);
+        let AtomView::Var(variable) = variable.as_view() else {
+            panic!("expected variable");
+        };
+        assert!(variable.get_symbol().is_flat());
+        assert_eq!(variable.get_wildcard_level(), 1);
+
+        let function = flat.call((1, 2));
+        let AtomView::Fun(function) = function.as_view() else {
+            panic!("expected function");
+        };
+        assert!(function.get_symbol().is_flat());
+        assert_eq!(function.get_symbol().get_wildcard_level(), 1);
+
+        let mut exported = vec![];
+        flat.export(&mut exported).unwrap();
+        let imported = Symbol::import(&mut exported.as_slice()).unwrap();
+        assert!(imported.is_flat());
+        assert_eq!(imported.get_wildcard_level(), 1);
     }
 }
