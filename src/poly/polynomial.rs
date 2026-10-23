@@ -680,7 +680,12 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+        self.format(
+            element,
+            &opts.clone().mode(crate::printer::PrintMode::MathML),
+            state,
+            f,
+        )
     }
 
     fn format<W: std::fmt::Write>(
@@ -2103,7 +2108,8 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Multiply every coefficient with `other`.
     pub fn mul_coeff(mut self, other: F::Element) -> Self {
-        if self.ring().is_one(&other) {
+        // A numerical unit may carry precision that multiplication must preserve.
+        if self.ring().is_one(&other) && other == self.ring().one() {
             return self;
         }
 

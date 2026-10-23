@@ -945,6 +945,35 @@ pub trait AtomCore: private::Sealed + Sized {
         self.as_atom_view().evaluate(map, binary_prec)
     }
 
+    /// Evaluate once with arbitrary-precision error tracking.
+    ///
+    /// Exact rational coefficients remain exact inputs, while floating literals
+    /// retain their source precision. Supplied inputs and registered tracked
+    /// callbacks carry absolute errors. `working_bits` selects arithmetic
+    /// precision, not guaranteed output accuracy; inspect the returned component
+    /// precision before converting it to an ordinary floating-point expression.
+    /// No precision retry or fallback to a center-only callback is performed.
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use symbolica::{prelude::*, domains::float::TrackedComplex};
+    /// let mut inputs = HashMap::new();
+    /// inputs.insert(parse!("x"), TrackedComplex::from_source_decimal(
+    ///     "1.0000000000000000000000000000000000000001", 50, 256,
+    /// ).unwrap());
+    /// let result = parse!("x-1").evaluate_tracked(&inputs, 256).unwrap();
+    /// assert!(result.precision().real().significant_digits().unwrap() < 20);
+    /// let rounded = result.to_float_with_precision().unwrap();
+    /// let expression = Atom::num(rounded); // Checked before radii are discarded.
+    /// ```
+    fn evaluate_tracked<A: AtomCore + KeyLookup>(
+        &self,
+        map: &StdHashMap<A, numerica::domains::float::TrackedComplex, impl BuildHasher>,
+        working_bits: u32,
+    ) -> Result<numerica::domains::float::TrackedComplex, EvaluationError> {
+        crate::evaluate::evaluate_tracked(self.as_atom_view(), map, working_bits)
+    }
+
     /// Evaluate an expression in a given ring.
     ///
     /// All variables and all user functions that do not have an evaluation hook,
