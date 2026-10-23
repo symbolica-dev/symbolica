@@ -7594,10 +7594,13 @@ impl PythonExpression {
             ));
         };
 
-        let functions = python_integration_functions().ok_or_else(|| {
-            exceptions::PyNotImplementedError::new_err(
-                "No symbolic integration backend is linked into this Symbolica build",
-            )
+        let functions = PYTHON_INTEGRATION.get().map_err(|error| match error {
+            ExtensionError::MissingImplementation { .. } => {
+                exceptions::PyNotImplementedError::new_err(
+                    "No symbolic integration backend is linked into this Symbolica build",
+                )
+            }
+            error => error.into(),
         })?;
         let result = (functions.integrate)(&self.expr, x);
         Ok(match result {
@@ -7641,10 +7644,13 @@ impl PythonExpression {
             ));
         };
 
-        let functions = python_integration_functions().ok_or_else(|| {
-            exceptions::PyNotImplementedError::new_err(
-                "No symbolic integration backend is linked into this Symbolica build",
-            )
+        let functions = PYTHON_INTEGRATION.get().map_err(|error| match error {
+            ExtensionError::MissingImplementation { .. } => {
+                exceptions::PyNotImplementedError::new_err(
+                    "No symbolic integration backend is linked into this Symbolica build",
+                )
+            }
+            error => error.into(),
         })?;
         let (result, overview, steps) = (functions.integrate_with_steps)(&self.expr, x);
         Ok((
