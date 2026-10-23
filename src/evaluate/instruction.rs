@@ -200,6 +200,204 @@ pub struct ExportedSubEvaluator<T> {
     pub instructions: Arc<ExportedInstructions<T>>,
 }
 
+impl<T: Default + Clone> ExpressionEvaluator<T> {
+    /// Import scalar constants and shared function bodies, remapping their indices.
+    /// The caller chooses how to store literals; registered constant placeholders
+    /// always get distinct slots before any later literal can be interned.
+    pub(super) fn import_context(
+        &self,
+        ins: &mut InstructionList<T>,
+        external_functions: &mut Vec<ExternalFunctionContainer<T>>,
+        mut import_scalar_constant: impl FnMut(&mut InstructionList<T>, T) -> Slot,
+    ) -> (Vec<Slot>, Vec<usize>) {
+        let unknown: HashSet<_> = self
+            .external_fns
+            .iter()
+            .filter_map(|external| external.constant_index)
+            .collect();
+        let mut slots = Vec::new();
+        let mut constants = Vec::new();
+        for (index, value) in self.stack[self.param_count..self.reserved_indices]
+            .iter()
+            .enumerate()
+        {
+            let slot = if unknown.contains(&index) {
+                let slot = ins.push_scalar_constant(value.clone());
+                *ins.unknown_constants.last_mut().unwrap() = true;
+                slot
+            } else {
+                import_scalar_constant(ins, value.clone())
+            };
+            let Slot::Const(index) = slot else {
+                panic!("Imported scalar constants must use constant slots");
+            };
+            constants.push(index);
+            slots.push(slot);
+        }
+        let mut functions = Vec::new();
+        for external in &self.external_fns {
+            let mut external = external.clone();
+            if let Some(index) = external.constant_index.as_mut() {
+                *index = constants[*index];
+            }
+            if let Some(body) = &mut external.body {
+                for (instruction, _) in &mut Arc::make_mut(body).instructions {
+                    if let Instr::ExternalFun(_, function, _) = instruction {
+                        *function = functions[*function];
+                    }
+                }
+            }
+            let index = external_functions
+                .iter()
+                .position(|f| {
+                    f == &external
+                        && f.constant_index == external.constant_index
+                        && f.body == external.body
+                })
+                .unwrap_or_else(|| {
+                    external_functions.push(external);
+                    external_functions.len() - 1
+                });
+            functions.push(index);
+        }
+        (slots, functions)
+    }
+
+    /// Inline this evaluator's scalar instructions into an instruction list.
+    /// Each output updates the source-slot map after its inputs are read, so reused
+    /// stack slots become distinct temporaries without modifying the source.
+    /// Shared function bodies are imported without inlining, and the caller chooses
+    /// how scalar literals are stored in the destination's vector-sized groups.
+    pub(super) fn inline_instructions(
+        &self,
+        args: &[Slot],
+        ins: &mut InstructionList<T>,
+        external_functions: &mut Vec<ExternalFunctionContainer<T>>,
+        next_label: &mut usize,
+        import_scalar_constant: impl FnMut(&mut InstructionList<T>, T) -> Slot,
+    ) -> Vec<Slot> {
+        let (constants, functions) =
+            self.import_context(ins, external_functions, import_scalar_constant);
+        let mut slots = args.to_vec();
+        slots.extend(constants);
+        slots.resize(self.stack.len(), Slot::Temp(0));
+        let mut labels = HashMap::default();
+        for (instr, _) in &self.instructions {
+            if let Instr::Label(label) = instr {
+                labels.insert(*label, Label(*next_label));
+                *next_label += 1;
+            }
+        }
+        for (instr, _) in &self.instructions {
+            let (output, instr) = match instr {
+                Instr::Add(output, args) | Instr::Mul(output, args) => {
+                    let mut value = slots[args[0]];
+                    for arg in &args[1..] {
+                        value = ins.add(if matches!(instr, Instr::Add(..)) {
+                            VectorInstruction::Add(value, slots[*arg])
+                        } else {
+                            VectorInstruction::Mul(value, slots[*arg])
+                        });
+                    }
+                    slots[*output] = value;
+                    continue;
+                }
+                Instr::Pow(o, a, p) => (*o, VectorInstruction::Pow(slots[*a], *p)),
+                Instr::Powf(o, a, b) => (*o, VectorInstruction::Powf(slots[*a], slots[*b])),
+                Instr::BuiltinFun(o, f, a) => (*o, VectorInstruction::BuiltinFun(*f, slots[*a])),
+                Instr::ExternalFun(o, f, args) => (
+                    *o,
+                    VectorInstruction::ExternalFun(
+                        functions[*f],
+                        args.iter().map(|a| slots[*a]).collect(),
+                    ),
+                ),
+                Instr::Join(o, c, a, b) => {
+                    (*o, VectorInstruction::Join(slots[*c], slots[*a], slots[*b]))
+                }
+                Instr::IfElse(c, l) => {
+                    ins.add(VectorInstruction::IfElse(slots[*c], labels[l]));
+                    continue;
+                }
+                Instr::Goto(l) => {
+                    ins.add(VectorInstruction::Goto(labels[l]));
+                    continue;
+                }
+                Instr::Label(l) => {
+                    ins.add(VectorInstruction::Label(labels[l]));
+                    continue;
+                }
+            };
+            slots[output] = ins.add(instr);
+        }
+        self.result_indices.iter().map(|i| slots[*i]).collect()
+    }
+
+    /// Lower an instruction list to native evaluator storage.
+    /// The caller must optimize the stack and fix labels before evaluation, and
+    /// may run instruction optimizations before those final steps.
+    pub(super) fn from_instruction_list(
+        param_count: usize,
+        instructions: InstructionList<T>,
+        external_fns: Vec<ExternalFunctionContainer<T>>,
+        outputs: Vec<Slot>,
+        settings: OptimizationSettings,
+    ) -> Self {
+        let reserved_indices = param_count + instructions.constants.len();
+        let index = |slot| match slot {
+            Slot::Param(index) => index,
+            Slot::Const(index) => param_count + index,
+            Slot::Temp(index) => reserved_indices + index,
+            Slot::Out(_) => unreachable!("instruction lists do not use output slots"),
+        };
+        let mut lowered = Vec::with_capacity(instructions.instructions.len());
+        for instruction in instructions.instructions {
+            let out = reserved_indices + lowered.len();
+            let instruction = match instruction {
+                VectorInstruction::Add(a, b) | VectorInstruction::Mul(a, b) => {
+                    let mut inputs = vec![index(a), index(b)];
+                    inputs.sort_unstable();
+                    if matches!(instruction, VectorInstruction::Add(..)) {
+                        Instr::Add(out, inputs)
+                    } else {
+                        Instr::Mul(out, inputs)
+                    }
+                }
+                VectorInstruction::Assign(a) => Instr::Add(out, vec![index(a)]),
+                VectorInstruction::Pow(a, power) => Instr::Pow(out, index(a), power),
+                VectorInstruction::Powf(a, b) => Instr::Powf(out, index(a), index(b)),
+                VectorInstruction::BuiltinFun(symbol, a) => {
+                    Instr::BuiltinFun(out, symbol, index(a))
+                }
+                VectorInstruction::ExternalFun(function, args) => {
+                    Instr::ExternalFun(out, function, args.into_iter().map(index).collect())
+                }
+                VectorInstruction::IfElse(condition, label) => {
+                    Instr::IfElse(index(condition), label)
+                }
+                VectorInstruction::Goto(label) => Instr::Goto(label),
+                VectorInstruction::Label(label) => Instr::Label(label),
+                VectorInstruction::Join(condition, a, b) => {
+                    Instr::Join(out, index(condition), index(a), index(b))
+                }
+            };
+            lowered.push((instruction, ComplexPhase::Any));
+        }
+        let mut stack = vec![T::default(); param_count];
+        stack.extend(instructions.constants);
+        stack.resize(reserved_indices + lowered.len(), T::default());
+        Self {
+            stack,
+            param_count,
+            reserved_indices,
+            instructions: lowered,
+            result_indices: outputs.into_iter().map(index).collect(),
+            external_fns,
+            settings,
+        }
+    }
+}
+
 impl<T: Clone> ExpressionEvaluator<T> {
     /// Export the instruction stream, temporary storage size, constants, and sub-evaluators.
     ///
@@ -460,6 +658,17 @@ impl<T> InstructionList<T> {
     pub fn add(&mut self, instr: VectorInstruction) -> Slot {
         self.instructions.push(instr);
         Slot::Temp(self.instructions.len() - 1)
+    }
+}
+
+impl<T: Default> InstructionList<T> {
+    /// Append a scalar in its own vector-sized group without interning it.
+    pub(super) fn push_scalar_constant(&mut self, value: T) -> Slot {
+        let slot = Slot::Const(self.constants.len());
+        self.constants.push(value);
+        self.constants.extend((1..self.dim).map(|_| T::default()));
+        self.unknown_constants.push(false);
+        slot
     }
 }
 

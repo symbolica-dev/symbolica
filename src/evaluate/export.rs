@@ -1066,7 +1066,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
             };
         }
 
-        let mut close_else_branch = 0;
+        let mut branch_ends = Vec::new();
         for (ins, _c) in self.instructions {
             match ins {
                 Instr::Add(o, a) => {
@@ -1142,16 +1142,17 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                 Instr::IfElse(cond, _label) => {
                     *out += &format!("\tif ({} != 0.) {{\n", get_input!(*cond));
                 }
-                Instr::Goto(..) => {
+                Instr::Goto(label) => {
                     *out += "\t} else {\n";
-                    close_else_branch += 1;
+                    branch_ends.push(*label);
                 }
-                Instr::Label(..) => {}
-                Instr::Join(o, cond, a, b) => {
-                    if close_else_branch > 0 {
-                        close_else_branch -= 1;
+                Instr::Label(label) => {
+                    if branch_ends.last() == Some(label) {
+                        branch_ends.pop();
                         *out += "\t}\n";
                     }
+                }
+                Instr::Join(o, cond, a, b) => {
                     let arg_a = get_input!(*a);
                     let arg_b = get_input!(*b);
                     *out += format!(
