@@ -1096,6 +1096,25 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         *out += format!("\t{} = pow({base}, {e});\n", get_output!(o)).as_str();
                     }
                 }
+                Instr::Select(o, c, a, b) => {
+                    *out += format!(
+                        "\t{} = ({} != 0.) ? {} : {};\n",
+                        get_output!(o),
+                        get_input!(*c),
+                        get_input!(*a),
+                        get_input!(*b)
+                    )
+                    .as_str();
+                }
+                Instr::Div(o, a, b) => {
+                    *out += format!(
+                        "\t{} = {}/{};\n",
+                        get_output!(o),
+                        get_input!(*a),
+                        get_input!(*b)
+                    )
+                    .as_str();
+                }
                 Instr::Powf(o, b, e) => {
                     let base = get_input!(*b);
                     let exp = get_input!(*e);
@@ -1321,7 +1340,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                     }
                     stack_to_reg.insert(r, i);
                 }
-                Instr::Powf(r, b, e) => {
+                Instr::Powf(r, b, e) | Instr::Div(r, b, e) => {
                     if b >= &self.reserved_indices {
                         reg_last_use[stack_to_reg[b]] = i;
                     }
@@ -1341,7 +1360,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         reg_last_use[stack_to_reg[c]] = i;
                     }
                 }
-                Instr::Join(r, c, t, f) => {
+                Instr::Join(r, c, t, f) | Instr::Select(r, c, t, f) => {
                     if c >= &self.reserved_indices {
                         reg_last_use[stack_to_reg[c]] = i;
                     }
@@ -1377,12 +1396,14 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
             Pow(MemOrReg, u16, MemOrReg, i64),
             Sqrt(MemOrReg, u16, MemOrReg),
             Powf(usize, usize, usize),
+            Div(usize, usize, usize),
             BuiltinFun(usize, Symbol, usize),
             ExternalFun(usize, usize, Vec<usize>),
             IfElse(usize),
             Goto,
             Label(Label),
             Join(usize, usize, usize, usize),
+            Select(usize, usize, usize, usize),
         }
 
         let mut new_instr: Vec<RegInstr> = instr
@@ -1402,6 +1423,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                     RegInstr::Pow(MemOrReg::Mem(*r), u16::MAX, MemOrReg::Mem(*b), *e)
                 }
                 Instr::Powf(r, b, e) => RegInstr::Powf(*r, *b, *e),
+                Instr::Div(r, a, b) => RegInstr::Div(*r, *a, *b),
                 Instr::BuiltinFun(r, s, a) => {
                     if *s == Symbol::SQRT {
                         RegInstr::Sqrt(MemOrReg::Mem(*r), u16::MAX, MemOrReg::Mem(*a))
@@ -1414,6 +1436,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                 Instr::Goto(_) => RegInstr::Goto,
                 Instr::Label(l) => RegInstr::Label(*l),
                 Instr::Join(r, c, a, b) => RegInstr::Join(*r, *c, *a, *b),
+                Instr::Select(r, c, a, b) => RegInstr::Select(*r, *c, *a, *b),
             })
             .collect();
 
@@ -1487,7 +1510,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         RegInstr::Pow(_, _, _, _) => {
                             panic!("use outside of ASM block");
                         }
-                        RegInstr::Powf(_, a, b) => {
+                        RegInstr::Powf(_, a, b) | RegInstr::Div(_, a, b) => {
                             if *a == old_reg {
                                 panic!("use outside of ASM block");
                             }
@@ -1512,7 +1535,7 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         }
                         RegInstr::Label(_) => {}
                         RegInstr::Goto => {}
-                        RegInstr::Join(_, c, a, b) => {
+                        RegInstr::Join(_, c, a, b) | RegInstr::Select(_, c, a, b) => {
                             if *c == old_reg || *a == old_reg || *b == old_reg {
                                 panic!("use outside of ASM block");
                             }
@@ -2261,6 +2284,24 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                             InlineASM::None => unreachable!(),
                         }
                     }
+                }
+                RegInstr::Select(o, c, a, b) => {
+                    end_asm_block!(in_asm_block);
+                    let condition = get_input!(*c);
+                    let yes = get_input!(*a);
+                    let no = get_input!(*b);
+                    if asm_flavour == InlineASM::AVX2 {
+                        *out +=
+                            format!("\tZ[{o}] = xsimd::select({condition} != 0., {yes}, {no});\n")
+                                .as_str();
+                    } else {
+                        *out +=
+                            format!("\tZ[{o}] = ({condition} != 0.) ? {yes} : {no};\n").as_str();
+                    }
+                }
+                RegInstr::Div(o, a, b) => {
+                    end_asm_block!(in_asm_block);
+                    *out += format!("\tZ[{o}] = {}/{};\n", get_input!(*a), get_input!(*b)).as_str();
                 }
                 RegInstr::Powf(o, b, e) => {
                     end_asm_block!(in_asm_block);
@@ -3020,6 +3061,24 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         let base = get_input!(*b);
                         *out += format!("\tZ[{o}] = pow({base}, {e});\n").as_str();
                     }
+                }
+                Instr::Select(o, c, a, b) => {
+                    end_asm_block!(in_asm_block);
+                    let condition = get_input!(*c);
+                    let yes = get_input!(*a);
+                    let no = get_input!(*b);
+                    if asm_flavour == InlineASM::AVX2 {
+                        *out +=
+                            format!("\tZ[{o}] = xsimd::select({condition} != 0., {yes}, {no});\n")
+                                .as_str();
+                    } else {
+                        *out +=
+                            format!("\tZ[{o}] = ({condition} != 0.) ? {yes} : {no};\n").as_str();
+                    }
+                }
+                Instr::Div(o, a, b) => {
+                    end_asm_block!(in_asm_block);
+                    *out += format!("\tZ[{o}] = {}/{};\n", get_input!(*a), get_input!(*b)).as_str();
                 }
                 Instr::Powf(o, b, e) => {
                     end_asm_block!(in_asm_block);

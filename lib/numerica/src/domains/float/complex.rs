@@ -806,6 +806,16 @@ impl<T: FloatLike> FloatLike for Complex<T> {
     }
 
     #[inline]
+    fn select_nonzero(&self, nonzero: &Self, zero: &Self) -> Self {
+        Self::new(
+            self.re
+                .select_nonzero(&nonzero.re, &self.im.select_nonzero(&nonzero.re, &zero.re)),
+            self.re
+                .select_nonzero(&nonzero.im, &self.im.select_nonzero(&nonzero.im, &zero.im)),
+        )
+    }
+
+    #[inline]
     fn set_precision(&mut self, precision: u32) {
         self.re.set_precision(precision);
         self.im.set_precision(precision);

@@ -69,6 +69,12 @@ pub enum Instruction {
     Label(usize),
     /// `Join(o, cond, t, f)` means `o = cond ? t : f`.
     Join(Slot, Slot, Slot, Slot),
+    /// Divide directly, retaining finite ratios whose denominator has no finite reciprocal.
+    /// The final flags describe whether the numerator and denominator are real.
+    Div(Slot, Slot, Slot, bool, bool),
+    /// Select an already computed alternative, independently in each SIMD lane.
+    /// Unlike a control-flow `Join`, this does not close an `IfElse` scope.
+    Select(Slot, Slot, Slot, Slot),
 }
 
 impl std::fmt::Display for Instruction {
@@ -99,6 +105,9 @@ impl std::fmt::Display for Instruction {
             Instruction::Pow(o, b, e, _) => {
                 write!(f, "{o} = {b}^{e}")
             }
+            Instruction::Div(o, numerator, denominator, _, _) => {
+                write!(f, "{o} = {numerator}/{denominator}")
+            }
             Instruction::Powf(o, b, e, _) => {
                 write!(f, "{o} = {b}^{e}")
             }
@@ -127,7 +136,7 @@ impl std::fmt::Display for Instruction {
             Instruction::Label(label) => {
                 write!(f, "L{}:", label)
             }
-            Instruction::Join(o, cond, a, b) => {
+            Instruction::Join(o, cond, a, b) | Instruction::Select(o, cond, a, b) => {
                 write!(f, "{} = {} ? {} : {}", o, cond, a, b)
             }
         }
@@ -397,6 +406,25 @@ impl<T: Clone> ProgramView<'_, T> {
                         get_slot!(*b),
                     ));
                 }
+                Instr::Div(o, numerator, denominator) => {
+                    // Division is marked real only when both operands are real.
+                    let real = *sc == ComplexPhase::Real;
+                    instr.push(Instruction::Div(
+                        get_slot!(*o),
+                        get_slot!(*numerator),
+                        get_slot!(*denominator),
+                        real,
+                        real,
+                    ));
+                }
+                Instr::Select(o, cond, a, b) => {
+                    instr.push(Instruction::Select(
+                        get_slot!(*o),
+                        get_slot!(*cond),
+                        get_slot!(*a),
+                        get_slot!(*b),
+                    ));
+                }
             }
         }
 
@@ -444,6 +472,10 @@ pub enum VectorInstruction {
     Label(Label),
     /// Select the second or third slot according to whether the first is nonzero.
     Join(Slot, Slot, Slot),
+    /// Divide directly instead of multiplying by a potentially overflowing reciprocal.
+    Div(Slot, Slot),
+    /// Select already computed values per lane; no jump or branch scope is implied.
+    Select(Slot, Slot, Slot),
 }
 
 /// A sequence of vector operations with shared constant storage.
@@ -554,6 +586,8 @@ pub(super) enum Instr {
     Goto(Label),
     Label(Label),
     Join(usize, usize, usize, usize),
+    Div(usize, usize, usize),
+    Select(usize, usize, usize, usize),
 }
 
 /// The phase of an operation in a complex evaluator.

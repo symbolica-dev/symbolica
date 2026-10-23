@@ -237,6 +237,19 @@ impl PythonEvaluatorInstructions {
                         ],
                     )?);
                 }
+                Instruction::Div(out, numerator, denominator, numerator_real, denominator_real) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "div".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(numerator).into_pyobject(py)?.as_any(),
+                            slot_to_object(denominator).into_pyobject(py)?.as_any(),
+                            numerator_real.into_pyobject(py)?.as_any(),
+                            denominator_real.into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
                 Instruction::Powf(out, base, exponent, is_real) => {
                     result.push(PyTuple::new(
                         py,
@@ -294,6 +307,18 @@ impl PythonEvaluatorInstructions {
                         py,
                         [
                             "join".into_pyobject(py)?.as_any(),
+                            slot_to_object(out).into_pyobject(py)?.as_any(),
+                            slot_to_object(condition).into_pyobject(py)?.as_any(),
+                            slot_to_object(if_true).into_pyobject(py)?.as_any(),
+                            slot_to_object(if_false).into_pyobject(py)?.as_any(),
+                        ],
+                    )?);
+                }
+                Instruction::Select(out, condition, if_true, if_false) => {
+                    result.push(PyTuple::new(
+                        py,
+                        [
+                            "select".into_pyobject(py)?.as_any(),
                             slot_to_object(out).into_pyobject(py)?.as_any(),
                             slot_to_object(condition).into_pyobject(py)?.as_any(),
                             slot_to_object(if_true).into_pyobject(py)?.as_any(),

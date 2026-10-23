@@ -83,7 +83,7 @@ pub struct OperationCount {
     pub additions: usize,
     /// The number of multiplications.
     pub multiplications: usize,
-    /// The number of inversions.
+    /// The number of inversions and direct divisions.
     pub inversions: usize,
     /// The number of function calls.
     pub function_calls: usize,
@@ -494,6 +494,10 @@ mod test {
                         let result = value(*base).powi((*exponent).try_into().unwrap());
                         write(*out, result, &mut temporaries, &mut outputs);
                     }
+                    Instruction::Div(out, numerator, denominator, _, _) => {
+                        let result = value(*numerator) / value(*denominator);
+                        write(*out, result, &mut temporaries, &mut outputs);
+                    }
                     Instruction::Powf(out, base, exponent, _) => {
                         let result = value(*base).powf(value(*exponent));
                         write(*out, result, &mut temporaries, &mut outputs);
@@ -514,6 +518,10 @@ mod test {
                         );
                         assert_eq!(result.len(), 1);
                         write(*out, result[0], &mut temporaries, &mut outputs);
+                    }
+                    Instruction::Select(out, condition, yes, no) => {
+                        let result = value(if value(*condition) != 0. { *yes } else { *no });
+                        write(*out, result, &mut temporaries, &mut outputs);
                     }
                     Instruction::Assign(out, input) => {
                         let result = value(*input);

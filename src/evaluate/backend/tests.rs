@@ -19,6 +19,68 @@ fn check_restrict_macro_scope<F: CompiledNumber>(source: &mut String, function_n
 }
 
 #[test]
+fn norm_value_selections_preserve_physical_branch_scopes_in_cpp() {
+    let source = parse!("if(c,x^2,abs(x))")
+        .evaluator(&[parse!("c"), parse!("x")])
+        .build()
+        .unwrap()
+        .vectorize(&Dualizer::new(
+            crate::domains::dual::HyperDual::<f64>::new(vec![vec![0], vec![1], vec![2]]),
+            vec![(0, 1), (0, 2)],
+        ))
+        .unwrap()
+        .map_coeff(&|value| value.re.to_f64());
+    let cases = [
+        (1., 0., [0., 0., 4.]), // The inactive modulus is at its cusp.
+        (0., 3., [3., 2., 1.]),
+        (1., 3., [9., 12., 10.]),
+        (0., -3., [3., -2., -1.]),
+        (1., -3., [9., -12., -2.]),
+        (1., 0., [0., 0., 4.]),
+    ];
+    for direct in [false, true] {
+        let mut compiled = source
+            .clone()
+            .jit_compile(
+                JITCompilationSettings::new()
+                    .direct_translation(direct)
+                    .optimization_level(2),
+            )
+            .unwrap();
+        for (condition, x, expected) in cases {
+            let mut output = [0.; 3];
+            compiled.evaluate(&[condition, 0., 0., x, 2., 1.], &mut output);
+            assert_eq!(output, expected, "direct={direct}, c={condition}, x={x}");
+        }
+    }
+    let base =
+        std::env::temp_dir().join(format!("symbolica_norm_selection_{}", std::process::id()));
+    let assembly = if cfg!(target_arch = "aarch64") {
+        InlineASM::AArch64
+    } else {
+        InlineASM::X64
+    };
+    for (index, mode) in [InlineASM::None, assembly].into_iter().enumerate() {
+        let cpp = base.with_extension(format!("{index}.cpp"));
+        let library = base.with_extension(format!("{index}.so"));
+        let name = format!("norm_selection_{index}");
+        let code = source
+            .export_cpp::<f64>(&cpp, &name, ExportSettings::new().inline_asm(mode))
+            .unwrap();
+        code.compile(&library, generic_cpp_compile_options())
+            .unwrap();
+        let mut compiled = CompiledRealEvaluator::load(&library, &name).unwrap();
+        for (condition, x, expected) in cases {
+            let mut output = [0.; 3];
+            compiled.evaluate(&[condition, 0., 0., x, 2., 1.], &mut output);
+            assert_eq!(output, expected, "mode={mode:?}, c={condition}, x={x}");
+        }
+        std::fs::remove_file(cpp).unwrap();
+        std::fs::remove_file(library).unwrap();
+    }
+}
+
+#[test]
 fn generic_cpp_nonoverlapping_real_buffers() {
     let base = std::env::temp_dir().join(format!("symbolica_generic_real_{}", std::process::id()));
     let source = base.with_extension("cpp");

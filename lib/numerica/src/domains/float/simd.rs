@@ -17,6 +17,17 @@ macro_rules! simd_impl {
             }
 
             #[inline(always)]
+            fn select_nonzero(&self, nonzero: &Self, zero: &Self) -> Self {
+                // Equality, rather than ordered inequality, keeps NaN nonzero.
+                // Keep the declared wide 1.4 minimum; newer wide versions
+                // deprecate the trait spelling in favor of an inherent method.
+                #[allow(deprecated)]
+                let mask = wide::CmpEq::simd_eq(*self, Self::ZERO);
+                #[allow(deprecated)]
+                mask.blend(*zero, *nonzero)
+            }
+
+            #[inline(always)]
             fn mul_add(&self, a: &Self, b: &Self) -> Self {
                 *self * *a + b
             }
@@ -124,6 +135,13 @@ macro_rules! simd_impl {
             #[inline(always)]
             fn norm(&self) -> Self {
                 (*self).abs()
+            }
+
+            #[inline]
+            fn hypot(&self, other: &Self) -> Self {
+                let left = self.to_array();
+                let right = other.to_array();
+                Self::from(std::array::from_fn(|index| left[index].hypot(right[index])))
             }
 
             #[inline(always)]

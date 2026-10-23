@@ -1494,6 +1494,27 @@ impl<'a> AtomView<'a> {
                         ComplexPhase::default(),
                     ));
                 }
+                Instruction::Select(o, condition, yes, no) => {
+                    instructions.push((
+                        Instr::Select(
+                            slot_map!(o),
+                            slot_map!(condition),
+                            slot_map!(yes),
+                            slot_map!(no),
+                        ),
+                        ComplexPhase::Any,
+                    ));
+                }
+                Instruction::Div(o, numerator, denominator, numerator_real, denominator_real) => {
+                    instructions.push((
+                        Instr::Div(slot_map!(o), slot_map!(numerator), slot_map!(denominator)),
+                        if numerator_real && denominator_real {
+                            ComplexPhase::Real
+                        } else {
+                            ComplexPhase::Any
+                        },
+                    ));
+                }
             }
         }
 
@@ -1571,7 +1592,7 @@ impl<'a> AtomView<'a> {
                     Instruction::Pow(_, base, _, _) | Instruction::Assign(_, base) => {
                         lower_global(base);
                     }
-                    Instruction::Powf(_, base, exp, _) => {
+                    Instruction::Powf(_, base, exp, _) | Instruction::Div(_, base, exp, _, _) => {
                         lower_global(base);
                         lower_global(exp);
                     }
@@ -1579,7 +1600,8 @@ impl<'a> AtomView<'a> {
                         function.2.iter_mut().for_each(&mut lower_global);
                     }
                     Instruction::IfElse(cond, _) => lower_global(cond),
-                    Instruction::Join(_, cond, then_value, else_value) => {
+                    Instruction::Join(_, cond, then_value, else_value)
+                    | Instruction::Select(_, cond, then_value, else_value) => {
                         lower_global(cond);
                         lower_global(then_value);
                         lower_global(else_value);
