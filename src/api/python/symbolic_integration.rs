@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use super::*;
 
 /// The Python-facing representation of one accepted integration transformation.
@@ -222,39 +220,94 @@ pub struct PythonIntegrationFunctions {
     pub integrate_with_steps: PythonIntegrateWithStepsFn,
 }
 
-static PYTHON_INTEGRATION_FUNCTIONS: OnceLock<PythonIntegrationFunctions> = OnceLock::new();
-
-/// Install the symbolic integration implementation used by the Python API.
-#[allow(unused)]
-pub fn set_python_integration_functions(
-    functions: PythonIntegrationFunctions,
-) -> Result<(), &'static str> {
-    if PYTHON_INTEGRATION_FUNCTIONS.set(functions).is_ok() {
-        return Ok(());
-    }
-
-    let installed = PYTHON_INTEGRATION_FUNCTIONS
-        .get()
-        .expect("the integration function cell was initialized by another caller");
-    if std::ptr::fn_addr_eq(installed.integrate, functions.integrate)
-        && std::ptr::fn_addr_eq(
-            installed.integrate_with_steps,
-            functions.integrate_with_steps,
-        )
-    {
-        Ok(())
-    } else {
-        Err("different Python integration functions have already been installed")
-    }
-}
-
-pub(crate) fn python_integration_functions() -> Option<&'static PythonIntegrationFunctions> {
-    PYTHON_INTEGRATION_FUNCTIONS.get()
-}
+/// Symbolic integration implementation registered by the containing native host.
+///
+/// Register one static [`ExtensionImplementation<PythonIntegrationFunctions>`]
+/// so both entry points are installed atomically and repeated initialization is safe.
+pub static PYTHON_INTEGRATION: ExtensionPoint<PythonIntegrationFunctions> =
+    ExtensionPoint::new("symbolic integration");
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expression_methods_use_registered_integration_table() {
+        fn integrate(input: &Atom, variable: Symbol) -> Result<Atom, Atom> {
+            assert_eq!(input, &Atom::num(5));
+            Ok(Atom::var(variable))
+        }
+
+        fn integrate_with_steps(
+            input: &Atom,
+            variable: Symbol,
+        ) -> (Result<Atom, Atom>, String, Vec<PythonIntegrationStep>) {
+            assert_eq!(input, &Atom::num(5));
+            let output = Atom::var(variable);
+            let step = PythonIntegrationStep::new(
+                Some(7),
+                0,
+                "registered transformation".to_owned(),
+                Vec::new(),
+                "test backend".to_owned(),
+                input.clone(),
+                output.clone(),
+            );
+            // Incomplete integration still returns the backend's best-effort value.
+            (Err(output), "registered overview".to_owned(), vec![step])
+        }
+
+        static IMPLEMENTATION: ExtensionImplementation<PythonIntegrationFunctions> =
+            ExtensionImplementation::new(
+                "test integration",
+                PythonIntegrationFunctions {
+                    integrate,
+                    integrate_with_steps,
+                },
+            );
+
+        Python::initialize();
+        Python::attach(|py| {
+            let variable = PythonExpression {
+                expr: Atom::var(crate::symbol!("extension_registration_test::x")),
+            };
+            let input = PythonExpression { expr: Atom::num(5) };
+            for error in [
+                input.integrate(variable.clone()).err().unwrap(),
+                input.integrate_with_steps(variable.clone()).err().unwrap(),
+            ] {
+                assert!(error.is_instance_of::<exceptions::PyNotImplementedError>(py));
+                assert_eq!(
+                    error.value(py).to_string(),
+                    "No symbolic integration backend is linked into this Symbolica build"
+                );
+            }
+            for error in [
+                input.integrate(input.clone()).err().unwrap(),
+                input.integrate_with_steps(input.clone()).err().unwrap(),
+            ] {
+                assert!(error.is_instance_of::<exceptions::PyValueError>(py));
+                assert_eq!(
+                    error.value(py).to_string(),
+                    "Integration must be done with respect to a variable"
+                );
+            }
+
+            PYTHON_INTEGRATION.register(&IMPLEMENTATION).unwrap();
+            PYTHON_INTEGRATION.register(&IMPLEMENTATION).unwrap();
+            assert_eq!(
+                input.integrate(variable.clone()).unwrap().expr,
+                variable.expr
+            );
+            let (result, overview, steps) = input.integrate_with_steps(variable.clone()).unwrap();
+            assert_eq!(result.expr, variable.expr);
+            assert_eq!(overview, "registered overview");
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].rule, Some(7));
+            assert_eq!(steps[0].input, input.expr);
+            assert_eq!(steps[0].output, variable.expr);
+        });
+    }
 
     fn step() -> PythonIntegrationStep {
         PythonIntegrationStep::new(

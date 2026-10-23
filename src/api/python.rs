@@ -157,6 +157,7 @@ mod condition;
 mod display;
 mod evaluator;
 mod expression;
+mod extensions;
 mod graph;
 mod integer;
 #[cfg(feature = "python_stubgen")]
@@ -176,6 +177,9 @@ pub use display::{
 };
 pub use evaluator::*;
 pub use expression::*;
+pub use extensions::{
+    ExtensionError, ExtensionImplementation, ExtensionPoint, PythonExtensionFunction,
+};
 pub use graph::*;
 pub use integer::*;
 pub use integration::*;
