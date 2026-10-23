@@ -191,6 +191,11 @@ fn validate_atom_data(data: &[u8]) -> Result<(), std::string::String> {
         position += 1;
         match tag & TYPE_MASK {
             NUM_ID => {
+                // Numeric nodes have no flags. Accepting reserved bits would
+                // preserve alternate bytes for the same coefficient on import.
+                if tag != NUM_ID {
+                    return Err("Noncanonical numeric atom flags".to_owned());
+                }
                 position = end - validate_packed_coefficient(rest)?.len();
             }
             VAR_ID => {
@@ -3049,6 +3054,11 @@ mod tests {
             coefficient(&valid, &component(128, &[0])),
             coefficient(&valid, &component(256, &[0])),
         ];
+        for flags in 1u8..=31 {
+            let mut raw = coefficient(&valid, &[]);
+            raw[0] |= flags << 3;
+            invalid.push(raw);
+        }
         for header in [
             vec![0x91, valid.len() as u8, 0], // Unsigned lengths cannot have a sign bit.
             vec![0x12, valid.len() as u8, 0, 0], // A wider real length is redundant.
@@ -3121,6 +3131,12 @@ mod tests {
                 let mut atom = Atom::new();
                 assert_eq!(
                     atom.read(&mut stream.as_slice()).unwrap_err().kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    Atom::import_with_map(&mut stream.as_slice(), &StateMap::default())
+                        .unwrap_err()
+                        .kind(),
                     std::io::ErrorKind::InvalidData
                 );
                 let mut exported = state.clone();
