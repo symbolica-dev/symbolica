@@ -165,10 +165,11 @@ different coefficients, even when their central values agree.
 On MPFR, Rug's `get_significand()` borrows the limbs without an intermediate
 integer allocation. Writing each limb with `to_le_bytes()` avoids a
 general-purpose digit-export loop and native-endian memory dumps. Decode uses
-`mpfr_set_ui_2exp` for significands fitting a native unsigned long, or an integer
-import followed by a single `mpfr_set_z_2exp` for larger values, checking that the
-result is exact. [MPFR documents this integer/exponent assignment](https://mpfr.org/mpfr-current/mpfr.html#Assignment-Functions).
-Small significands avoid the temporary integer allocation. Reusable writer
+`mpfr_set_ui_2exp` for significands fitting a native unsigned long, or a single
+`mpfr_set_z_2exp` otherwise, checking that the result is exact. Significands up
+to four native limbs use a read-only GMP integer backed by aligned stack storage;
+larger values use an owned temporary integer. [MPFR documents this integer/exponent assignment](https://mpfr.org/mpfr-current/mpfr.html#Assignment-Functions).
+Small and medium significands avoid the temporary integer allocation. Reusable writer
 buffers avoid the output allocation as a separate optimization.
 
 Three sequential runs on CPU 2 of the same Ryzen 9 5900X used release LTO,
