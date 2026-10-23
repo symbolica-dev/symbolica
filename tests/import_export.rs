@@ -215,4 +215,18 @@ fn rational_rename() {
     partial_state_export();
     finite_field_offset();
     user_data_resources();
+    import_rejects_legacy_float_encoding();
+}
+
+fn import_rejects_legacy_float_encoding() {
+    let mut export = Vec::new();
+    parse!("1.25*x").export(&mut export).unwrap();
+    // Version 6 stored float coefficients without their absolute errors.
+    export[4..6].copy_from_slice(&6u16.to_le_bytes());
+    let err = Atom::import(&mut export.as_slice(), None).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        err.to_string()
+            .contains("Unsupported export format version 6")
+    );
 }

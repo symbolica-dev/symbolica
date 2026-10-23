@@ -1146,7 +1146,6 @@ mod test {
         let depth = SeriesDepth::relative(4);
         let expected = Atom::Zero.series(x, 0, depth.clone()).unwrap();
         for text in [
-            "0.125*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
             "1/8*(1/(relative_exact_zero_x*(relative_exact_zero_x-1))-1/(relative_exact_zero_x-1)+1/relative_exact_zero_x)",
         ] {
             let input = parse!(text).expand();
@@ -1159,10 +1158,19 @@ mod test {
     }
 
     #[test]
+    fn series_preserves_uncertain_leading_zero() {
+        let x = symbol!("relative_uncertain_zero_x");
+        let input = parse!("(0.125-0.125)/relative_uncertain_zero_x+relative_uncertain_zero_x^12");
+        let result = input.series(x, 0, SeriesDepth::relative(1)).unwrap();
+        assert!(!result.to_atom().is_zero());
+        assert!(result.to_atom().as_view().has_inexact_coefficients());
+    }
+
+    #[test]
     fn series_relative_zero_proof_preserves_nonzero_and_unresolved_terms() {
         let x = symbol!("relative_zero_control_x");
         let zero = parse!(
-            "0.125*(1/(relative_zero_control_x*(relative_zero_control_x-1))-1/(relative_zero_control_x-1)+1/relative_zero_control_x)"
+            "1/8*(1/(relative_zero_control_x*(relative_zero_control_x-1))-1/(relative_zero_control_x-1)+1/relative_zero_control_x)"
         )
         .expand();
         for remainder in [

@@ -8727,7 +8727,9 @@ impl<E: PositiveExponent> PolynomialGCD<E> for IntegerRing {
         a_degrees: &[E],
         b_degrees: &[E],
     ) -> Option<MultivariatePolynomial<Self, E>> {
-        if let Some(gcd) = MultivariatePolynomial::try_square_derivative_gcd(a, b, a_degrees, b_degrees) {
+        if let Some(gcd) =
+            MultivariatePolynomial::try_square_derivative_gcd(a, b, a_degrees, b_degrees)
+        {
             return Some(gcd);
         }
         let force_hu = GLOBAL_SETTINGS
@@ -9886,21 +9888,17 @@ mod tests {
 
     #[test]
     fn constant_gcd_bounds_preserve_monomial_and_integer_content() {
-        let a = parse!("7/13*x^6*y^4*(1+x^2+y^2)")
-            .to_polynomial::<_, u32>(&Q, None);
-        let b = parse!("-11/17*x^4*y^6*(2+x^2+y^2)")
-            .to_polynomial::<_, u32>(&Q, a.variables().clone());
-        let expected = parse!("x^4*y^4")
-            .to_polynomial::<_, u32>(&Q, a.variables().clone());
+        let a = parse!("7/13*x^6*y^4*(1+x^2+y^2)").to_polynomial::<_, u32>(&Q, None);
+        let b =
+            parse!("-11/17*x^4*y^6*(2+x^2+y^2)").to_polynomial::<_, u32>(&Q, a.variables().clone());
+        let expected = parse!("x^4*y^4").to_polynomial::<_, u32>(&Q, a.variables().clone());
         assert_eq!(a.gcd(&b), expected);
         assert_eq!(b.gcd(&a), expected);
 
-        let a = parse!("12*x^6*y^4*(1+x^2+y^2)")
-            .to_polynomial::<_, u32>(&Z, None);
-        let b = parse!("-18*x^4*y^6*(2+x^2+y^2)")
-            .to_polynomial::<_, u32>(&Z, a.variables().clone());
-        let expected = parse!("6*x^4*y^4")
-            .to_polynomial::<_, u32>(&Z, a.variables().clone());
+        let a = parse!("12*x^6*y^4*(1+x^2+y^2)").to_polynomial::<_, u32>(&Z, None);
+        let b =
+            parse!("-18*x^4*y^6*(2+x^2+y^2)").to_polynomial::<_, u32>(&Z, a.variables().clone());
+        let expected = parse!("6*x^4*y^4").to_polynomial::<_, u32>(&Z, a.variables().clone());
         assert_eq!(a.gcd(&b), expected);
         assert_eq!(b.gcd(&a), expected);
     }
@@ -9915,8 +9913,7 @@ mod tests {
         let common = parse!("x+y+z+1").to_polynomial::<_, u32>(&Q, None);
         let x = parse!("x").to_polynomial::<_, u32>(&Q, common.variables().clone());
         let tail = parse!("y+z+1").to_polynomial::<_, u32>(&Q, common.variables().clone());
-        let cofactor = parse!("y+2*z+2")
-            .to_polynomial::<_, u32>(&Q, common.variables().clone());
+        let cofactor = parse!("y+2*z+2").to_polynomial::<_, u32>(&Q, common.variables().clone());
         let other_cofactor = cofactor.clone().add_constant(Rational::one());
         let inverse_prime = Q.inv(&prime);
         // Reject both denominator poles and loss of a variable's leading degree.
@@ -9930,9 +9927,8 @@ mod tests {
                 let b = (&factor * &other_cofactor).mul_coeff(Rational::from((3, 7)));
                 let vars: Vec<_> = (0..a.nvars()).collect();
                 for (a, b) in [(&a, &b), (&b, &a)] {
-                    let bounds = <RationalField as PolynomialGCD<u32>>::get_gcd_var_bounds(
-                        a, b, &vars,
-                    );
+                    let bounds =
+                        <RationalField as PolynomialGCD<u32>>::get_gcd_var_bounds(a, b, &vars);
                     for &v in &vars {
                         assert!(bounds[v] >= factor.degree(v));
                         assert!(bounds[v] <= a.degree(v).min(b.degree(v)));
@@ -9946,9 +9942,8 @@ mod tests {
         }
         let vars: Vec<_> = (0..common.nvars()).collect();
         let other = common.clone().add_constant(Rational::one());
-        let bounds = <RationalField as PolynomialGCD<u32>>::get_gcd_var_bounds(
-            &common, &other, &vars,
-        );
+        let bounds =
+            <RationalField as PolynomialGCD<u32>>::get_gcd_var_bounds(&common, &other, &vars);
         assert!(bounds.iter().all(|&d| d == 0));
         assert!(common.gcd(&other).is_one());
     }

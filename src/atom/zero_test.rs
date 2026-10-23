@@ -7,7 +7,7 @@ use crate::{
         Field, Ring, RingOps, UniformlySampleableRing,
         algebraic::{AlgebraicContext, AlgebraicExtension},
         finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
-        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, SingleFloat},
+        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike, SingleFloat},
         integer::Integer,
         rational::{Q, Rational},
     },
@@ -185,6 +185,11 @@ impl AtomView<'_> {
                 match n.get_coeff_view() {
                     CoefficientView::Natural(..) | CoefficientView::Large(..) => {}
                     CoefficientView::Float(re, im) => {
+                        if re.has_error() || im.has_error() {
+                            return None;
+                        }
+                        // The accessor also handles an implicit exact imaginary
+                        // zero without decoding or assuming a full float payload.
                         if !re.is_finite() || !im.is_finite() {
                             return None;
                         }
@@ -444,7 +449,8 @@ impl AtomView<'_> {
             if let CoefficientView::Float(re, im) = c {
                 let (re, im) = (re.to_float(), im.to_float());
                 if re.is_finite() && im.is_finite() {
-                    return Complex::new(re.to_rational(), im.to_rational()).into();
+                    return Complex::new(re.get_num().to_rational(), im.get_num().to_rational())
+                        .into();
                 }
             }
             c.to_owned()
@@ -1222,13 +1228,13 @@ impl AtomView<'_> {
         let components = [&value.re, &value.im];
         if !components
             .iter()
-            .all(|v| v.get_num().is_finite() && v.get_absolute_error().is_finite())
+            .all(|v| v.get_num().is_finite() && v.get_error_magnitude().is_finite())
         {
             return false;
         }
         components
             .iter()
-            .any(|v| v.get_num().abs() > 8. * v.get_absolute_error())
+            .any(|v| v.get_num().absolute_magnitude() > v.get_error_magnitude().scale_pow2(3))
     }
 
     fn numerical_precise_nonzero(
@@ -1236,44 +1242,72 @@ impl AtomView<'_> {
         points: &HashMap<AtomView<'_>, Complex<f64>>,
         max_precision: u32,
     ) -> bool {
+        let has_input_error = self.has_inexact_coefficients();
         let mut previous: Option<Complex<Float>> = None;
         let mut precision = 128;
         while precision <= max_precision {
-            let values: HashMap<_, Complex<Float>> = points
+            let values: HashMap<_, Complex<ErrorPropagatingFloat<Float>>> = points
                 .iter()
                 .map(|(a, z)| {
                     (
                         *a,
                         Complex::new(
-                            Float::with_val(precision, z.re),
-                            Float::with_val(precision, z.im),
+                            ErrorPropagatingFloat::from(Float::with_val(precision, z.re)),
+                            ErrorPropagatingFloat::from(Float::with_val(precision, z.im)),
                         ),
                     )
                 })
                 .collect();
-            let Ok(value) = self.evaluate(&values, precision) else {
-                return false;
+            let value = match self.evaluate(&values, precision) {
+                Ok(value) => value,
+                Err(_) if !has_input_error => {
+                    // Exact expressions may contain callbacks registered only
+                    // for ordinary multiprecision numbers. Keep supporting
+                    // those callbacks; approximate inputs require tracking.
+                    let values: HashMap<_, Complex<Float>> = values
+                        .into_iter()
+                        .map(|(key, value)| {
+                            (
+                                key,
+                                Complex::new(value.re.into_value(), value.im.into_value()),
+                            )
+                        })
+                        .collect();
+                    let Ok(value) = self.evaluate(&values, precision) else {
+                        return false;
+                    };
+                    value.into()
+                }
+                Err(_) => return false,
             };
-            if !value.re.is_finite() || !value.im.is_finite() {
+            if !value.re.is_finite()
+                || !value.im.is_finite()
+                || !value.re.get_error_magnitude().is_finite()
+                || !value.im.get_error_magnitude().is_finite()
+            {
                 return false;
             }
             if let Some(old) = previous {
                 for (a, b) in [(&old.re, &value.re), (&old.im, &value.im)] {
-                    // Float tracks precision loss. Also require agreement across
-                    // two working precisions, so a shrinking rounding residual is
-                    // not mistaken for a stable nonzero value. Never downcast these
-                    // values or errors to f64: this path handles its range failures.
-                    if !a.is_zero()
-                        && !b.is_zero()
+                    // Require a resolved value and agreement across working
+                    // precisions. Compare scaled magnitudes before any f64
+                    // conversion so tiny stored errors remain meaningful.
+                    if b.get_num().absolute_magnitude() > b.get_error_magnitude().scale_pow2(3)
+                        && !a.is_zero()
+                        && !b.get_num().is_zero()
                         && a.get_precision() >= 32
-                        && b.get_precision() >= 32
-                        && (a.clone() / b - b.one()).norm() < Float::with_val(64, 1e-8)
+                        // Stored input uncertainty is handled by the eight-error
+                        // separation above. Requiring nine accurate decimal
+                        // digits here rejected resolved inputs such as 16 ± 1
+                        // only when their exponent exceeded the f64 range.
+                        && b.get_num().get_precision() >= 32
+                        && (a.clone() / b.get_num() - a.one()).norm() < Float::with_val(64, 1e-8)
                     {
                         return true;
                     }
                 }
             }
-            previous = Some(value);
+            previous = Some(Complex::new(value.re.into_value(), value.im.into_value()));
             if precision == max_precision {
                 break;
             }
@@ -1664,7 +1698,7 @@ mod tests {
         let rational = parse!("1+1/10^100");
         assert!(!floating.check_equal(&rational).is_true());
         assert!(!rational.check_equal(&floating).is_true());
-        assert_eq!(floating.check_equal(1), ConditionResult::True);
+        assert_eq!(floating.check_equal(1), ConditionResult::Inconclusive);
         let exact = ZeroTestSettings::new().treat_floats_as_exact(true);
         assert_eq!(
             floating.check_equal_with(&rational, &exact),
@@ -1683,6 +1717,119 @@ mod tests {
                 .check_equal_with(f.call(Atom::num((1, 2))), &exact),
             ConditionResult::True
         );
+    }
+
+    #[test]
+    fn tracked_zero_queries_distinguish_exact_uncertain_and_resolved_values() {
+        use crate::domains::float::Magnitude;
+
+        let tracked = |center: Float, error: Magnitude| {
+            Atom::num(ErrorPropagatingFloat::new_with_error_magnitude(
+                center, error,
+            ))
+        };
+        let exact_zero = tracked(Float::with_val(160, 0), Magnitude::ZERO);
+        assert!(exact_zero.is_zero());
+        assert_eq!(exact_zero.check_zero(), ConditionResult::True);
+
+        let tiny_error = Magnitude::ONE.scale_pow2(-4000);
+        for (center, error) in [
+            (Float::with_val(160, 0), Magnitude::ONE),
+            (Float::with_val(160, 1), Magnitude::from_f64(2.)),
+            (Float::with_val(160, 0), tiny_error),
+            (Float::with_val(160, 1), Magnitude::INFINITY),
+            (Float::with_val(160, 1), Magnitude::NAN),
+        ] {
+            let value = tracked(center, error);
+            assert!(!value.is_zero());
+            assert_eq!(value.check_zero(), ConditionResult::Inconclusive, "{value}");
+            assert_eq!(
+                value.check_equal(0),
+                ConditionResult::Inconclusive,
+                "{value}"
+            );
+        }
+
+        let one = tracked(Float::with_val(160, 1), Magnitude::from_f64(0.1));
+        assert!(!one.is_one());
+        assert_eq!(one.check_equal(1), ConditionResult::Inconclusive);
+        let cancellation = &one - &one;
+        assert!(!cancellation.is_zero());
+        assert_eq!(cancellation.check_zero(), ConditionResult::Inconclusive);
+        assert_eq!(
+            cancellation.check_zero_with(&ZeroTestSettings::new().treat_floats_as_exact(true)),
+            ConditionResult::True
+        );
+
+        let resolved = tracked(Float::with_val(160, 16), Magnitude::ONE);
+        assert_eq!(resolved.check_zero(), ConditionResult::False);
+    }
+
+    #[test]
+    fn structural_zero_handles_compact_real_coefficients() {
+        use crate::domains::float::Magnitude;
+
+        let structural = ZeroTestSettings::new()
+            .finite_field_samples(0)
+            .numerical_samples(0)
+            .exact_fallback(false);
+        for precision in [128, 256, 512] {
+            for imaginary_precision in [precision / 2, precision, 2 * precision] {
+                for (center, expected) in [(0, ConditionResult::True), (3, ConditionResult::False)]
+                {
+                    let value = Atom::num(Complex::new(
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(precision, center),
+                            Magnitude::ZERO,
+                        ),
+                        ErrorPropagatingFloat::exact_zero(imaginary_precision),
+                    ));
+                    assert_eq!(value.check_zero_with(&structural), expected);
+                }
+                for center in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let value = Atom::num(Complex::new(
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(precision, center),
+                            Magnitude::ZERO,
+                        ),
+                        ErrorPropagatingFloat::exact_zero(imaginary_precision),
+                    ));
+                    assert_eq!(
+                        value.check_zero_with(&structural),
+                        ConditionResult::Inconclusive
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tracked_zero_queries_keep_wide_error_ranges_and_input_uncertainty() {
+        use crate::domains::float::Magnitude;
+
+        let tiny = Float::parse("1e-1000", Some(160)).unwrap();
+        let error = tiny.absolute_magnitude();
+        assert_eq!(error.to_f64(), None);
+        for (factor, expected) in [
+            (1, ConditionResult::Inconclusive),
+            (16, ConditionResult::False),
+        ] {
+            let value = Atom::num(ErrorPropagatingFloat::new_with_error_magnitude(
+                tiny.clone() * Float::with_val(160, factor),
+                error,
+            ));
+            assert_eq!(value.check_zero(), expected, "factor={factor}, {value}");
+        }
+        let uncertain_imaginary = Atom::num(Complex::new(
+            ErrorPropagatingFloat::exact_zero(160),
+            ErrorPropagatingFloat::new_with_error_magnitude(Float::with_val(160, 0), error),
+        ));
+        assert!(!uncertain_imaginary.is_zero());
+        assert_eq!(
+            uncertain_imaginary.check_zero(),
+            ConditionResult::Inconclusive
+        );
+        assert_eq!(Magnitude::ZERO.to_f64(), Some(0.));
     }
 
     #[test]
@@ -2054,7 +2201,7 @@ mod tests {
 
     #[test]
     fn binary_float_components_keep_structural_zero_checks() {
-        use crate::domains::float::{Complex, Float};
+        use crate::domains::float::{Complex, ErrorPropagatingFloat, Float, Magnitude};
 
         for precision in [53, 128, 512] {
             for imaginary_precision in [precision, precision + 17] {
@@ -2062,8 +2209,14 @@ mod tests {
                 // 'n', which must not be mistaken for the old text specials.
                 for center in [0, 1, 0x800069, 0x80006e] {
                     let atom = Atom::num(Complex::new(
-                        Float::with_val(precision, center),
-                        Float::with_val(imaginary_precision, 0),
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(precision, center),
+                            Magnitude::ZERO,
+                        ),
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(imaginary_precision, 0),
+                            Magnitude::ZERO,
+                        ),
                     ));
                     assert_eq!(
                         atom.as_view().structural_zero(0, &mut 1),
@@ -2076,8 +2229,14 @@ mod tests {
                 }
                 for center in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
                     let atom = Atom::num(Complex::new(
-                        Float::with_val(precision, center),
-                        Float::with_val(imaginary_precision, 0),
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(precision, center),
+                            Magnitude::ZERO,
+                        ),
+                        ErrorPropagatingFloat::new_with_error_magnitude(
+                            Float::with_val(imaginary_precision, 0),
+                            Magnitude::ZERO,
+                        ),
                     ));
                     assert_eq!(atom.as_view().structural_zero(0, &mut 1), None);
                 }

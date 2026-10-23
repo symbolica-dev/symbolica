@@ -1,4 +1,4 @@
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use numerica::domains::{
     float::{Complex, FloatField},
     integer::Integer,
@@ -350,7 +350,7 @@ impl<'a> AtomView<'a> {
         // do a cross multiplication
         if let AtomView::Add(a) = self {
             let mut terms = vec![];
-            let mut all_dens = HashSet::default();
+            let mut all_dens: HashMap<AtomView<'_>, u64> = HashMap::default();
 
             for arg in a {
                 let mut numerators = vec![];
@@ -365,8 +365,12 @@ impl<'a> AtomView<'a> {
                                 && n < 0
                                 && d == 1
                             {
-                                all_dens.insert(b);
-                                denominators.push(b);
+                                let power = n.unsigned_abs();
+                                all_dens
+                                    .entry(b)
+                                    .and_modify(|p| *p = (*p).max(power))
+                                    .or_insert(power);
+                                denominators.push((b, power));
                                 continue;
                             }
                         }
@@ -381,8 +385,12 @@ impl<'a> AtomView<'a> {
                         && n < 0
                         && d == 1
                     {
-                        all_dens.insert(b);
-                        denominators.push(b);
+                        let power = n.unsigned_abs();
+                        all_dens
+                            .entry(b)
+                            .and_modify(|p| *p = (*p).max(power))
+                            .or_insert(power);
+                        denominators.push((b, power));
                     } else {
                         numerators.push(arg);
                     }
@@ -405,10 +413,15 @@ impl<'a> AtomView<'a> {
                 for n in num.iter().skip(1) {
                     term *= *n;
                 }
-                for d in &all_dens {
-                    if !den.iter().any(|x| x == d) {
-                        // multiply numerator by missing denominator
-                        term *= *d;
+                for (d, power) in &all_dens {
+                    let present = den
+                        .iter()
+                        .find(|(base, _)| base == d)
+                        .map_or(0, |(_, p)| *p);
+                    let missing = power - present;
+                    if missing != 0 {
+                        // Multiply by precisely the missing denominator power.
+                        term *= d.pow(missing);
                     }
                 }
 
@@ -416,8 +429,8 @@ impl<'a> AtomView<'a> {
             }
 
             let mut denominator = Atom::num(1);
-            for d in all_dens {
-                denominator *= d;
+            for (d, power) in all_dens {
+                denominator *= d.pow(power);
             }
 
             *out = numerator / denominator;
@@ -702,23 +715,28 @@ impl<'a> AtomView<'a> {
                             && ni == 0
                         {
                             if n < 0 && d == 1 {
-                                denominators.push(
-                                    b.to_polynomial::<_, u16>(&complex, None)
-                                        .pow(n.unsigned_abs() as usize),
-                                );
-                                den_changed.push((a, false));
-                                continue;
+                                if let Ok(poly) = b.try_to_polynomial::<_, u16>(&complex, None) {
+                                    denominators.push(poly.pow(n.unsigned_abs() as usize));
+                                    den_changed.push((a, false));
+                                    continue;
+                                }
                             } else if n > 0 && d == 1 {
-                                numerators.push(a.to_polynomial::<_, u16>(&complex, None));
-                                num_changed.push((a, false));
-                                continue;
+                                if let Ok(poly) = a.try_to_polynomial::<_, u16>(&complex, None) {
+                                    numerators.push(poly);
+                                    num_changed.push((a, false));
+                                    continue;
+                                }
                             }
                         }
 
                         rest.push(a);
                     } else {
-                        numerators.push(a.to_polynomial(&complex, None));
-                        num_changed.push((a, false));
+                        if let Ok(poly) = a.try_to_polynomial(&complex, None) {
+                            numerators.push(poly);
+                            num_changed.push((a, false));
+                        } else {
+                            rest.push(a);
+                        }
                     }
                 }
 
@@ -2221,6 +2239,27 @@ mod test {
             parse!("1/2*(v4*(1+v4))^-1*(2*v3*v4+v1^2*v4+v1^2*v4^2+2*v1^3*v2+2*v1^3*v2*v4)");
 
         assert_eq!(out, ref_out);
+    }
+
+    #[test]
+    fn together_preserves_float_denominator_powers() {
+        // Floating coefficients select the symbolic cross-multiplication fallback.
+        for (input, expected) in [
+            ("1.0/x^2 + 2.0/y", "(1.0*y + 2.0*x^2)/(x^2*y)"),
+            ("1.0/x^2 + 2.0/x^3", "(1.0*x + 2.0)/x^3"),
+            ("1.0/(x^2*y) + 2.0/(x*y^3)", "(1.0*y^2 + 2.0*x)/(x^2*y^3)"),
+        ] {
+            assert_eq!(parse!(input).together(), parse!(expected));
+        }
+    }
+
+    #[test]
+    fn cancel_preserves_float_factors() {
+        let input = parse!("1.25*(x^2-1)/(x-1)");
+        assert_eq!(input.cancel(), parse!("1.25*(x+1)"));
+
+        let input = parse!("(x+1.25)/(x+1.25*y)");
+        assert_eq!(input.cancel(), input);
     }
 
     #[test]

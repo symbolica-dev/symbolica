@@ -20,7 +20,7 @@ use crate::{
     domains::{
         Ring,
         backend::integer::from_digits_radix,
-        float::{Complex, Float, FloatLike},
+        float::{Complex, ErrorPropagatingFloat},
         integer::Integer,
         rational::Rational,
     },
@@ -791,13 +791,13 @@ impl Token {
                         out.to_num(x);
                     }
                 }
-                Err(_) => match Float::parse(n, None) {
+                Err(_) => match ErrorPropagatingFloat::parse(n, None) {
                     Ok(f) => {
-                        // derive precision from string length, should be overestimate
+                        let zero = ErrorPropagatingFloat::exact_zero(f.get_num().prec());
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f));
+                            out.to_num(Complex::new(zero, f));
                         } else {
-                            out.to_num(Coefficient::Float(f.into()));
+                            out.to_num(Coefficient::Float(Complex::new(f, zero)));
                         }
                     }
                     Err(e) => Err(format!("Error parsing number: {e}"))?,
@@ -921,13 +921,13 @@ impl Token {
                         out.to_num(x);
                     }
                 }
-                Err(_) => match Float::parse(n, None) {
+                Err(_) => match ErrorPropagatingFloat::parse(n, None) {
                     Ok(f) => {
-                        // derive precision from string length, should be overestimate
+                        let zero = ErrorPropagatingFloat::exact_zero(f.get_num().prec());
                         if *is_imag {
-                            out.to_num(Complex::new(f.zero(), f));
+                            out.to_num(Complex::new(zero, f));
                         } else {
-                            out.to_num(Coefficient::Float(f.into()));
+                            out.to_num(Coefficient::Float(Complex::new(f, zero)));
                         }
                     }
                     Err(e) => Err(format!("Error parsing number: {e}"))?,
@@ -1388,6 +1388,14 @@ impl Token {
                             c = char_iter.next().unwrap_or('\0');
                             column_counter += 1;
                             last_digit_is_exp = false;
+                            continue;
+                        }
+
+                        if matches!(c, '-' | '+') && id_buffer.ends_with('`') {
+                            // Precision and accuracy suffixes may be negative.
+                            id_buffer.push(c);
+                            c = char_iter.next().unwrap_or('\0');
+                            column_counter += 1;
                             continue;
                         }
 
@@ -2113,8 +2121,8 @@ mod test {
     use std::sync::Arc;
 
     use crate::{
-        atom::{AtomCore, SymbolAttribute},
-        domains::{SelfRing, integer::Z},
+        atom::{Atom, AtomCore, SymbolAttribute},
+        domains::{SelfRing, float::ErrorPropagatingFloat, integer::Z},
         parse,
         parser::Token,
         printer::{PrintOptions, PrintState},
@@ -2171,7 +2179,7 @@ mod test {
         assert_eq!(b, parse!("f_(x__, v___)"));
 
         let a = parse!("2*x+2*^5y + SetAccuracy[0, 10.]", Mathematica);
-        assert_eq!(a, parse!("2*x+2e5*y"));
+        assert_eq!(a, parse!("2*x+2e5*y+0.`10"));
 
         let a = parse!("\"a b $ * \\\" / // c\"", Mathematica);
         assert!(a.get_symbol().is_some());
@@ -2394,7 +2402,21 @@ mod test {
         let input = parse!("1.2`20x+1e-5`20+1e+5 * 1.1234e23 +2exp(5)");
 
         let r = format!("{}", input.printer(PrintOptions::file_no_namespace()));
-        assert_eq!(r, "1.123400000000000e28+1.2000000000000000000*x+2*𝑒^5");
+        assert_eq!(
+            r,
+            "1.123400000000000e28`15.41+1.2000000000000000000`20.00*x+2*𝑒^5"
+        );
+    }
+
+    #[test]
+    fn signed_float_accuracy() {
+        let input = parse!("0.``-4*x");
+        let expected = Atom::num(ErrorPropagatingFloat::new_with_accuracy(
+            crate::domains::float::Float::with_val(53, 0),
+            -4.0,
+        )) * parse!("x");
+        assert_eq!(input, expected);
+        assert_eq!(parse!("0.``+4*x"), parse!("0.``4*x"));
     }
 
     #[test]

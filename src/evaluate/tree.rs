@@ -1845,7 +1845,10 @@ impl<'a> AtomView<'a> {
             CoefficientView::Large(l, i) => Complex::new(l.to_rat(), i.to_rat()),
             CoefficientView::Float(r, i) => {
                 // TODO: converting back to rational is slow
-                Complex::new(r.to_float().to_rational(), i.to_float().to_rational())
+                Complex::new(
+                    r.to_float().get_num().to_rational(),
+                    i.to_float().get_num().to_rational(),
+                )
             }
             CoefficientView::Indeterminate => {
                 return Err(EvaluationError::UnsupportedCoefficient {
@@ -4531,8 +4534,8 @@ impl<'a> AtomView<'a> {
                     Ok(Expression::Const(
                         0,
                         Box::new(Complex::new(
-                            r.to_float().to_rational(),
-                            i.to_float().to_rational(),
+                            r.to_float().get_num().to_rational(),
+                            i.to_float().get_num().to_rational(),
                         )),
                     ))
                 }
@@ -4869,6 +4872,15 @@ impl<'a> AtomView<'a> {
                         funcs,
                         external_functions,
                     )?;
+                    // An uncertain float can have a zero central value even though
+                    // its symbolic coefficient must be retained.
+                    if let Expression::Const(_, n) = &a {
+                        if n.is_zero() {
+                            return Ok(a);
+                        } else if n.is_one() {
+                            continue;
+                        }
+                    }
                     if let Expression::Mul(0, m) = a {
                         muls.extend(m);
                     } else {
@@ -4876,26 +4888,48 @@ impl<'a> AtomView<'a> {
                     }
                 }
 
-                muls.sort();
-
-                Ok(Expression::Mul(0, muls))
+                match muls.len() {
+                    0 => Ok(Expression::Const(
+                        0,
+                        Box::new(Complex::new(Rational::one(), Rational::zero())),
+                    )),
+                    1 => Ok(muls.pop().unwrap()),
+                    _ => {
+                        muls.sort();
+                        Ok(Expression::Mul(0, muls))
+                    }
+                }
             }
             AtomView::Add(a) => {
                 let mut adds = vec![];
                 for arg in a.iter() {
-                    adds.push(arg.to_eval_tree_impl(
+                    let arg = arg.to_eval_tree_impl(
                         fn_map,
                         params,
                         args,
                         fn_id_map,
                         funcs,
                         external_functions,
-                    )?);
+                    )?;
+                    if let Expression::Const(_, n) = &arg
+                        && n.is_zero()
+                    {
+                        continue;
+                    }
+                    adds.push(arg);
                 }
 
-                adds.sort();
-
-                Ok(Expression::Add(0, adds))
+                match adds.len() {
+                    0 => Ok(Expression::Const(
+                        0,
+                        Box::new(Complex::new(Rational::zero(), Rational::zero())),
+                    )),
+                    1 => Ok(adds.pop().unwrap()),
+                    _ => {
+                        adds.sort();
+                        Ok(Expression::Add(0, adds))
+                    }
+                }
             }
         }
     }
@@ -4919,11 +4953,13 @@ impl<'a> AtomView<'a> {
             AtomView::Num(n) => {
                 let f = n
                     .get_coeff_view()
-                    .to_float(binary_prec)
+                    .to_tracked_float(binary_prec)
                     .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })?;
-                T::try_from_complex_float(f).map_err(|e| EvaluationError::EvaluationFailed {
-                    expression: self.to_owned(),
-                    reason: e,
+                T::try_from_complex_tracked_float(f).map_err(|e| {
+                    EvaluationError::EvaluationFailed {
+                        expression: self.to_owned(),
+                        reason: e,
+                    }
                 })
             }
             AtomView::Var(v) => {
@@ -5052,7 +5088,11 @@ impl<'a> AtomView<'a> {
                         args.push(arg.evaluate_impl(map, cache, binary_prec)?);
                     }
 
-                    if args.is_empty() && eval.has_constant_evaluator() {
+                    if args.is_empty()
+                        && eval.has_constant_evaluator()
+                        && !(T::TRACKS_UNCERTAINTY
+                            && tags.iter().any(|tag| tag.has_inexact_coefficients()))
+                    {
                         let val = T::try_from_complex_float(
                             eval.evaluate_constant(&tags, binary_prec).map_err(|e| {
                                 EvaluationError::EvaluationFailed {

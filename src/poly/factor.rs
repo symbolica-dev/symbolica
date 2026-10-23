@@ -2474,8 +2474,7 @@ impl<E: PositiveExponent> SparsePolynomialSquareRootContext<E> {
             }
 
             let root_index = self.root_coefficients.len();
-            if self.product_count.saturating_add(root_index) > self.maximum_pair_products
-            {
+            if self.product_count.saturating_add(root_index) > self.maximum_pair_products {
                 return None;
             }
             self.product_count += root_index;

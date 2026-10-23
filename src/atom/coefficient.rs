@@ -8,7 +8,6 @@ use crate::{
     domains::{
         backend::integer::{from_lsf_bytes, lsf_byte_size, write_lsf_bytes},
         finite_field::FiniteFieldElement,
-        float::SingleFloat,
         integer::{Integer, IntegerRing, Z},
         rational::Fraction,
         rational_polynomial::RationalPolynomial,
@@ -202,7 +201,7 @@ pub(crate) fn validate_packed_coefficient(data: &[u8]) -> Result<&[u8], String> 
     }
 
     fn component(data: &[u8], allow_zero: bool) -> Result<(), String> {
-        if data.len() < 5 && !(allow_zero && data.len() == 4) {
+        if data.len() < 13 && !(allow_zero && data.len() == 4) {
             return Err("Invalid floating coefficient component length".to_owned());
         }
         SerializedFloat(data).try_to_float().map(|_| ())
@@ -227,7 +226,7 @@ pub(crate) fn validate_packed_coefficient(data: &[u8]) -> Result<&[u8], String> 
             if !imaginary.is_empty() {
                 component(imaginary, true)?;
                 if (imaginary.len() == 4 && imaginary == &real[..4])
-                    || (imaginary.len() > 4 && SerializedFloat(imaginary).is_zero())
+                    || (imaginary.len() > 4 && SerializedFloat(imaginary).is_exact_zero())
                 {
                     return Err("Noncanonical imaginary zero coefficient".to_owned());
                 }
@@ -472,24 +471,26 @@ impl PackedRationalNumberWriter for Coefficient {
             }
             Coefficient::Float(f) => {
                 // Zero bytes inherit the real precision; four bytes preserve a
-                // distinct imaginary precision. Both represent an exactly zero value.
-                let im_is_zero = f.im.is_zero();
-                let im_len = if im_is_zero {
-                    u64::from(f.re.prec() != f.im.prec()) * 4
+                // distinct imaginary precision. Both mean exactly zero error.
+                let im_is_exact_zero = f.im.is_exact_zero();
+                let im_len = if im_is_exact_zero {
+                    u64::from(f.re.get_num().prec() != f.im.get_num().prec()) * 4
                 } else {
-                    f.im.serialized_size() as u64 + 4
+                    f.im.get_num().serialized_size() as u64 + 12
                 };
-                let lengths = (f.re.serialized_size() as u64 + 4, im_len);
+                let lengths = (f.re.get_num().serialized_size() as u64 + 12, im_len);
                 dest.reserve((1 + lengths.get_packed_size() + lengths.0 + lengths.1) as usize);
                 dest.put_u8(COMPACT_FLOAT);
                 lengths.write_packed(dest);
-                dest.put_u32_le(f.re.prec());
-                f.re.serialize_into(dest);
+                dest.put_u32_le(f.re.get_num().prec());
+                dest.extend_from_slice(&f.re.get_error_magnitude().to_le_bytes());
+                f.re.get_num().serialize_into(dest);
                 if im_len != 0 {
-                    dest.put_u32_le(f.im.prec());
+                    dest.put_u32_le(f.im.get_num().prec());
                 }
-                if !im_is_zero {
-                    f.im.serialize_into(dest);
+                if !im_is_exact_zero {
+                    dest.extend_from_slice(&f.im.get_error_magnitude().to_le_bytes());
+                    f.im.get_num().serialize_into(dest);
                 }
             }
             Coefficient::FiniteField(num, f) => {
@@ -624,12 +625,12 @@ impl PackedRationalNumberWriter for Coefficient {
                 1 + packed_size_multi_rat(&c.re) + packed_size_multi_rat(&c.im)
             }
             Coefficient::Float(f) => {
-                let im_len = if f.im.is_zero() {
-                    u64::from(f.re.prec() != f.im.prec()) * 4
+                let im_len = if f.im.is_exact_zero() {
+                    u64::from(f.re.get_num().prec() != f.im.get_num().prec()) * 4
                 } else {
-                    f.im.serialized_size() as u64 + 4
+                    f.im.get_num().serialized_size() as u64 + 12
                 };
-                let lengths = (f.re.serialized_size() as u64 + 4, im_len);
+                let lengths = (f.re.get_num().serialized_size() as u64 + 12, im_len);
                 1 + lengths.get_packed_size() + lengths.0 + lengths.1
             }
             Coefficient::FiniteField(m, i) => 2 + (*m.inner(), i.0 as u64).get_packed_size(),
@@ -683,6 +684,8 @@ impl PackedRationalNumberReader for [u8] {
                 rest,
             )
         } else if disc == FLOAT {
+            // Alternate fixed-width length encoding with the current magnitude
+            // payload. Older exported formats are rejected by their version.
             let len = source.get_u64_le() as usize;
             let start = source;
             source.advance(len);
@@ -1146,7 +1149,70 @@ impl PackedRationalNumberWriter for (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::float::{Complex, Float};
+    use crate::domains::float::{Complex, ErrorPropagatingFloat, Float, Magnitude, SingleFloat};
+
+    fn float_coefficient(precision: u32, complex: bool) -> Coefficient {
+        Coefficient::Float(Complex::new(
+            ErrorPropagatingFloat::new_with_absolute_error(
+                Float::with_val(precision, 1) / Float::with_val(precision, 3),
+                1e-12,
+            ),
+            ErrorPropagatingFloat::new_with_absolute_error(
+                if complex {
+                    Float::with_val(precision + 17, -2) / Float::with_val(precision + 17, 7)
+                } else {
+                    Float::with_val(precision + 17, 0)
+                },
+                // An uncertain zero must retain its error even when its value
+                // encoding is shared with exact zero.
+                2e-14,
+            ),
+        ))
+    }
+
+    fn write_fixed_length_float(coefficient: &Coefficient, dest: &mut Vec<u8>) {
+        let Coefficient::Float(f) = coefficient else {
+            unreachable!()
+        };
+        dest.put_u8(FLOAT);
+        for value in [&f.re, &f.im] {
+            let data = value.get_num().serialize();
+            dest.put_u64_le(data.len() as u64 + 12);
+            dest.put_u32_le(value.get_num().prec());
+            dest.extend_from_slice(&value.get_error_magnitude().to_le_bytes());
+            dest.extend_from_slice(&data);
+        }
+    }
+
+    fn assert_float_roundtrip(coefficient: &Coefficient, data: &[u8]) {
+        if data[0] == COMPACT_FLOAT {
+            assert_eq!(
+                validate_packed_coefficient(data).unwrap(),
+                b"trailing bytes"
+            );
+        } else {
+            // Keep the trusted reader usable, but only compact canonical layouts
+            // are accepted at import boundaries under the current format.
+            assert!(validate_packed_coefficient(data).is_err());
+        }
+        let (view, remaining) = data.get_coeff_view();
+        assert_eq!(remaining, b"trailing bytes");
+        assert_eq!(data.skip_rational(), remaining);
+        let Coefficient::Float(expected) = coefficient else {
+            unreachable!()
+        };
+        let Coefficient::Float(actual) = view.to_owned() else {
+            panic!("Expected a float coefficient")
+        };
+        for (expected, actual) in [(&expected.re, &actual.re), (&expected.im, &actual.im)] {
+            assert_eq!(expected.get_num(), actual.get_num());
+            assert_eq!(expected.get_num().prec(), actual.get_num().prec());
+            assert_eq!(
+                expected.get_error_magnitude().to_le_bytes(),
+                actual.get_error_magnitude().to_le_bytes()
+            );
+        }
+    }
 
     #[test]
     fn small_integer_atoms_cover_inline_and_escaped_payloads() {
@@ -1214,6 +1280,239 @@ mod tests {
     }
 
     #[test]
+    fn packed_float_lengths_and_uncertainty_roundtrip() {
+        // Cross the one-byte length limit and include both real and complex
+        // values with unequal component precisions.
+        for precision in [53, 800, 1024, 4096] {
+            for complex in [false, true] {
+                let coefficient = float_coefficient(precision, complex);
+                let mut packed = Vec::new();
+                coefficient.write_packed(&mut packed);
+                assert_eq!(packed[0], COMPACT_FLOAT);
+                assert_eq!(packed.len() as u64, coefficient.get_packed_size());
+                let mut fixed_length = Vec::new();
+                write_fixed_length_float(&coefficient, &mut fixed_length);
+                if precision <= 800 {
+                    assert_eq!(fixed_length.len() - packed.len(), 13);
+                } else {
+                    assert!(fixed_length.len() > packed.len());
+                }
+                packed.extend_from_slice(b"trailing bytes");
+                fixed_length.extend_from_slice(b"trailing bytes");
+                assert_float_roundtrip(&coefficient, &packed);
+                assert_float_roundtrip(&coefficient, &fixed_length);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_real_floats_omit_exact_imaginary_zeros() {
+        for precision in [53, 800, 1024, 4096] {
+            for precision_delta in [0, 17] {
+                let mut coefficient = float_coefficient(precision, false);
+                let Coefficient::Float(f) = &mut coefficient else {
+                    unreachable!()
+                };
+                f.im = ErrorPropagatingFloat::exact_zero(precision + precision_delta);
+                let mut packed = Vec::new();
+                coefficient.write_packed(&mut packed);
+                assert_eq!(packed.len() as u64, coefficient.get_packed_size());
+                let (re_len, im_len, _) = read_packed_pair(&packed[1..]);
+                assert_eq!(im_len, if precision_delta == 0 { 0 } else { 4 });
+                let previous_size = 1 + (re_len, 13).get_packed_size() + re_len + 13;
+                assert_eq!(previous_size - packed.len() as u64, 13 - im_len);
+
+                let CoefficientView::Float(re, im) = packed.get_coeff_view().0 else {
+                    unreachable!()
+                };
+                assert_eq!(im.0.len(), 4);
+                if precision_delta == 0 {
+                    assert_eq!(im.0.as_ptr(), re.0.as_ptr());
+                }
+                assert!(im.is_zero());
+                assert!(im.is_exact_zero());
+                assert!(im.is_finite());
+                assert!(!im.has_error());
+                let mut repacked = Vec::new();
+                packed
+                    .get_coeff_view()
+                    .0
+                    .to_owned()
+                    .write_packed(&mut repacked);
+                assert_eq!(packed, repacked);
+                packed.extend_from_slice(b"trailing bytes");
+                assert_float_roundtrip(&coefficient, &packed);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_imaginary_zero_retains_every_nonzero_error() {
+        for error in [
+            Magnitude::MIN_POSITIVE,
+            Magnitude::ONE.scale_pow2(-4000),
+            Magnitude::ONE,
+            Magnitude::INFINITY,
+            Magnitude::NAN,
+        ] {
+            let coefficient = Coefficient::Float(Complex::new(
+                ErrorPropagatingFloat::exact_zero(53),
+                ErrorPropagatingFloat::new_with_error_magnitude(Float::new(91), error),
+            ));
+            let mut packed = Vec::new();
+            coefficient.write_packed(&mut packed);
+            assert_eq!(read_packed_pair(&packed[1..]).1, 13);
+            assert_eq!(packed.len() as u64, coefficient.get_packed_size());
+            let CoefficientView::Float(_, im) = packed.get_coeff_view().0 else {
+                unreachable!()
+            };
+            assert!(im.has_error());
+            assert!(im.is_zero());
+            assert!(im.is_finite());
+            assert!(!im.is_exact_zero());
+            packed.extend_from_slice(b"trailing bytes");
+            assert_float_roundtrip(&coefficient, &packed);
+        }
+    }
+
+    #[test]
+    fn packed_binary_float_predicates_match_checked_decoding() {
+        for precision in [53, 256, 4096] {
+            for center in [
+                0.,
+                -0.,
+                1.5,
+                -1.5,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+            ] {
+                let coefficient = Coefficient::Float(Complex::new(
+                    ErrorPropagatingFloat::new_with_error_magnitude(
+                        Float::with_val(precision, center),
+                        Magnitude::ONE.scale_pow2(-4000),
+                    ),
+                    ErrorPropagatingFloat::exact_zero(precision),
+                ));
+                let mut packed = Vec::new();
+                coefficient.write_packed(&mut packed);
+                assert_eq!(packed.len() as u64, coefficient.get_packed_size());
+                let CoefficientView::Float(real, imaginary) = packed.get_coeff_view().0 else {
+                    unreachable!()
+                };
+                assert_eq!(real.is_zero(), center == 0.);
+                assert_eq!(real.is_finite(), center.is_finite());
+                assert!(real.has_error());
+                assert!(!real.is_exact_zero());
+                assert!(imaginary.is_exact_zero() && imaginary.is_finite());
+                let decoded = real.try_to_float().unwrap();
+                assert_eq!(decoded.get_num().prec(), precision);
+                assert_eq!(
+                    decoded.get_error_magnitude(),
+                    Magnitude::ONE.scale_pow2(-4000)
+                );
+                let mut repacked = Vec::new();
+                packed
+                    .get_coeff_view()
+                    .0
+                    .to_owned()
+                    .write_packed(&mut repacked);
+                assert_eq!(packed, repacked);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_zero_keeps_existing_signed_zero_canonicalization() {
+        let mut canonical = Vec::new();
+        Coefficient::Float(Complex::new(
+            ErrorPropagatingFloat::exact_zero(53),
+            ErrorPropagatingFloat::exact_zero(53),
+        ))
+        .write_packed(&mut canonical);
+        for (re, im) in [(0., -0.), (-0., 0.), (-0., -0.)] {
+            let coefficient = Coefficient::Float(Complex::new(
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::with_val(53, re),
+                    Magnitude::ZERO,
+                ),
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::with_val(53, im),
+                    Magnitude::ZERO,
+                ),
+            ));
+            let mut packed = Vec::new();
+            coefficient.write_packed(&mut packed);
+            assert_eq!(packed, canonical);
+            let CoefficientView::Float(re, im) = packed.get_coeff_view().0 else {
+                unreachable!()
+            };
+            assert!(re.is_exact_zero() && im.is_exact_zero());
+        }
+    }
+
+    /// Run with `cargo test --release -p symbolica packed_float_benchmark -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual packed coefficient memory and throughput benchmark"]
+    fn packed_float_benchmark() {
+        use std::{hint::black_box, time::Instant};
+
+        let iterations = 200_000;
+        for (precision, complex) in [(53, false), (53, true), (256, false), (4096, true)] {
+            let coefficient = float_coefficient(precision, complex);
+            let mut fixed_length = Vec::new();
+            let mut packed = Vec::new();
+            write_fixed_length_float(&coefficient, &mut fixed_length);
+            coefficient.write_packed(&mut packed);
+            let fixed_length_bytes = fixed_length.len();
+            let packed_bytes = packed.len();
+
+            let start = Instant::now();
+            for _ in 0..iterations {
+                fixed_length.clear();
+                write_fixed_length_float(black_box(&coefficient), &mut fixed_length);
+                black_box(&fixed_length);
+            }
+            let fixed_length_time = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..iterations {
+                packed.clear();
+                black_box(&coefficient).write_packed(&mut packed);
+                black_box(&packed);
+            }
+            let packed_time = start.elapsed();
+            eprintln!(
+                "precision={precision}, complex={complex}: {fixed_length_bytes} -> {packed_bytes} bytes, fixed_length={:.1} ns/write, compact={:.1} ns/write",
+                fixed_length_time.as_nanos() as f64 / iterations as f64,
+                packed_time.as_nanos() as f64 / iterations as f64,
+            );
+        }
+
+        let zero = Coefficient::Float(Complex::new(
+            ErrorPropagatingFloat::exact_zero(53),
+            ErrorPropagatingFloat::exact_zero(53),
+        ));
+        let mut data = Vec::new();
+        zero.write_packed(&mut data);
+        let CoefficientView::Float(real, _) = data.get_coeff_view().0 else {
+            unreachable!()
+        };
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(black_box(real).to_float().is_exact_zero());
+        }
+        let old_time = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(black_box(real).is_exact_zero());
+        }
+        eprintln!(
+            "exact zero: deserialized={:.1} ns/check, borrowed={:.1} ns/check",
+            old_time.as_nanos() as f64 / iterations as f64,
+            start.elapsed().as_nanos() as f64 / iterations as f64,
+        );
+    }
+    #[test]
     fn compact_binary_float_roundtrips_and_rejects_fixed_length_imports() {
         for precision in [2, 53, 256, 4096] {
             for imaginary_precision in [precision, precision + 17] {
@@ -1222,7 +1521,7 @@ mod tests {
                         Float::with_val(precision, 1) / Float::with_val(precision, 3),
                         Float::with_val(imaginary_precision, imaginary_value),
                     );
-                    let coefficient = Coefficient::Float(value.clone());
+                    let coefficient = Coefficient::from(value.clone());
                     let mut compact = Vec::new();
                     coefficient.write_packed(&mut compact);
                     assert_eq!(compact.len() as u64, coefficient.get_packed_size());
@@ -1232,16 +1531,11 @@ mod tests {
                         if value.im.is_zero() {
                             u64::from(value.re.prec() != value.im.prec()) * 4
                         } else {
-                            value.im.serialized_size() as u64 + 4
+                            value.im.serialized_size() as u64 + 12
                         }
                     );
-                    let mut fixed = vec![FLOAT];
-                    for part in [&value.re, &value.im] {
-                        let bytes = part.serialize();
-                        fixed.put_u64_le(bytes.len() as u64 + 4);
-                        fixed.put_u32_le(part.prec());
-                        fixed.extend_from_slice(&bytes);
-                    }
+                    let mut fixed = Vec::new();
+                    write_fixed_length_float(&coefficient, &mut fixed);
                     assert!(fixed.len() > compact.len());
                     for mut packed in [compact, fixed] {
                         packed.extend_from_slice(b"trailing bytes");
@@ -1258,10 +1552,10 @@ mod tests {
                             unreachable!()
                         };
                         assert_eq!(rest, b"trailing bytes");
-                        assert_eq!(re.try_to_float().unwrap(), value.re);
-                        assert_eq!(im.try_to_float().unwrap(), value.im);
-                        assert_eq!(re.to_float().prec(), value.re.prec());
-                        assert_eq!(im.to_float().prec(), value.im.prec());
+                        assert_eq!(re.try_to_float().unwrap().get_num(), &value.re);
+                        assert_eq!(im.try_to_float().unwrap().get_num(), &value.im);
+                        assert_eq!(re.to_float().get_num().prec(), value.re.prec());
+                        assert_eq!(im.to_float().get_num().prec(), value.im.prec());
                         assert!(re.is_finite() && im.is_finite());
                         assert_eq!(im.is_zero(), value.im.is_zero());
                     }

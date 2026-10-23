@@ -3,12 +3,12 @@ use symbolica::{
     domains::{
         Ring,
         finite_field::{FiniteFieldCore, Zp},
-        float::{Complex, ErrorPropagatingFloat, Float, RealLike},
+        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike},
         rational::Rational,
     },
     evaluate::{
-        CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, ExportSettings,
-        ExpressionEvaluator, InlineASM, OptimizationSettings,
+        CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, EvaluationDomain,
+        ExportSettings, ExpressionEvaluator, InlineASM, OptimizationSettings,
     },
     parse, symbol,
 };
@@ -1633,4 +1633,299 @@ fn cuda_compiled_evaluator_complex() {
         "re: {}",
         out[0].re
     );
+}
+
+#[test]
+fn direct_evaluation_preserves_coefficient_uncertainty() {
+    let coefficient =
+        ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, 1), 0.125);
+    let expression = Atom::num(coefficient);
+    let result = expression
+        .evaluate_with_prec(
+            &std::collections::HashMap::<Atom, ErrorPropagatingFloat<Float>>::new(),
+            128,
+        )
+        .unwrap();
+    assert_eq!(result.get_num().to_f64(), 1.0);
+    assert_eq!(result.get_absolute_error(), 0.125);
+
+    let result = expression
+        .evaluate(&std::collections::HashMap::<Atom, ErrorPropagatingFloat<f64>>::new())
+        .unwrap();
+    assert_eq!(*result.get_num(), 1.0);
+    assert!(result.get_absolute_error() >= 0.125);
+
+    let expression = parse!("0.0``4*x+1");
+    let result = expression
+        .evaluate(&std::collections::HashMap::from([(
+            parse!("x"),
+            ErrorPropagatingFloat::new_with_absolute_error(2.0, 0.0),
+        )]))
+        .unwrap();
+    assert_eq!(*result.get_num(), 1.0);
+    assert!(result.get_absolute_error() >= 0.0002);
+}
+
+#[test]
+fn direct_evaluation_retains_error_when_the_center_underflows_f64() {
+    let center = Float::parse("1e-1000", Some(128)).unwrap();
+    let magnitude = center.absolute_magnitude();
+    let expression = Atom::num(ErrorPropagatingFloat::from(center));
+    let result = expression
+        .evaluate(&std::collections::HashMap::<Atom, ErrorPropagatingFloat<f64>>::new())
+        .unwrap();
+    assert_eq!(*result.get_num(), 0.0);
+    assert!(result.get_error_magnitude() >= magnitude);
+}
+
+#[test]
+fn evaluators_handle_sums_of_uncertain_zeros() {
+    let expression = parse!("0.0``4*x+0.0``4*y");
+    for direct in [false, true] {
+        let evaluator = expression
+            .evaluator(&[parse!("x"), parse!("y")])
+            .direct_translation(direct)
+            .build()
+            .unwrap();
+        let mut evaluator = evaluator.map_coeff(&|x| x.re.to_f64());
+        assert_eq!(evaluator.evaluate_single(&[2.0, 3.0]), 0.0);
+    }
+}
+
+#[test]
+fn tracked_constant_evaluation_preserves_uncertain_tags() {
+    let _ = symbol!(
+        "symbolica::evaluation_test::tagged_constant",
+        eval = EvaluationInfo::constant(|tags, precision| {
+            tags[0]
+                .to_owned()
+                .evaluate_with_prec(
+                    &std::collections::HashMap::<Atom, Complex<Float>>::new(),
+                    precision,
+                )
+                .map_err(|error| error.to_string())
+        })
+        .with_tags(1)
+    );
+    let uncertain = parse!("symbolica::evaluation_test::tagged_constant(1.0``0)");
+    let center = uncertain
+        .evaluate_with_prec(
+            &std::collections::HashMap::<Atom, Complex<Float>>::new(),
+            128,
+        )
+        .unwrap();
+    assert_eq!(center.re.to_f64(), 1.);
+
+    assert!(
+        uncertain
+            .evaluate(&std::collections::HashMap::<Atom, ErrorPropagatingFloat<f64>>::new())
+            .is_err()
+    );
+    assert!(
+        uncertain
+            .evaluate(&std::collections::HashMap::<
+                Atom,
+                Complex<ErrorPropagatingFloat<f64>>,
+            >::new())
+            .is_err()
+    );
+    assert!(
+        uncertain
+            .evaluate_with_prec(
+                &std::collections::HashMap::<Atom, ErrorPropagatingFloat<Float>>::new(),
+                128,
+            )
+            .is_err()
+    );
+    assert!(
+        uncertain
+            .evaluate_with_prec(
+                &std::collections::HashMap::<Atom, Complex<ErrorPropagatingFloat<Float>>>::new(),
+                128,
+            )
+            .is_err()
+    );
+    assert!(uncertain.check_zero().is_inconclusive());
+
+    let exact = parse!("symbolica::evaluation_test::tagged_constant(1)");
+    let result = exact
+        .evaluate_with_prec(
+            &std::collections::HashMap::<Atom, ErrorPropagatingFloat<Float>>::new(),
+            128,
+        )
+        .unwrap();
+    assert_eq!(result.get_num().to_f64(), 1.);
+}
+
+#[test]
+fn mixed_precision_conjugate_products_and_sqrt_cancellation() {
+    for precision in [128, 256, 512] {
+        let cancellation = parse!("sqrt(x)-abs(sqrt(x))");
+        let value = Float::with_val(precision, 2);
+        let plain = cancellation
+            .evaluate_with_prec(
+                &std::collections::HashMap::from([(parse!("x"), value.clone())]),
+                precision,
+            )
+            .unwrap();
+        assert!(
+            plain.is_fully_zero(),
+            "sqrt cancellation at {precision} bits: {plain}"
+        );
+        let tracked = cancellation
+            .evaluate_with_prec(
+                &std::collections::HashMap::from([(
+                    parse!("x"),
+                    Complex::from(ErrorPropagatingFloat::from(value.clone())),
+                )]),
+                precision,
+            )
+            .unwrap();
+        assert!(tracked.re.get_num().is_fully_zero());
+        assert!(!tracked.re.is_exact());
+        assert!(tracked.im.is_exact_zero());
+
+        let product = parse!("z*conj(z)");
+        let z = Complex::new(value.sqrt(), Float::with_val(precision, 1.5));
+        let plain = product
+            .evaluate_with_prec(
+                &std::collections::HashMap::from([(parse!("z"), z.clone())]),
+                precision,
+            )
+            .unwrap();
+        assert!(
+            plain.im.is_fully_zero(),
+            "conjugate product at {precision} bits: {plain}"
+        );
+        let z: Complex<ErrorPropagatingFloat<Float>> = z.into();
+        let tracked = product
+            .evaluate_with_prec(
+                &std::collections::HashMap::from([(parse!("z"), z)]),
+                precision,
+            )
+            .unwrap();
+        assert!(tracked.im.get_num().is_fully_zero());
+        assert!(!tracked.im.is_exact());
+    }
+}
+
+#[test]
+fn purely_real_computations_keep_exact_zero_imaginary_parts() {
+    for precision in [128, 256, 512] {
+        for other_precision in [precision / 2, precision, 2 * precision] {
+            let x = Complex::from(ErrorPropagatingFloat::new_with_absolute_error(
+                Float::with_val(precision, 2),
+                0.001,
+            ));
+            let y = Complex::from(ErrorPropagatingFloat::new_with_absolute_error(
+                Float::with_val(other_precision, 1.5),
+                0.001,
+            ));
+            let values = std::collections::HashMap::from([
+                (parse!("x"), x.clone()),
+                (parse!("y"), y.clone()),
+            ]);
+            for text in [
+                "x+y", "x-y", "x*y", "x/y", "x^3", "x^y", "sqrt(x)", "log(x)", "exp(x)", "sin(x)",
+                "cos(x)",
+            ] {
+                let result = parse!(text).evaluate_with_prec(&values, precision).unwrap();
+                assert!(
+                    result.im.is_exact_zero(),
+                    "{text} at {precision}/{other_precision} bits: {result}"
+                );
+                assert!(!result.re.is_exact(), "{text} discarded real uncertainty");
+            }
+            let x = Atom::num(x);
+            let y = Atom::num(y);
+            for normalized in [
+                &x + &y,
+                &x - &y,
+                &x * &y,
+                &x / &y,
+                x.pow(3),
+                x.pow(&y),
+                x.sqrt(),
+                x.log(),
+                x.exp(),
+                x.sin(),
+                x.cos(),
+            ] {
+                let result = normalized
+                    .evaluate_with_prec(&std::collections::HashMap::<Atom, Complex<ErrorPropagatingFloat<Float>>>::new(), precision)
+                    .unwrap();
+                assert!(
+                    result.im.is_exact_zero(),
+                    "normalized real coefficient acquired imaginary error: {normalized}"
+                );
+                assert!(!result.re.is_exact());
+                assert!(
+                    normalized
+                        .evaluate_with_prec(
+                            &std::collections::HashMap::<Atom, ErrorPropagatingFloat<Float>>::new(),
+                            precision
+                        )
+                        .is_ok()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn real_constants_preserve_exact_zero_imaginary_parts() {
+    let _ = symbol!(
+        "symbolica::evaluation_test::real_constant",
+        eval = EvaluationInfo::constant(|_, precision| Ok(Float::with_val(precision, 2)
+            .sqrt()
+            .into()))
+    );
+    for precision in [128, 256, 512] {
+        for text in [
+            "0",
+            "1",
+            "-2",
+            "1/3",
+            "pi",
+            "e",
+            "symbolica::evaluation_test::real_constant",
+        ] {
+            let expression = if text == "e" {
+                Atom::var(Symbol::E)
+            } else {
+                parse!(text)
+            };
+            let value = expression
+                .evaluate_with_prec(
+                    &std::collections::HashMap::<Atom, Complex<ErrorPropagatingFloat<Float>>>::new(
+                    ),
+                    precision,
+                )
+                .unwrap();
+            assert!(
+                value.im.is_exact_zero(),
+                "{text} acquired imaginary uncertainty at {precision} bits"
+            );
+            let value = expression
+                .evaluate(&std::collections::HashMap::<
+                    Atom,
+                    Complex<ErrorPropagatingFloat<f64>>,
+                >::new())
+                .unwrap();
+            assert!(
+                value.im.is_exact_zero(),
+                "{text} acquired imaginary uncertainty in binary64"
+            );
+        }
+    }
+
+    let tiny = Float::parse("1e-1000", Some(128)).unwrap();
+    let magnitude = tiny.absolute_magnitude();
+    let constant = Complex::new(Float::with_val(128, 1), tiny);
+    let value =
+        Complex::<ErrorPropagatingFloat<f64>>::try_from_complex_float(constant.clone()).unwrap();
+    assert_eq!(*value.im.get_num(), 0.);
+    assert!(value.im.get_error_magnitude() >= magnitude);
+    assert!(!value.im.is_exact_zero());
+    assert!(ErrorPropagatingFloat::<f64>::try_from_complex_float(constant).is_err());
 }

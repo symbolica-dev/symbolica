@@ -1285,14 +1285,15 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let expr = parse!("0.33*x + 3");
     /// let out = expr.map_coefficient(|c| match c {
     ///     CoefficientView::Natural(r, d, ri, di) => {
-    ///         Coefficient::Float(Complex::new(Rational::from((r, d)).to_multi_prec_float(53),
+    ///         Coefficient::from(Complex::new(Rational::from((r, d)).to_multi_prec_float(53),
     ///             Rational::from((ri, di)).to_multi_prec_float(53)))
     ///     }
     ///     _ => c.to_owned(),
     /// });
+    /// // Compare printed values: the conversion and parsing track different errors.
     /// assert_eq!(
-    ///     out,
-    ///     parse!("3.30000000000000e-1*x+3.00000000000000")
+    ///     out.to_string(),
+    ///     parse!("3.30000000000000e-1*x+3.00000000000000").to_string()
     /// );
     /// ```
     fn map_coefficient<F: Fn(CoefficientView) -> Coefficient + Copy>(&self, f: F) -> Self::Output {
@@ -1309,14 +1310,15 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let mut out = Atom::new();
     /// expr.map_coefficient_into(|c| match c {
     ///     CoefficientView::Natural(r, d, ri, di) => {
-    ///         Coefficient::Float(Complex::new(Rational::from((r, d)).to_multi_prec_float(53),
+    ///         Coefficient::from(Complex::new(Rational::from((r, d)).to_multi_prec_float(53),
     ///             Rational::from((ri, di)).to_multi_prec_float(53)))
     ///     }
     ///     _ => c.to_owned(),
     /// }, &mut out);
+    /// // Compare printed values: the conversion and parsing track different errors.
     /// assert_eq!(
-    ///     out,
-    ///     parse!("3.30000000000000e-1*x+3.00000000000000")
+    ///     out.to_string(),
+    ///     parse!("3.30000000000000e-1*x+3.00000000000000").to_string()
     /// );
     /// ```
     fn map_coefficient_into<F: Fn(CoefficientView) -> Coefficient + Copy>(

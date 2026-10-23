@@ -37,9 +37,10 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-// Versions 7–9 are reserved for historical error-tracking coefficient layouts.
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 11;
-pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[10, 11];
+// Format 11 was used by incompatible main and historical tracking layouts.
+// Only format 12 unambiguously combines compact integers and tracked floats.
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 12;
+pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[12];
 pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
@@ -1768,7 +1769,7 @@ mod tests {
 
     #[test]
     fn rejects_previous_state_formats_before_reading_payload() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, u16::MAX] {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, u16::MAX] {
             let mut bytes = super::SYMBOLICA_MAGIC.to_le_bytes().to_vec();
             bytes.extend_from_slice(&version.to_le_bytes());
             // No payload is necessary: reject the version before attempting
@@ -1784,15 +1785,10 @@ mod tests {
     fn state_export_import() {
         let mut export = vec![];
         State::export(&mut export).unwrap();
+        assert_eq!(&export[4..6], &super::EXPORT_FORMAT_VERSION.to_le_bytes());
 
-        assert_eq!(&export[4..6], &11u16.to_le_bytes());
-        // The state metadata layout is shared; embedded atom records carry
-        // their own format identifier and migrate independently.
-        for version in [10u16, 11] {
-            export[4..6].copy_from_slice(&version.to_le_bytes());
-            let i = State::import(&mut export.as_slice(), None).unwrap();
-            assert!(i.is_empty());
-        }
+        let i = State::import(&mut export.as_slice(), None).unwrap();
+        assert!(i.is_empty());
     }
 
     #[test]

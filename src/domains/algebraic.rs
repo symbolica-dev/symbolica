@@ -2248,7 +2248,12 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         state: crate::printer::PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+        self.format(
+            element,
+            &opts.clone().mode(crate::printer::PrintMode::MathML),
+            state,
+            f,
+        )
     }
 
     fn format<W: std::fmt::Write>(

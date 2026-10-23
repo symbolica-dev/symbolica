@@ -1,0 +1,16 @@
+precision,hex_bytes,binary_bytes,operation,iterations,median_ns,min_ns,max_ns
+53,18,9,hex_encode_allocated,100000,162.06,97.83,164.97
+53,18,9,binary_encode_allocated,100000,40.03,22.41,41.61
+53,18,9,binary_encode_reused,100000,15.14,8.17,15.37
+53,18,9,hex_decode,100000,244.59,128.14,251.06
+53,18,9,binary_decode,100000,77.02,48.23,78.25
+256,69,34,hex_encode_allocated,100000,229.51,135.74,234.33
+256,69,34,binary_encode_allocated,100000,110.03,54.61,110.12
+256,69,34,binary_encode_reused,100000,18.00,9.41,18.15
+256,69,34,hex_decode,100000,517.59,298.25,520.54
+256,69,34,binary_decode,100000,133.54,69.89,134.98
+4096,1029,514,hex_encode_allocated,100000,1363.84,769.02,1389.52
+4096,1029,514,binary_encode_allocated,100000,189.72,121.56,197.79
+4096,1029,514,binary_encode_reused,100000,87.91,78.61,89.63
+4096,1029,514,hex_decode,100000,3154.77,3151.77,5202.43
+4096,1029,514,binary_decode,100000,534.29,533.74,1185.77

@@ -2061,6 +2061,7 @@ impl PythonTransformer {
             double_star_for_exponentiation = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
+            print_precision = false,
             precision = None,
             show_namespaces = false,
             hide_namespace = None,
@@ -2086,6 +2087,7 @@ impl PythonTransformer {
         double_star_for_exponentiation: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
+        print_precision: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
@@ -2110,6 +2112,7 @@ impl PythonTransformer {
             double_star_for_exponentiation,
             function_brackets,
             num_exp_as_superscript,
+            print_precision,
             mode: mode.into(),
             precision,
             print_precision: false,
@@ -3314,6 +3317,7 @@ impl PythonExpression {
         &self,
         max_line_length: Option<usize>,
         max_terms: Option<usize>,
+        print_precision: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
@@ -3326,6 +3330,7 @@ impl PythonExpression {
                 self.expr.as_view(),
                 PrintOptions {
                     max_line_length,
+                    print_precision,
                     precision,
                     hide_all_namespaces: !show_namespaces,
                     hide_namespace: if show_namespaces {
@@ -3363,6 +3368,7 @@ impl PythonExpression {
         double_star_for_exponentiation: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
+        print_precision: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
@@ -3392,6 +3398,7 @@ impl PythonExpression {
                     double_star_for_exponentiation,
                     function_brackets,
                     num_exp_as_superscript,
+                    print_precision,
                     mode: mode.into(),
                     precision,
                     print_precision: false,
@@ -4630,6 +4637,7 @@ impl PythonExpression {
             double_star_for_exponentiation = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
+            print_precision = false,
             precision = None,
             show_namespaces = false,
             hide_namespace = None,
@@ -4646,7 +4654,7 @@ impl PythonExpression {
         print_ring=True, symmetric_representation_for_finite_field=False, \
         explicit_rational_polynomial=False, number_thousands_separator=None, \
         multiplication_operator='\\u00b7', double_star_for_exponentiation=False, \
-        function_brackets=('(', ')'), num_exp_as_superscript=True, precision=None, \
+        function_brackets=('(', ')'), num_exp_as_superscript=True, print_precision=False, precision=None, \
         show_namespaces=False, hide_namespace=None, include_attributes=False, custom_print_mode=None)"
     )]
     pub fn format(
@@ -4668,6 +4676,7 @@ impl PythonExpression {
         double_star_for_exponentiation: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
+        print_precision: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
@@ -4691,6 +4700,7 @@ impl PythonExpression {
             double_star_for_exponentiation,
             function_brackets,
             num_exp_as_superscript,
+            print_precision,
             precision,
             show_namespaces,
             hide_namespace,
@@ -4734,6 +4744,7 @@ impl PythonExpression {
             double_star_for_exponentiation = false,
             function_brackets = ('(',')'),
             num_exp_as_superscript = true,
+            print_precision = false,
             precision = None,
             show_namespaces = false,
             hide_namespace = None,
@@ -4748,7 +4759,7 @@ impl PythonExpression {
         print_ring=True, symmetric_representation_for_finite_field=False, \
         explicit_rational_polynomial=False, number_thousands_separator=None, \
         multiplication_operator='\\u00b7', double_star_for_exponentiation=False, \
-        function_brackets=('(', ')'), num_exp_as_superscript=True, precision=None, \
+        function_brackets=('(', ')'), num_exp_as_superscript=True, print_precision=False, precision=None, \
         show_namespaces=False, hide_namespace=None, include_attributes=False, \
         custom_print_mode=None, *, mathml=True, page_size=25)"
     )]
@@ -4772,6 +4783,7 @@ impl PythonExpression {
         double_star_for_exponentiation: bool,
         function_brackets: (char, char),
         num_exp_as_superscript: bool,
+        print_precision: bool,
         precision: Option<usize>,
         show_namespaces: bool,
         hide_namespace: Option<&str>,
@@ -4802,6 +4814,7 @@ impl PythonExpression {
                     double_star_for_exponentiation,
                     function_brackets,
                     num_exp_as_superscript,
+                    print_precision,
                     precision,
                     hide_all_namespaces: !show_namespaces,
                     hide_namespace: if show_namespaces {
@@ -4838,6 +4851,7 @@ impl PythonExpression {
             double_star_for_exponentiation,
             function_brackets,
             num_exp_as_superscript,
+            print_precision,
             precision,
             show_namespaces,
             hide_namespace,
@@ -4864,6 +4878,7 @@ impl PythonExpression {
             double_star_for_exponentiation,
             function_brackets,
             num_exp_as_superscript,
+            print_precision,
             precision,
             show_namespaces,
             hide_namespace,
@@ -4875,6 +4890,7 @@ impl PythonExpression {
         let latex = expression.format_latex_with_options(
             max_line_length,
             max_terms,
+            print_precision,
             precision,
             show_namespaces,
             hide_namespace,
@@ -4921,6 +4937,7 @@ impl PythonExpression {
         Ok(self.format_latex_with_options(
             max_line_length,
             Some(100),
+            false,
             None,
             false,
             None,

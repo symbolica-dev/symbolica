@@ -218,12 +218,16 @@ mod test {
 
         let a = parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(x)");
 
-        assert!(
-            (parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(0.1`32)").to_float(32)
-                - parse!("2.7273975248950224505081204947890e-1`32"))
-            .abs()
-                < parse!("1e-30`32")
-        );
+        // The custom callback accepts central values, so request an explicit
+        // plain numeric evaluation rather than discarding uncertainty in normalization.
+        let value = parse!("symbolica::eval_fun::e*symbolica::eval_fun::atanh(0.1`32)")
+            .evaluate_with_prec(
+                &std::collections::HashMap::<Atom, Complex<Float>>::new(),
+                110,
+            )
+            .unwrap();
+        let expected = Float::parse("2.7273975248950224505081204947890e-1", Some(110)).unwrap();
+        assert!(crate::domains::float::RealLike::to_f64(&(value.re - expected)).abs() < 1e-30);
 
         let r = a.evaluator(&[parse!("x")]).build().unwrap();
 

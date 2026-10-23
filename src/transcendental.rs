@@ -3467,7 +3467,12 @@ fn atom_float_precision(value: AtomView) -> Option<u32> {
     };
 
     match number.get_coeff_view() {
-        CoefficientView::Float(r, i) => Some(r.to_float().prec().max(i.to_float().prec())),
+        CoefficientView::Float(r, i) => Some(
+            r.to_float()
+                .get_num()
+                .prec()
+                .max(i.to_float().get_num().prec()),
+        ),
         _ => None,
     }
 }
@@ -3546,8 +3551,15 @@ fn atom_to_complex_float(value: AtomView, binary_prec: u32) -> Option<Complex<Fl
             i.to_rat().to_multi_prec_float(binary_prec),
         )),
         CoefficientView::Float(r, i) => {
-            let mut re = r.to_float();
-            let mut im = i.to_float();
+            let re = r.to_float();
+            let im = i.to_float();
+            // Normalization must not discard coefficient uncertainty. A
+            // registered tracked evaluator may handle this expression later.
+            if !re.is_exact() || !im.is_exact() {
+                return None;
+            }
+            let mut re = re.into_value();
+            let mut im = im.into_value();
             if re.prec() > binary_prec {
                 re.set_prec(binary_prec);
             }
@@ -4983,7 +4995,12 @@ mod tests {
         // The backends round the decimal input at different storage widths.
         // Compare accuracy at the input precision, not bitwise identity to a
         // rounded decimal reference.
-        let value = Complex::<Float>::try_from(parse!("gamma(0.3)")).unwrap();
+        let value = parse!("gamma(0.3)")
+            .evaluate_with_prec(
+                &std::collections::HashMap::<Atom, Complex<Float>>::new(),
+                80,
+            )
+            .unwrap();
         assert!((value.re.to_f64() - 2.991568987687591).abs() < 1e-15);
         assert!(value.im.is_fully_zero());
         assert_eq!(
@@ -5443,12 +5460,47 @@ mod tests {
     }
 
     #[test]
-    fn special_float_inputs_normalize_immediately() {
-        assert!(Complex::<Float>::try_from(parse!("gamma(1.25)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("erf(1.25)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("polygamma(0,1.25)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("polygamma(1,1.25)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
+    fn uncertain_special_float_inputs_remain_symbolic() {
+        // These functions do not yet register uncertainty-aware evaluators.
+        for input in [
+            "gamma(1.25)",
+            "erf(1.25)",
+            "polygamma(0,1.25)",
+            "polygamma(1,1.25)",
+            "zeta(1.25)",
+        ] {
+            let expression = parse!(input);
+            assert!(matches!(
+                expression.as_view(),
+                crate::atom::AtomView::Fun(_)
+            ));
+            assert!(Complex::<Float>::try_from(expression).is_err());
+        }
+    }
+
+    #[test]
+    fn exact_special_float_inputs_still_normalize() {
+        let exact = crate::domains::float::ErrorPropagatingFloat::new_with_absolute_error(
+            Float::with_val(100, 1.25),
+            0.0,
+        );
+        let expression = crate::function!(super::gamma(), Atom::num(exact));
+        assert!(Complex::<Float>::try_from(expression).is_ok());
+    }
+
+    #[test]
+    fn elementary_float_normalization_preserves_uncertainty() {
+        for input in ["tan(0.25``2)", "sinh(0.25``2)", "tan(0.0``2)"] {
+            let expression = parse!(input);
+            let crate::atom::AtomView::Num(number) = expression.as_view() else {
+                panic!("{input} did not use its registered tracked evaluator");
+            };
+            let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                panic!("{input} lost its floating coefficient");
+            };
+            assert!(value.re.get_absolute_error() >= 0.01, "{input}");
+            assert!(value.im.is_exact_zero(), "{input}");
+        }
     }
 
     #[test]
@@ -5509,8 +5561,8 @@ mod tests {
     }
 
     #[test]
-    fn polylog_float_normalization() {
-        assert!(Complex::<Float>::try_from(parse!("polylog(2,0.5)")).is_ok());
+    fn uncertain_polylog_float_remains_symbolic() {
+        assert!(Complex::<Float>::try_from(parse!("polylog(2,0.5)")).is_err());
     }
 
     #[test]
@@ -5923,7 +5975,7 @@ mod tests {
 
     #[test]
     fn zeta_float_normalization() {
-        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
+        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_err());
         assert!(Complex::<Float>::try_from(parse!("zeta(1/2+1i/4)").to_float(50)).is_ok());
     }
 
@@ -6139,11 +6191,11 @@ mod tests {
     }
 
     #[test]
-    fn bessel_float_inputs_normalize_immediately() {
-        assert!(Complex::<Float>::try_from(parse!("bessel_j(1/2,2.0)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("bessel_y(1/2,2.0)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("bessel_i(1/2,2.0)")).is_ok());
-        assert!(Complex::<Float>::try_from(parse!("bessel_k(1/2,2.0)")).is_ok());
+    fn uncertain_bessel_float_inputs_remain_symbolic() {
+        assert!(Complex::<Float>::try_from(parse!("bessel_j(1/2,2.0)")).is_err());
+        assert!(Complex::<Float>::try_from(parse!("bessel_y(1/2,2.0)")).is_err());
+        assert!(Complex::<Float>::try_from(parse!("bessel_i(1/2,2.0)")).is_err());
+        assert!(Complex::<Float>::try_from(parse!("bessel_k(1/2,2.0)")).is_err());
     }
 
     #[test]

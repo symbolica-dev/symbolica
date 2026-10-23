@@ -787,6 +787,7 @@ fn print_options_to_dict<'py>(
     )?;
     dict.set_item("function_brackets", options.function_brackets)?;
     dict.set_item("num_exp_as_superscript", options.num_exp_as_superscript)?;
+    dict.set_item("print_precision", options.print_precision)?;
     dict.set_item("precision", options.precision)?;
     dict.set_item("pretty_matrix", options.pretty_matrix)?;
     dict.set_item("hide_namespace", options.hide_namespace.as_deref())?;

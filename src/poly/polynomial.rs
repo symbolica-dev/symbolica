@@ -680,7 +680,12 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+        self.format(
+            element,
+            &opts.clone().mode(crate::printer::PrintMode::MathML),
+            state,
+            f,
+        )
     }
 
     fn format<W: std::fmt::Write>(
@@ -2103,7 +2108,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Multiply every coefficient with `other`.
     pub fn mul_coeff(mut self, other: F::Element) -> Self {
-        if self.ring().is_one(&other) {
+        // Numerical unit predicates can accept representations that carry
+        // precision or other metadata. Only elide the canonical ring unit.
+        if self.ring().is_one(&other) && other == self.ring().one() {
             return self;
         }
 
@@ -7861,6 +7868,65 @@ mod test {
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
         total_degree_kernel_precedes_mixed_radix, total_degree_rank_table,
     };
+
+    #[test]
+    fn atom_polynomial_scaling_preserves_floating_unit_coefficients() {
+        use crate::{
+            atom::{Atom, AtomView},
+            coefficient::Coefficient,
+            domains::{atom::AtomField, float::Float},
+        };
+
+        let ring = AtomField {
+            statistical_zero_test: false,
+            ..AtomField::new()
+        };
+        let variables = Arc::new(vec![super::PolyVariable::from(symbol!("unit_scale_x"))]);
+        let mut polynomial = MultivariatePolynomial::<_, i8>::new(&ring, None, variables);
+        polynomial.append_monomial(Atom::num(1), &[-2]);
+        polynomial.append_monomial(Atom::num(1), &[0]);
+        polynomial.append_monomial(Atom::num(1), &[3]);
+        let unit = Atom::num(Float::with_val(24, 1));
+        let scaled = polynomial.clone().mul_coeff(unit);
+        assert_eq!(scaled.exponents, polynomial.exponents);
+        assert_eq!(scaled.nterms(), 3);
+        for coefficient in &scaled.coefficients {
+            let AtomView::Num(number) = coefficient.as_view() else {
+                panic!("expected a floating coefficient");
+            };
+            assert!(!number.is_one());
+            let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                panic!("floating unit became an exact coefficient");
+            };
+            assert_eq!(value.re.get_num().prec(), 24);
+            assert!(value.re.get_absolute_error() > 0.);
+            assert!(value.im.is_exact_zero());
+        }
+        assert_eq!(polynomial.clone().mul_coeff(ring.one()), polynomial);
+    }
+
+    #[test]
+    fn tracked_polynomial_coefficients_preserve_uncertain_zero_and_unit() {
+        use crate::domains::float::{ErrorPropagatingFloat, Float, FloatField};
+
+        let ring = FloatField::from_rep(ErrorPropagatingFloat::<Float>::exact_zero(100));
+        let variables = Arc::new(vec![super::PolyVariable::from(symbol!("tracked_unit_x"))]);
+        let mut polynomial = MultivariatePolynomial::<_, i8>::new(&ring, None, variables);
+        polynomial.append_monomial(
+            ErrorPropagatingFloat::new_with_absolute_error(Float::new(100), 1e-10),
+            &[-2],
+        );
+        polynomial.append_monomial(ring.one(), &[3]);
+        assert_eq!(polynomial.nterms(), 2);
+        assert!(!polynomial.is_zero());
+
+        let unit = ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(100, 1), 1e-6);
+        let scaled = polynomial.mul_coeff(unit);
+        assert_eq!(scaled.nterms(), 2);
+        assert!(scaled.coefficients[0].get_absolute_error() >= 1e-10);
+        assert!(scaled.coefficients[1].get_absolute_error() >= 1e-6);
+        assert!(!ring.is_one(&scaled.coefficients[1]));
+    }
 
     #[test]
     fn packed_u16_exponents_round_trip_all_lengths() {

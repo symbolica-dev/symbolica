@@ -4078,8 +4078,8 @@ pub(crate) fn exact_numeric_value(
     match n.get_coeff_view().to_owned() {
         Coefficient::Complex(value) => Some(value),
         Coefficient::Float(value) => Some(crate::domains::float::Complex::new(
-            value.re.try_to_rational()?,
-            value.im.try_to_rational()?,
+            value.re.get_num().try_to_rational()?,
+            value.im.get_num().try_to_rational()?,
         )),
         _ => None,
     }

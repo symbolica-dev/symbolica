@@ -32,8 +32,9 @@ use super::{
 };
 
 /// The current export format identifier for atom data.
-// Versions 2–4 are reserved for historical error-tracking coefficient layouts.
-const ATOM_EXPORT_FORMAT: u8 = 6;
+// Format 6 was used by incompatible main and historical tracking layouts.
+// Only format 7 unambiguously combines compact integers and tracked floats.
+const ATOM_EXPORT_FORMAT: u8 = 7;
 
 const NUM_ID: u8 = 1;
 const VAR_ID: u8 = 2;
@@ -191,7 +192,7 @@ fn update_large_function_size(data: &mut Vec<u8>, old_end: usize, size: u64) {
 
 /// Reject unsupported storage layouts before reading or interpreting atom data.
 fn check_atom_format(format: u8) -> Result<(), std::io::Error> {
-    if !matches!(format, 5 | ATOM_EXPORT_FORMAT) {
+    if format != ATOM_EXPORT_FORMAT {
         if format == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -209,12 +210,7 @@ fn check_atom_format(format: u8) -> Result<(), std::io::Error> {
 
 /// Check node boundaries and float payloads before constructing trusted views.
 /// The explicit stack bounds nesting by input length without recursive calls.
-#[cfg(test)]
 fn validate_atom_data(data: &[u8]) -> Result<(), std::string::String> {
-    validate_atom_data_format(data, ATOM_EXPORT_FORMAT)
-}
-
-fn validate_atom_data_format(data: &[u8], format: u8) -> Result<(), std::string::String> {
     fn variable_payload(data: &[u8]) -> Result<&[u8], std::string::String> {
         let (_, _, rest) = read_packed_pair_checked(data)?;
         // The variable scanner indexes its width table without masking a sign.
@@ -253,20 +249,15 @@ fn validate_atom_data_format(data: &[u8], format: u8) -> Result<(), std::string:
         match tag & TYPE_MASK {
             NUM_ID => {
                 if tag != NUM_ID {
-                    if format == 5 {
-                        return Err("Noncanonical numeric atom flags".to_owned());
-                    }
                     // All nonzero upper-five-bit codes are complete integers.
                     continue;
                 }
                 let remaining = validate_packed_coefficient(rest)?;
-                if format == ATOM_EXPORT_FORMAT {
-                    let coefficient = &rest[..rest.len() - remaining.len()];
-                    if let CoefficientView::Natural(value, 1, 0, 1) = coefficient.get_coeff_view().0
-                        && (-15..=15).contains(&value)
-                    {
-                        return Err("Small integer must use its inline numeric header".to_owned());
-                    }
+                let coefficient = &rest[..rest.len() - remaining.len()];
+                if let CoefficientView::Natural(value, 1, 0, 1) = coefficient.get_coeff_view().0
+                    && (-15..=15).contains(&value)
+                {
+                    return Err("Small integer must use its inline numeric header".to_owned());
                 }
                 position = end - remaining.len();
             }
@@ -287,7 +278,7 @@ fn validate_atom_data_format(data: &[u8], format: u8) -> Result<(), std::string:
                         .is_some_and(|&header| header & TYPE_MASK == NUM_ID && header != NUM_ID)
                 });
                 if tag & POW_HAS_SMALL_INT_FLAG != 0 {
-                    if format == 5 || !inline_exponent {
+                    if !inline_exponent {
                         return Err(
                             "Compact power flag requires a variable and inline integer".to_owned()
                         );
@@ -295,7 +286,7 @@ fn validate_atom_data_format(data: &[u8], format: u8) -> Result<(), std::string:
                     // Consume exactly the variable and its one-byte exponent.
                     position = end - exponent.unwrap().len() + 1;
                 } else {
-                    if format == ATOM_EXPORT_FORMAT && inline_exponent {
+                    if inline_exponent {
                         return Err("Variable power is missing its compact flag".to_owned());
                     }
                     frames.push(Frame {
@@ -341,122 +332,6 @@ fn validate_atom_data_format(data: &[u8], format: u8) -> Result<(), std::string:
         }
     }
     Ok(())
-}
-
-/// Convert validated format-5 bytes without consulting symbol state. Every
-/// composite is marked dirty for normalization after symbol remapping. Like
-/// validation, conversion uses an explicit stack for deeply nested input.
-fn convert_legacy_atom(mut data: &[u8]) -> RawAtom {
-    struct Frame {
-        start: usize,
-        header_end: usize,
-        count: u64,
-        remaining: u64,
-    }
-    fn finish(data: &mut RawAtom, frame: Frame) {
-        let tag = data[frame.start] & TYPE_MASK;
-        if tag == POW_ID {
-            let children = &data[frame.start + 1..];
-            if children[0] & TYPE_MASK == VAR_ID {
-                let exponent = unsafe { skip_packed_variable(&children[1..]) };
-                if exponent.len() == 1 && exponent[0] & TYPE_MASK == NUM_ID && exponent[0] != NUM_ID
-                {
-                    data[frame.start] |= POW_HAS_SMALL_INT_FLAG;
-                }
-            }
-        } else {
-            let size = (data.len() - frame.header_end) as u64;
-            let header = if tag == FUN_ID {
-                (size, 1)
-            } else {
-                (frame.count, size)
-            };
-            let new_end = frame.start + 1 + header.get_packed_size() as usize;
-            resize_header(data, frame.header_end, new_end);
-            header.write_packed_fixed(&mut data[frame.start + 1..new_end]);
-        }
-    }
-
-    let mut result = Vec::with_capacity(data.len());
-    let mut frames: Vec<Frame> = Vec::new();
-    loop {
-        let header = data[0];
-        let tag = header & TYPE_MASK;
-        match tag {
-            NUM_ID | VAR_ID => {
-                let rest = data[1..].skip_rational();
-                let node = &data[..data.len() - rest.len()];
-                if tag == NUM_ID
-                    && let CoefficientView::Natural(value, 1, 0, 1) = node[1..].get_coeff_view().0
-                    && (-15..=15).contains(&value)
-                {
-                    result.push(inline_number_header(value));
-                } else {
-                    result.extend_from_slice(node);
-                }
-                data = rest;
-            }
-            POW_ID | FUN_ID | MUL_ID | ADD_ID => {
-                let start = result.len();
-                result.push(header | NOT_NORMALIZED);
-                let count = if tag == POW_ID {
-                    data = &data[1..];
-                    2
-                } else if tag == FUN_ID {
-                    let metadata = function_metadata(data);
-                    let (_, count, rest) = read_packed_pair(metadata);
-                    result.extend([1, 0]);
-                    let header_end = result.len();
-                    result.extend_from_slice(&metadata[..metadata.len() - rest.len()]);
-                    data = rest;
-                    frames.push(Frame {
-                        start,
-                        header_end,
-                        count,
-                        remaining: count,
-                    });
-                    if count != 0 {
-                        continue;
-                    }
-                    let frame = frames.pop().unwrap();
-                    finish(&mut result, frame);
-                    // An empty function is already complete.
-                    0
-                } else {
-                    let (count, _, rest) = read_packed_pair(&data[1..]);
-                    data = rest;
-                    result.extend([0x11, 0, 0]);
-                    count
-                };
-                if tag != FUN_ID {
-                    let frame = Frame {
-                        start,
-                        header_end: result.len(),
-                        count,
-                        remaining: count,
-                    };
-                    if count != 0 {
-                        frames.push(frame);
-                        continue;
-                    }
-                    finish(&mut result, frame);
-                }
-            }
-            _ => unreachable!("The format-5 atom was validated"),
-        }
-        loop {
-            let Some(frame) = frames.last_mut() else {
-                debug_assert!(data.is_empty());
-                return result;
-            };
-            frame.remaining -= 1;
-            if frame.remaining != 0 {
-                break;
-            }
-            let frame = frames.pop().unwrap();
-            finish(&mut result, frame);
-        }
-    }
 }
 
 /// The underlying slice of expression data.
@@ -969,11 +844,7 @@ impl<C: crate::state::HasStateMap> bincode::Decode<C> for Atom {
 
             dest.resize(n_size, 0);
             source.read(&mut dest)?;
-            validate_atom_data_format(&dest, flags_buf[0])
-                .map_err(bincode::error::DecodeError::OtherString)?;
-            if flags_buf[0] == 5 {
-                dest = convert_legacy_atom(&dest);
-            }
+            validate_atom_data(&dest).map_err(bincode::error::DecodeError::OtherString)?;
 
             unsafe {
                 match dest[0] & TYPE_MASK {
@@ -1011,11 +882,8 @@ impl Atom {
 
         dest.resize(n_size, 0);
         source.read_exact(&mut dest)?;
-        validate_atom_data_format(&dest, format)
+        validate_atom_data(&dest)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        if format == 5 {
-            dest = convert_legacy_atom(&dest);
-        }
 
         unsafe {
             match dest[0] & TYPE_MASK {
@@ -2116,8 +1984,8 @@ impl<'a> NumView<'a> {
         Num { data: buffer }
     }
 
+    /// Check if the number is exactly zero.
     #[inline]
-    /// Return whether this coefficient is zero.
     pub fn is_zero(&self) -> bool {
         if self.data.len() == 1 {
             return self.data[0] == inline_number_header(0);
@@ -2129,8 +1997,22 @@ impl<'a> NumView<'a> {
         }
     }
 
+    /// Check if the number is zero, either exactly
+    /// or within the precision of the coefficient type.
     #[inline]
-    /// Return whether this coefficient is one.
+    pub fn is_zero_within_precision(&self) -> bool {
+        if self.data.len() == 1 {
+            return self.data[0] == inline_number_header(0);
+        }
+        if self.data.is_small_int() {
+            self.data.is_zero_rat()
+        } else {
+            self.get_coeff_view().is_zero_within_precision()
+        }
+    }
+
+    /// Check if the number is exactly one.
+    #[inline]
     pub fn is_one(&self) -> bool {
         if self.data.len() == 1 {
             return self.data[0] == inline_number_header(1);
@@ -3595,48 +3477,8 @@ mod tests {
     }
 
     // Reconstruct format 5 without using the current number builder.
-    fn legacy_power_bytes(atom: AtomView<'_>, format: u8) -> Vec<u8> {
-        assert_eq!(format, 5);
-        let mut data = vec![atom.get_data()[0]];
-        match atom {
-            AtomView::Num(n) => {
-                data[0] = NUM_ID;
-                n.get_coeff_view().to_owned().write_packed(&mut data);
-            }
-            AtomView::Pow(p) => {
-                data[0] &= !POW_HAS_SMALL_INT_FLAG;
-                let (base, exp) = p.get_base_exp();
-                data.extend(legacy_power_bytes(base, format));
-                data.extend(legacy_power_bytes(exp, format));
-            }
-            AtomView::Fun(f) => {
-                data.extend([1, 0]); // provisional packed size
-                let metadata = function_metadata(f.data);
-                let (_, _, children) = read_packed_pair(metadata);
-                data.extend_from_slice(&metadata[..metadata.len() - children.len()]);
-                for child in f.iter() {
-                    data.extend(legacy_power_bytes(child, format));
-                }
-                update_function_size(&mut data, 3);
-            }
-            AtomView::Mul(_) | AtomView::Add(_) => {
-                let (count, _, children) = read_packed_pair(&atom.get_data()[1..]);
-                data.extend([0x11, 0, 0]);
-                for child in (ListIterator {
-                    data: children,
-                    length: count as usize,
-                }) {
-                    data.extend(legacy_power_bytes(child, format));
-                }
-                update_list_header(&mut data, 4, count);
-            }
-            _ => return atom.get_data().to_vec(),
-        }
-        data
-    }
-
     #[test]
-    fn compact_power_current_and_legacy_serialization() {
+    fn compact_power_tracked_serialization() {
         use crate::atom::AtomCore;
         for text in [
             "0",
@@ -3654,13 +3496,26 @@ mod tests {
             "f(0.0,1.25,x^2,2.5+3.75*𝑖)",
         ] {
             let atom = parse!(text);
-            for (format, data) in [
-                (5, legacy_power_bytes(atom.as_view(), 5)),
-                (ATOM_EXPORT_FORMAT, atom.as_view().get_data().to_vec()),
-            ] {
+            for format in [5, 6, ATOM_EXPORT_FORMAT] {
+                let data = atom.as_view().get_data();
                 let mut bytes = vec![format];
                 bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
-                bytes.extend_from_slice(&data);
+                bytes.extend_from_slice(data);
+                if format != ATOM_EXPORT_FORMAT {
+                    // Reject ambiguous historical identifiers before examining
+                    // their payload, including otherwise valid current bytes.
+                    assert!(Atom::import_with_map(&mut &bytes[..], &StateMap::default()).is_err());
+                    #[cfg(feature = "bincode")]
+                    assert!(
+                        bincode::decode_from_slice_with_context::<_, Atom, _>(
+                            &bytes,
+                            bincode::config::standard(),
+                            StateMap::default()
+                        )
+                        .is_err()
+                    );
+                    continue;
+                }
                 assert_eq!(
                     Atom::import_with_map(&mut &bytes[..], &StateMap::default()).unwrap(),
                     atom
@@ -3678,15 +3533,12 @@ mod tests {
                 }
                 let mut full = Vec::new();
                 State::export_partial(&mut full, atom.get_all_symbols(true)).unwrap();
-                if format < ATOM_EXPORT_FORMAT {
-                    full[4..6].copy_from_slice(&(format as u16 + 5).to_le_bytes());
-                }
                 full.extend_from_slice(&1u64.to_le_bytes());
                 full.extend_from_slice(&bytes);
                 assert_eq!(Atom::import(&mut &full[..], None).unwrap(), atom);
             }
         }
-        for format in [0, 1, 2, 3, 4, 7, 255] {
+        for format in [0, 1, 2, 3, 4, 5, 6, 255] {
             assert!(check_atom_format(format).is_err());
         }
     }
@@ -3882,7 +3734,7 @@ mod tests {
 
     #[test]
     fn rejects_previous_atom_formats_before_reading_payload() {
-        for format in [0, 1, 2, 3, 4, 7, u8::MAX] {
+        for format in [0, 1, 2, 3, 4, 5, 6, u8::MAX] {
             let mut atom = Atom::num(42);
             let mut bytes = &[format][..];
             let error = atom.read(&mut bytes).unwrap_err();
@@ -3909,11 +3761,9 @@ mod tests {
         for value in -15i64..=15 {
             let mut ordinary = vec![NUM_ID];
             Coefficient::from(value).write_packed(&mut ordinary);
-            assert!(validate_atom_data_format(&ordinary, 5).is_ok());
             invalid.push(ordinary);
             let number = InlineNum::new(value, 1);
             assert!(validate_atom_data(number.get_data()).is_ok());
-            assert!(validate_atom_data_format(number.get_data(), 5).is_err());
             let mut missing_flag = vec![POW_ID];
             missing_flag.extend_from_slice(base);
             missing_flag.extend_from_slice(number.get_data());
@@ -3922,7 +3772,6 @@ mod tests {
                 let mut power = Pow::new_into(variable.as_view(), number.as_view(), Vec::new());
                 power.set_normalized(normalized);
                 assert!(validate_atom_data(&power.data).is_ok());
-                assert!(validate_atom_data_format(&power.data, 5).is_err());
                 let mut stream = vec![ATOM_EXPORT_FORMAT];
                 stream.extend_from_slice(&(power.data.len() as u64).to_le_bytes());
                 stream.extend_from_slice(&power.data);
@@ -3935,7 +3784,6 @@ mod tests {
         invalid.push(vec![NUM_ID, 2, 2, 0]); // A wider packed small integer.
         let mut signed_variable = base.to_vec();
         signed_variable[1] |= 0x80;
-        assert!(validate_atom_data_format(&signed_variable, 5).is_err());
         invalid.push(signed_variable.clone());
         for children in [
             vec![],
@@ -3968,27 +3816,38 @@ mod tests {
     }
 
     #[test]
-    fn format_five_conversion_uses_an_explicit_stack() {
+    fn current_format_validation_uses_an_explicit_stack() {
         let depth = 10_000;
         let mut data = vec![POW_ID; depth];
-        for _ in 0..=depth {
-            data.extend([NUM_ID, 1, 0]);
+        data.extend(std::iter::repeat_n(inline_number_header(0), depth + 1));
+        assert!(validate_atom_data(&data).is_ok());
+        let mut bytes = vec![ATOM_EXPORT_FORMAT];
+        bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&data);
+        let mut atom = Atom::new();
+        atom.read(&mut bytes.as_slice()).unwrap();
+        assert_eq!(atom.as_view().get_data(), data);
+    }
+
+    #[test]
+    fn inline_integers_support_zero_within_precision() {
+        for value in -15..=15 {
+            let atom = Atom::num(value);
+            let AtomView::Num(number) = atom.as_view() else {
+                unreachable!();
+            };
+            assert_eq!(number.get_data().len(), 1);
+            assert_eq!(number.is_zero_within_precision(), value == 0);
         }
-        assert!(validate_atom_data_format(&data, 5).is_ok());
-        let converted = convert_legacy_atom(&data);
-        assert_eq!(converted.len(), 2 * depth + 1);
-        assert!(
-            converted[..depth]
-                .iter()
-                .all(|&tag| tag == POW_ID | NOT_NORMALIZED)
-        );
-        assert!(validate_atom_data(&converted).is_ok());
     }
 
     #[test]
     fn imports_reject_malformed_binary_floats_before_traversal() {
+        use crate::domains::float::Magnitude;
+
         let component = |precision: u32, value: &[u8]| {
             let mut bytes = precision.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&Magnitude::ZERO.to_le_bytes());
             bytes.extend_from_slice(value);
             bytes
         };
@@ -4074,6 +3933,9 @@ mod tests {
         ] {
             invalid.push(coefficient(&component(128, &value), &[]));
         }
+        let mut invalid_error = valid.clone();
+        invalid_error[4] = 1; // A nonzero magnitude significand must be normalized.
+        invalid.push(coefficient(&invalid_error, &[]));
         let mut truncated = vec![NUM_ID, 11];
         (u64::MAX, 0).write_packed(&mut truncated);
         invalid.push(truncated);
@@ -4156,9 +4018,83 @@ mod tests {
     }
 
     #[test]
+    fn packed_real_float_exports_preserve_implicit_imaginary_precision() {
+        use crate::domains::float::{Complex, ErrorPropagatingFloat, Float, Magnitude};
+        use std::hash::{DefaultHasher, Hasher};
+
+        let hash = |atom: &Atom| {
+            let mut hasher = DefaultHasher::new();
+            atom.hash(&mut hasher);
+            hasher.finish()
+        };
+        let real_error = Magnitude::from_f64(1e-12);
+        for imaginary_precision in [53, 137] {
+            let atom = Atom::num(Coefficient::Float(Complex::new(
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::with_val(53, 1.25),
+                    real_error,
+                ),
+                ErrorPropagatingFloat::exact_zero(imaginary_precision),
+            )));
+            let (_, imaginary_length, _) = read_packed_pair(&atom.as_view().get_data()[2..]);
+            assert_eq!(
+                imaginary_length,
+                if imaginary_precision == 53 { 0 } else { 4 }
+            );
+
+            let mut stateless = Vec::new();
+            atom.as_view().write(&mut stateless).unwrap();
+            assert_eq!(stateless[0], ATOM_EXPORT_FORMAT);
+            let mut decoded = Atom::new();
+            decoded.read(&mut &stateless[..]).unwrap();
+            let mut roundtrips = vec![decoded];
+            roundtrips
+                .push(Atom::import_with_map(&mut &stateless[..], &StateMap::default()).unwrap());
+
+            let mut exported = Vec::new();
+            atom.as_view().export(&mut exported).unwrap();
+            assert_eq!(
+                &exported[4..6],
+                &crate::state::EXPORT_FORMAT_VERSION.to_le_bytes()
+            );
+            roundtrips.push(Atom::import(&mut &exported[..], None).unwrap());
+
+            #[cfg(feature = "bincode")]
+            {
+                let config = bincode::config::standard();
+                let encoded = bincode::encode_to_vec(&atom, config).unwrap();
+                assert_eq!(encoded, stateless);
+                let (decoded, read): (Atom, usize) =
+                    bincode::decode_from_slice_with_context(&encoded, config, StateMap::default())
+                        .unwrap();
+                assert_eq!(read, encoded.len());
+                roundtrips.push(decoded);
+            }
+
+            for decoded in roundtrips {
+                assert_eq!(decoded, atom);
+                assert_eq!(hash(&decoded), hash(&atom));
+                let AtomView::Num(number) = decoded.as_view() else {
+                    panic!("expected a floating coefficient");
+                };
+                let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                    panic!("expected a floating coefficient");
+                };
+                assert_eq!(value.re.get_num(), &Float::with_val(53, 1.25));
+                assert_eq!(value.re.get_num().prec(), 53);
+                assert_eq!(value.re.get_error_magnitude(), real_error);
+                assert_eq!(value.im.get_num().prec(), imaginary_precision);
+                assert!(value.im.is_exact_zero());
+                assert_eq!(Atom::num(Coefficient::Float(value)), atom);
+            }
+        }
+    }
+
+    #[test]
     fn packed_lengths_roundtrip() {
         for expr in [
             "0",
+            "1.25",
             "x",
             "f()",
             "f(x)",
@@ -4166,6 +4102,7 @@ mod tests {
             "3*x*y",
             "x+y",
             "f((x+y)^(2*x),g(x,3*y))+2*x",
+            "f(1.25,2.5*x)+g(3.75)",
         ] {
             let atom = parse!(expr);
             let mut bytes = Vec::new();

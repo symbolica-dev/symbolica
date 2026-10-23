@@ -9,12 +9,26 @@ pub trait EvaluationDomain: Sized + 'static {
     /// Use `None` for variable-precision domains such as `Float` and `Complex<Float>`.
     const FIXED_PRECISION: Option<u32>;
 
+    /// Whether evaluation must preserve input uncertainty. Such domains require
+    /// a matching tracked callback for constants with uncertain symbolic tags.
+    /// Plain numeric domains evaluate the central value instead.
+    const TRACKS_UNCERTAINTY: bool = false;
+
     /// Try to convert a `Complex<Float>` to the type.
     fn try_from_complex_float(_: Complex<Float>) -> Result<Self, String> {
         Err(format!(
             "Cannot convert from Complex<Float> to {}",
             std::any::type_name::<Self>()
         ))
+    }
+
+    /// Convert a coefficient while preserving uncertainty when supported by the domain.
+    /// Ordinary floating-point domains receive the central value; error-tracking
+    /// domains override this method to retain the coefficient's absolute error.
+    fn try_from_complex_tracked_float(
+        f: Complex<ErrorPropagatingFloat<Float>>,
+    ) -> Result<Self, String> {
+        Self::try_from_complex_float(Complex::new(f.re.into_value(), f.im.into_value()))
     }
 
     /// Resolve a function implementation for the given tags, if available for the type.
@@ -291,41 +305,58 @@ impl EvaluationDomain for Complex<Float> {
 }
 
 impl EvaluationDomain for ErrorPropagatingFloat<f64> {
+    const TRACKS_UNCERTAINTY: bool = true;
+
     const FIXED_PRECISION: Option<u32> = f64::FIXED_PRECISION;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        if f.is_real() {
-            Ok(ErrorPropagatingFloat::new(
-                f.re.to_f64(),
-                15.954589770191003,
-            ))
+        Self::try_from_complex_tracked_float(f.into())
+    }
+
+    fn try_from_complex_tracked_float(
+        f: Complex<ErrorPropagatingFloat<Float>>,
+    ) -> Result<Self, String> {
+        let f = Complex::<ErrorPropagatingFloat<f64>>::try_from_complex_tracked_float(f)?;
+        if f.im.is_exact_zero() {
+            Ok(f.re)
         } else {
-            Err(format!(
-                "Cannot convert from Complex<Float> to Float because the result {f} is not real"
-            ))
+            Err("Cannot convert an uncertain complex coefficient to a real domain".into())
         }
     }
 }
 
 impl EvaluationDomain for ErrorPropagatingFloat<Float> {
+    const TRACKS_UNCERTAINTY: bool = true;
+
     const FIXED_PRECISION: Option<u32> = None;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        if f.is_real() {
-            Ok(ErrorPropagatingFloat::new_with_native_precision(f.re))
+        Self::try_from_complex_tracked_float(f.into())
+    }
+
+    fn try_from_complex_tracked_float(
+        f: Complex<ErrorPropagatingFloat<Float>>,
+    ) -> Result<Self, String> {
+        if f.im.is_exact_zero() {
+            Ok(f.re)
         } else {
-            Err(format!(
-                "Cannot convert from Complex<Float> to Float because the result {f} is not real"
-            ))
+            Err("Cannot convert an uncertain complex coefficient to a real domain".into())
         }
     }
 }
 
 impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
+    const TRACKS_UNCERTAINTY: bool = true;
+
     const FIXED_PRECISION: Option<u32> = Some(53);
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        let f: Complex<ErrorPropagatingFloat<Float>> = f.into();
+        Self::try_from_complex_tracked_float(f.into())
+    }
+
+    fn try_from_complex_tracked_float(
+        f: Complex<ErrorPropagatingFloat<Float>>,
+    ) -> Result<Self, String> {
         let convert = |f: ErrorPropagatingFloat<Float>| {
             let value = f.get_num().to_f64();
             let rounding = if value.is_finite() && f.get_num().is_finite() {
@@ -346,12 +377,20 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
 }
 
 impl EvaluationDomain for Complex<ErrorPropagatingFloat<Float>> {
+    const TRACKS_UNCERTAINTY: bool = true;
+
     const FIXED_PRECISION: Option<u32> = None;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
         // Plain complex zeros identify exact axes. Preserve them when attaching
         // native-precision errors to the nonzero components.
         Ok(f.into())
+    }
+
+    fn try_from_complex_tracked_float(
+        f: Complex<ErrorPropagatingFloat<Float>>,
+    ) -> Result<Self, String> {
+        Ok(f)
     }
 }
 
@@ -376,12 +415,15 @@ mod tracked_precision_tests {
                 Float::with_val(2048, 0),
             ))
             .unwrap();
-            let scale = if value == 0 { 1. } else { (value as f64).abs() };
             assert_eq!(converted.get_num(), &Float::with_val(2048, value));
             assert_eq!(converted.get_num().prec(), 2048);
+            if value == 0 {
+                assert!(converted.is_exact_zero());
+                continue;
+            }
             assert_eq!(
                 converted.get_error_magnitude(),
-                Magnitude::from_f64(scale).scale_pow2(-2048)
+                Magnitude::from_f64((value as f64).abs()).scale_pow2(-2048)
             );
             assert!(converted.get_error_magnitude().is_finite());
             assert!(!converted.get_error_magnitude().is_zero());
@@ -403,6 +445,7 @@ mod tracked_precision_tests {
             converted.re.get_error_magnitude(),
             Magnitude::from_f64(2.).scale_pow2(-2048)
         );
+        // Plain zero components are exact in the tracking coefficient domain.
         assert!(converted.im.is_exact_zero());
         assert_eq!(converted.re.get_error_magnitude().to_f64(), None);
         assert_eq!(converted.im.get_error_magnitude().to_f64(), Some(0.));

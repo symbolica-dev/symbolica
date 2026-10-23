@@ -1330,7 +1330,7 @@ impl AtomView<'_> {
                 if let CoefficientView::Float(r, i) = n.get_coeff_view() {
                     match id.get_id() {
                         Symbol::COS_ID => {
-                            let r = if i.is_zero() {
+                            let r = if i.is_exact_zero() {
                                 r.to_float().cos().into()
                             } else {
                                 Complex::new(r.to_float(), i.to_float()).cos()
@@ -1339,7 +1339,7 @@ impl AtomView<'_> {
                             return true;
                         }
                         Symbol::SIN_ID => {
-                            let r = if i.is_zero() {
+                            let r = if i.is_exact_zero() {
                                 r.to_float().sin().into()
                             } else {
                                 Complex::new(r.to_float(), i.to_float()).sin()
@@ -1348,7 +1348,7 @@ impl AtomView<'_> {
                             return true;
                         }
                         Symbol::LOG_ID => {
-                            let r = if i.is_zero() {
+                            let r = if i.is_exact_zero() {
                                 r.to_float().log().into()
                             } else {
                                 Complex::new(r.to_float(), i.to_float()).log()
@@ -1357,7 +1357,7 @@ impl AtomView<'_> {
                             return true;
                         }
                         Symbol::ABS_ID => {
-                            let r = if i.is_zero() {
+                            let r = if i.is_exact_zero() {
                                 r.to_float().norm().into()
                             } else {
                                 Complex::new(r.to_float(), i.to_float()).norm()
@@ -1785,26 +1785,43 @@ impl AtomView<'_> {
             debug_assert!(!out.as_view().needs_normalization());
         }
 
-        if let Some(e) = &data.custom_evaluation
-            && e.get_tag_count() == 0
-            && let Some(e) = e.get_evaluator::<Complex<Float>>(&[])
+        if let Some(evaluators) = &data.custom_evaluation
+            && evaluators.get_tag_count() == 0
             && let AtomView::Fun(f) = out.as_view()
-            && f.iter().all(|arg| {
-                if let AtomView::Num(n) = arg
-                    && n.get_coeff_view().is_float()
-                {
-                    true
-                } else {
-                    false
-                }
-            })
+            && f.iter()
+                .all(|arg| matches!(arg, AtomView::Num(n) if n.get_coeff_view().is_float()))
         {
-            let args = f
+            type Tracked = crate::domains::float::ErrorPropagatingFloat<Float>;
+            let args: Vec<Complex<Tracked>> = f
                 .iter()
-                .map(|x| Complex::<Float>::try_from(x).unwrap())
-                .collect::<Vec<_>>();
-            let result = (e)(&args);
-            out.to_num(result);
+                .map(|arg| {
+                    let AtomView::Num(n) = arg else {
+                        unreachable!()
+                    };
+                    let Coefficient::Float(value) = n.get_coeff_view().to_owned() else {
+                        unreachable!()
+                    };
+                    value
+                })
+                .collect();
+            if let Some(evaluate) = evaluators.get_evaluator::<Complex<Tracked>>(&[]) {
+                out.to_num(evaluate(&args));
+            } else if args.iter().all(|arg| arg.im.is_exact_zero())
+                && let Some(evaluate) = evaluators.get_evaluator::<Tracked>(&[])
+            {
+                let args: Vec<_> = args.into_iter().map(|arg| arg.re).collect();
+                out.to_num(evaluate(&args));
+            } else if args
+                .iter()
+                .all(|arg| arg.re.is_exact() && arg.im.is_exact())
+                && let Some(evaluate) = evaluators.get_evaluator::<Complex<Float>>(&[])
+            {
+                let args: Vec<_> = args
+                    .into_iter()
+                    .map(|arg| Complex::new(arg.re.into_value(), arg.im.into_value()))
+                    .collect();
+                out.to_num(evaluate(&args));
+            }
         }
     }
 
@@ -2233,6 +2250,69 @@ mod test {
         printer::PrintOptions,
         state::Workspace,
     };
+
+    #[test]
+    fn normalization_and_laurent_collection_retain_floating_units() {
+        use crate::{
+            coefficient::Coefficient,
+            domains::float::{Float, SingleFloat},
+        };
+
+        let epsilon = Atom::var(crate::symbol!("floating_unit_epsilon"));
+        let unit = Atom::num(Float::with_val(24, 1));
+        let assert_unit = |expression: &Atom| {
+            let coefficients = expression.coefficient_list::<i8>(&[epsilon.as_view()]);
+            assert_eq!(coefficients.len(), 1);
+            let AtomView::Num(number) = coefficients[0].1.as_view() else {
+                panic!("expected a floating coefficient");
+            };
+            assert!(!number.is_one());
+            assert!(number.get_coeff_view().is_real());
+            let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                panic!("floating unit was stripped");
+            };
+            assert_eq!(value.re.get_num().prec(), 24);
+            assert!(value.re.get_num().is_one());
+            assert!(value.re.get_absolute_error() > 0.);
+            assert!(value.im.is_exact_zero());
+        };
+        for power in [-2, 0, 3] {
+            let expression = &unit * epsilon.pow(power);
+            assert_unit(&expression);
+            assert_unit(&expression.collect::<i8>(epsilon.as_view()));
+        }
+
+        let twice = Atom::num(Float::with_val(24, 2));
+        let merged = &twice * &epsilon - &unit * &epsilon;
+        assert_unit(&merged);
+        assert_unit(&merged.collect::<i8>(epsilon.as_view()));
+    }
+
+    #[test]
+    fn power_identities_require_exact_unit_or_zero_exponents() {
+        use crate::{coefficient::Coefficient, domains::float::Float};
+
+        let x = Atom::var(crate::symbol!("floating_power_x"));
+        assert_eq!(x.pow(1), x);
+        assert_eq!(x.pow(0), Atom::num(1));
+        for exponent in [0, 1] {
+            let approximate = Atom::num(Float::with_val(24, exponent));
+            assert!(matches!(x.pow(&approximate).as_view(), AtomView::Pow(_)));
+        }
+        let floating = Atom::num(Float::with_val(24, 1));
+        assert_eq!(floating.pow(1), floating);
+        assert!(matches!(floating.pow(&x).as_view(), AtomView::Pow(_)));
+        let powered = floating.pow(0);
+        let AtomView::Num(number) = powered.as_view() else {
+            panic!("expected a numeric unit");
+        };
+        let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+            panic!("expected the floating precision to be retained");
+        };
+        assert!(value.re.is_exact());
+        assert!(value.im.is_exact_zero());
+        assert_eq!(value.re.get_num().prec(), 24);
+    }
 
     // Build the reference one level at a time, so only the expression under test
     // has an entire chain of dirty children to normalize recursively.

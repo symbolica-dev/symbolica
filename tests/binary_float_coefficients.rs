@@ -6,7 +6,7 @@ use std::{
 use symbolica::{
     atom::{Atom, AtomCore, AtomView},
     coefficient::{Coefficient, CoefficientView},
-    domains::float::{Complex, Float, FloatLike, SingleFloat},
+    domains::float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Magnitude, SingleFloat},
     parse,
     state::StateMap,
 };
@@ -18,7 +18,7 @@ fn float_coefficient(atom: &Atom) -> Complex<Float> {
     let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
         panic!("expected a floating coefficient");
     };
-    value
+    Complex::new(value.re.get_num().clone(), value.im.get_num().clone())
 }
 
 fn hash(atom: &Atom) -> u64 {
@@ -66,11 +66,11 @@ fn compact_real_coefficients_omit_zero_value_and_preserve_both_precisions() {
             Float::with_val(precision, 1.25),
             Float::with_val(precision, 1.25),
         ));
-        // A nonzero imaginary component stores its four-byte precision and
-        // three-byte binary value. A matching zero needs neither payload.
+        // A nonzero imaginary component stores four bytes of precision, eight
+        // bytes of error magnitude and three value bytes. An exact zero is omitted.
         assert_eq!(
             full_complex.as_view().get_data().len(),
-            same_precision.as_view().get_data().len() + 7
+            same_precision.as_view().get_data().len() + 15
         );
 
         for imaginary_precision in [precision, precision + 17] {
@@ -93,7 +93,7 @@ fn compact_real_coefficients_omit_zero_value_and_preserve_both_precisions() {
             let CoefficientView::Float(real, imaginary) = number.get_coeff_view() else {
                 unreachable!();
             };
-            assert_eq!(real.0.len(), 7);
+            assert_eq!(real.0.len(), 15);
             assert_eq!(imaginary.0, imaginary_precision.to_le_bytes());
             assert!(imaginary.is_zero());
             assert!(imaginary.is_finite());
@@ -132,6 +132,55 @@ fn binary_coefficients_keep_nonzero_imaginary_values_outside_f64_range() {
                 assert!(
                     decoded
                         .evaluate_with_prec(&HashMap::<Atom, Float>::new(), precision + 17)
+                        .is_err()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_imports_keep_uncertain_imaginary_zero_payloads() {
+    for imaginary_precision in [128, 257] {
+        for error in [
+            Magnitude::MIN_POSITIVE,
+            Magnitude::ONE.scale_pow2(-4000),
+            Magnitude::ONE.scale_pow2(4000),
+            Magnitude::INFINITY,
+            Magnitude::NAN,
+        ] {
+            let atom = Atom::num(Complex::new(
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::with_val(128, 1.25),
+                    Magnitude::ZERO,
+                ),
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::new(imaginary_precision),
+                    error,
+                ),
+            ));
+            for decoded in roundtrips(&atom) {
+                let AtomView::Num(number) = decoded.as_view() else {
+                    unreachable!()
+                };
+                let CoefficientView::Float(_, imaginary) = number.get_coeff_view() else {
+                    unreachable!()
+                };
+                assert_eq!(imaginary.0.len(), 13);
+                assert!(imaginary.is_zero() && imaginary.has_error());
+                assert!(!imaginary.is_exact_zero());
+                let imaginary = imaginary.to_float();
+                assert_eq!(imaginary.get_num().prec(), imaginary_precision);
+                assert_eq!(
+                    imaginary.get_error_magnitude().to_le_bytes(),
+                    error.to_le_bytes()
+                );
+                assert!(
+                    decoded
+                        .evaluate_with_prec(
+                            &HashMap::<Atom, ErrorPropagatingFloat<Float>>::new(),
+                            512,
+                        )
                         .is_err()
                 );
             }
@@ -201,6 +250,15 @@ fn borrowed_coefficient_ordering_matches_decoded_components() {
                     Float::with_val(precision + 17, imaginary),
                 )));
             }
+        }
+        for error in [Magnitude::ZERO, Magnitude::ONE, Magnitude::INFINITY] {
+            atoms.push(Atom::num(Complex::new(
+                ErrorPropagatingFloat::new_with_error_magnitude(
+                    Float::with_val(precision, 1.25),
+                    error,
+                ),
+                ErrorPropagatingFloat::new_with_error_magnitude(Float::new(precision + 17), error),
+            )));
         }
     }
     for left in &atoms {

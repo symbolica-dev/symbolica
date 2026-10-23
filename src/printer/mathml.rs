@@ -553,7 +553,7 @@ impl Renderer<'_, '_> {
                         CoefficientView::Large(r, i) if !i.is_zero() => {
                             Some((r.to_rat().into(), i.to_rat().into()))
                         }
-                        CoefficientView::Float(r, i) if !i.is_zero() => {
+                        CoefficientView::Float(r, i) if !i.is_exact_zero() => {
                             Some((r.to_float().into(), i.to_float().into()))
                         }
                         _ => None,
@@ -653,7 +653,7 @@ impl Renderer<'_, '_> {
                     match n.get_coeff_view() {
                         CoefficientView::Natural(_, _, i, _) => i == 0,
                         CoefficientView::Large(_, i) => i.is_zero(),
-                        CoefficientView::Float(_, i) => i.is_zero(),
+                        CoefficientView::Float(_, i) => i.is_exact_zero(),
                         _ => false,
                     }
                 } else {
@@ -1173,7 +1173,7 @@ impl<'a> AtomView<'a> {
         match n.get_coeff_view() {
             CoefficientView::Natural(r, _, i, _) => r != 0 && i != 0,
             CoefficientView::Large(r, i) => !r.is_zero() && !i.is_zero(),
-            CoefficientView::Float(r, i) => !r.is_zero() && !i.is_zero(),
+            CoefficientView::Float(r, i) => !r.is_exact_zero() && !i.is_exact_zero(),
             _ => false,
         }
     }
@@ -1341,6 +1341,34 @@ impl<'a> AtomView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_imaginary_zero_keeps_complex_layout_and_precision() {
+        use crate::domains::float::{Complex, ErrorPropagatingFloat, Float};
+
+        let coefficient = Atom::num(Complex::new(
+            ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, -1), 0.0625),
+            ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, 0), 0.125),
+        ));
+        assert!(coefficient.as_view().mathml_complex_coefficient());
+        let options = PrintOptions {
+            print_precision: true,
+            ..PrintOptions::new()
+        };
+        let html = coefficient
+            .as_view()
+            .render_mathml_page(&options, 0, 25)
+            .html;
+        assert!(html.contains("<mi>𝑖</mi>"), "{html}");
+        assert!(html.contains('`'), "{html}");
+        assert!(html.contains("<mo>+</mo>"), "{html}");
+
+        let power = crate::parse!("mathml_uncertain_exponent_x").pow(coefficient);
+        let html = power.as_view().render_mathml_page(&options, 0, 25).html;
+        assert!(html.contains("<msup>"), "{html}");
+        assert!(html.contains("<mi>𝑖</mi>"), "{html}");
+        assert!(!html.contains("<mfrac>"), "{html}");
+    }
 
     fn scoped_page<'r>(
         input: &str,
