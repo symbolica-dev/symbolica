@@ -72,6 +72,49 @@ fn constant_budget_failure_does_not_poison_concurrent_success_cache() {
 }
 
 #[test]
+fn constant_callback_failure_is_not_overwritten_by_a_later_budget_check() {
+    use crate::{
+        atom::EvaluationInfo,
+        utils::resources::{ResourceBudget, ResourceLimits},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
+    let callback_calls = calls.clone();
+    let callback_failed = failed.clone();
+    let info = EvaluationInfo::constant(move |_, bits| {
+        if callback_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            callback_failed.store(true, Ordering::SeqCst);
+            return Err("sentinel: invalid constant source".into());
+        }
+        Ok(Complex::new(Float::with_val(bits, 2.5), Float::new(bits)))
+    });
+    let budget = ResourceBudget::with_memory_monitor(
+        ResourceLimits {
+            max_process_rss_bytes: Some(1),
+            ..Default::default()
+        },
+        move || Ok(if failed.load(Ordering::SeqCst) { 2 } else { 0 }),
+    );
+    let error = budget.run(|| info.evaluate_constant(&[], 53)).unwrap_err();
+    assert_eq!(error, "sentinel: invalid constant source");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        info.evaluate_constant(&[], 53).unwrap().re,
+        Float::with_val(53, 2.5)
+    );
+    assert_eq!(
+        info.evaluate_constant(&[], 53).unwrap().re,
+        Float::with_val(53, 2.5)
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn deep_tracked_functions_use_an_explicit_stack_and_keep_callbacks_lazy() {
     use crate::atom::EvaluationInfo;
     use crate::utils::resources::{ResourceBudget, ResourceLimits};

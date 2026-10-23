@@ -661,11 +661,11 @@ impl EvaluationInfo {
                 .get_or_try_init(|| {
                     let result = eval(&[], 53)?;
                     crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
-                    Ok(result)
+                    Ok::<_, String>(result)
                 })
-                .cloned();
+                .cloned()?;
             crate::utils::resources::checkpoint().map_err(|error| error.to_string())?;
-            return result;
+            return Ok(result);
         }
 
         if let Some(eval) = &self.constant_eval {
