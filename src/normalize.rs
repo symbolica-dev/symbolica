@@ -909,7 +909,7 @@ impl AtomView<'_> {
             exp
         };
 
-        if base == InlineVar::new(Symbol::E).as_view() {
+        if matches!(base, AtomView::Var(v) if v.get_symbol_id() == Symbol::E_ID) {
             // simplify logs inside exp
             if exp.contains_symbol(Symbol::LOG) {
                 let mut buffer = workspace.new_atom();
