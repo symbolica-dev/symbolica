@@ -4,6 +4,8 @@ mod homogeneous;
 mod rational_division;
 
 #[cfg(test)]
+mod batch_tests;
+#[cfg(test)]
 mod division_tests;
 
 use ahash::{HashMap, HashMapExt};
@@ -2687,6 +2689,91 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         )
     }
 
+    /// Replace several variables by elements of the coefficient ring.
+    ///
+    /// Each `(variable, value)` pair refers to an index in [`Self::get_vars`].
+    /// Replacements are simultaneous, so all indices refer to the original variable list.
+    /// If `erase_variables` is `true`, only the replaced variables are removed from that
+    /// list. Otherwise, the variable list is preserved and their exponents become zero.
+    /// An empty replacement list leaves the polynomial unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a variable index is out of bounds or appears more than once.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let f = parse!("x*y + z")
+    ///     .to_polynomial::<_, u8>(&Q, [symbol!("x"), symbol!("y"), symbol!("z")]);
+    /// let g = f.replace_multiple(&[(0, &5.into()), (2, &7.into())], true);
+    /// assert_eq!(g.to_expression(), parse!("5*y + 7"));
+    /// assert_eq!(g.nvars(), 1);
+    /// ```
+    pub fn replace_multiple(
+        &self,
+        replacements: &[(usize, &F::Element)],
+        erase_variables: bool,
+    ) -> Self {
+        if replacements.is_empty() {
+            return self.clone();
+        }
+
+        let mut replaced = vec![false; self.nvars()];
+        for &(variable, _) in replacements {
+            assert!(variable < self.nvars(), "Variable index out of bounds");
+            assert!(!replaced[variable], "Variable index appears more than once");
+            replaced[variable] = true;
+        }
+
+        let retained: Vec<_> = (0..self.nvars()).filter(|&i| !replaced[i]).collect();
+        let result = if erase_variables {
+            let variables = Arc::new(
+                retained
+                    .iter()
+                    .map(|&i| self.variables()[i].clone())
+                    .collect(),
+            );
+            Self::new(self.ring(), Some(self.nterms()), variables)
+        } else {
+            self.zero_with_capacity(self.nterms())
+        };
+        let mut coefficients = Vec::with_capacity(self.nterms());
+        let mut exponents = Vec::with_capacity(self.nterms() * result.nvars());
+        let mut exponent = vec![E::zero(); result.nvars()];
+        let ring = self.ring();
+
+        for term in self {
+            let mut coefficient = term.coefficient.clone();
+            for &(variable, value) in replacements {
+                let power = term.exponents[variable].to_u32();
+                if power != 0 {
+                    ring.mul_assign(&mut coefficient, &ring.pow(value, u64::from(power)));
+                    if ring.is_zero(&coefficient) {
+                        break;
+                    }
+                }
+            }
+            if ring.is_zero(&coefficient) {
+                continue;
+            }
+
+            for (new_index, &old_index) in retained.iter().enumerate() {
+                exponent[if erase_variables {
+                    new_index
+                } else {
+                    old_index
+                }] = term.exponents[old_index];
+            }
+            coefficients.push(coefficient);
+            exponents.extend_from_slice(&exponent);
+        }
+
+        // Substitution can merge monomials and change their ordering.
+        Self::fill_coefficient_list(result, coefficients, exponents)
+    }
+
     /// Replace the last active variable `n` in the polynomial by the ring element `v`.
     /// Variables after `n` must be absent from the polynomial.
     pub fn replace_last(&self, n: usize, v: &F::Element) -> MultivariatePolynomial<F, E, LexOrder> {
@@ -2915,6 +3002,125 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         }
 
         self.merge_shifted_univariate_coefficients(shifted_coefficients)
+    }
+
+    /// Shift several variables by elements of the coefficient ring.
+    ///
+    /// Each `(variable, shift)` pair replaces `x_variable` by `x_variable + shift`.
+    /// Variable indices refer to the order returned by [`Self::get_vars`].
+    /// The variable list is preserved. Empty or zero shifts leave the polynomial unchanged.
+    ///
+    /// Expands each monomial with the binomial theorem, caches powers of each shift,
+    /// and merges equal monomials before sorting the result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an index is out of bounds or occurs more than once, including for
+    /// zero polynomials and zero shifts.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use symbolica::prelude::*;
+    /// let f = parse!("x*y")
+    ///     .to_polynomial::<_, u8>(&Q, [symbol!("x"), symbol!("y")]);
+    /// let shifted = f.shift_vars(&[(0, &1.into()), (1, &2.into())]);
+    /// assert_eq!(shifted, f.shift_var(0, &1.into()).shift_var(1, &2.into()));
+    /// ```
+    pub fn shift_vars(&self, shifts: &[(usize, &F::Element)]) -> Self {
+        let mut seen = vec![false; self.nvars()];
+        for &(variable, _) in shifts {
+            assert!(variable < self.nvars(), "Variable index out of bounds");
+            assert!(!seen[variable], "Variable index appears more than once");
+            seen[variable] = true;
+        }
+
+        if self.is_zero() || shifts.is_empty() {
+            return self.clone();
+        }
+
+        let ring = self.ring();
+        let mut shift_powers = Vec::with_capacity(shifts.len());
+        for &(variable, shift) in shifts {
+            if ring.is_zero(shift) {
+                continue;
+            }
+            let degree = self.degree(variable).to_u32() as usize;
+            if degree == 0 {
+                continue;
+            }
+
+            let mut powers = Vec::with_capacity(degree + 1);
+            powers.push(ring.one());
+            for exponent in 0..degree {
+                powers.push(ring.mul(&powers[exponent], shift));
+            }
+            shift_powers.push((variable, powers));
+        }
+        if shift_powers.is_empty() {
+            return self.clone();
+        }
+
+        let mut terms: HashMap<Vec<E>, F::Element> = HashMap::with_capacity(self.nterms());
+        for term in self {
+            let mut expanded = vec![(term.exponents.to_vec(), term.coefficient.clone())];
+            for (variable, powers) in &shift_powers {
+                let exponent = term.exponents[*variable].to_u32() as usize;
+                if exponent == 0 {
+                    continue;
+                }
+
+                // Compute each binomial factor once for this expansion. Integer division
+                // keeps this valid in rings of any characteristic.
+                let mut factors = Vec::with_capacity(exponent + 1);
+                let mut binomial = Integer::from(1);
+                for j in 0..=exponent {
+                    let factor = ring.mul(&ring.nth(binomial.clone()), &powers[exponent - j]);
+                    if !ring.is_zero(&factor) {
+                        factors.push((E::from_u32(j as u32), factor));
+                    }
+                    if j < exponent {
+                        binomial *= (exponent - j) as i64;
+                        binomial /= (j + 1) as i64;
+                    }
+                }
+
+                let mut next = Vec::new();
+                for (exponents, coefficient) in expanded {
+                    for (exponent, factor) in &factors {
+                        let coefficient = ring.mul(&coefficient, factor);
+                        if ring.is_zero(&coefficient) {
+                            continue;
+                        }
+                        let mut exponents = exponents.clone();
+                        exponents[*variable] = *exponent;
+                        next.push((exponents, coefficient));
+                    }
+                }
+                expanded = next;
+            }
+
+            for (exponents, coefficient) in expanded {
+                terms
+                    .entry(exponents)
+                    .and_modify(|sum| ring.add_assign(sum, &coefficient))
+                    .or_insert(coefficient);
+            }
+        }
+
+        let mut coefficients = Vec::with_capacity(terms.len());
+        let mut exponents = Vec::with_capacity(terms.len() * self.nvars());
+        for (term_exponents, coefficient) in terms {
+            if !ring.is_zero(&coefficient) {
+                coefficients.push(coefficient);
+                exponents.extend_from_slice(&term_exponents);
+            }
+        }
+        Self::fill_coefficient_list(
+            self.zero_with_capacity(coefficients.len()),
+            coefficients,
+            exponents,
+        )
     }
 
     /// Merge sorted coefficient polynomials after assigning each one a distinct
