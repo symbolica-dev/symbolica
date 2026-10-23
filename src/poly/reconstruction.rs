@@ -7,7 +7,8 @@
 //! Additional opt-in polynomial and rational routes reuse the Hu–Monagan GCD's
 //! BMA interpolation primitives and require a listed smooth prime.
 //! Results are probabilistic: fresh probes check the result and failed attempts
-//! restart with new anchors. Degree and probe limits make failure bounded.
+//! restart with new anchors. Normal searches widen inconclusive degree guesses;
+//! explicit diagnostics can cap work, while RAM/time budgets remain shared.
 
 use crate::{
     domains::{
@@ -33,7 +34,10 @@ mod rational;
 mod rational_factors;
 mod sparse_row;
 mod support;
-pub use rational::{RationalReconstructionStats, reconstruct_rational_function_over_q};
+pub use rational::{
+    RationalReconstructionStats, reconstruct_rational_function_over_q,
+    reconstruct_rational_function_over_q_fallible,
+};
 
 type Element = FiniteFieldElement<u64>;
 type Polynomial = MultivariatePolynomial<Zp64, u16>;
@@ -75,15 +79,23 @@ pub enum ReconstructionMethod {
 /// Resource bounds and reproducible random sampling controls.
 #[derive(Clone, Debug)]
 pub struct ReconstructionOptions {
-    /// Maximum degree of either univariate numerator or denominator.
+    /// Enforce explicitly configured degree/probe/attempt/prime diagnostics.
+    /// Disabled by default; ordinary work stops only for resources or correctness.
+    pub diagnostics_enabled: bool,
+    /// One cooperative resource scope, inherited by all modular images and retries.
+    pub resources: crate::utils::resources::ResourceLimits,
+    /// Initial degree estimate for ordinary adaptive reconstruction. With
+    /// diagnostics enabled, this is the maximum degree of either univariate
+    /// numerator or denominator.
     /// For Cuyt–Lee this bounds total degree; for balanced Zippel and BMA it
     /// bounds individual degree. BMA may use tighter `bma_degree_bounds`.
     pub max_degree: u16,
-    /// Maximum number of distinct black-box calls, including poles and retries.
+    /// Diagnostic maximum distinct black-box calls, including poles and retries.
+    /// Ignored when diagnostics are disabled.
     pub max_probes: usize,
     /// Number of fresh successful checks for early termination and final validation.
     pub verification_points: usize,
-    /// Maximum number of attempts with independently sampled anchors.
+    /// Maximum independently sampled anchors, enforced only in diagnostic mode.
     pub max_attempts: usize,
     /// Seed for reproducibility; use different seeds for independent confirmations.
     pub seed: u64,
@@ -112,6 +124,8 @@ pub struct ReconstructionOptions {
 impl Default for ReconstructionOptions {
     fn default() -> Self {
         Self {
+            diagnostics_enabled: false,
+            resources: Default::default(),
             max_degree: 128,
             max_probes: 1_000_000,
             verification_points: 3,
@@ -124,6 +138,14 @@ impl Default for ReconstructionOptions {
             bma_degree_bounds: None,
             bma_polynomial_probe_limit: 32,
         }
+    }
+}
+
+impl ReconstructionOptions {
+    /// Explicitly enforce the retained diagnostic degree and work counters.
+    pub fn with_diagnostics(mut self) -> Self {
+        self.diagnostics_enabled = true;
+        self
     }
 }
 
@@ -154,6 +176,10 @@ pub struct ReconstructionStats {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconstructionError {
+    /// A typed cooperative RAM/time failure; never an unlucky specialization.
+    ResourceLimit(crate::utils::resources::ResourceLimitError),
+    /// A caller-declared oracle failure, distinct from an exceptional point.
+    OracleFailure(String),
     InvalidOptions,
     ProbeLimit,
     /// Too few prime images to lift and independently validate the coefficients.
@@ -166,7 +192,15 @@ pub enum ReconstructionError {
 
 impl std::fmt::Display for ReconstructionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResourceLimit(error) => return std::fmt::Display::fmt(error, f),
+            Self::OracleFailure(message) => {
+                return write!(f, "rational reconstruction oracle failed: {message}");
+            }
+            _ => {}
+        }
         f.write_str(match self {
+            Self::ResourceLimit(_) | Self::OracleFailure(_) => unreachable!(),
             Self::InvalidOptions => "reconstruction requires variables, positive limits, and a sufficiently large prime field",
             Self::ProbeLimit => "rational reconstruction exhausted its black-box probe budget",
             Self::PrimeLimit => "rational reconstruction exhausted its prime budget",
@@ -175,7 +209,19 @@ impl std::fmt::Display for ReconstructionError {
         })
     }
 }
-impl std::error::Error for ReconstructionError {}
+impl std::error::Error for ReconstructionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ResourceLimit(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+impl From<crate::utils::resources::ResourceLimitError> for ReconstructionError {
+    fn from(error: crate::utils::resources::ResourceLimitError) -> Self {
+        Self::ResourceLimit(error)
+    }
+}
 
 type Result<T> = std::result::Result<T, ReconstructionError>;
 
@@ -189,6 +235,8 @@ type Result<T> = std::result::Result<T, ReconstructionError>;
 /// `field` to occur in `SMOOTH_PRIMES`. Returned numerator and denominator are
 /// coprime and denominator-monic.
 /// Three random checks are the default, not a deterministic identity proof.
+/// Compatibility entrypoint for oracles that cannot report errors.
+/// `None` is an unavailable specialization, never an operational failure.
 pub fn reconstruct_rational_function<F>(
     field: Zp64,
     variables: Arc<Vec<PolyVariable>>,
@@ -199,12 +247,52 @@ pub fn reconstruct_rational_function<F>(
 where
     F: FnMut(&Zp64, &[Element]) -> Option<Element>,
 {
+    reconstruct_rational_function_fallible(
+        field,
+        variables,
+        |field, point| Ok(black_box(field, point)),
+        method,
+        options,
+    )
+}
+
+/// Reconstruct using a fallible oracle. An error is propagated immediately,
+/// preserving the distinction between invalid input and a pole (`Ok(None)`).
+pub fn reconstruct_rational_function_fallible<F>(
+    field: Zp64,
+    variables: Arc<Vec<PolyVariable>>,
+    black_box: F,
+    method: ReconstructionMethod,
+    options: &ReconstructionOptions,
+) -> Result<(Fraction, ReconstructionStats)>
+where
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
+{
+    crate::utils::resources::ResourceBudget::new(options.resources).run(|| {
+        crate::utils::resources::checkpoint()?;
+        let result =
+            reconstruct_rational_function_scoped(field, variables, black_box, method, options)?;
+        crate::utils::resources::checkpoint()?;
+        Ok(result)
+    })
+}
+
+fn reconstruct_rational_function_scoped<F>(
+    field: Zp64,
+    variables: Arc<Vec<PolyVariable>>,
+    mut black_box: F,
+    method: ReconstructionMethod,
+    options: &ReconstructionOptions,
+) -> Result<(Fraction, ReconstructionStats)>
+where
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
+{
     if variables.is_empty()
         || options.max_degree == 0
         || options.max_degree > u16::MAX / 2
-        || options.max_probes == 0
+        || options.diagnostics_enabled && options.max_probes == 0
         || options.verification_points == 0
-        || options.max_attempts == 0
+        || options.diagnostics_enabled && options.max_attempts == 0
         || field.get_prime()
             < 8 * (options.max_degree as u64 + options.verification_points as u64 + 1)
     {
@@ -221,7 +309,7 @@ where
         field,
         template,
         black_box: &mut black_box,
-        options,
+        options: options.clone(),
         rng: StdRng::seed_from_u64(options.seed),
         cache: HashMap::new(),
         stats: Default::default(),
@@ -234,8 +322,12 @@ where
         removed_numerator_factor: None,
         fixed_last_variable: None,
     };
-    for attempt in 0..options.max_attempts {
-        ctx.stats.attempts = attempt + 1;
+    loop {
+        crate::utils::resources::checkpoint()?;
+        if options.diagnostics_enabled && ctx.stats.attempts >= options.max_attempts {
+            return Err(ReconstructionError::AttemptsExhausted);
+        }
+        ctx.stats.attempts = ctx.stats.attempts.saturating_add(1);
         ctx.swapped_variable = None;
         let (selected, mut profile) = if method == ReconstructionMethod::Automatic {
             let before = ctx.stats.probes;
@@ -243,9 +335,13 @@ where
             ctx.stats.selection_probes += ctx.stats.probes - before;
             match choice {
                 Ok(choice) => choice,
-                Err(ReconstructionError::ProbeLimit) => {
-                    return Err(ReconstructionError::ProbeLimit);
-                }
+                Err(
+                    error @ (ReconstructionError::ProbeLimit
+                    | ReconstructionError::ResourceLimit(_)
+                    | ReconstructionError::OracleFailure(_)
+                    | ReconstructionError::InvalidOptions
+                    | ReconstructionError::UnsupportedBmaGeometry),
+                ) => return Err(error),
                 // A failed degree forecast need not prevent balanced reconstruction.
                 Err(_) => (ReconstructionMethod::BalancedZippel, None),
             }
@@ -262,8 +358,17 @@ where
             let result = match selected {
                 ReconstructionMethod::PolynomialBma => {
                     let fixed = ctx.point();
-                    ctx.bma_polynomial(ctx.template.nvars(), &fixed, options.max_probes)
-                        .and_then(|p| p.ok_or(ReconstructionError::AttemptsExhausted))
+                    ctx.bma_polynomial(
+                        ctx.template.nvars(),
+                        &fixed,
+                        if options.diagnostics_enabled {
+                            options.max_probes
+                        } else {
+                            usize::try_from(ctx.field.get_prime() - 1)
+                                .map_err(|_| ReconstructionError::UnsupportedBmaGeometry)?
+                        },
+                    )
+                    .and_then(|p| p.ok_or(ReconstructionError::AttemptsExhausted))
                 }
                 ReconstructionMethod::HuMonagan => {
                     let fixed = ctx.point();
@@ -287,9 +392,13 @@ where
                     let r = Fraction::from_num_den(r.numerator, r.denominator, &ctx.field, true);
                     return Ok((r, ctx.stats));
                 }
-                Err(ReconstructionError::ProbeLimit) => {
-                    return Err(ReconstructionError::ProbeLimit);
-                }
+                Err(
+                    error @ (ReconstructionError::ProbeLimit
+                    | ReconstructionError::ResourceLimit(_)
+                    | ReconstructionError::OracleFailure(_)
+                    | ReconstructionError::InvalidOptions
+                    | ReconstructionError::UnsupportedBmaGeometry),
+                ) => return Err(error),
                 _ => {}
             }
             if separate {
@@ -297,8 +406,20 @@ where
                 ctx.stats.selected_method = Some(ReconstructionMethod::BalancedZippel);
             }
         }
+        if !options.diagnostics_enabled && ctx.stats.attempts.is_multiple_of(4) {
+            // Four anchors retain the original kernel's retry schedule for
+            // each degree estimate; this never limits the ordinary request.
+            // Disabled diagnostic counters do not affect that schedule.
+            // Failed anchors or an inconclusive degree forecast do not stop
+            // ordinary work. Widen the next ansatz within the actual field and
+            // doubled-u16 exponent representation; keep trying new anchors at
+            // that representation boundary under the same resource scope.
+            let field_bound = (ctx.field.get_prime() / 8)
+                .saturating_sub(options.verification_points as u64 + 1)
+                .min(u64::from(u16::MAX / 2)) as u16;
+            ctx.options.max_degree = ctx.options.max_degree.saturating_mul(2).min(field_bound);
+        }
     }
-    Err(ReconstructionError::AttemptsExhausted)
 }
 
 struct BalancedPilot {
@@ -313,7 +434,7 @@ struct Context<'a, F> {
     field: Zp64,
     template: Polynomial,
     black_box: &'a mut F,
-    options: &'a ReconstructionOptions,
+    options: ReconstructionOptions,
     rng: StdRng,
     cache: HashMap<Vec<Element>, Option<Element>>,
     stats: ReconstructionStats,
@@ -352,7 +473,7 @@ fn value(r: &Fraction, point: &[Element]) -> Option<Element> {
     (!f.is_zero(&d)).then(|| f.div(&r.numerator.replace_all(point), &d))
 }
 
-impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
+impl<F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>> Context<'_, F> {
     fn random(&mut self) -> Element {
         self.field
             .to_element(self.rng.random_range(1..self.field.get_prime()))
@@ -440,16 +561,18 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
         }
     }
     fn probe_raw(&mut self, point: &[Element]) -> Result<Option<Element>> {
+        crate::utils::resources::checkpoint()?;
         let point = self.original_point(point);
         if let Some(v) = self.cache.get(point.as_ref()) {
-            self.stats.cache_hits += 1;
+            self.stats.cache_hits = self.stats.cache_hits.saturating_add(1);
             return Ok(*v);
         }
-        if self.stats.probes >= self.options.max_probes {
+        if self.options.diagnostics_enabled && self.stats.probes >= self.options.max_probes {
             return Err(ReconstructionError::ProbeLimit);
         }
-        self.stats.probes += 1;
-        let v = (self.black_box)(&self.field, &point);
+        self.stats.probes = self.stats.probes.saturating_add(1);
+        let v = (self.black_box)(&self.field, &point)?;
+        crate::utils::resources::checkpoint()?;
         self.stats.poles += usize::from(v.is_none());
         self.cache.insert(point.into_owned(), v);
         Ok(v)
@@ -688,9 +811,13 @@ impl<F: FnMut(&Zp64, &[Element]) -> Option<Element>> Context<'_, F> {
                     self.stats.sparse_rows += 1;
                     return Ok(row);
                 }
-                Err(ReconstructionError::ProbeLimit) => {
-                    return Err(ReconstructionError::ProbeLimit);
-                }
+                Err(
+                    error @ (ReconstructionError::ProbeLimit
+                    | ReconstructionError::ResourceLimit(_)
+                    | ReconstructionError::OracleFailure(_)
+                    | ReconstructionError::InvalidOptions
+                    | ReconstructionError::UnsupportedBmaGeometry),
+                ) => return Err(error),
                 Err(_) => self.stats.sparse_row_fallbacks += 1,
             }
         }
