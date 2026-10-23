@@ -94,8 +94,8 @@ impl AtomView<'_> {
                         return false;
                     }
 
-                    if matches!(arg, AtomView::Add(_)) {
-                        return var.map(|s| !arg.contains(s)).unwrap_or(false);
+                    if matches!(arg, AtomView::Add(_)) && var.is_none_or(|s| arg.contains(s)) {
+                        return false;
                     }
                 }
 
@@ -610,6 +610,17 @@ impl AtomView<'_> {
 mod test {
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    fn selective_expansion_checks_all_product_factors() {
+        let x = parse!("x");
+        let mut input = crate::atom::Atom::new();
+        let product = input.to_mul();
+        product.extend(parse!("z+w").as_view());
+        product.extend(parse!("x+y").as_view());
+        assert!(!input.is_expanded(Some(&x)));
+        assert!(input.expand_in(&x).is_expanded(Some(&x)));
+    }
 
     #[test]
     fn expand_num() {
