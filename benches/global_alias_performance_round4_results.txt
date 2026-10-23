@@ -1,0 +1,287 @@
+Global alias performance: fourth pass — 2026-10-23
+=================================================
+
+Source and fair reference
+-------------------------
+Measured main: 1b184e527fed2293e002a5e4c583ba83fbf70932.
+Measured global: d35ad4c7989e8078f0a1e520984ab700961ee0f5.
+Final global source: f825da21, adding a scoped expand_via_poly correctness guard
+and two tests after the measured revision. That guard does not change the native
+expand() path used in these timing binaries. The final guard was validated but
+the release timing binaries were not rebuilt for it. This report and comparison
+runner are subsequent documentation/tooling changes.
+The old-alias reference is the saved round-three alias-finished binary, before
+this pass and before the intervening main updates. Comparisons with old-alias
+therefore measure the combined change, not an isolated optimization ablation.
+
+Main advanced through 81f08a88 before the shared improvements in 11397e20 and
+1b184e52. Global includes that updated main and both shared changes. Resolved
+dependency versions match: the lockfile difference is only the direct arc-swap
+dependency needed by global aliases. The original user checkout was untouched.
+
+Changes
+-------
+Both branches now use checked small-integer coefficient arithmetic before the
+general number-domain implementations. The small inline dispatch avoids the
+large stack frame of the general addition/multiplication fallback. The E-power
+normalizer also compares the symbol directly, avoiding a temporary expression.
+Overflow, complex, fractional, and infinite values retain their general paths.
+
+Global avoids redundant alias cleanup work for ordinary atoms, simplifies the
+alias flag test, and keeps root-alias structural comparison out of the ordinary
+path. Public expression equality dispatches ordinary data straight to byte
+comparison. Nested semantic equality compares ordinary children directly and
+recurses only where alias semantics require it. Nested hashing writes expanded
+function/product encodings into a shared buffer, avoiding intermediate encoding
+buffers at each ancestor; sums retain their temporary encoding and ordering
+buffers. Ownership context stays
+live while alias bodies are borrowed. Arbitrary-hasher write sequences and
+opaque-alias identity remain covered by tests.
+
+Canonical packed headers remain an invariant. This pass removes unnecessary
+checks for nonminimal encodings; it does not add support for invalid encodings.
+
+Expansion now exposes transparent alias bodies at structural decisions, such
+as an aliased sum under a power or inside a product. The new benchmark checks
+found that these cases could previously return an unexpanded aliased expression;
+that incomplete work must not be counted as an alias speedup. An independent
+selective-is_expanded bug (a product returning early on an unrelated factor)
+was fixed on main too. Main integration also updates the new evaluator/Horner
+and MathML paths; MathML cursor replay retains alias body ownership and avoids
+using a separate alias allocation as a raw cursor bookmark.
+
+Final audit also found that polynomial expansion can miss aliased exponents
+and open opaque aliases inside mixed expressions. expand_via_poly now delegates
+alias-containing inputs to native expansion after its existing early exits;
+ordinary inputs retain polynomial conversion. Tests cover aliased integer
+exponents and opaque identity during whole-expression and selective expansion.
+The performance of this fallback is not measured in this report.
+
+Validation
+----------
+Final global source: 1,104 library + 103 integration tests passed, 1,207 total;
+two existing ignored tests. python_export,bincode checking passed, as did all
+17 expansion tests with full_fn_cmp. At the measured revision, full_fn_cmp
+semantic keys (10), normalization (33), aliases (63), expansion (15), and
+MathML (3) tests also passed.
+Main at 11397e20: 986 library + 103 integration tests passed, 1,089 total;
+two existing ignored tests. python_export,bincode checking and 18 full_fn_cmp
+normalization tests passed. After the final selective-expansion fix, all nine
+main expansion tests passed. The full main suite was not repeated at 1b184e52.
+All measured release benchmark executables built successfully.
+
+Measurement method
+------------------
+Six rounds, three samples per workload, 100 ms target, CPU 6 (SMT sibling 18).
+Variants run adjacent to one another for each workload; their order rotates
+and is balanced across the six rounds. Times are medians of within-round
+medians. Percentage changes use median within-round ratios, so they need not
+equal the ratio of the displayed median times. Negative means less elapsed time.
+
+The initial runs were affected by background CPU contention and are retained
+only as diagnostic data. Final runs use compare_alias_workloads.py --quiet:
+before each complete variant group, both logical CPUs must be below 15% busy
+over a one-second observation and no rustc process may be present. A group is
+retried if any run has process CPU/wall below 95%, sibling activity above 20%,
+or rustc present before/after execution. Acceptance never uses operation timing.
+All rejected groups, raw output, and telemetry are retained. This reduces
+observable contention; it does not control CPU frequency or detect every brief
+background process. Small percentage differences should not be overinterpreted.
+
+No-alias arithmetic results
+---------------------------
+Median ns/op. Old-alias is the saved round-three source, before the main update.
+Workload                    updated main    old alias    current alias   vs main  vs old alias
+construct                         957.27      1155.36          1111.68    +15.37%        -4.73%
+add_pair                           80.04        83.66            84.51     +6.42%        +0.74%
+add_chain                       10900.84     11945.65         11326.76     +3.97%        -6.38%
+add_many                         3081.26      4140.24          3584.92    +15.43%       -13.22%
+normalize_product                1559.05      2085.58          1861.11    +19.81%       -10.14%
+expand_power                   296122.32    358464.50        349229.04    +17.80%        -2.42%
+expand_product                 201600.77    285837.40        241837.12    +19.25%       -15.19%
+differentiate                    6176.21      7897.79          7415.08    +21.37%        -5.63%
+replace                         21586.31     23415.05         23714.22    +11.30%        +0.04%
+
+The workload geometric mean improves 6.48% versus old-alias and remains 14.38%
+slower than updated main. Bulk addition, normalization, and product expansion
+improve by 13.22%, 10.14%, and 15.19% versus old-alias. Pair addition is 84.51 ns
+versus main's 80.04 ns (+6.42% paired); its +0.74% change versus old-alias is
+within the observed round variation. Replacement is essentially unchanged.
+These gains include the intervening main updates as well as this pass.
+
+No-alias expression-key results
+-------------------------------
+Workload                         updated main    old alias   current alias  vs main  vs old alias
+hash_small                              2.331        3.179           3.160   +36.90%        -0.33%
+hash_large                            178.287      183.325         181.567    +2.18%        -0.97%
+hash_view_small                         2.978        4.062           4.066   +37.71%        -0.26%
+hash_view_large                       181.601      182.651         181.814    +0.13%        -0.45%
+eq_small_equal                          2.933        3.148           2.926    +0.34%        -6.86%
+eq_large_equal                         68.578       68.330          68.764    -0.15%        -0.01%
+eq_large_unequal_early                  1.020        1.793           1.350   +32.70%       -24.51%
+eq_large_unequal_late                  68.933       69.614          69.130    +0.27%        -0.64%
+eq_view_small_equal                     2.960        4.952           4.317   +44.27%       -13.51%
+eq_view_large_equal                    68.515       69.986          69.145    +0.85%        -0.94%
+ord_owned_small_equal                   4.709        5.471           5.925   +24.80%        +7.64%
+ord_owned_large_equal                  69.409       72.215          73.492    +4.68%        +0.96%
+ord_owned_large_unequal_late          144.755      148.063         148.502    +2.93%        +0.12%
+
+Small owned equality now matches main at about 2.93 ns. Early mismatch improves
+24.51% and small-view equality improves 13.51% versus old-alias. Small owned
+hashing remains 3.16 versus 2.33 ns on main. Small owned Ord regresses 7.64%
+versus old-alias (5.47 -> 5.92 ns); that regression is present across all six
+rounds. The view workload black-boxes full views, so it includes materialization
+of global's larger view in addition to the key operation.
+
+Live-alias results
+------------------
+Workload                              old alias    current alias   vs old alias
+construct_with_live_alias                  1163.08          1141.94          -1.74%
+copy_alias_power                             47.08            45.98          -1.88%
+add_alias_plain                             407.89           397.74          -1.86%
+multiply_alias_powers                       451.29           385.22         -14.68%
+copy_large_alias_power                       47.57            44.49          -1.59%
+multiply_large_alias_powers                 443.40           389.49         -11.80%
+copy_repeated_multi_aliases                8485.29          8586.36          +1.53%
+copy_alias_child_from_multi_owner           106.15           112.36          +7.75%
+
+Alias-power multiplication improves 14.68% (small body) and 11.80% (large body).
+Copying a child from a multi-owner expression regresses 7.75% (106.15 ->
+112.36 ns); the observed paired range is +2.44% to +29.48%. Other small live
+changes have round ranges crossing zero. The mixed live-suite geometric mean
+improves 3.27%.
+
+Transparent expression-key results
+----------------------------------
+Workload                              old alias    current alias   vs old alias
+hash_plain_body                             180.01           180.88          +0.38%
+hash_transparent_alias                      192.00           192.54          +0.19%
+hash_nested_plain                           362.05           362.99          +0.17%
+hash_nested_alias                          1449.77          1013.63         -30.02%
+eq_plain_body                                67.95            68.01          +0.32%
+eq_transparent_alias_plain                   79.83            87.01          +9.77%
+eq_nested_plain                             189.46           190.70          +0.70%
+eq_nested_alias_plain                      1301.86           327.96         -75.14%
+
+Nested alias equality improves 75.14%, from 1301.86 to 327.96 ns. Nested hashing
+improves 30.02%, from 1449.77 to 1013.63 ns. Relative to equivalent plain bodies
+within the current binary, those are about 1.72x and 2.79x respectively. Direct
+alias-to-body equality regresses 9.77%, from 79.83 to 87.01 ns, while direct
+hashing is nearly unchanged. These regressions remain visible in the results;
+the plain equality and nested alias improvements do not eliminate every cost.
+
+Ordinary/key/live telemetry: 228 accepted complete groups, 588 runs, 1764 timed
+samples, each verified against raw output. Thirteen groups (34 runs) were
+rejected and retained. Accepted CPU/wall is at least 97.95% (median 99.61%);
+sibling activity is at most 18.18% (median 0%). No accepted run observed a rustc
+process. Quiet prechecks waited 616.8 seconds in total; the longest wait was
+239.4 seconds. At most three attempts were needed for a group.
+
+Paired expansion with and without aliases
+-----------------------------------------
+The same shared harness constructs both representations. Setup asserts that
+aliases remain compressed, that semantic input/output equality holds, and that
+fully inlined input/result bytes match their ordinary counterparts. Independent
+numerical formulas are checked at three points. Timed work is only native
+expand(), including output allocation/destruction. This is not expand_via_poly.
+
+Workloads:
+  small power: (1+x+y+z+w)^7
+  small product: (1+x+y)^3 * (2+x+z)^3 * (3+y+w)^2
+  large power: P(x,y)^4, where P has 12 monomials
+  repeated product: (P(x,y)^2+z) * (P(x,y)^2+w), sharing one aliased P
+  P(x,y) = sum_{i=0..11} (i+1) * x^(i mod 4) * y^floor(i/4)
+
+Median microseconds; changes pair the medians within each round:
+Workload                   main     global plain  global aliased plain/main aliased/plain
+small power                308.6          359.0           363.3    +16.20%        +1.05%
+small product              210.4          243.2           245.1    +16.31%        +1.08%
+large power               2630.0         3099.6          3174.8    +17.46%        +3.26%
+repeated product           807.6          955.9           962.2    +18.50%        +1.02%
+
+Across these four cases, descriptive geometric-mean time is 17.11% higher for
+global plain than main, and 1.60% higher for global aliased than global plain.
+Observed aliased/plain round ranges are [-0.1%,+5.8%], [-7.4%,+2.7%],
+[-2.7%,+10.6%], and [-0.2%,+3.4%]. These are observed ranges, not confidence
+intervals. Incremental alias cost is close to parity; the precise 1–3% differences
+are not established as robust regressions. The branch's underlying no-alias
+overhead is the larger and more consistent cost.
+
+Encoded root sizes (bytes):
+Workload                 ordinary input  aliased input  expanded output
+small power                          23              7             6915
+small product                        55             25             5703
+large power                         179              7             2458
+repeated product                    377             32             3892
+All three variants have identical expanded output sizes. Input sizes exclude
+the separately stored alias bodies and ownership objects; these are encoding
+compression figures, not total memory savings.
+
+Expansion telemetry: 24 accepted groups, 72 runs, 216 timed samples. Accepted
+process CPU/wall is at least 98.50% (median 99.51%); no compiler was detected
+before or after an accepted run. Sibling activity is at most 20%. Two whole
+groups (six runs) were rejected and preserved: one for detected compilation,
+one for sibling activity. No timing-based outlier removal was performed.
+
+Profile diagnostics
+-------------------
+Two reversed-order main/global counter pairs, five 300 ms samples, CPU 6:
+Workload              main instr global instr delta   main cycles global cycles delta
+construct                  12929        14529 +12.38%        4454          5376 +20.71%
+normalize_product          20720        22905 +10.55%        7119          8347 +17.27%
+add_many                   41348        46082 +11.45%       14759         17760 +20.26%
+
+These approximate counts include process setup/calibration divided by measured
+iterations and were collected without quiet gating; they are diagnostic rather
+than precise kernel costs. Branch counts rise about 10–12%, while branch misses
+remain rare. User-cycle samples put main/global normalize at 13.60/14.92%,
+merge_factors at 11.08/14.24%, and power-base decoding at 5.89/8.17%. Shares in
+separate profiles are not per-function speed ratios. The profiles implicate
+normalization, factor management, and representation handling, but do not isolate
+the causal contribution of larger Atom/AtomView objects (40/32 vs 32/24 bytes).
+perf record used cycles:u at 1999 Hz without call graphs; no samples were lost.
+
+Reproduction and artifacts
+--------------------------
+Global worktree: /home/ben/.codex/worktrees/global-alias-performance/symbolica
+Main worktree: /home/ben/.codex/worktrees/main-pair-add/symbolica
+Cache: /home/ben/.cache/symbolica-alias-performance
+Source/compiler/lock hashes: cache/candidates/round4-final-source-metadata.json
+Compiler: rustc 1.99.0 (b940084d7 2026-09-28), LLVM 23.1.1, x86_64 Linux.
+CPU: AMD Ryzen 9 5900X, 24 logical CPUs.
+Release: opt-level=3, LTO=true, codegen-units=1, target-cpu=native, mold linker;
+default GMP, MPFR, and mimalloc features. Separate target directories per branch.
+Validation logs: cache/logs/round4-{updated-main,main,alias-final}*.log.
+Final guard validation: cache/logs/round4-poly-guard-*.log and
+cache/candidates/round4-poly-guard-validation.json.
+Profiles: cache/profiles-round4/. Saved binaries: cache/bin/round4-updated-*.
+
+For main, copy these unchanged from global d35ad4c7 before building:
+  examples/alias_performance.rs
+  examples/equality_hash_performance.rs
+  examples/expansion_performance.rs
+  examples/support/expansion_workloads.rs
+They are temporary benchmark inputs, not committed main changes. Their hashes
+were checked before removing the temporary copies from the main worktree.
+
+Build in each matching worktree with a separate CARGO_TARGET_DIR:
+  cargo build --release --example alias_performance --example equality_hash_performance --example expansion_performance
+Additional global executables:
+  cargo build --release --example global_alias_performance --example alias_equality_hash_performance --example alias_expansion_performance
+
+Final raw results, relative to global worktree (git-ignored):
+  benches/results/global-alias-round4-expansion-quiet-2026-10-23
+  benches/results/global-alias-round4-quiet-2026-10-23
+Each directory preserves reproduction scripts, invocation, binary hashes,
+samples.csv, summary.json, metadata.json, runs.jsonl, quiet_checks.jsonl,
+and stdout/stderr for every attempt. Run with a fresh output directory:
+  python3 benches/compare_alias_workloads.py --quiet --rounds 6 --samples 3 --target-ms 100 --cpu 6 --out OUTPUT --suite 'expansion:main=MAIN_PLAIN,plain=GLOBAL_PLAIN,aliased=GLOBAL_ALIASED'
+Use --suite ordinary:..., keys:..., live:..., or alias-keys:... for the other
+workloads; the recorded metadata has exact invocations and binary paths.
+
+Setup, validation, and calibration are outside timed samples. Expansion output
+allocation/destruction is included. Key comparisons use separate owned buffers.
+Run all executables sequentially after builds/tests; concurrent processes can
+also conflict with the license. These workload geometric means are not overall
+application speedups. Store contention, discovery, Python, and serialization
+performance are outside this suite.
