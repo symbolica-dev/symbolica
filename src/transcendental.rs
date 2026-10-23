@@ -4,6 +4,11 @@ use std::{
 };
 
 mod cpp;
+mod elementary;
+mod tracked;
+mod tracked_callbacks;
+
+use tracked::SpecialFunction;
 
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
@@ -343,7 +348,7 @@ impl SpecialSymbols {
 
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
-                        if maybe_eval_unary_float_in_norm(arg, out, gamma_numeric_eval) {
+                        if tracked_callbacks::normalize(SpecialFunction::Gamma, None, arg, out) {
                             return;
                         }
 
@@ -399,7 +404,7 @@ impl SpecialSymbols {
                     },
                 )
                 .with_evaluation_info(
-                    EvaluationInfo::new()
+                    tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::Gamma)
                     .with_cpp(cpp::unary("gamma", "tgamma", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, gamma_numeric_eval)
@@ -424,7 +429,7 @@ impl SpecialSymbols {
                 b.with_normalization_function(move |x, out| {
                     if let Some([n, z]) = function_arguments::<2>(x)
                         && let Ok(order) = u32::try_from(n) {
-                            if maybe_eval_polygamma_float_in_norm(order, z, out) {
+                            if tracked_callbacks::normalize(SpecialFunction::Polygamma(order), None, z, out) {
                                 return;
                             }
 
@@ -487,7 +492,7 @@ impl SpecialSymbols {
                     Some((Atom::num(1) / pole_power, regularized))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().with_tags(1)
+                    tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::Polygamma(0)).with_tags(1)
                     .register_tagged(|tags| {
                         let order = nonnegative_integer_tag("polygamma", tags).ok();
                         Box::new(move |args: &[Complex<Float>]| {
@@ -543,7 +548,7 @@ impl SpecialSymbols {
                             return;
                         }
 
-                        if maybe_eval_binary_float_in_norm(s, z, out, polylog_numeric_eval) {
+                        if tracked_callbacks::normalize(SpecialFunction::Polylog, Some(s), z, out) {
                         }
                     }
                 })
@@ -581,7 +586,7 @@ impl SpecialSymbols {
                     Some((Atom::num(1), sum.to_atom()))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new().with_tags(1)
+                    tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::Polylog).with_tags(1)
                     .register_tagged(|tags| {
                         let tags = tags.iter().map(|x| x.to_owned()).collect::<Vec<_>>();
                         Box::new(move |args: &[Complex<Float>]| {
@@ -675,7 +680,7 @@ impl SpecialSymbols {
 
                 b.with_normalization_function(|x, out| {
                     if let Some([arg]) = function_arguments::<1>(x) {
-                        if maybe_eval_unary_float_in_norm(arg, out, zeta_numeric_eval) {
+                        if tracked_callbacks::normalize(SpecialFunction::Zeta, None, arg, out) {
                             return;
                         }
 
@@ -707,7 +712,7 @@ impl SpecialSymbols {
                     Some((Atom::num(1) / pole, regularized))
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new()
+                    tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::Zeta)
                     .with_cpp(cpp::unary("zeta", "riemann_zeta", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, zeta_numeric_eval)
@@ -735,7 +740,7 @@ impl SpecialSymbols {
                             return;
                         }
 
-                        if maybe_eval_unary_float_in_norm(arg, out, erf_numeric_eval) {
+                        if tracked_callbacks::normalize(SpecialFunction::Erf, None, arg, out) {
                             return;
                         }
 
@@ -754,7 +759,7 @@ impl SpecialSymbols {
                     }
                 })
                 .with_evaluation_info(
-                    EvaluationInfo::new()
+                    tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::Erf)
                     .with_cpp(cpp::unary("erf", "erf", "x", false))
                     .register(|args: &[Complex<Float>]| {
                         unary_eval_complex_float(args, erf_numeric_eval)
@@ -887,7 +892,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tan());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Tan);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -918,6 +923,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.tan())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Tan)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Tan)
                     }),
                 )
             },
@@ -931,7 +942,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tan().inv());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Cot);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -962,6 +973,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.tan().inv())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Cot)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Cot)
                     }),
                 )
             },
@@ -975,7 +992,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cos().inv());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Sec);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1007,6 +1024,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.cos().inv())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sec)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sec)
                     }),
                 )
             },
@@ -1020,7 +1043,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sin().inv());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Csc);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1052,6 +1075,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.sin().inv())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Csc)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Csc)
                     }),
                 )
             },
@@ -1064,7 +1093,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sinh());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Sinh);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1086,6 +1115,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.sinh())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sinh)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sinh)
                     }),
                 )
             },
@@ -1098,7 +1133,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.cosh());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Cosh);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1120,6 +1155,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.cosh())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Cosh)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Cosh)
                     }),
                 )
             },
@@ -1133,7 +1174,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::zero());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tanh());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Tanh);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1164,6 +1205,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.tanh())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Tanh)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Tanh)
                     }),
                 )
             },
@@ -1177,7 +1224,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.tanh().inv());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Coth);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1208,6 +1255,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.tanh().inv())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Coth)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Coth)
                     }),
                 )
             },
@@ -1222,7 +1275,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::one());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.sech());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Sech);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1251,6 +1304,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.sech())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sech)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Sech)
                     }),
                 )
             },
@@ -1265,7 +1324,7 @@ impl GeometricSymbols {
                             out.to_num(Coefficient::complex_infinity());
                             return;
                         }
-                        let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.csch());
+                        let _ = elementary::normalize(&[arg], out, elementary::Operator::Csch);
                     }
                 })
                 .with_derivative_function(move |x, i, out| {
@@ -1294,6 +1353,12 @@ impl GeometricSymbols {
                     })
                     .register(|args: &[ErrorPropagatingFloat<Float>]| {
                         unary_eval_real(args, |x| x.csch())
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                        elementary::evaluate(args, elementary::Operator::Csch)
+                    })
+                    .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                        elementary::evaluate(args, elementary::Operator::Csch)
                     }),
                 )
             }
@@ -1318,7 +1383,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.asin());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Asin);
                 }
             },
             der = move |x, i, out| {
@@ -1346,6 +1411,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.asin())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asin)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asin)
+                })
         );
 
         let acos = symbol!(
@@ -1356,7 +1427,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.acos());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acos);
                 }
             },
             der = move |x, i, out| {
@@ -1384,6 +1455,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.acos())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acos)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acos)
+                })
         );
 
         let atan = symbol!(
@@ -1394,13 +1471,11 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, atan_numeric_eval);
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Atan);
                 }
-                if let Some([x, y]) = function_arguments::<2>(x)
-                    && maybe_eval_binary_float_in_norm(x, y, out, |x, y, prec| {
-                        Some(atan2_numeric_eval(x, y, prec))
-                    })
-                {}
+                if let Some([x, y]) = function_arguments::<2>(x) {
+                    let _ = elementary::normalize(&[x, y], out, elementary::Operator::Atan);
+                }
             },
             der = move |x, i, out| {
                 if i == 0
@@ -1453,15 +1528,19 @@ impl GeometricSymbols {
                 })
                 .register(|args: &[ErrorPropagatingFloat<f64>]| atan_eval_real(args))
                 .register(|args: &[ErrorPropagatingFloat<Float>]| atan_eval_real(args))
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Atan)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Atan)
+                })
         );
 
         let acot = symbol!(
             "acot",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, prec| {
-                        atan_numeric_eval(&z.inv(), prec)
-                    });
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acot);
                 }
             },
             der = move |x, i, out| {
@@ -1499,6 +1578,12 @@ impl GeometricSymbols {
                         inv.atan2(&inv.one())
                     })
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acot)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acot)
+                })
         );
 
         let asec = symbol!(
@@ -1509,7 +1594,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().acos());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Asec);
                 }
             },
             der = move |x, i, out| {
@@ -1538,13 +1623,19 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.inv().acos())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asec)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asec)
+                })
         );
 
         let acsc = symbol!(
             "acsc",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().asin());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acsc);
                 }
             },
             der = move |x, i, out| {
@@ -1573,6 +1664,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.inv().asin())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acsc)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acsc)
+                })
         );
 
         let asinh = symbol!(
@@ -1583,7 +1680,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.asinh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Asinh);
                 }
             },
             der = move |x, i, out| {
@@ -1611,6 +1708,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.asinh())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asinh)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asinh)
+                })
         );
 
         let acosh = symbol!(
@@ -1621,7 +1724,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.acosh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acosh);
                 }
             },
             der = move |x, i, out| {
@@ -1650,6 +1753,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.acosh())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acosh)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acosh)
+                })
         );
 
         let atanh = symbol!(
@@ -1660,7 +1769,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.atanh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Atanh);
                 }
             },
             der = move |x, i, out| {
@@ -1687,13 +1796,19 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.atanh())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Atanh)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Atanh)
+                })
         );
 
         let acoth = symbol!(
             "acoth",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().atanh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acoth);
                 }
             },
             der = move |x, i, out| {
@@ -1720,6 +1835,12 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.inv().atanh())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acoth)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acoth)
+                })
         );
 
         let asech = symbol!(
@@ -1730,7 +1851,7 @@ impl GeometricSymbols {
                         out.to_num(Coefficient::zero());
                         return;
                     }
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().acosh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Asech);
                 }
             },
             der = move |x, i, out| {
@@ -1761,13 +1882,19 @@ impl GeometricSymbols {
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.inv().acosh())
                 })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asech)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Asech)
+                })
         );
 
         let acsch = symbol!(
             "acsch",
             norm = |x, out| {
                 if let Some([arg]) = function_arguments::<1>(x) {
-                    let _ = maybe_eval_unary_float_in_norm(arg, out, |z, _| z.inv().asinh());
+                    let _ = elementary::normalize(&[arg], out, elementary::Operator::Acsch);
                 }
             },
             der = move |x, i, out| {
@@ -1796,6 +1923,12 @@ impl GeometricSymbols {
                 })
                 .register(|args: &[ErrorPropagatingFloat<Float>]| {
                     unary_eval_real(args, |x| x.inv().asinh())
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<f64>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acsch)
+                })
+                .register(|args: &[Complex<ErrorPropagatingFloat<Float>>]| {
+                    elementary::evaluate(args, elementary::Operator::Acsch)
                 })
         );
 
@@ -1842,7 +1975,7 @@ impl BesselSymbols {
                         }
                         return;
                     }
-                    let _ = maybe_eval_binary_float_in_norm(nu, z, out, bessel_j_numeric_eval);
+                    let _ = tracked_callbacks::normalize(SpecialFunction::BesselJ, Some(nu), z, out);
                 }
             },
             der = move |x, i, out| {
@@ -1856,7 +1989,7 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new()
+            eval = tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::BesselJ)
                 .with_tags(1)
                 .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_j", name, tags))
                 .register_tagged(|tags| {
@@ -1912,7 +2045,7 @@ impl BesselSymbols {
                         out.to_num(Coefficient::complex_infinity());
                         return;
                     }
-                    let _ = maybe_eval_binary_float_in_norm(nu, z, out, bessel_y_numeric_eval);
+                    let _ = tracked_callbacks::normalize(SpecialFunction::BesselY, Some(nu), z, out);
                 }
             },
             der = move |x, i, out| {
@@ -1926,7 +2059,7 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new()
+            eval = tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::BesselY)
                 .with_tags(1)
                 .with_cpp_generator(|name, tags| cpp::bessel("cyl_neumann", name, tags))
                 .register_tagged(|tags| {
@@ -1989,7 +2122,7 @@ impl BesselSymbols {
                         }
                         return;
                     }
-                    let _ = maybe_eval_binary_float_in_norm(nu, z, out, bessel_i_numeric_eval);
+                    let _ = tracked_callbacks::normalize(SpecialFunction::BesselI, Some(nu), z, out);
                 }
             },
             der = move |x, i, out| {
@@ -2003,7 +2136,7 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new()
+            eval = tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::BesselI)
                 .with_tags(1)
                 .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_i", name, tags))
                 .register_tagged(|tags| {
@@ -2059,7 +2192,7 @@ impl BesselSymbols {
                         out.to_num(Coefficient::complex_infinity());
                         return;
                     }
-                    let _ = maybe_eval_binary_float_in_norm(nu, z, out, bessel_k_numeric_eval);
+                    let _ = tracked_callbacks::normalize(SpecialFunction::BesselK, Some(nu), z, out);
                 }
             },
             der = move |x, i, out| {
@@ -2073,7 +2206,7 @@ impl BesselSymbols {
                         / Atom::num(2);
                 }
             },
-            eval = EvaluationInfo::new()
+            eval = tracked_callbacks::register(EvaluationInfo::new(), SpecialFunction::BesselK)
                 .with_tags(1)
                 .with_cpp_generator(|name, tags| cpp::bessel("cyl_bessel_k", name, tags))
                 .register_tagged(|tags| {
@@ -3483,93 +3616,6 @@ fn atom_to_integer(value: AtomView) -> Option<i64> {
         return None;
     }
     rat.numerator().to_i64()
-}
-
-fn maybe_eval_unary_float_in_norm(
-    arg: AtomView,
-    out: &mut Settable<Atom>,
-    evaluator: fn(&Complex<Float>, u32) -> Complex<Float>,
-) -> bool {
-    let Some(prec) = atom_float_precision(arg) else {
-        return false;
-    };
-    let Some(z) = atom_to_complex_float(arg, prec) else {
-        return false;
-    };
-
-    out.to_num(evaluator(&z, prec));
-    true
-}
-
-fn maybe_eval_polygamma_float_in_norm(order: u32, arg: AtomView, out: &mut Settable<Atom>) -> bool {
-    let Some(prec) = atom_float_precision(arg) else {
-        return false;
-    };
-    let Some(z) = atom_to_complex_float(arg, prec) else {
-        return false;
-    };
-
-    out.to_num(polygamma_numeric_eval(order, &z, prec));
-    true
-}
-
-fn maybe_eval_binary_float_in_norm(
-    lhs: AtomView,
-    rhs: AtomView,
-    out: &mut Settable<Atom>,
-    evaluator: fn(&Complex<Float>, &Complex<Float>, u32) -> Option<Complex<Float>>,
-) -> bool {
-    let precision = atom_float_precision(lhs).or_else(|| atom_float_precision(rhs));
-    let Some(prec) = precision else {
-        return false;
-    };
-    let Some(lhs_float) = atom_to_complex_float(lhs, prec) else {
-        return false;
-    };
-    let Some(rhs_float) = atom_to_complex_float(rhs, prec) else {
-        return false;
-    };
-    let Some(value) = evaluator(&lhs_float, &rhs_float, prec) else {
-        return false;
-    };
-    out.to_num(value);
-    true
-}
-
-fn atom_to_complex_float(value: AtomView, binary_prec: u32) -> Option<Complex<Float>> {
-    let AtomView::Num(number) = value else {
-        return None;
-    };
-
-    match number.get_coeff_view() {
-        CoefficientView::Natural(nr, dr, ni, di) => Some(Complex::new(
-            Float::with_val(binary_prec, nr) / Float::with_val(binary_prec, dr),
-            Float::with_val(binary_prec, ni) / Float::with_val(binary_prec, di),
-        )),
-        CoefficientView::Large(r, i) => Some(Complex::new(
-            r.to_rat().to_multi_prec_float(binary_prec),
-            i.to_rat().to_multi_prec_float(binary_prec),
-        )),
-        CoefficientView::Float(r, i) => {
-            let re = r.to_float();
-            let im = i.to_float();
-            // Normalization must not discard coefficient uncertainty. A
-            // registered tracked evaluator may handle this expression later.
-            if !re.is_exact() || !im.is_exact() {
-                return None;
-            }
-            let mut re = re.into_value();
-            let mut im = im.into_value();
-            if re.prec() > binary_prec {
-                re.set_prec(binary_prec);
-            }
-            if im.prec() > binary_prec {
-                im.set_prec(binary_prec);
-            }
-            Some(Complex::new(re, im))
-        }
-        _ => None,
-    }
 }
 
 fn gamma_numeric_eval(z: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
@@ -5460,8 +5506,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_special_float_inputs_remain_symbolic() {
-        // These functions do not yet register uncertainty-aware evaluators.
+    fn special_float_normalization_preserves_uncertainty() {
         for input in [
             "gamma(1.25)",
             "erf(1.25)",
@@ -5470,11 +5515,15 @@ mod tests {
             "zeta(1.25)",
         ] {
             let expression = parse!(input);
-            assert!(matches!(
-                expression.as_view(),
-                crate::atom::AtomView::Fun(_)
-            ));
-            assert!(Complex::<Float>::try_from(expression).is_err());
+            let crate::atom::AtomView::Num(number) = expression.as_view() else {
+                panic!("{input} did not normalize");
+            };
+            let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                panic!("{input} lost its floating coefficient");
+            };
+            assert!(value.re.get_error_magnitude().is_finite(), "{input}");
+            assert!(!value.re.is_exact(), "{input}");
+            assert!(value.im.is_exact_zero(), "{input}");
         }
     }
 
@@ -5561,8 +5610,17 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_polylog_float_remains_symbolic() {
-        assert!(Complex::<Float>::try_from(parse!("polylog(2,0.5)")).is_err());
+    fn polylog_float_normalization_preserves_uncertainty() {
+        let expression = parse!("polylog(2,0.5``6)");
+        let crate::atom::AtomView::Num(number) = expression.as_view() else {
+            panic!("polylog did not normalize");
+        };
+        let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+            panic!("polylog lost its floating coefficient");
+        };
+        assert!(value.re.get_absolute_error() >= 1e-6);
+        assert!(value.re.get_absolute_error() < 1e-4);
+        assert!(value.im.is_exact_zero());
     }
 
     #[test]
@@ -5975,7 +6033,7 @@ mod tests {
 
     #[test]
     fn zeta_float_normalization() {
-        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_err());
+        assert!(Complex::<Float>::try_from(parse!("zeta(1.25)")).is_ok());
         assert!(Complex::<Float>::try_from(parse!("zeta(1/2+1i/4)").to_float(50)).is_ok());
     }
 
@@ -6191,11 +6249,24 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_bessel_float_inputs_remain_symbolic() {
-        assert!(Complex::<Float>::try_from(parse!("bessel_j(1/2,2.0)")).is_err());
-        assert!(Complex::<Float>::try_from(parse!("bessel_y(1/2,2.0)")).is_err());
-        assert!(Complex::<Float>::try_from(parse!("bessel_i(1/2,2.0)")).is_err());
-        assert!(Complex::<Float>::try_from(parse!("bessel_k(1/2,2.0)")).is_err());
+    fn bessel_float_normalization_preserves_uncertainty() {
+        for input in [
+            "bessel_j(1/2,2.0)",
+            "bessel_y(1/2,2.0)",
+            "bessel_i(1/2,2.0)",
+            "bessel_k(1/2,2.0)",
+        ] {
+            let expression = parse!(input);
+            let crate::atom::AtomView::Num(number) = expression.as_view() else {
+                panic!("{input} did not normalize");
+            };
+            let Coefficient::Float(value) = number.get_coeff_view().to_owned() else {
+                panic!("{input} lost its floating coefficient");
+            };
+            assert!(value.re.get_error_magnitude().is_finite(), "{input}");
+            assert!(!value.re.is_exact(), "{input}");
+            assert!(value.im.is_exact_zero(), "{input}");
+        }
     }
 
     #[test]

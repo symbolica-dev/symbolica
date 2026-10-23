@@ -4046,9 +4046,12 @@ mod test {
     }
 
     #[test]
-    fn uncertain_function_tags_are_not_evaluated_as_exact() {
+    fn uncertain_function_tags_preserve_their_error() {
         let expression = parse!("bessel_j(0.5``1, 2)");
-        assert_eq!(expression.to_float(30), expression);
+        let value = tracked_value(&expression.to_float(30));
+        assert!(value.re.get_absolute_error() > 1e-3);
+        assert!(value.re.get_error_magnitude().is_finite());
+        assert!(value.im.is_exact_zero());
     }
 
     #[test]

@@ -102,6 +102,25 @@ division use the remaining denominator clearance, computed by downward-rounded
 `Magnitude::sub_lower`, instead of relying only on a derivative at the center.
 Multiplication includes the cross term `delta_a * delta_b`.
 
+All geometric functions, including two-argument `atan`, now register real and
+complex tracked evaluators. Their normalization uses the same tracked operations;
+inverse functions leave the real fast path when the input uncertainty crosses
+the real domain boundary.
+
+Gamma, erf, zeta, polygamma, polylog and the four Bessel functions also support
+tracked normalization and evaluation in binary64 and arbitrary precision.
+Special-function estimates use symmetric probes with extra working precision,
+including simultaneous argument and order perturbations. Responses are scaled
+with `Magnitude`, so errors outside the binary64 exponent range survive. Exact
+representable order tags remain exact, while uncertain tags and rational
+conversion errors contribute to the result. Known pole and branch-cut
+neighborhoods produce unbounded uncertainty. Conservative locality checks use
+the argument size, order and distance to singularities to reject neighborhoods
+where probes could miss oscillations. Complex erf additionally checks the
+phase variation of its exponential derivative. These numerical estimates are not
+certified enclosures; probes cannot bound every interior extremum or certify the
+underlying special-function approximation.
+
 Arithmetic adds rounding uncertainty to propagated input uncertainty. Underflow
 to zero retains a bound from the input magnitudes, and native scalar subnormal
 results have an absolute rounding floor. MPFR's abrupt underflow and Astro's
