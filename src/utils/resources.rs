@@ -1,7 +1,8 @@
 //! Cooperative process-memory and elapsed-time budgets shared by nested work.
 //!
 //! No work-count limits are imposed. Call [`checkpoint`] at interruptible
-//! boundaries and use [`ResourceBudget::capture_current`] when spawning workers.
+//! boundaries. Workers use [`ResourceBudget::capture_current`] followed by
+//! [`ResourceBudget::run_captured`] to install their logical caller's context.
 //! Opaque external calls cannot be interrupted here; a process supervisor is
 //! required for a hard deadline. RSS covers the whole process, not an individual
 //! expression, cache, or thread. Concurrent allocations can exceed an observed
@@ -24,7 +25,7 @@ pub struct ResourceLimits {
     pub max_elapsed: Option<Duration>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourceLimitError {
     Memory {
         rss_bytes: u64,
@@ -136,7 +137,8 @@ impl ResourceBudget {
 
     /// Install this budget for a lexical operation. Checkpoints are explicit;
     /// nesting never replaces an outer restriction. Panic unwinding restores
-    /// the previous context. Spawned threads require [`Self::capture_current`].
+    /// the previous context. Worker dispatch uses [`Self::capture_current`]
+    /// and [`Self::run_captured`] instead.
     pub fn run<R>(&self, operation: impl FnOnce() -> R) -> R {
         if self.is_unlimited() {
             return operation();
@@ -177,6 +179,32 @@ impl ResourceBudget {
         })
     }
 
+    /// Enter a dispatched job with its captured caller context, restoring the
+    /// worker's previous context afterward, including during unwinding.
+    ///
+    /// Work-stealing pools can execute an unrelated job while another job is
+    /// waiting on that worker. Its suspended scopes must not constrain this job.
+    /// Use a context from [`Self::capture_current`], which already includes all
+    /// genuine caller ancestors. Even an empty capture must replace worker TLS.
+    /// Ordinary nested operations use [`Self::run`] to retain their outer scopes.
+    pub fn run_captured<R>(&self, operation: impl FnOnce() -> R) -> R {
+        let replacement = match self.0.as_ref() {
+            Budget::Captured(budgets) => budgets.clone(),
+            Budget::Limited { .. } => vec![self.clone()],
+        };
+        let previous = ACTIVE.with(|active| active.replace(replacement));
+        struct Restore(Vec<ResourceBudget>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE.with(|active| {
+                    active.replace(std::mem::take(&mut self.0));
+                });
+            }
+        }
+        let _scope = Restore(previous);
+        operation()
+    }
+
     /// Check this budget or captured context. Use the free [`checkpoint`]
     /// function to check every budget active on the calling thread.
     pub fn checkpoint(&self) -> Result<(), ResourceLimitError> {
@@ -187,28 +215,14 @@ impl ResourceBudget {
     /// This is a cooperative headroom check, not an allocator reservation.
     /// Use the free [`check_allocation`] function for all active scopes.
     pub fn check_allocation(&self, additional_bytes: u64) -> Result<(), ResourceLimitError> {
+        self.check_elapsed()?;
         match self.0.as_ref() {
             Budget::Captured(budgets) => {
                 for budget in budgets {
                     budget.check_allocation(additional_bytes)?;
                 }
             }
-            Budget::Limited {
-                limits,
-                started,
-                memory,
-            } => {
-                if let Some(limit) = limits.max_elapsed {
-                    let elapsed = started
-                        .ok_or_else(|| ResourceLimitError::MonitorUnavailable {
-                            resource: "elapsed time",
-                            message: "std::time::Instant is unavailable on this target".into(),
-                        })?
-                        .elapsed();
-                    if elapsed >= limit {
-                        return Err(ResourceLimitError::Elapsed { elapsed, limit });
-                    }
-                }
+            Budget::Limited { limits, memory, .. } => {
                 if let Some(limit_bytes) = limits.max_process_rss_bytes {
                     let rss_bytes =
                         memory().map_err(|message| ResourceLimitError::MonitorUnavailable {
@@ -223,6 +237,32 @@ impl ResourceBudget {
                             additional_bytes,
                             limit_bytes,
                         });
+                    }
+                }
+            }
+        }
+        self.check_elapsed()
+    }
+
+    fn check_elapsed(&self) -> Result<(), ResourceLimitError> {
+        match self.0.as_ref() {
+            Budget::Captured(budgets) => {
+                for budget in budgets {
+                    budget.check_elapsed()?;
+                }
+            }
+            Budget::Limited {
+                limits, started, ..
+            } => {
+                if let Some(limit) = limits.max_elapsed {
+                    let elapsed = started
+                        .ok_or_else(|| ResourceLimitError::MonitorUnavailable {
+                            resource: "elapsed time",
+                            message: "std::time::Instant is unavailable on this target".into(),
+                        })?
+                        .elapsed();
+                    if elapsed >= limit {
+                        return Err(ResourceLimitError::Elapsed { elapsed, limit });
                     }
                 }
             }
@@ -251,6 +291,11 @@ pub fn check_allocation(additional_bytes: u64) -> Result<(), ResourceLimitError>
     ACTIVE.with(|active| {
         for budget in active.borrow().iter() {
             budget.check_allocation(additional_bytes)?;
+        }
+        // A monitor can block after an earlier scope's first clock check.
+        // Recheck every clock after all monitoring, before permitting a commit.
+        for budget in active.borrow().iter() {
+            budget.check_elapsed()?;
         }
         Ok(())
     })
@@ -377,7 +422,7 @@ mod tests {
     #[test]
     fn captured_context_keeps_all_scopes_on_a_worker() {
         let captured = memory(5, 6).run(|| memory(100, 1).run(ResourceBudget::capture_current));
-        let worker = std::thread::spawn(move || captured.run(checkpoint));
+        let worker = std::thread::spawn(move || captured.run_captured(checkpoint));
         assert!(matches!(
             worker.join().unwrap(),
             Err(ResourceLimitError::Memory { .. })
@@ -399,6 +444,72 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert!(captured.check_allocation(3).is_err());
         });
+    }
+
+    #[test]
+    fn independent_dispatched_jobs_do_not_inherit_suspended_worker_scopes() {
+        let empty = ResourceBudget::capture_current();
+        let independent = memory(100, 1).run(ResourceBudget::capture_current);
+        let expired = ResourceBudget::new(ResourceLimits {
+            max_elapsed: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        expired.run(|| {
+            assert!(matches!(
+                checkpoint(),
+                Err(ResourceLimitError::Elapsed { .. })
+            ));
+            empty.run_captured(checkpoint).unwrap();
+            independent.run_captured(checkpoint).unwrap();
+            assert!(matches!(
+                checkpoint(),
+                Err(ResourceLimitError::Elapsed { .. })
+            ));
+        });
+        // Capturing a real ancestor keeps its restriction on the dispatched job.
+        let child = expired.run(ResourceBudget::capture_current);
+        assert!(matches!(
+            child.run_captured(checkpoint),
+            Err(ResourceLimitError::Elapsed { .. })
+        ));
+    }
+
+    #[test]
+    fn dispatched_job_unwinding_restores_suspended_worker_limits() {
+        let empty = ResourceBudget::capture_current();
+        memory(10, 8).run(|| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                empty.run_captured(|| panic!("failed dispatched job"))
+            }));
+            assert!(result.is_err());
+            assert!(matches!(
+                check_allocation(3),
+                Err(ResourceLimitError::Memory { .. })
+            ));
+        });
+        checkpoint().unwrap();
+    }
+
+    #[test]
+    fn slow_memory_monitor_cannot_hide_an_elapsed_outer_budget() {
+        let clock = ResourceBudget::new(ResourceLimits {
+            max_elapsed: Some(Duration::from_millis(100)),
+            ..Default::default()
+        });
+        let memory = ResourceBudget::with_memory_monitor(
+            ResourceLimits {
+                max_process_rss_bytes: Some(100),
+                ..Default::default()
+            },
+            || {
+                std::thread::sleep(Duration::from_millis(120));
+                Ok(1)
+            },
+        );
+        assert!(matches!(
+            clock.run(|| memory.run(checkpoint)),
+            Err(ResourceLimitError::Elapsed { .. })
+        ));
     }
 
     #[test]
