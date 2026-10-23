@@ -5882,7 +5882,8 @@ where
         let mut sample_point = self.ring().zero();
         let mut uni_f = self.replace(interpolation_var, &sample_point);
 
-        let mut i = 0;
+        let mut tried_points = HashSet::new();
+        tried_points.insert(sample_point.clone());
         let mut rng = rng();
         loop {
             if self.degree(main_var) == uni_f.degree(main_var)
@@ -5891,7 +5892,7 @@ where
                 break;
             }
 
-            if self.ring().size() == Some(i.into()) {
+            if self.ring().size() == Some(tried_points.len().into()) {
                 let field = self
                     .ring()
                     .upgrade(self.ring().extension_degree().to_u64().unwrap() as usize + 1);
@@ -5910,15 +5911,22 @@ where
                     .expect("Galois factors do not descend to the original field");
             }
 
-            // After zero, try a small constant before sampling the whole field.
-            let policy = if i == 0 {
-                self.ring().sampling_policy(Some(0), (0..=1).into())
+            // Count distinct points: repeated random draws do not establish
+            // that the field is too small. Premature upgrades can also change
+            // the representation of coefficients in an existing extension.
+            sample_point = if tried_points.len() == 1 {
+                self.ring().one()
             } else {
-                self.ring().uniform_sampling_policy()
+                let policy = self.ring().uniform_sampling_policy();
+                loop {
+                    let point = self.ring().sample(&mut rng, &policy);
+                    if !tried_points.contains(&point) {
+                        break point;
+                    }
+                }
             };
-            sample_point = self.ring().sample(&mut rng, &policy);
+            tried_points.insert(sample_point.clone());
             uni_f = self.replace(interpolation_var, &sample_point);
-            i += 1;
         }
 
         let mut d = self.degree(interpolation_var).to_u32();
