@@ -22,6 +22,7 @@ mod python;
 mod rational;
 mod serialization;
 mod simd;
+mod tracked;
 
 #[cfg(test)]
 mod complex_tests;
@@ -42,6 +43,7 @@ pub use python::{
     PythonComplexFloat, PythonFloat, PythonMultiPrecisionComplex, PythonMultiPrecisionFloat,
     register_python_floats,
 };
+pub use tracked::{ErrorQuality, TrackedComplex, TrackedComponentPrecision, TrackedPrecision};
 
 pub trait FloatLike:
     PartialEq
