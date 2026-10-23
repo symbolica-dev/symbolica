@@ -350,8 +350,34 @@ mod horner_search_tests {
     }
 }
 
+// Bound diagnostic rendering only. The complete expression remains stored in
+// the existing error record; evaluation and input size are never restricted.
+struct ErrorExpression<'a>(&'a Atom);
+
+impl std::fmt::Display for ErrorExpression<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let expression = self.0.as_view();
+        if expression.get_data().len() <= 256 {
+            return std::fmt::Display::fmt(self.0, f);
+        }
+        match expression {
+            crate::atom::AtomView::Fun(function) => write!(
+                f,
+                "{}(...; {} arguments)",
+                function.get_symbol(),
+                function.get_nargs()
+            ),
+            crate::atom::AtomView::Add(_) => f.write_str("sum (...)"),
+            crate::atom::AtomView::Mul(_) => f.write_str("product (...)"),
+            crate::atom::AtomView::Pow(_) => f.write_str("power (...)"),
+            crate::atom::AtomView::Num(_) => f.write_str("numerical coefficient (...)"),
+            crate::atom::AtomView::Var(_) => std::fmt::Display::fmt(self.0, f),
+        }
+    }
+}
+
 /// Errors that can occur while building or performing numerical expression evaluation.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum EvaluationError {
     /// A cooperative RAM/time budget was exhausted. This does not retain or
     /// format the potentially very deep expression that was being evaluated.
@@ -463,6 +489,16 @@ pub enum EvaluationError {
     },
 }
 
+impl std::fmt::Debug for EvaluationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the same bounded expression context as Display, including when
+        // an error is logged with Debug or returned from a test assertion.
+        f.debug_tuple("EvaluationError")
+            .field(&format_args!("{self}"))
+            .finish()
+    }
+}
+
 impl std::error::Error for EvaluationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -477,7 +513,7 @@ impl std::fmt::Display for EvaluationError {
         match self {
             EvaluationError::ResourceLimit(error) => error.fmt(f),
             EvaluationError::NotIndeterminate { atom } => {
-                write!(f, "atom is not indeterminate: {atom:?}")
+                write!(f, "atom is not indeterminate: {}", ErrorExpression(atom))
             }
             EvaluationError::InvalidParameterCount { expected, actual } => {
                 write!(
@@ -506,7 +542,8 @@ impl std::fmt::Display for EvaluationError {
             EvaluationError::UndefinedFunction { expression } => {
                 write!(
                     f,
-                    "function {expression} is not in a parameter map and does not have an evaluator"
+                    "function {} is not in a parameter map and does not have an evaluator",
+                    ErrorExpression(expression)
                 )
             }
             EvaluationError::WrongNumberOfArguments {
@@ -537,21 +574,30 @@ impl std::fmt::Display for EvaluationError {
                 function.get_name()
             ),
             EvaluationError::FunctionRedefined { function } => {
-                write!(f, "function {} is redefined", function.to_plain_string())
+                write!(f, "function {} is redefined", ErrorExpression(function))
             }
 
             EvaluationError::NumericalTypeDoesNotSupportImaginaryUnit => {
                 f.write_str("numerical type does not support imaginary unit")
             }
             EvaluationError::EvaluationFailed { expression, reason } => {
-                write!(f, "could not evaluate {expression}: {reason}")
+                write!(
+                    f,
+                    "could not evaluate {}: {reason}",
+                    ErrorExpression(expression)
+                )
             }
             EvaluationError::EvaluationTreeConstructionFailed { expression, reason } => write!(
                 f,
-                "could not build an evaluation tree for {expression}: {reason}"
+                "could not build an evaluation tree for {}: {reason}",
+                ErrorExpression(expression)
             ),
             EvaluationError::EvaluatorConstructionFailed { expression, reason } => {
-                write!(f, "could not build an evaluator for {expression}: {reason}")
+                write!(
+                    f,
+                    "could not build an evaluator for {}: {reason}",
+                    ErrorExpression(expression)
+                )
             }
             EvaluationError::MultiEvaluatorConstructionFailed {
                 expression_count,
@@ -566,7 +612,8 @@ impl std::fmt::Display for EvaluationError {
             } => {
                 write!(
                     f,
-                    "could not find an evaluator of type {eval_type} for {expression}"
+                    "could not find an evaluator of type {eval_type} for {}",
+                    ErrorExpression(expression)
                 )
             }
         }
