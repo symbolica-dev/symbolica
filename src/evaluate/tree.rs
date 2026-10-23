@@ -354,6 +354,9 @@ mod horner_search_tests {
 /// Errors that can occur while building or performing numerical expression evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EvaluationError {
+    /// A cooperative RAM/time budget was exhausted. This does not retain or
+    /// format the potentially very deep expression that was being evaluated.
+    ResourceLimit(crate::utils::resources::ResourceLimitError),
     /// An expression supplied as a parameter is not a supported indeterminate.
     NotIndeterminate {
         /// The invalid parameter expression.
@@ -461,11 +464,19 @@ pub enum EvaluationError {
     },
 }
 
-impl std::error::Error for EvaluationError {}
+impl std::error::Error for EvaluationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ResourceLimit(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl std::fmt::Display for EvaluationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EvaluationError::ResourceLimit(error) => error.fmt(f),
             EvaluationError::NotIndeterminate { atom } => {
                 write!(f, "atom is not indeterminate: {atom:?}")
             }
