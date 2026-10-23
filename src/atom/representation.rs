@@ -2974,7 +2974,7 @@ impl<'a> PowView<'a> {
         Pow { data: buffer }
     }
 
-    #[inline]
+    #[inline(always)]
     /// Borrow the base of this power.
     pub fn get_base(&self) -> AtomView<'a> {
         self.iter().next().unwrap()
@@ -2997,7 +2997,7 @@ impl<'a> PowView<'a> {
         (self.data[0] & HAS_ALIAS_FLAG) != 0
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get_base_exp(&self) -> (AtomView<'a>, AtomView<'a>) {
         let mut it = self.iter();
 

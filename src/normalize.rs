@@ -941,20 +941,27 @@ impl AtomView<'_> {
             // Borrow canonical products while flattening them. Their children
             // need owned buffers for merging, but copying the parent is redundant.
             let mut handle;
-            let mul = if let AtomView::Mul(mul) = a
-                && !a.needs_normalization()
-            {
-                mul
+            let mul = if !a.needs_normalization() {
+                if let AtomView::Mul(mul) = a {
+                    mul
+                } else {
+                    if let AtomView::Num(n) = a
+                        && n.is_one()
+                    {
+                        continue;
+                    }
+                    // Fill the final factor slot directly instead of moving
+                    // the completed owned buffer through another stack value.
+                    atom_test_buf.push(workspace.new_atom());
+                    atom_test_buf.last_mut().unwrap().set_from_view(&a);
+                    continue;
+                }
             } else {
                 handle = workspace.new_atom();
-                if a.needs_normalization() {
-                    let had_alias = a.has_alias();
-                    a.normalize(workspace, &mut handle);
-                    if had_alias && !handle.has_alias() {
-                        *cleanup_alias_handles = true;
-                    }
-                } else {
-                    handle.set_from_view(&a);
+                let had_alias = a.has_alias();
+                a.normalize(workspace, &mut handle);
+                if had_alias && !handle.has_alias() {
+                    *cleanup_alias_handles = true;
                 }
 
                 let Atom::Mul(mul) = handle.deref_mut() else {
@@ -975,12 +982,16 @@ impl AtomView<'_> {
                 {
                     continue;
                 }
-                let mut handle = workspace.new_atom();
-                handle.set_from_view(&c);
-                atom_test_buf.push(handle);
+                atom_test_buf.push(workspace.new_atom());
+                atom_test_buf.last_mut().unwrap().set_from_view(&c);
             }
         }
 
+        // A child normalization callback can introduce aliases into an
+        // initially alias-free product. Inspect the completed factor group.
+        // Merging canonical factors only combines or copies their existing
+        // pieces, so it cannot introduce the first alias into this group.
+        let group_has_alias = atom_test_buf.iter().any(|factor| factor.has_alias());
         atom_test_buf.sort_by(|a, b| a.as_view().cmp_factors(&b.as_view()));
 
         let mut second_pass = false;
@@ -995,9 +1006,8 @@ impl AtomView<'_> {
             let mut cur_len = 0;
 
             for mut cur_buf in factors {
-                let had_alias = last_buf.has_alias() || cur_buf.has_alias();
                 let merged = last_buf.merge_factors(&mut cur_buf, &mut tmp, workspace);
-                if merged && had_alias {
+                if merged && group_has_alias {
                     *cleanup_alias_handles = true;
                 }
                 if !merged {
@@ -3505,6 +3515,79 @@ mod test {
                 }
             }
         });
+    }
+
+    #[test]
+    fn product_normalization_tracks_aliases_created_by_callbacks() {
+        use crate::atom::SymbolBuilder;
+        use std::sync::{Arc, Mutex};
+
+        // Top-level aliases can remain in the thread-local workspace. Check
+        // their final release after that workspace has also been dropped.
+        let weak_aliases = std::thread::spawn(|| {
+            let x = parse!("callback_product_x");
+            let y = parse!("callback_product_y");
+            let weak_aliases = Arc::new(Mutex::new(Vec::new()));
+            let callback_aliases = weak_aliases.clone();
+            let callback_x = x.clone();
+            let function = SymbolBuilder::new(crate::wrap_symbol!("callback_product_alias"))
+                .with_normalization_function(move |_view, out| {
+                    let owner = crate::alias::register_alias_atom(callback_x.clone());
+                    callback_aliases
+                        .lock()
+                        .unwrap()
+                        .push(Arc::downgrade(&owner));
+                    let power = owner.to_atom().pow(2);
+                    out.set_from_view(&power.as_view());
+                })
+                .build()
+                .unwrap();
+
+            Workspace::get_local().with(|ws| {
+                for (factor, expected, retains_alias) in [
+                    (x.pow(-2), Atom::num(1), false),
+                    (y.clone(), x.pow(2) * &y, true),
+                ] {
+                    // Keep the callback dirty so the product itself starts
+                    // alias-free and normalization creates the first alias.
+                    let mut callback = Atom::new();
+                    callback.to_fun(function);
+                    let mut dirty = Atom::new();
+                    let mul = dirty.to_mul();
+                    mul.extend(callback.as_view());
+                    mul.extend(factor.as_view());
+                    assert!(!dirty.has_alias());
+                    assert!(dirty.as_view().needs_normalization());
+
+                    let old = crate::alias::register_alias_atom(parse!("callback_product_old"));
+                    let old_weak = Arc::downgrade(&old);
+                    let mut out = old.to_atom();
+                    drop(old);
+                    dirty.as_view().normalize(ws, &mut out);
+                    assert_eq!(out, expected);
+                    assert_eq!(out.has_alias(), retains_alias);
+                    assert!(!out.as_view().needs_normalization());
+                    assert!(old_weak.upgrade().is_none());
+                    if retains_alias {
+                        assert!(
+                            weak_aliases
+                                .lock()
+                                .unwrap()
+                                .last()
+                                .unwrap()
+                                .upgrade()
+                                .is_some()
+                        );
+                    }
+                }
+            });
+            let aliases = weak_aliases.lock().unwrap().clone();
+            assert_eq!(aliases.len(), 2);
+            aliases
+        })
+        .join()
+        .unwrap();
+        assert!(weak_aliases.iter().all(|alias| alias.upgrade().is_none()));
     }
 
     #[test]
