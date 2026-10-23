@@ -6,6 +6,7 @@ pub mod factor;
 pub mod gcd;
 pub mod groebner;
 pub mod polynomial;
+pub mod reconstruction;
 mod resultant;
 pub use resultant::PolynomialResultant;
 pub mod series;
