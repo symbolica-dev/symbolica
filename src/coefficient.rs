@@ -2398,7 +2398,24 @@ impl Ord for CoefficientView<'_> {
 impl Add<CoefficientView<'_>> for CoefficientView<'_> {
     type Output = Coefficient;
 
+    #[inline]
     fn add(self, other: CoefficientView<'_>) -> Coefficient {
+        // Exponents and collected term coefficients are commonly small real
+        // integers. Avoid constructing and adding four rational components.
+        if let (CoefficientView::Natural(a, 1, 0, 1), CoefficientView::Natural(b, 1, 0, 1)) =
+            (self, other)
+            && let Some(sum) = a.checked_add(b)
+        {
+            return sum.into();
+        }
+
+        self.add_general(other)
+    }
+}
+
+impl CoefficientView<'_> {
+    #[inline(never)]
+    fn add_general(self, other: CoefficientView<'_>) -> Coefficient {
         match (self, other) {
             (
                 CoefficientView::Natural(n1, d1, ni1, di1),
@@ -2540,7 +2557,22 @@ impl Add<CoefficientView<'_>> for CoefficientView<'_> {
 impl Mul for CoefficientView<'_> {
     type Output = Coefficient;
 
+    #[inline]
     fn mul(self, other: CoefficientView<'_>) -> Coefficient {
+        if let (CoefficientView::Natural(a, 1, 0, 1), CoefficientView::Natural(b, 1, 0, 1)) =
+            (self, other)
+            && let Some(product) = a.checked_mul(b)
+        {
+            return product.into();
+        }
+
+        self.mul_general(other)
+    }
+}
+
+impl CoefficientView<'_> {
+    #[inline(never)]
+    fn mul_general(self, other: CoefficientView<'_>) -> Coefficient {
         match (self, other) {
             (
                 CoefficientView::Natural(n1, d1, ni1, di1),
@@ -2740,7 +2772,21 @@ impl Mul for CoefficientView<'_> {
 impl Add<i64> for CoefficientView<'_> {
     type Output = Coefficient;
 
+    #[inline]
     fn add(self, other: i64) -> Coefficient {
+        if let CoefficientView::Natural(value, 1, 0, 1) = self
+            && let Some(sum) = value.checked_add(other)
+        {
+            return sum.into();
+        }
+
+        self.add_integer_general(other)
+    }
+}
+
+impl CoefficientView<'_> {
+    #[inline(never)]
+    fn add_integer_general(self, other: i64) -> Coefficient {
         match self {
             CoefficientView::Natural(n1, d1, ni1, di1) => Coefficient::Complex(
                 Complex::new(
@@ -3636,6 +3682,52 @@ mod test {
     }
 
     #[test]
+    fn small_integer_view_addition_boundaries() {
+        use crate::domains::integer::Integer;
+
+        for (left, right) in [
+            (0, 0),
+            (0, 17),
+            (17, -17),
+            (-31, -47),
+            (i64::MAX, 0),
+            (i64::MIN, 0),
+            (i64::MAX, 1),
+            (i64::MIN, -1),
+            (i64::MAX, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (i64::MAX, i64::MIN),
+        ] {
+            let a = CoefficientView::Natural(left, 1, 0, 1);
+            let b = CoefficientView::Natural(right, 1, 0, 1);
+            let expected = Coefficient::from(Integer::from(left) + Integer::from(right));
+            assert_eq!(a + b, expected, "{left} + {right}");
+            assert_eq!(a + right, expected, "{left} + integer {right}");
+        }
+    }
+
+    #[test]
+    fn small_integer_view_addition_preserves_other_domains() {
+        let half = CoefficientView::Natural(1, 2, 0, 1);
+        let complex = CoefficientView::Natural(1, 1, 2, 1);
+        assert_eq!(half + half, Coefficient::from(1));
+        assert_eq!(half + 1, Coefficient::from((3, 2)));
+        assert_eq!(
+            complex + complex,
+            coefficient_view(&parse!("2+4i")).to_owned()
+        );
+        assert_eq!(complex + 1, coefficient_view(&parse!("2+2i")).to_owned());
+        assert_eq!(
+            CoefficientView::Indeterminate + 1,
+            Coefficient::Indeterminate
+        );
+        assert_eq!(
+            CoefficientView::Infinity(None) + 1,
+            Coefficient::Infinity(None)
+        );
+    }
+
+    #[test]
     fn rat_pow() {
         assert_eq!(parse!("(-2)^(-1/2)"), parse!("-1i*(1/2)^(1/2)"));
         assert_eq!(parse!("(-2)^(1/2)"), parse!("1i*2^(1/2)"));
@@ -3662,6 +3754,47 @@ mod test {
         assert_eq!(parse!("166659413^(1/2)"), parse!("547*557^(1/2)"));
         assert_eq!(parse!("1301820637^(1/2)"), parse!("10007*13^(1/2)"));
         assert_eq!(parse!("(13/100140049)^(1/2)"), parse!("1/10007*13^(1/2)"));
+    }
+
+    #[test]
+    fn small_integer_view_multiplication_boundaries() {
+        use crate::domains::integer::Integer;
+
+        for (left, right) in [
+            (0, 0),
+            (0, i64::MIN),
+            (1, i64::MAX),
+            (1, i64::MIN),
+            (17, -17),
+            (-31, -47),
+            (i64::MIN, -1),
+            (i64::MAX, 2),
+            (i64::MIN, 2),
+            (i64::MAX, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (i64::MAX, i64::MIN),
+        ] {
+            let a = CoefficientView::Natural(left, 1, 0, 1);
+            let b = CoefficientView::Natural(right, 1, 0, 1);
+            let expected = Coefficient::from(Integer::from(left) * Integer::from(right));
+            assert_eq!(a * b, expected, "{left} * {right}");
+        }
+
+        let half = CoefficientView::Natural(1, 2, 0, 1);
+        let complex = CoefficientView::Natural(1, 1, 2, 1);
+        assert_eq!(half * half, Coefficient::from((1, 4)));
+        assert_eq!(
+            complex * complex,
+            coefficient_view(&parse!("-3+4i")).to_owned()
+        );
+        assert_eq!(
+            CoefficientView::Indeterminate * CoefficientView::Natural(1, 1, 0, 1),
+            Coefficient::Indeterminate
+        );
+        assert_eq!(
+            CoefficientView::Infinity(None) * CoefficientView::Natural(0, 1, 0, 1),
+            Coefficient::Indeterminate
+        );
     }
 
     #[test]

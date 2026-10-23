@@ -1,6 +1,8 @@
 //! Expression key semantics. RawAtom remains a byte-oriented storage key.
 
-use std::{borrow::Cow, cmp::Ordering, hash::Hash};
+use std::{borrow::Cow, cmp::Ordering, hash::Hash, sync::Arc};
+
+use crate::alias::AliasHandle;
 
 use super::{
     ADD_ID, ALIAS_ID, ALIAS_OPAQUE_FLAG, AtomView, FUN_ID, HAS_ALIAS_FLAG, MUL_ID, NO_ALIASES,
@@ -97,7 +99,89 @@ fn aliased_view_eq(left: &AtomView<'_>, right: &AtomView<'_>) -> bool {
     if let Some(body) = borrowed_alias_body(right) {
         return view_eq(left, &body);
     }
-    expanded_eq(left.get_data(), right.get_data())
+    let left_data = left.get_data();
+    let right_data = right.get_data();
+    if is_transparent_alias(left_data) {
+        let handle = alias_handle(left_data);
+        return view_eq(&handle.atom().as_view(), right);
+    }
+    if is_transparent_alias(right_data) {
+        let handle = alias_handle(right_data);
+        return view_eq(left, &handle.atom().as_view());
+    }
+    if left_data[0] & !HAS_ALIAS_FLAG != right_data[0] & !HAS_ALIAS_FLAG {
+        return false;
+    }
+    // Length headers can differ because an alias compresses a child. Compare
+    // the retained metadata and ordered children without materializing either
+    // expanded encoding. Stored headers use the canonical encoding produced by
+    // the writers. Alias-free children still use the byte-comparison path.
+    match left_data[0] & TYPE_MASK {
+        FUN_ID | MUL_ID | ADD_ID => {
+            let is_fun = left_data[0] & TYPE_MASK == FUN_ID;
+            let (left_name, left_nargs, left_children) = if is_fun {
+                read_packed_pair(function_metadata(left_data))
+            } else {
+                let (nargs, _, children) = read_packed_pair(&left_data[1..]);
+                (0, nargs, children)
+            };
+            let (right_name, right_nargs, right_children) = if is_fun {
+                read_packed_pair(function_metadata(right_data))
+            } else {
+                let (nargs, _, children) = read_packed_pair(&right_data[1..]);
+                (0, nargs, children)
+            };
+            if left_name != right_name || left_nargs != right_nargs {
+                return false;
+            }
+            if left_data[0] & TYPE_MASK == ADD_ID && left_data[0] & NOT_NORMALIZED == 0 {
+                // Expansion can change the encoded monomial order of a
+                // normalized sum. Preserve the established sorted-key contract.
+                return expanded_data_with_aliases(left_data, left.aliases_vec())
+                    == expanded_data_with_aliases(right_data, right.aliases_vec());
+            }
+            ordered_children_eq(
+                left_children,
+                left.aliases_vec(),
+                right_children,
+                right.aliases_vec(),
+                left_nargs,
+            )
+        }
+        POW_ID => ordered_children_eq(
+            &left_data[1..],
+            left.aliases_vec(),
+            &right_data[1..],
+            right.aliases_vec(),
+            2,
+        ),
+        // Different opaque tokens and non-alias leaves are already unequal.
+        _ => false,
+    }
+}
+
+fn ordered_children_eq(
+    mut left: &[u8],
+    left_aliases: &Vec<Arc<AliasHandle>>,
+    mut right: &[u8],
+    right_aliases: &Vec<Arc<AliasHandle>>,
+    nargs: u64,
+) -> bool {
+    for _ in 0..nargs {
+        let left_tail = skip_raw_atom(left);
+        let right_tail = skip_raw_atom(right);
+        let left_child = &left[..left.len() - left_tail.len()];
+        let right_child = &right[..right.len() - right_tail.len()];
+        if !view_eq(
+            &AtomView::from_with_aliases(left_child, left_aliases),
+            &AtomView::from_with_aliases(right_child, right_aliases),
+        ) {
+            return false;
+        }
+        left = left_tail;
+        right = right_tail;
+    }
+    true
 }
 
 #[inline]
@@ -114,8 +198,16 @@ pub(crate) fn view_hash<H: std::hash::Hasher>(view: &AtomView<'_>, state: &mut H
 fn aliased_view_hash<H: std::hash::Hasher>(view: &AtomView<'_>, state: &mut H) {
     if let Some(body) = borrowed_alias_body(view) {
         view_hash(&body, state);
+    } else if is_transparent_alias(view.get_data()) {
+        // Detached direct aliases can also hash their guarded body directly.
+        let handle = alias_handle(view.get_data());
+        view_hash(&handle.atom().as_view(), state);
     } else {
-        expanded_hash(view.get_data(), state);
+        // Keep the live ownership context through nested aliases. Looking up
+        // an already borrowed body needs neither a registry guard nor an Arc clone.
+        expanded_data_with_aliases(view.get_data(), view.aliases_vec())
+            .as_ref()
+            .hash(state);
     }
 }
 
@@ -130,7 +222,18 @@ pub(crate) fn aliased_view_cmp(left: &AtomView<'_>, right: &AtomView<'_>) -> Ord
     if let Some(body) = borrowed_alias_body(right) {
         return left.cmp_public(&body);
     }
-    expanded_cmp(left.get_data(), right.get_data())
+    if is_transparent_alias(left.get_data()) {
+        let handle = alias_handle(left.get_data());
+        return handle.atom().as_view().cmp_public(right);
+    }
+    if is_transparent_alias(right.get_data()) {
+        let handle = alias_handle(right.get_data());
+        return left.cmp_public(&handle.atom().as_view());
+    }
+    compare_expanded(
+        &expanded_data_with_aliases(left.get_data(), left.aliases_vec()),
+        &expanded_data_with_aliases(right.get_data(), right.aliases_vec()),
+    )
 }
 
 fn borrowed_alias_body<'a>(view: &AtomView<'a>) -> Option<AtomView<'a>> {
@@ -153,15 +256,10 @@ pub(crate) fn encoded_eq(left: &[u8], right: &[u8]) -> bool {
 
 #[cold]
 fn expanded_eq(left: &[u8], right: &[u8]) -> bool {
-    if is_transparent_alias(left) {
-        let handle = alias_handle(left);
-        return encoded_eq(handle.atom().as_view().get_data(), right);
-    }
-    if is_transparent_alias(right) {
-        let handle = alias_handle(right);
-        return encoded_eq(left, handle.atom().as_view().get_data());
-    }
-    expanded_data(left) == expanded_data(right)
+    aliased_view_eq(
+        &AtomView::from_with_aliases(left, &NO_ALIASES),
+        &AtomView::from_with_aliases(right, &NO_ALIASES),
+    )
 }
 
 #[inline]
@@ -177,7 +275,7 @@ pub(crate) fn encoded_hash<H: std::hash::Hasher>(data: &[u8], state: &mut H) {
 fn expanded_hash<H: std::hash::Hasher>(data: &[u8], state: &mut H) {
     if is_transparent_alias(data) {
         let handle = alias_handle(data);
-        encoded_hash(handle.atom().as_view().get_data(), state);
+        view_hash(&handle.atom().as_view(), state);
         return;
     }
     // Hash the same contiguous byte slice as an unaliased expression. Arbitrary
@@ -199,17 +297,10 @@ pub(crate) fn encoded_cmp(left: &[u8], right: &[u8]) -> Ordering {
 
 #[cold]
 fn expanded_cmp(left: &[u8], right: &[u8]) -> Ordering {
-    if is_transparent_alias(left) {
-        let handle = alias_handle(left);
-        return encoded_cmp(handle.atom().as_view().get_data(), right);
-    }
-    if is_transparent_alias(right) {
-        let handle = alias_handle(right);
-        return encoded_cmp(left, handle.atom().as_view().get_data());
-    }
-    let left = expanded_data(left);
-    let right = expanded_data(right);
-    compare_expanded(&left, &right)
+    aliased_view_cmp(
+        &AtomView::from_with_aliases(left, &NO_ALIASES),
+        &AtomView::from_with_aliases(right, &NO_ALIASES),
+    )
 }
 
 #[inline]
@@ -268,11 +359,18 @@ pub(crate) fn compare_expanded_sum_contents(left: &[u8], right: &[u8]) -> Orderi
 }
 
 fn expanded_data(data: &[u8]) -> Cow<'_, [u8]> {
+    expanded_data_with_aliases(data, &NO_ALIASES)
+}
+
+fn expanded_data_with_aliases<'a>(
+    data: &'a [u8],
+    aliases: &Vec<Arc<AliasHandle>>,
+) -> Cow<'a, [u8]> {
     if !raw_has_alias(data) || data[0] & TYPE_MASK == ALIAS_ID && !is_transparent_alias(data) {
         return Cow::Borrowed(data);
     }
     let mut out = Vec::with_capacity(data.len());
-    expand_atom(data, &mut out);
+    expand_atom(data, aliases, &mut out);
     Cow::Owned(out)
 }
 
@@ -288,7 +386,7 @@ fn alias_handle(data: &[u8]) -> std::sync::Arc<crate::alias::AliasHandle> {
 
 /// Expand one complete encoded atom, retaining all non-alias metadata. Return
 /// whether its expansion still contains opaque aliases.
-fn expand_atom(data: &[u8], out: &mut Vec<u8>) -> bool {
+fn expand_atom(data: &[u8], aliases: &Vec<Arc<AliasHandle>>, out: &mut Vec<u8>) -> bool {
     if !raw_has_alias(data) {
         out.extend_from_slice(data);
         return false;
@@ -299,31 +397,66 @@ fn expand_atom(data: &[u8], out: &mut Vec<u8>) -> bool {
             true
         }
         ALIAS_ID => {
-            // BorrowedAtom stores only encoded bytes. Hold a strong registry
-            // guard while reading the body and recursively expanding dependencies.
-            let handle = alias_handle(data);
-            expand_atom(handle.atom().as_view().get_data(), out)
-        }
-        FUN_ID | MUL_ID | ADD_ID => {
-            let is_fun = data[0] & TYPE_MASK == FUN_ID;
-            let (name, n_args, mut children) = if is_fun {
-                read_packed_pair(function_metadata(data))
+            // Live views borrow their owner; detached byte keys need a strong
+            // registry guard while recursively expanding the body's dependencies.
+            let view = AtomView::from_with_aliases(data, aliases);
+            if let Some(body) = borrowed_alias_body(&view) {
+                expand_atom(body.get_data(), body.aliases_vec(), out)
             } else {
-                let (n_args, _, children) = read_packed_pair(&data[1..]);
-                (0, n_args, children)
-            };
-            let mut expanded = Vec::new();
-            if is_fun {
-                (name, n_args).write_packed(&mut expanded);
+                let handle = alias_handle(data);
+                let body = handle.atom().as_view();
+                expand_atom(body.get_data(), body.aliases_vec(), out)
             }
-            let mut term_ranges =
-                (data[0] & TYPE_MASK == ADD_ID && data[0] & NOT_NORMALIZED == 0).then(Vec::new);
+        }
+        FUN_ID | MUL_ID => {
+            let is_fun = data[0] & TYPE_MASK == FUN_ID;
+            let metadata = if is_fun {
+                function_metadata(data)
+            } else {
+                &data[1..]
+            };
+            let (first, second, mut children) = read_packed_pair(metadata);
+            let n_args = if is_fun { second } else { first };
+            let old_header_end = if is_fun {
+                data.len() - metadata.len()
+            } else {
+                data.len() - children.len()
+            };
+            let start = out.len();
+            // Start with the existing header and write descendants directly into
+            // the final buffer. Only the length header needs resizing afterward;
+            // there is no intermediate Vec for every function/product ancestor.
+            out.extend_from_slice(&data[..data.len() - children.len()]);
+            let header_end = start + old_header_end;
+            let mut has_alias = false;
+            for _ in 0..n_args {
+                let tail = skip_raw_atom(children);
+                let child = &children[..children.len() - tail.len()];
+                has_alias |= expand_atom(child, aliases, out);
+                children = tail;
+            }
+            let payload_len = (out.len() - header_end) as u64;
+            let header = if is_fun {
+                (payload_len, 1)
+            } else {
+                (n_args, payload_len)
+            };
+            let new_header_end = start + 1 + header.get_packed_size() as usize;
+            super::resize_header(out, header_end, new_header_end);
+            header.write_packed_fixed(&mut out[start + 1..new_header_end]);
+            out[start] = (data[0] & !HAS_ALIAS_FLAG) | if has_alias { HAS_ALIAS_FLAG } else { 0 };
+            has_alias
+        }
+        ADD_ID => {
+            let (n_args, _, mut children) = read_packed_pair(&data[1..]);
+            let mut expanded = Vec::new();
+            let mut term_ranges = (data[0] & NOT_NORMALIZED == 0).then(Vec::new);
             let mut has_alias = false;
             for _ in 0..n_args {
                 let tail = skip_raw_atom(children);
                 let child = &children[..children.len() - tail.len()];
                 let start = expanded.len();
-                has_alias |= expand_atom(child, &mut expanded);
+                has_alias |= expand_atom(child, aliases, &mut expanded);
                 if let Some(ranges) = &mut term_ranges {
                     ranges.push(start..expanded.len());
                 }
@@ -343,11 +476,7 @@ fn expand_atom(data: &[u8], out: &mut Vec<u8>) -> bool {
                 });
             }
             out.push((data[0] & !HAS_ALIAS_FLAG) | if has_alias { HAS_ALIAS_FLAG } else { 0 });
-            if is_fun {
-                (expanded.len() as u64, 1).write_packed(out);
-            } else {
-                (n_args, expanded.len() as u64).write_packed(out);
-            }
+            (n_args, expanded.len() as u64).write_packed(out);
             if let Some(ranges) = term_ranges {
                 for range in ranges {
                     out.extend_from_slice(&expanded[range]);
@@ -363,8 +492,8 @@ fn expand_atom(data: &[u8], out: &mut Vec<u8>) -> bool {
             let children = &data[1..];
             let exp = skip_raw_atom(children);
             let base = &children[..children.len() - exp.len()];
-            let base_has_alias = expand_atom(base, out);
-            let exp_has_alias = expand_atom(exp, out);
+            let base_has_alias = expand_atom(base, aliases, out);
+            let exp_has_alias = expand_atom(exp, aliases, out);
             if base_has_alias || exp_has_alias {
                 out[start] |= HAS_ALIAS_FLAG;
             }
@@ -530,6 +659,329 @@ mod tests {
             let aliased = parent(alias.as_view());
             assert!(plain.as_view().needs_normalization());
             assert_key_equivalent(&aliased, &plain);
+        }
+    }
+
+    #[test]
+    fn nested_key_expansion_resizes_headers_at_nonzero_offsets() {
+        let variable = parse!("key_header_boundary_x");
+        let opaque = parse!("key_header_boundary_opaque").alias(true);
+        for nargs in [0, 1, 31, 127, 255, 256, 257, 1024] {
+            let mut body = Atom::new();
+            let fun = body.to_fun(symbol!("key_header_boundary_body"));
+            for _ in 0..nargs {
+                fun.add_arg(variable.as_view());
+            }
+            let alias = body.alias(false);
+            let wrap = |child: &Atom| {
+                let mut product = Atom::new();
+                let factors = product.to_mul();
+                factors.extend(opaque.as_view());
+                factors.extend(child.as_view());
+                let mut inner = Atom::new();
+                let inner_fun = inner.to_fun(symbol!("key_header_boundary_inner"));
+                inner_fun.add_arg(variable.as_view());
+                inner_fun.add_arg(product.as_view());
+                inner_fun.add_arg(child.as_view());
+                let mut outer = Atom::new();
+                let outer_fun = outer.to_fun(symbol!("key_header_boundary_outer"));
+                outer_fun.add_arg(opaque.as_view());
+                outer_fun.add_arg(inner.as_view());
+                outer_fun.add_arg(product.as_view());
+                outer
+            };
+            let plain = wrap(&body);
+            let aliased = wrap(&alias);
+            assert_key_equivalent(&aliased, &plain);
+            // Exercise a second ownership context reached through an alias body.
+            let indirect = wrap(&aliased.alias(false));
+            assert_key_equivalent(&indirect, &wrap(&plain));
+            let detached = AtomView::from(aliased.as_view().get_data());
+            assert_eq!(detached, plain.as_view());
+            assert_eq!(hash_trace(&detached), hash_trace(&plain));
+        }
+    }
+
+    #[test]
+    fn recursive_alias_equality_preserves_metadata_and_child_order() {
+        let x = parse!("key_recursive_x");
+        let y = parse!("key_recursive_y");
+        let alias = x.alias(false);
+        let make = |kind, first: &Atom, second: &Atom| {
+            let mut atom = Atom::new();
+            match kind {
+                0 => {
+                    let fun = atom.to_fun(symbol!("key_recursive_fun"));
+                    fun.add_arg(first.as_view());
+                    fun.add_arg(second.as_view());
+                }
+                1 => {
+                    atom.to_pow(first.as_view(), second.as_view());
+                }
+                2 => {
+                    let mul = atom.to_mul();
+                    mul.extend(first.as_view());
+                    mul.extend(second.as_view());
+                }
+                _ => {
+                    let add = atom.to_add();
+                    add.extend(first.as_view());
+                    add.extend(second.as_view());
+                }
+            }
+            atom
+        };
+        for kind in 0..4 {
+            let plain = make(kind, &x, &y);
+            let aliased = make(kind, &alias, &y);
+            assert_key_equivalent(&aliased, &plain);
+            for other in [make(kind, &y, &x), make(kind, &x, &x), make(kind, &y, &y)] {
+                assert_ne!(aliased, other);
+                assert_ne!(other, aliased);
+                assert!(BorrowedAtom::new(aliased.as_view()) != BorrowedAtom::new(other.as_view()));
+            }
+            let mut different_metadata = plain.clone();
+            different_metadata.set_normalized(true);
+            assert_ne!(aliased, different_metadata);
+        }
+        let f = make(0, &alias, &y);
+        let mut other_head = Atom::new();
+        let fun = other_head.to_fun(symbol!("key_recursive_other_fun"));
+        fun.add_arg(x.as_view());
+        fun.add_arg(y.as_view());
+        assert_ne!(f, other_head);
+        let mut shorter = Atom::new();
+        shorter
+            .to_fun(symbol!("key_recursive_fun"))
+            .add_arg(x.as_view());
+        assert_ne!(f, shorter);
+        let mut coefficient_flag = make(2, &x, &y);
+        let Atom::Mul(factors) = &mut coefficient_flag else {
+            unreachable!()
+        };
+        factors.set_has_coefficient(true);
+        assert_ne!(make(2, &alias, &y), coefficient_flag);
+    }
+
+    #[test]
+    fn recursive_alias_keys_match_independent_expansion_oracle() {
+        use super::{
+            ADD_ID, ALIAS_ID, ALIAS_OPAQUE_FLAG, FUN_ID, HAS_ALIAS_FLAG, MUL_ID, NO_ALIASES,
+            NOT_NORMALIZED, POW_ID, PackedRationalNumberWriter, TYPE_MASK, alias_handle,
+            function_metadata, raw_has_alias, read_packed_pair, skip_raw_atom,
+        };
+
+        // Retain the previous expansion algorithm as an independent oracle:
+        // every compound builds a separate child buffer before writing headers.
+        // This deliberately does not call the optimized key comparison/expander.
+        fn reference_expand(data: &[u8], out: &mut Vec<u8>) -> bool {
+            if !raw_has_alias(data) {
+                out.extend_from_slice(data);
+                return false;
+            }
+            match data[0] & TYPE_MASK {
+                ALIAS_ID if data[0] & ALIAS_OPAQUE_FLAG != 0 => {
+                    out.extend_from_slice(data);
+                    true
+                }
+                ALIAS_ID => {
+                    let handle = alias_handle(data);
+                    reference_expand(handle.atom().as_view().get_data(), out)
+                }
+                FUN_ID | MUL_ID | ADD_ID => {
+                    let is_fun = data[0] & TYPE_MASK == FUN_ID;
+                    let (name, n_args, mut children) = if is_fun {
+                        read_packed_pair(function_metadata(data))
+                    } else {
+                        let (n_args, _, children) = read_packed_pair(&data[1..]);
+                        (0, n_args, children)
+                    };
+                    let mut expanded = Vec::new();
+                    if is_fun {
+                        (name, n_args).write_packed(&mut expanded);
+                    }
+                    let mut term_ranges = (data[0] & TYPE_MASK == ADD_ID
+                        && data[0] & NOT_NORMALIZED == 0)
+                        .then(Vec::new);
+                    let mut has_alias = false;
+                    for _ in 0..n_args {
+                        let tail = skip_raw_atom(children);
+                        let child = &children[..children.len() - tail.len()];
+                        let start = expanded.len();
+                        has_alias |= reference_expand(child, &mut expanded);
+                        if let Some(ranges) = &mut term_ranges {
+                            ranges.push(start..expanded.len());
+                        }
+                        children = tail;
+                    }
+                    if let Some(ranges) = &mut term_ranges {
+                        // Restore encoded monomial order after expansion, including
+                        // older aliased sums stored in semantic factor order. This does
+                        // not normalize any expression or invoke user callbacks.
+                        ranges.sort_by(|left, right| {
+                            AtomView::from_with_aliases(&expanded[left.clone()], &NO_ALIASES)
+                                .get_term_cmp_slice()
+                                .cmp(
+                                    AtomView::from_with_aliases(
+                                        &expanded[right.clone()],
+                                        &NO_ALIASES,
+                                    )
+                                    .get_term_cmp_slice(),
+                                )
+                        });
+                    }
+                    out.push(
+                        (data[0] & !HAS_ALIAS_FLAG) | if has_alias { HAS_ALIAS_FLAG } else { 0 },
+                    );
+                    if is_fun {
+                        (expanded.len() as u64, 1).write_packed(out);
+                    } else {
+                        (n_args, expanded.len() as u64).write_packed(out);
+                    }
+                    if let Some(ranges) = term_ranges {
+                        for range in ranges {
+                            out.extend_from_slice(&expanded[range]);
+                        }
+                    } else {
+                        out.extend_from_slice(&expanded);
+                    }
+                    has_alias
+                }
+                POW_ID => {
+                    let start = out.len();
+                    out.push(data[0] & !HAS_ALIAS_FLAG);
+                    let children = &data[1..];
+                    let exp = skip_raw_atom(children);
+                    let base = &children[..children.len() - exp.len()];
+                    let base_has_alias = reference_expand(base, out);
+                    let exp_has_alias = reference_expand(exp, out);
+                    if base_has_alias || exp_has_alias {
+                        out[start] |= HAS_ALIAS_FLAG;
+                    }
+                    base_has_alias || exp_has_alias
+                }
+                _ => unreachable!("Alias flag on a leaf expression"),
+            }
+        }
+
+        let x = parse!("key_oracle_x");
+        let y = parse!("key_oracle_y");
+        let heads = [symbol!("key_oracle_f"), symbol!("key_oracle_g")];
+        let mut cases = vec![
+            Atom::Zero,
+            Atom::num(1),
+            Atom::num((-3, 7)),
+            x.clone(),
+            y.clone(),
+            x.alias(true),
+            y.alias(true),
+            x.alias(false),
+        ];
+        let mut level = cases.clone();
+        let mut seed = 0x8d12_7f39_0a5e_c621u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+        // Forty expressions, maximum two generated levels, and 1,600 ordered
+        // comparisons keep this deterministic differential check bounded.
+        for _ in 0..2 {
+            let mut next_level = Vec::new();
+            for kind in 0..8 {
+                let left = &level[next() % level.len()];
+                let right = &level[next() % level.len()];
+                let head = heads[next() % heads.len()];
+                for aliases in [false, true] {
+                    let left = if aliases {
+                        left.alias(false)
+                    } else {
+                        left.clone()
+                    };
+                    let right = if aliases {
+                        right.alias(false)
+                    } else {
+                        right.clone()
+                    };
+                    let mut atom = Atom::new();
+                    match kind {
+                        0 | 5 => {
+                            let fun = atom.to_fun(head);
+                            fun.add_arg(left.as_view());
+                            fun.add_arg(right.as_view());
+                            if kind == 5 {
+                                fun.add_arg(x.as_view());
+                                atom.set_normalized(true);
+                            }
+                        }
+                        1 => {
+                            atom.to_pow(left.as_view(), right.as_view());
+                        }
+                        2 | 6 => {
+                            let mul = atom.to_mul();
+                            mul.extend(left.as_view());
+                            if kind == 6 {
+                                mul.extend(Atom::num(3).as_view());
+                                mul.set_has_coefficient(true);
+                            } else {
+                                mul.extend(right.as_view());
+                            }
+                        }
+                        3 => {
+                            let add = atom.to_add();
+                            add.extend(left.as_view());
+                            add.extend(right.as_view());
+                        }
+                        4 => {
+                            atom = Atom::add_many(&[left, right]);
+                        }
+                        _ => {
+                            atom = left.alias(false);
+                        }
+                    }
+                    next_level.push(atom.clone());
+                    cases.push(atom);
+                }
+            }
+            level = next_level;
+        }
+        assert_eq!(cases.len(), 40);
+        let expected: Vec<_> = cases
+            .iter()
+            .map(|atom| {
+                let mut data = Vec::new();
+                reference_expand(atom.as_view().get_data(), &mut data);
+                data
+            })
+            .collect();
+        for (i, atom) in cases.iter().enumerate() {
+            let expected_hash = hash_trace(expected[i].as_slice());
+            assert_eq!(hash_trace(atom), expected_hash, "owned hash, case {i}");
+            assert_eq!(
+                hash_trace(&atom.as_view()),
+                expected_hash,
+                "view hash, case {i}"
+            );
+            assert_eq!(
+                hash_trace(BorrowedAtom::new(atom.as_view())),
+                expected_hash,
+                "borrowed hash, case {i}"
+            );
+            for (j, other) in cases.iter().enumerate() {
+                let equal = expected[i] == expected[j];
+                assert_eq!(atom == other, equal, "owned equality, cases {i}/{j}");
+                assert_eq!(
+                    atom.as_view() == other.as_view(),
+                    equal,
+                    "view equality, cases {i}/{j}"
+                );
+                assert_eq!(
+                    BorrowedAtom::new(atom.as_view()) == BorrowedAtom::new(other.as_view()),
+                    equal,
+                    "borrowed equality, cases {i}/{j}"
+                );
+            }
         }
     }
 

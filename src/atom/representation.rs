@@ -76,8 +76,9 @@ static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
 
 #[inline(always)]
 pub(crate) fn raw_has_alias(data: &[u8]) -> bool {
-    let tag = data[0];
-    tag & HAS_ALIAS_FLAG != 0 || tag & TYPE_MASK == ALIAS_ID
+    // The masked value is 0..=7 without the subtree flag and 64..=71 with it.
+    // ALIAS_ID is the largest type tag, so both cases need only one comparison.
+    data[0] & (HAS_ALIAS_FLAG | TYPE_MASK) >= ALIAS_ID
 }
 
 #[inline]
@@ -569,13 +570,23 @@ impl RawAtom {
 
     #[inline]
     pub(crate) fn clear_aliases(&mut self) {
+        if self.aliases.is_some() {
+            self.drop_aliases();
+        }
+    }
+
+    // Ordinary setters and recycled buffers have no owners. Keep their path
+    // free of ownership stores and the destructor's unwind bookkeeping.
+    #[cold]
+    #[inline(never)]
+    fn drop_aliases(&mut self) {
         self.aliases = None;
     }
 
     #[inline]
     pub(crate) fn sync_aliases_from(&mut self, aliases: &[Arc<AliasHandle>]) {
         if aliases.is_empty() {
-            self.aliases = None;
+            self.clear_aliases();
         } else {
             let mut owners = aliases.to_vec();
             // Callers such as refresh_alias_handles_from_tree may provide slot
@@ -605,7 +616,7 @@ impl RawAtom {
         if has_alias {
             self.aliases = Self::collect_aliases_from_view_data(data, aliases);
         } else {
-            self.aliases = None;
+            self.clear_aliases();
         }
     }
 
@@ -4096,6 +4107,14 @@ mod tests {
 
     #[test]
     fn alias_presence_ignores_other_header_flags() {
+        // Include every combination of the unrelated symbol/normalization flags.
+        for tag in 0..=u8::MAX {
+            assert_eq!(
+                raw_has_alias(&[tag]),
+                tag & HAS_ALIAS_FLAG != 0 || tag & TYPE_MASK == ALIAS_ID,
+                "header {tag:#x}",
+            );
+        }
         let linear = symbol!("alias_header_linear"; Linear);
         let symmetric = symbol!("alias_header_symmetric"; Symmetric);
         let x = parse!("x");

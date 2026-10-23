@@ -7,7 +7,7 @@ use crate::{
         AddView, Atom, AtomCore, AtomView, Fun, InlineVar, MulView, PowView, Symbol,
         representation::{
             FunView, InlineNum, ListIterator, ListSlice, compare_expanded_function_data,
-            compare_expanded_sum_contents, compare_expanded_term_keys,
+            compare_expanded_sum_contents, compare_expanded_term_keys, raw_has_alias,
         },
     },
     coefficient::{Coefficient, CoefficientView},
@@ -58,23 +58,24 @@ impl AtomView<'_> {
     }
 
     /// Compare structure after the caller has checked representation equality.
+    #[inline]
     pub(crate) fn cmp_structural(&self, other: &AtomView<'_>) -> Ordering {
-        // Borrow ordinary views directly. Materializing both resolved views
-        // here copies their data and ownership pointers on every comparison.
-        let resolved_a;
-        let a = if matches!(self, AtomView::Alias(_)) {
-            resolved_a = resolve_alias_loop(*self);
-            &resolved_a
-        } else {
-            self
-        };
-        let resolved_b;
-        let b = if matches!(other, AtomView::Alias(_)) {
-            resolved_b = resolve_alias_loop(*other);
-            &resolved_b
-        } else {
-            other
-        };
+        if matches!(self, AtomView::Alias(_)) || matches!(other, AtomView::Alias(_)) {
+            return self.cmp_structural_alias(other);
+        }
+        self.cmp_structural_resolved(other)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn cmp_structural_alias(&self, other: &AtomView<'_>) -> Ordering {
+        let a = resolve_alias(*self);
+        let b = resolve_alias(*other);
+        a.cmp_structural_resolved(&b)
+    }
+
+    fn cmp_structural_resolved(&self, other: &AtomView<'_>) -> Ordering {
+        let (a, b) = (self, other);
 
         match (a, b) {
             // comparisons on floating points may yield Equal even if the binary data is not the same
@@ -193,21 +194,24 @@ impl AtomView<'_> {
     }
 
     /// Compare factors semantically in a term. `x` and `x^2` are placed next to each other by sorting a power based on the base only.
+    #[inline]
     pub(crate) fn cmp_factors(&self, other: &AtomView<'_>) -> Ordering {
-        let resolved_a;
-        let a = if matches!(self, AtomView::Alias(_)) {
-            resolved_a = resolve_alias_loop(*self);
-            &resolved_a
-        } else {
-            self
-        };
-        let resolved_b;
-        let b = if matches!(other, AtomView::Alias(_)) {
-            resolved_b = resolve_alias_loop(*other);
-            &resolved_b
-        } else {
-            other
-        };
+        if matches!(self, AtomView::Alias(_)) || matches!(other, AtomView::Alias(_)) {
+            return self.cmp_factors_alias(other);
+        }
+        self.cmp_factors_resolved(other)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn cmp_factors_alias(&self, other: &AtomView<'_>) -> Ordering {
+        let a = resolve_alias(*self);
+        let b = resolve_alias(*other);
+        a.cmp_factors_resolved(&b)
+    }
+
+    fn cmp_factors_resolved(&self, other: &AtomView<'_>) -> Ordering {
+        let (a, b) = (self, other);
 
         match (a, b) {
             (AtomView::Num(_), AtomView::Num(_)) => Ordering::Equal,
@@ -412,13 +416,26 @@ fn resolve_alias_loop(mut a: AtomView<'_>) -> AtomView<'_> {
     a
 }
 
-#[inline]
-fn semantic_eq(a: &AtomView<'_>, b: &AtomView<'_>) -> bool {
-    // Normalized alias-free expressions have a canonical byte representation.
-    // Alias bodies can also contain unnormalized atoms from the raw builders.
-    a.get_data() == b.get_data()
-        || ((a.has_alias() || b.has_alias() || a.needs_normalization() || b.needs_normalization())
-            && a.cmp(b).is_eq())
+#[inline(always)]
+fn semantic_eq<A: AtomCore, B: AtomCore>(a: &A, b: &B) -> bool {
+    // Keep only bytes on the ordinary path. Passing the original operands to
+    // the cold fallback lets the compiler avoid materializing ownership views.
+    let a_data = a.as_atom_view().get_data();
+    let b_data = b.as_atom_view().get_data();
+    a_data == b_data
+        || ((raw_has_alias(a_data)
+            || raw_has_alias(b_data)
+            || a.as_atom_view().needs_normalization()
+            || b.as_atom_view().needs_normalization())
+            && semantic_eq_slow(a, b))
+}
+
+#[cold]
+#[inline(never)]
+fn semantic_eq_slow<A: AtomCore, B: AtomCore>(a: &A, b: &B) -> bool {
+    // Alias bodies may contain raw atoms, whose structural comparison differs
+    // from public key equality because normalization flags are not significant.
+    a.as_atom_view().cmp(&b.as_atom_view()).is_eq()
 }
 
 #[inline]
@@ -501,7 +518,7 @@ impl Atom {
             let pv = p1.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(other, Atom::Num(_)) && semantic_eq(&base, &other.as_view()) {
+            if !matches!(other, Atom::Num(_)) && semantic_eq(&base, other) {
                 if let AtomView::Num(n) = &exp {
                     let new_exp = n.get_coeff_view() + 1;
 
@@ -537,7 +554,7 @@ impl Atom {
             let pv = p.to_pow_view();
             let (base, exp) = pv.get_base_exp();
 
-            if !matches!(self, Atom::Num(_)) && semantic_eq(&base, &self.as_view()) {
+            if !matches!(self, Atom::Num(_)) && semantic_eq(&base, self) {
                 // The base borrowed from `other` survives mutations of `self`.
                 // Copy only when preserving an alias held by `self` instead.
                 let mut semantic_base;
@@ -589,7 +606,7 @@ impl Atom {
         }
 
         // x * x => x^2
-        if semantic_eq(&self.as_view(), &other.as_view()) {
+        if semantic_eq(self, other) {
             // add powers
             let exp = other.to_num(2);
             helper.to_pow(self.as_view(), AtomView::Num(exp.to_num_view()));
@@ -1255,7 +1272,7 @@ impl AtomView<'_> {
             exp
         };
 
-        if base == InlineVar::new(Symbol::E).as_view() {
+        if matches!(base, AtomView::Var(v) if v.get_symbol_id() == Symbol::E_ID) {
             // simplify logs inside exp
             if exp.contains_symbol(Symbol::LOG) {
                 let mut buffer = workspace.new_atom();
