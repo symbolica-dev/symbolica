@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-23",
+  "cpu": "AMD Ryzen 9 5900X, x86_64; CPU 2 affinity; SMT sibling 14; powersave governor; boost enabled",
+  "rustc": "1.99.0 (b940084d7 2026-09-28), LLVM 23.1.1",
+  "profile": {
+    "cargo": "bench",
+    "opt-level": 3,
+    "debug": true,
+    "debug-assertions": false,
+    "codegen-units": 16,
+    "lto": "off",
+    "incremental": true
+  },
+  "rustflags": [
+    "-C",
+    "target-cpu=native",
+    "-C",
+    "link-arg=-fuse-ld=mold"
+  ],
+  "build_jobs": 3,
+  "backends": {
+    "mpfr": "default features",
+    "astro": "--no-default-features --features tracing_max_level_info,faster_alloc,integer-malachite,float-astro,native_code_generation"
+  },
+  "timing": {
+    "clock": "Linux CLOCK_THREAD_CPUTIME_ID",
+    "warmup_iterations": 100,
+    "samples_per_case": 7,
+    "iterations_per_sample": 20000,
+    "aggregate": "median",
+    "cpu_affinity": 2,
+    "cpu_prewarm_seconds": 2,
+    "reported_pass": "second serial pass, with CPU prewarm; first pass retained separately"
+  },
+  "memory": {
+    "retained_atoms": 200000,
+    "samples_per_case": 7,
+    "method": "delta VmRSS in separate fresh processes; Vec capacity reserved before initial RSS; bytes include subsequently touched vector pages, allocator slack and cached transient allocations"
+  },
+  "sources": {
+    "main": "170ba932d0cf73508da34cc78fbe82361158147e",
+    "binary": "1e51900739f5e0f3271acfc9cba794f1833d8a18",
+    "tracked": "238be647928ec5b7fb14cb773c187b6e0ef11d42 plus working-tree text, evaluator and nonlinear-uncertainty changes"
+  },
+  "tracked_production_file_content_sha256_at_build": "29009f778672ba2ab21abe72b227465a59c330c20c09598b9a4d7a7eb334b4d5",
+  "lock_package_identity_sha256": "00816cc51db1635ab90a3a006bd672b63b8524e60887b2ba5947ccc99671ff6b",
+  "executable_sha256": {
+    "main-mpfr": "7df2e125e8057a31e1de609204f20fbb0645f7b7f905aebb853549e1e433fe98",
+    "main-astro": "404953217e77dfd1072e86dde38e4ca42b0c054bd1846aa4df261df39721eee1",
+    "binary-mpfr": "52da2a357c6540413494fdc2c2b0f12fa02438363ca036a14149697100ff1017",
+    "binary-astro": "9d86c2957e490a5194ae34635800802931b37df731286f9c6a4548adc5307e24",
+    "tracked-mpfr": "b95a336f76a820a8c96d1fff94da2fc2709d111992f7668870bfdf115a6d121d",
+    "tracked-astro": "dfcdd14a66ffeba045622bff951308c0bd82f81b071e665ee3f09006fd932305"
+  },
+  "limitations": [
+    "Host was not isolated; an unrelated worktree compiled during runs. Thread CPU time excludes descheduling but not frequency and cache effects.",
+    "The shared harness underwent formatting only between baseline and tracked builds.",
+    "Results cover fixed numeric coefficient microbenchmarks, not whole applications or nonlinear functions.",
+    "Cancellation retains uncertainty in tracked results and returns an exact zero on main, so outputs have different metadata semantics."
+  ],
+  "implementation_commit": "6efef83b472477bb51ae699fed774b7409d53690"
+}
