@@ -578,3 +578,38 @@ fn subnormal_f64_conversion_is_exact() {
         }
     }
 }
+
+#[test]
+fn complex_axis_division_preserves_each_simd_lane() {
+    use wide::f64x4;
+    let tiny = f64::from_bits(3);
+    let real = [tiny, f64::MAX / 2., 1e-300, -6.];
+    let imaginary = [-tiny, f64::MAX / 4., -1e-300, 9.];
+    let denominator = [0.5, 2., 1e-300, -3.];
+    for imaginary_axis in [false, true] {
+        let input = Complex::new(f64x4::from(real), f64x4::from(imaginary));
+        let d = f64x4::from(denominator);
+        let divisor = if imaginary_axis {
+            Complex::new(f64x4::ZERO, d)
+        } else {
+            Complex::new(d, f64x4::ZERO)
+        };
+        let actual = input / divisor;
+        let expected_re = std::array::from_fn(|i| {
+            if imaginary_axis {
+                imaginary[i] / denominator[i]
+            } else {
+                real[i] / denominator[i]
+            }
+        });
+        let expected_im = std::array::from_fn(|i| {
+            if imaginary_axis {
+                -real[i] / denominator[i]
+            } else {
+                imaginary[i] / denominator[i]
+            }
+        });
+        assert_eq!(actual.re.to_array(), expected_re);
+        assert_eq!(actual.im.to_array(), expected_im);
+    }
+}

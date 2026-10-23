@@ -571,6 +571,15 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
 
     #[inline]
     fn div(self, rhs: &Self) -> Self::Output {
+        // Axis denominators need no squared norm. This also preserves finite
+        // subnormal ratios in SIMD domains without scalar range classification.
+        if rhs.im.is_fully_zero() {
+            return Self::new(self.re / &rhs.re, self.im / &rhs.re);
+        }
+        if rhs.re.is_fully_zero() {
+            return Self::new(self.im / &rhs.im, -self.re / &rhs.im);
+        }
+
         let n = rhs.norm_squared();
         let re = self.re.clone() * &rhs.re + self.im.clone() * &rhs.im;
         let im = self.im.clone() * &rhs.re - self.re.clone() * &rhs.im;
@@ -579,13 +588,6 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
             && (!im.needs_rescaling() || im.is_fully_zero())
         {
             return Complex::new(re / &n, im / &n);
-        }
-
-        if rhs.im.is_fully_zero() {
-            return Self::new(self.re / &rhs.re, self.im / &rhs.re);
-        }
-        if rhs.re.is_fully_zero() {
-            return Self::new(self.im / &rhs.im, -self.re / &rhs.im);
         }
 
         // Keep the usual two-division path for ordinary inputs. Only rescale
