@@ -277,7 +277,10 @@ mod astro {
                 .try_reserve_exact(word_count)
                 .map_err(|_| "Cannot allocate binary float significand")?;
             words.resize(word_count, 0);
-            if shift >= 0 && shift % 8 == 0 {
+            if significand.len() >= std::mem::size_of::<astro_float::Word>()
+                && shift >= 0
+                && shift % 8 == 0
+            {
                 // Normal values need only byte padding. Import whole words
                 // instead of updating each destination word once per byte.
                 const WORD_BYTES: usize = std::mem::size_of::<astro_float::Word>();
@@ -306,8 +309,9 @@ mod astro {
                     words[word + count] = astro_float::Word::from_le_bytes(bytes);
                 }
             } else {
-                // Subnormal values may need a non-byte-aligned shift, including
-                // dropping up to seven low bits already checked to be zero.
+                // Short significands avoid chunk setup. Subnormal values may
+                // need a non-byte-aligned shift, including dropping up to seven
+                // low bits already checked to be zero.
                 for (index, &byte) in significand.iter().enumerate() {
                     let bit = index as i64 * 8 + shift;
                     if bit < 0 {
