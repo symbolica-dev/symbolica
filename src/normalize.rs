@@ -1788,26 +1788,32 @@ impl AtomView<'_> {
     }
 
     /// Add two atoms and normalize the result.
+    #[inline]
     pub(crate) fn add_normalized(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
-        // write (a+b)+(a+b) as 2*(a+b)
-        if *self == rhs {
-            let mut a = ws.new_atom();
-            let m = a.to_mul();
-            m.extend(InlineNum::new(2, 1).as_view());
-            m.extend(*self);
-            a.as_view().normalize(ws, out);
-            return;
+        if self.get_data() == rhs.get_data() {
+            self.add_identical(ws, out);
+        } else if matches!(self, AtomView::Add(_)) {
+            self.add_normalized_sum(rhs, ws, out);
+        } else if matches!(rhs, AtomView::Add(_)) {
+            rhs.add_normalized_sum(*self, ws, out);
+        } else {
+            self.add_normalized_pair(rhs, ws, out);
         }
+    }
 
-        if !matches!(self, AtomView::Add(_)) {
-            if matches!(rhs, AtomView::Add(_)) {
-                rhs.add_normalized(*self, ws, out);
-            } else {
-                self.add_normalized_pair(rhs, ws, out);
-            }
-            return;
-        }
+    #[inline(never)]
+    fn add_identical(&self, ws: &Workspace, out: &mut Atom) {
+        // Keep identical sums factored: (a+b)+(a+b) = 2*(a+b).
+        let mut a = ws.new_atom();
+        let m = a.to_mul();
+        m.extend(InlineNum::new(2, 1).as_view());
+        m.extend(*self);
+        a.as_view().normalize(ws, out);
+    }
 
+    /// Merge a normalized sum with another expression.
+    #[inline(never)]
+    fn add_normalized_sum(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
         let a = out.to_add();
         a.grow_capacity(self.get_byte_size() + rhs.get_byte_size());
 
@@ -1994,6 +2000,7 @@ impl AtomView<'_> {
     }
 
     /// Add two terms after excluding sums.
+    #[inline]
     fn add_normalized_pair(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
         if !self.needs_normalization()
             && !rhs.needs_normalization()
@@ -2004,19 +2011,20 @@ impl AtomView<'_> {
             if order != Ordering::Equal {
                 // Canonical terms with distinct monomials need neither staging nor sorting.
                 let a = out.to_add();
-                a.grow_capacity(self.get_byte_size() + rhs.get_byte_size());
                 if order == Ordering::Less {
-                    a.extend(*self);
-                    a.extend(rhs);
+                    a.set_normalized_pair(self.get_data(), rhs.get_data());
                 } else {
-                    a.extend(rhs);
-                    a.extend(*self);
+                    a.set_normalized_pair(rhs.get_data(), self.get_data());
                 }
-                a.set_normalized(true);
                 return;
             }
         }
 
+        self.add_unnormalized_pair(rhs, ws, out);
+    }
+
+    #[inline(never)]
+    fn add_unnormalized_pair(&self, rhs: AtomView, ws: &Workspace, out: &mut Atom) {
         let mut sum = ws.new_atom();
         let a = sum.to_add();
         a.extend(*self);

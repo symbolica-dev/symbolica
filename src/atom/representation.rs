@@ -1342,6 +1342,27 @@ impl Default for Add {
 }
 
 impl Add {
+    /// Store two distinct, sorted, normalized, alias-free terms that are neither
+    /// sums nor coefficients. The caller has already checked these invariants.
+    #[inline]
+    pub(crate) fn set_normalized_pair(&mut self, left: &[u8], right: &[u8]) {
+        self.data.clear();
+        let payload_len = left.len() + right.len();
+        if payload_len <= u8::MAX as usize {
+            self.data.reserve(4 + payload_len);
+            self.data
+                .extend_from_slice(&[ADD_ID, 0x11, 2, payload_len as u8]);
+        } else {
+            let header = (2u64, payload_len as u64);
+            self.data
+                .reserve(1 + header.get_packed_size() as usize + payload_len);
+            self.data.push(ADD_ID);
+            header.write_packed(&mut self.data);
+        }
+        self.data.extend_from_slice(left);
+        self.data.extend_from_slice(right);
+    }
+
     #[inline]
     pub(crate) fn new() -> Add {
         Self::new_into(RawAtom::new())
@@ -1441,7 +1462,7 @@ impl Add {
 
     pub(crate) fn grow_capacity(&mut self, size: usize) {
         if size > self.data.capacity() {
-            let additional = size - self.data.capacity();
+            let additional = size - self.data.len();
             self.data.reserve(additional);
         }
     }
@@ -2616,6 +2637,54 @@ impl<'a> Iterator for ListSliceIterator<'a> {
 mod tests {
     use super::*;
     use crate::{parse, symbol};
+
+    #[test]
+    fn normalized_pair_headers_cover_payload_widths() {
+        let right = parse!("pair_header_right");
+        let child = Atom::num(1);
+        let mut sum = Add::new();
+        let mut header_sizes = Vec::new();
+        for count in [0, 80, 81, 82, 100, 21_840, 21_841, 21_842, 22_000] {
+            let mut left = Atom::new();
+            let function = left.to_fun(symbol!("pair_header_left"));
+            for _ in 0..count {
+                function.add_arg(child.as_view());
+            }
+            function.set_normalized(true);
+            let mut terms = [left.as_view(), right.as_view()];
+            terms.sort_by(|a, b| a.get_term_cmp_slice().cmp(b.get_term_cmp_slice()));
+            let payload_len = terms
+                .iter()
+                .map(|term| term.get_data().len())
+                .sum::<usize>();
+
+            sum.set_normalized_pair(terms[0].get_data(), terms[1].get_data());
+            let (nargs, size, payload) = read_packed_pair(&sum.data[1..]);
+            assert_eq!((nargs, size as usize), (2, payload_len));
+            assert_eq!(sum.data[0], ADD_ID);
+            assert_eq!(sum.to_add_view().iter().collect::<Vec<_>>(), terms);
+            header_sizes.push(sum.data.len() - payload.len());
+
+            let mut appended = Add::new();
+            appended.extend(terms[0]);
+            appended.extend(terms[1]);
+            appended.set_normalized(true);
+            assert_eq!(sum.data.as_slice(), appended.data.as_slice());
+        }
+        header_sizes.sort_unstable();
+        header_sizes.dedup();
+        assert_eq!(header_sizes, vec![4, 5, 7]);
+    }
+
+    #[test]
+    fn growing_sum_capacity_counts_from_its_length() {
+        let mut sum = Add::new();
+        sum.data.reserve(64);
+        let target = sum.data.capacity() + 1;
+        sum.grow_capacity(target);
+        assert!(sum.data.capacity() >= target);
+        assert_eq!(sum.get_nargs(), 0);
+    }
 
     fn check_list(atom: AtomView<'_>, expected: &[AtomView<'_>]) {
         let slice = match atom {
