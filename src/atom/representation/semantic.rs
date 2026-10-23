@@ -66,7 +66,7 @@ impl Ord for BorrowedAtom {
 #[cold]
 #[inline(never)]
 pub(crate) fn aliased_atom_eq<T: crate::atom::AtomCore>(left: &super::Atom, right: &T) -> bool {
-    aliased_view_eq(&left.as_view(), &right.as_atom_view())
+    view_eq(&left.as_view(), &right.as_atom_view())
 }
 
 #[cold]
@@ -75,7 +75,7 @@ pub(crate) fn aliased_view_eq_other<T: crate::atom::AtomCore>(
     left: &AtomView<'_>,
     right: &T,
 ) -> bool {
-    aliased_view_eq(left, &right.as_atom_view())
+    view_eq(left, &right.as_atom_view())
 }
 
 #[cold]

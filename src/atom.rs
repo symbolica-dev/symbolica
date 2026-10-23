@@ -2516,9 +2516,11 @@ impl<T: AtomCore> PartialEq<T> for AtomView<'_> {
     fn eq(&self, other: &T) -> bool {
         let data = self.get_data();
         let other_data = other.as_atom_view().get_data();
-        data == other_data
-            || ((representation::raw_has_alias(data) || representation::raw_has_alias(other_data))
-                && representation::aliased_view_eq_other(self, other))
+        if representation::raw_has_alias(data) || representation::raw_has_alias(other_data) {
+            representation::aliased_view_eq_other(self, other)
+        } else {
+            data == other_data
+        }
     }
 }
 
@@ -2527,9 +2529,11 @@ impl<T: AtomCore> PartialEq<T> for Atom {
     fn eq(&self, other: &T) -> bool {
         let data = self.as_view().get_data();
         let other_data = other.as_atom_view().get_data();
-        data == other_data
-            || ((representation::raw_has_alias(data) || representation::raw_has_alias(other_data))
-                && representation::aliased_atom_eq(self, other))
+        if representation::raw_has_alias(data) || representation::raw_has_alias(other_data) {
+            representation::aliased_atom_eq(self, other)
+        } else {
+            data == other_data
+        }
     }
 }
 
