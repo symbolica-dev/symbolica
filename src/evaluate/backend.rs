@@ -417,6 +417,9 @@ self_cell!(
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
 /// The settings for JIT compilation.
+///
+/// SymJIT's `stable_math` option is enabled by default. To override it, use
+/// `JITCompilationSettings::new().with_option("stable_math", "false")`.
 pub struct JITCompilationSettings {
     /// Directly translate the Symbolica instructions to SymJIT IR, without performing any tree-based analysis.
     direct_translation: bool,
@@ -461,6 +464,8 @@ impl JITCompilationSettings {
     }
 
     fn apply_to_config(&self, config: &mut Config) -> Result<(), String> {
+        // Apply the default before explicit user options so it remains overridable.
+        config.set_stable_math(true);
         config.set_dicect(self.direct_translation);
         config.set_opt_level(self.optimization_level);
         for (key, value) in &self.options {
