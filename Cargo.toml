@@ -160,6 +160,9 @@ symjit = { version = "2.27.3", optional = true }
 divan = { version = "0.1.21", optional = true }
 flint3-sys = { version = "3.6.1", optional = true, features = ["gmp-mpfr-sys"] }
 
+[dev-dependencies]
+serde_json = "1.0"
+
 [[bench]]
 name = "flint_comparison"
 harness = false

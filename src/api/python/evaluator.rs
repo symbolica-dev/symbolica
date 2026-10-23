@@ -434,6 +434,7 @@ pub struct PythonExpressionEvaluator {
     pub eval_double_float_complex: Option<ExpressionEvaluator<Complex<DoubleFloat>>>,
     pub eval_arb_prec: Option<(u32, ExpressionEvaluator<Float>)>,
     pub eval_arb_prec_complex: Option<(u32, ExpressionEvaluator<Complex<Float>>)>,
+    pub eval_tracked_complex: Option<(u32, ExpressionEvaluator<super::tracking::TrackedComplex>)>,
     pub jit_compile: bool,
     #[cfg(feature = "native_code_generation")]
     pub jit_settings: JITCompilationSettings,
@@ -454,7 +455,8 @@ impl PythonExpressionEvaluator {
             self.eval_double_float = Some(
                 self.eval_complex
                     .set_coeff(&self.rational_constants)
-                    .map_coeff(&|x| (&x.re).into()),
+                    .try_map_coeff_with_prec(&|x| (&x.re).into(), 106)
+                    .map_err(exceptions::PyValueError::new_err)?,
             );
         }
 
@@ -578,6 +580,7 @@ impl PythonExpressionEvaluator {
             eval_double_float_complex: self.eval_double_float_complex.clone(),
             eval_arb_prec: self.eval_arb_prec.clone(),
             eval_arb_prec_complex: self.eval_arb_prec_complex.clone(),
+            eval_tracked_complex: self.eval_tracked_complex.clone(),
             jit_compile: self.jit_compile,
             #[cfg(feature = "native_code_generation")]
             jit_settings: self.jit_settings.clone(),
@@ -658,6 +661,7 @@ impl PythonExpressionEvaluator {
                 eval_double_float_complex: None,
                 eval_arb_prec: None,
                 eval_arb_prec_complex: None,
+                eval_tracked_complex: None,
                 jit_compile: false,
             });
         }
@@ -713,6 +717,7 @@ impl PythonExpressionEvaluator {
                 eval_double_float_complex: None,
                 eval_arb_prec: None,
                 eval_arb_prec_complex: None,
+                eval_tracked_complex: None,
                 jit_compile,
                 jit_settings,
             })
@@ -892,6 +897,7 @@ impl PythonExpressionEvaluator {
         }
         self.eval_arb_prec = None;
         self.eval_arb_prec_complex = None;
+        self.eval_tracked_complex = None;
 
         Ok(())
     }
@@ -943,7 +949,11 @@ impl PythonExpressionEvaluator {
 
         #[cfg(feature = "native_code_generation")]
         if use_jit && self.jit_real.is_none() {
-            let real_eval = self.eval_complex.clone().map_coeff(&|x| x.re);
+            let real_eval = self
+                .eval_complex
+                .clone()
+                .try_map_coeff_with_prec(&|x| x.re, 53)
+                .map_err(exceptions::PyValueError::new_err)?;
 
             self.jit_real = Some(
                 real_eval
@@ -953,7 +963,12 @@ impl PythonExpressionEvaluator {
         }
 
         if !use_jit && self.eval_real.is_none() {
-            self.eval_real = Some(self.eval_complex.clone().map_coeff(&|x| x.re));
+            self.eval_real = Some(
+                self.eval_complex
+                    .clone()
+                    .try_map_coeff_with_prec(&|x| x.re, 53)
+                    .map_err(exceptions::PyValueError::new_err)?,
+            );
         }
 
         let arr = reshape_evaluator_inputs(
@@ -1014,6 +1029,49 @@ impl PythonExpressionEvaluator {
         inputs.output(out, py)
     }
 
+    /// Evaluate with per-component absolute errors, preserving stored coefficient uncertainty.
+    /// Inputs may be TrackedComplexFloat values, numerical Expressions or ordinary scalars.
+    /// This uses the tracked interpreter even when JIT compilation is enabled.
+    #[pyo3(signature = (inputs, decimal_digit_precision = None))]
+    fn evaluate_with_error(
+        &mut self,
+        inputs: Vec<PythonTrackedInput>,
+        decimal_digit_precision: Option<u32>,
+    ) -> PyResult<Vec<PythonTrackedComplexFloat>> {
+        use crate::domains::float::{ErrorPropagatingFloat, SingleFloat};
+        let prec = decimal_digit_precision
+            .map(|digits| Float::decimal_digits_to_bits(digits as f64))
+            .transpose()
+            .map_err(exceptions::PyValueError::new_err)?
+            .unwrap_or(53);
+        let zero = ErrorPropagatingFloat::exact_zero(prec);
+        if self
+            .eval_tracked_complex
+            .as_ref()
+            .is_none_or(|(cached_prec, _)| *cached_prec != prec)
+        {
+            let evaluator = self
+                .eval_complex
+                .set_coeff(&self.rational_constants)
+                .try_map_coeff_with_prec(
+                    &|c| Complex::new(zero.from_rational(&c.re), zero.from_rational(&c.im)),
+                    prec,
+                )
+                .map_err(exceptions::PyValueError::new_err)?;
+            self.eval_tracked_complex = Some((prec, evaluator));
+        }
+        let evaluator = &mut self.eval_tracked_complex.as_mut().unwrap().1;
+        let inputs = inputs
+            .iter()
+            .map(|x| x.to_tracked(prec))
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut output = vec![Complex::new(zero.clone(), zero); self.eval_complex.get_output_len()];
+        evaluator
+            .try_evaluate(&inputs, &mut output)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(output.into_iter().map(PythonTrackedComplexFloat).collect())
+    }
+
     /// Evaluate the expression for a single input. The precision of the input parameters is honored, and
     /// all constants are converted to a float with a decimal precision set by `decimal_digit_precision`.
     ///
@@ -1062,7 +1120,8 @@ impl PythonExpressionEvaluator {
                 prec,
                 self.eval_complex
                     .set_coeff(&self.rational_constants)
-                    .map_coeff_with_prec(&|x| x.re.to_multi_prec_float(prec), prec),
+                    .try_map_coeff_with_prec(&|x| x.re.to_multi_prec_float(prec), prec)
+                    .map_err(exceptions::PyValueError::new_err)?,
             ));
         }
 
@@ -1334,6 +1393,7 @@ impl PythonExpressionEvaluator {
         }
         self.eval_arb_prec = None;
         self.eval_arb_prec_complex = None;
+        self.eval_tracked_complex = None;
 
         Ok(())
     }

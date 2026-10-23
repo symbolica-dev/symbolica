@@ -584,10 +584,12 @@ fn register_constant_external_container<T>(
     fixed_args: Vec<Complex<Rational>>,
     constants: &mut Vec<Complex<Rational>>,
 ) -> usize {
-    let index = if let Some(index) = external_functions
-        .iter()
-        .position(|x| x.symbol == symbol && x.tags == tags && x.fixed_args == fixed_args)
-    {
+    let index = if let Some(index) = external_functions.iter().position(|x| {
+        x.floating_coefficient.is_none()
+            && x.symbol == symbol
+            && x.tags == tags
+            && x.fixed_args == fixed_args
+    }) {
         index
     } else {
         external_functions.push(ExternalFunctionContainer::new(symbol, tags, fixed_args));
@@ -913,6 +915,22 @@ impl LinearizationContext<'_> {
                 self.constants.push(Some(constant));
                 self.constants.len() - 1
             });
+        Slot::Const(index)
+    }
+
+    fn floating_constant_slot(&mut self, coefficient: FloatingCoefficient) -> Slot {
+        if let Some(external) = self
+            .external_functions
+            .iter()
+            .find(|external| external.floating_coefficient.as_ref() == Some(&coefficient))
+        {
+            return Slot::Const(external.constant_index.unwrap());
+        }
+        let mut external = ExternalFunctionContainer::from_floating(coefficient);
+        let index = self.constants.len();
+        external.constant_index = Some(index);
+        self.constants.push(None);
+        self.external_functions.push(external);
         Slot::Const(index)
     }
 
@@ -1844,11 +1862,7 @@ impl<'a> AtomView<'a> {
             }
             CoefficientView::Large(l, i) => Complex::new(l.to_rat(), i.to_rat()),
             CoefficientView::Float(r, i) => {
-                // TODO: converting back to rational is slow
-                Complex::new(
-                    r.to_float().get_num().to_rational(),
-                    i.to_float().get_num().to_rational(),
-                )
+                return Ok(context.floating_constant_slot(FloatingCoefficient::new(r, i)));
             }
             CoefficientView::Indeterminate => {
                 return Err(EvaluationError::UnsupportedCoefficient {
@@ -2305,12 +2319,15 @@ pub enum Expression<T> {
     ),
     /// A cached hash and an index into the extracted common subexpressions.
     SubExpression(ExpressionHash, usize),
+    /// A floating constant retaining original precision and absolute error.
+    /// It must be resolved in the numerical target domain, not simplified as a rational.
+    FloatingConstant(ExpressionHash, FloatingCoefficient),
 }
 
 impl<T> Expression<T> {
     fn get_hash(&self) -> ExpressionHash {
         match self {
-            Expression::Const(h, _) => *h,
+            Expression::Const(h, _) | Expression::FloatingConstant(h, _) => *h,
             Expression::Parameter(h, _) => *h,
             Expression::Eval(h, _, _) => *h,
             Expression::Add(h, _) => *h,
@@ -2335,6 +2352,9 @@ impl<T: Eq + InternalOrdering> PartialOrd for Expression<T> {
 impl<T: Eq + InternalOrdering> Ord for Expression<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
+            (Expression::FloatingConstant(_, a), Expression::FloatingConstant(_, b)) => a.cmp(b),
+            (Expression::FloatingConstant(_, _), _) => std::cmp::Ordering::Less,
+            (_, Expression::FloatingConstant(_, _)) => std::cmp::Ordering::Greater,
             (Expression::Const(_, a), Expression::Const(_, b)) => a.internal_cmp(b),
             (Expression::Parameter(_, a), Expression::Parameter(_, b)) => a.cmp(b),
             (Expression::Eval(_, a, b), Expression::Eval(_, c, d)) => {
@@ -2389,7 +2409,10 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
     fn find_subexpression<'a>(&'a self, subexp: &mut HashMap<&'a Expression<T>, usize>) -> bool {
         if matches!(
             self,
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _)
+            Expression::Const(_, _)
+                | Expression::FloatingConstant(_, _)
+                | Expression::Parameter(_, _)
+                | Expression::ReadArg(_, _)
         ) {
             return true;
         }
@@ -2402,7 +2425,10 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
         subexp.insert(self, 1);
 
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in ae {
                     arg.find_subexpression(subexp);
@@ -2441,7 +2467,10 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
         }
 
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in &mut *ae {
                     arg.replace_subexpression(subexp, false);
@@ -2482,7 +2511,10 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
     ) -> OperationCount {
         if matches!(
             self,
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _)
+            Expression::Const(_, _)
+                | Expression::FloatingConstant(_, _)
+                | Expression::Parameter(_, _)
+                | Expression::ReadArg(_, _)
         ) {
             return OperationCount::default();
         }
@@ -2494,7 +2526,9 @@ impl<T: Eq + Hash + Clone + InternalOrdering> Expression<T> {
         sub_expr.insert(self, 1);
 
         match self {
-            Expression::Const(_, _) => OperationCount::default(),
+            Expression::Const(_, _) | Expression::FloatingConstant(_, _) => {
+                OperationCount::default()
+            }
             Expression::Parameter(_, _) => OperationCount::default(),
             Expression::Eval(_, _, args) => {
                 let mut count = OperationCount::default();
@@ -2562,6 +2596,16 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 
     fn rehash(&mut self, partial: bool) -> ExpressionHash {
         match self {
+            Expression::FloatingConstant(h, coefficient) => {
+                if partial && *h != 0 {
+                    return *h;
+                }
+                let mut hasher = AHasher::default();
+                hasher.write_u8(13);
+                coefficient.hash(&mut hasher);
+                *h = hasher.finish();
+                *h
+            }
             Expression::Const(h, c) => {
                 if partial && *h != 0 {
                     return *h;
@@ -2727,7 +2771,7 @@ impl<T: std::hash::Hash + Clone> Expression<T> {
 }
 
 impl<T: Clone + PartialEq> SplitExpression<T> {
-    pub fn map_coeff<T2, F: Fn(&T) -> T2>(&self, f: &F) -> SplitExpression<T2> {
+    pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> SplitExpression<T2> {
         SplitExpression {
             tree: self.tree.iter().map(|x| x.map_coeff(f)).collect(),
             subexpressions: self.subexpressions.iter().map(|x| x.map_coeff(f)).collect(),
@@ -2736,11 +2780,22 @@ impl<T: Clone + PartialEq> SplitExpression<T> {
 }
 
 impl<T: Clone + PartialEq> Expression<T> {
-    /// Map the coefficients.
+    /// Convert exact coefficients with `f`, resolving original floating
+    /// coefficients directly through the target [`EvaluationDomain`].
+    /// The closure is not applied to floating coefficients. Their stored
+    /// precision and uncertainty are preserved for tracked target domains.
     ///
     /// Note that no rehashing is performed.
-    pub fn map_coeff<T2, F: Fn(&T) -> T2>(&self, f: &F) -> Expression<T2> {
+    pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> Expression<T2> {
         match self {
+            Expression::FloatingConstant(h, coefficient) => Expression::Const(
+                *h,
+                Box::new(
+                    coefficient
+                        .resolve::<T2>(T2::FIXED_PRECISION)
+                        .expect("Cannot map floating evaluator coefficient"),
+                ),
+            ),
             Expression::Const(h, c) => Expression::Const(*h, Box::new(f(c))),
             Expression::Parameter(h, p) => Expression::Parameter(*h, *p),
             Expression::Eval(h, id, e_args) => {
@@ -2794,8 +2849,32 @@ impl Expression<Complex<Rational>> {
         external_functions: &mut Vec<ExternalFunctionContainer<Complex<Rational>>>,
     ) {
         match self {
+            Expression::FloatingConstant(_, coefficient) => {
+                let external = if let Some(index) = external_functions.iter().position(|external| {
+                    external.floating_coefficient.as_ref() == Some(coefficient)
+                }) {
+                    index
+                } else {
+                    external_functions.push(ExternalFunctionContainer::from_floating(
+                        coefficient.clone(),
+                    ));
+                    external_functions.len() - 1
+                };
+                let index = *external_functions[external]
+                    .constant_index
+                    .get_or_insert_with(|| {
+                        constants.push(Complex::default());
+                        constants.len() - 1
+                    });
+                *self = Expression::Parameter(0, param_count + index);
+            }
             Expression::Const(_, t) => {
-                if let Some(p) = constants.iter().position(|x| x == &**t) {
+                if let Some(p) = constants.iter().enumerate().position(|(index, x)| {
+                    x == &**t
+                        && !external_functions
+                            .iter()
+                            .any(|external| external.constant_index == Some(index))
+                }) {
                     *self = Expression::Parameter(0, param_count + p);
                 } else {
                     constants.push(t.as_ref().clone());
@@ -2861,8 +2940,10 @@ impl Expression<Complex<Rational>> {
 }
 
 impl<T: Clone + PartialEq> EvalTree<T> {
-    /// Convert all numerical coefficients with `f`, preserving the expression
-    /// structure, parameter order, and function definitions.
+    /// Convert exact coefficients with `f`, preserving the expression structure,
+    /// parameter order, and function definitions. Original floating coefficients
+    /// resolve directly through the target [`EvaluationDomain`] and do not pass
+    /// through `f`; tracked targets retain their input uncertainty.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(&self, f: &F) -> EvalTree<T2> {
         EvalTree {
             expressions: SplitExpression {
@@ -2982,6 +3063,9 @@ impl EvalTree<Complex<Rational>> {
         reserved_indices: usize,
     ) -> usize {
         match tree {
+            Expression::FloatingConstant(_, _) => {
+                unreachable!("Floating constants must be stripped before linearization")
+            }
             Expression::Const(_, t) => {
                 unreachable!(
                     "Constants should have been stripped from the expression tree. Found constant {}",
@@ -3901,7 +3985,10 @@ impl Expression<Complex<Rational>> {
     /// Apply a simple occurrence-order Horner scheme to every addition.
     pub fn occurrence_order_horner_scheme(&mut self) {
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in ae {
                     arg.occurrence_order_horner_scheme();
@@ -4026,7 +4113,10 @@ impl Expression<Complex<Rational>> {
 
     fn find_all_variables(&self, vars: &mut HashMap<Expression<Complex<Rational>>, usize>) {
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in ae {
                     arg.find_all_variables(vars);
@@ -4191,7 +4281,10 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
 impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrdering> Expression<T> {
     fn rename_subexpression(&mut self, subexp: &HashMap<usize, usize>) {
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in &mut *ae {
                     arg.rename_subexpression(subexp);
@@ -4232,7 +4325,10 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
 
     fn get_dependent_subexpressions(&self, dep: &mut Vec<usize>) {
         match self {
-            Expression::Const(_, _) | Expression::Parameter(_, _) | Expression::ReadArg(_, _) => {}
+            Expression::Const(_, _)
+            | Expression::FloatingConstant(_, _)
+            | Expression::Parameter(_, _)
+            | Expression::ReadArg(_, _) => {}
             Expression::Eval(_, _, ae) => {
                 for arg in ae {
                     arg.get_dependent_subexpressions(dep);
@@ -4294,7 +4390,9 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
     /// to count shared subexpressions only once.
     pub fn count_operations(&self) -> OperationCount {
         match self {
-            Expression::Const(_, _) => OperationCount::default(),
+            Expression::Const(_, _) | Expression::FloatingConstant(_, _) => {
+                OperationCount::default()
+            }
             Expression::Parameter(_, _) => OperationCount::default(),
             Expression::Eval(_, _, args) => {
                 let mut count = OperationCount::default();
@@ -4367,6 +4465,9 @@ impl<T: Real> EvalTree<T> {
         args: &[T],
     ) -> T {
         match expr {
+            Expression::FloatingConstant(_, _) => {
+                panic!("Map floating coefficients to the numerical domain before evaluating a tree")
+            }
             Expression::Const(_, c) => c.as_ref().clone(),
             Expression::Parameter(_, p) => params[*p].clone(),
             Expression::Eval(_, f, e_args) => {
@@ -4529,16 +4630,10 @@ impl<'a> AtomView<'a> {
                     0,
                     Box::new(Complex::new(l.to_rat(), i.to_rat())),
                 )),
-                CoefficientView::Float(r, i) => {
-                    // TODO: converting back to rational is slow
-                    Ok(Expression::Const(
-                        0,
-                        Box::new(Complex::new(
-                            r.to_float().get_num().to_rational(),
-                            i.to_float().get_num().to_rational(),
-                        )),
-                    ))
-                }
+                CoefficientView::Float(r, i) => Ok(Expression::FloatingConstant(
+                    0,
+                    FloatingCoefficient::new(r, i),
+                )),
                 CoefficientView::Indeterminate => Err(EvaluationError::UnsupportedCoefficient {
                     coefficient: "indeterminate".to_owned(),
                 }),

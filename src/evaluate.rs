@@ -49,8 +49,8 @@ pub use export::*;
 pub use external::*;
 pub use function_map::*;
 pub use instruction::{
-    ComplexPhase, ExportedConstantFunction, ExportedInstructions, ExportedSubEvaluator,
-    Instruction, InstructionList, Label, Slot, VectorInstruction,
+    ComplexPhase, ExportedConstantFunction, ExportedFloatingCoefficient, ExportedInstructions,
+    ExportedSubEvaluator, Instruction, InstructionList, Label, Slot, VectorInstruction,
 };
 pub use optimize::*;
 pub use tree::*;

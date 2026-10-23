@@ -102,6 +102,7 @@ impl PythonSeries {
                     function_brackets,
                     num_exp_as_superscript,
                     print_precision,
+                    lossless_floats: false,
                     mode: mode.into(),
                     precision,
                     print_precision: false,

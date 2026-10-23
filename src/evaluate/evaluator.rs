@@ -162,6 +162,8 @@ impl<T: bincode::Encode> bincode::Encode for ExpressionEvaluator<T> {
         &self,
         encoder: &mut E,
     ) -> core::result::Result<(), bincode::error::EncodeError> {
+        bincode::Encode::encode(&255u8, encoder)?;
+        bincode::Encode::encode(&1u8, encoder)?;
         bincode::Encode::encode(&self.stack, encoder)?;
         bincode::Encode::encode(&self.param_count, encoder)?;
         bincode::Encode::encode(&self.reserved_indices, encoder)?;
@@ -179,6 +181,13 @@ impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Co
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
+        if <u8 as bincode::Decode<Context>>::decode(decoder)? != 255
+            || <u8 as bincode::Decode<Context>>::decode(decoder)? != 1
+        {
+            return Err(bincode::error::DecodeError::Other(
+                "Unsupported evaluator format. Rebuild the evaluator",
+            ));
+        }
         Ok(Self {
             stack: bincode::Decode::decode(decoder)?,
             param_count: bincode::Decode::decode(decoder)?,
@@ -198,6 +207,13 @@ impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
     ) -> Result<Self, bincode::error::DecodeError> {
+        if <u8 as bincode::BorrowDecode<'de, Context>>::borrow_decode(decoder)? != 255
+            || <u8 as bincode::BorrowDecode<'de, Context>>::borrow_decode(decoder)? != 1
+        {
+            return Err(bincode::error::DecodeError::Other(
+                "Unsupported evaluator format. Rebuild the evaluator",
+            ));
+        }
         Ok(Self {
             stack: bincode::BorrowDecode::borrow_decode(decoder)?,
             param_count: bincode::BorrowDecode::borrow_decode(decoder)?,
@@ -223,10 +239,24 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ExpressionEvaluator<T> {
     }
 }
 
-impl<T: SingleFloat> ExpressionEvaluator<Complex<T>> {
-    /// Check if the expression evaluator is real, i.e., all coefficients are real.
+impl<T: SingleFloat + 'static> ExpressionEvaluator<Complex<T>> {
+    /// Check whether all values are real in the evaluator's current domain.
+    /// Tracked components require exact imaginary zero; ordinary domains only
+    /// inspect their central values. Unresolved exact evaluators inspect the
+    /// original floating centers instead of their rational placeholders.
     pub fn is_real(&self) -> bool {
-        self.stack.iter().all(|x| x.is_real())
+        self.stack.iter().all(|x| x.im.is_exact_zero())
+            && (std::any::TypeId::of::<T>() != std::any::TypeId::of::<Rational>()
+                || self.external_fns.iter().all(|external| {
+                    external
+                        .floating_coefficient
+                        .as_ref()
+                        .is_none_or(|coefficient| {
+                            coefficient
+                                .to_tracked_float(None)
+                                .is_ok_and(|value| value.im.get_num().is_zero())
+                        })
+                }))
     }
 }
 
@@ -621,13 +651,17 @@ impl ExpressionEvaluator<Complex<Rational>> {
         self,
         ring: &R,
     ) -> Result<ExpressionEvaluator<R::Element>, EvaluationError> {
-        if self.external_fns.len() > 0 {
+        if let Some(external) = self
+            .external_fns
+            .iter()
+            .find(|external| external.floating_coefficient.is_none())
+        {
             return Err(EvaluationError::UndefinedFunction {
-                expression: self.external_fns[0].symbol.to_atom(),
+                expression: external.symbol.to_atom(),
             });
         }
 
-        let stack = self
+        let mut stack = self
             .stack
             .into_iter()
             .map(|x| {
@@ -635,6 +669,20 @@ impl ExpressionEvaluator<Complex<Rational>> {
                     .map_err(|e| EvaluationError::UnsupportedCoefficient { coefficient: e })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        for external in &self.external_fns {
+            if let (Some(index), Some(coefficient)) =
+                (external.constant_index, &external.floating_coefficient)
+            {
+                let value = coefficient.to_tracked_float(None).map_err(|coefficient| {
+                    EvaluationError::UnsupportedCoefficient { coefficient }
+                })?;
+                stack[self.param_count + index] = ring
+                    .try_element_from_coefficient(Coefficient::Float(value))
+                    .map_err(|coefficient| EvaluationError::UnsupportedCoefficient {
+                        coefficient,
+                    })?;
+            }
+        }
 
         Ok(ExpressionEvaluator {
             stack,
@@ -648,15 +696,19 @@ impl ExpressionEvaluator<Complex<Rational>> {
     }
 }
 
-impl<T: Default> ExpressionEvaluator<T> {
-    /// Map the coefficients to a different type.
-    pub fn map_coeff_with_prec<T2: EvaluationDomain, F: Fn(&T) -> T2>(
+impl<T> ExpressionEvaluator<T> {
+    /// Map exact numerical constants with `f`, resolving registered constants and
+    /// original floating coefficients in the target domain at `binary_prec`.
+    /// Tracked target domains retain input error; plain domains receive centers.
+    /// `f` applies only to exact constants. Original floating coefficients are
+    /// resolved through [`EvaluationDomain::try_from_complex_tracked_float`],
+    /// so `f` should convert domains rather than transform all coefficients.
+    pub fn try_map_coeff_with_prec<T2: EvaluationDomain, F: Fn(&T) -> T2>(
         self,
         f: &F,
         binary_prec: u32,
-    ) -> ExpressionEvaluator<T2> {
+    ) -> Result<ExpressionEvaluator<T2>, String> {
         let mut stack: Vec<_> = self.stack.iter().map(f).collect();
-
         let external_fns = self
             .external_fns
             .iter()
@@ -664,12 +716,10 @@ impl<T: Default> ExpressionEvaluator<T> {
             .collect::<Vec<_>>();
         for external in &external_fns {
             if let Some(i) = external.constant_index {
-                stack[self.param_count + i] =
-                    external.evaluate_constant::<T2>(binary_prec).unwrap();
+                stack[self.param_count + i] = external.evaluate_constant::<T2>(binary_prec)?;
             }
         }
-
-        ExpressionEvaluator {
+        Ok(ExpressionEvaluator {
             stack,
             param_count: self.param_count,
             reserved_indices: self.reserved_indices,
@@ -677,10 +727,22 @@ impl<T: Default> ExpressionEvaluator<T> {
             result_indices: self.result_indices,
             external_fns,
             settings: self.settings,
-        }
+        })
     }
 
-    /// Map the coefficients to a different type with a known precision.
+    /// Map coefficients, panicking if a constant cannot be represented in the
+    /// target domain. Use [`Self::try_map_coeff_with_prec`] for fallible conversion.
+    pub fn map_coeff_with_prec<T2: EvaluationDomain, F: Fn(&T) -> T2>(
+        self,
+        f: &F,
+        binary_prec: u32,
+    ) -> ExpressionEvaluator<T2> {
+        self.try_map_coeff_with_prec(f, binary_prec)
+            .expect("Cannot map evaluator constants")
+    }
+
+    /// Convert exact coefficients with `f` and resolve original floating
+    /// coefficients directly in the target domain with its known precision.
     /// Use [Self::map_coeff_with_prec] to specify a custom precision.
     pub fn map_coeff<T2: EvaluationDomain, F: Fn(&T) -> T2>(
         self,
@@ -737,6 +799,8 @@ impl<T: Default> ExpressionEvaluator<T> {
     }
 
     /// Borrow the numerical constants stored by the evaluator.
+    /// Before mapping, original floating coefficients occupy unresolved slots;
+    /// their lossless metadata is available through [`Self::export_instructions`].
     pub fn get_constants(&self) -> &[T] {
         &self.stack[self.param_count..self.reserved_indices]
     }
@@ -759,7 +823,9 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         count
     }
+}
 
+impl<T: Default> ExpressionEvaluator<T> {
     /// Optimize a fresh SSA program before allocating its temporary stack.
     /// Retained bodies use this same pipeline once, before becoming shared.
     pub(super) fn optimize_instructions(&mut self) {
@@ -1381,6 +1447,23 @@ impl<T: Default> ExpressionEvaluator<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_rational_slots_retains_original_floating_metadata() {
+        let value = ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, 0), 0.125);
+        let expression = Atom::num(value) * crate::parse!("x") + 1;
+        let exact = expression.evaluator(&[crate::parse!("x")]).build().unwrap();
+        let coefficients = exact.get_constants().to_vec();
+        let plain = exact.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        let restored = plain.set_coeff(&coefficients);
+        let sample = ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, 0), 0.);
+        let mut tracked = restored
+            .try_map_coeff_with_prec(&|c| sample.from_rational(&c.re), 128)
+            .unwrap();
+        let result = tracked.evaluate_single(&[sample.from_usize(2)]);
+        assert_eq!(result.get_num().to_f64(), 1.);
+        assert!(result.get_absolute_error() >= 0.25);
+    }
 
     #[test]
     fn coefficient_conversion_shares_function_bodies() {

@@ -783,6 +783,9 @@ impl Token {
                 }
                 _ => unreachable!(),
             },
+            Token::Number(n, false) if n.trim_start_matches('-').starts_with("0f[") => {
+                out.to_num(Coefficient::Float(Complex::parse_lossless(n)?));
+            }
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
@@ -913,6 +916,9 @@ impl Token {
         out: &mut Atom,
     ) -> Result<(), String> {
         match self {
+            Token::Number(n, false) if n.trim_start_matches('-').starts_with("0f[") => {
+                out.to_num(Coefficient::Float(Complex::parse_lossless(n)?));
+            }
             Token::Number(n, is_imag) => match n.parse::<Integer>() {
                 Ok(x) => {
                     if *is_imag {
@@ -1383,6 +1389,34 @@ impl Token {
                 ParseState::Number => {
                     let mut last_digit_is_exp = false;
                     loop {
+                        if c == 'f' && id_buffer == "0" && char_iter.clone().next() == Some('[') {
+                            // A complete tracked complex coefficient is one numeric token:
+                            // reparsing its parts through addition would alter the error.
+                            id_buffer.push('f');
+                            id_buffer.push(char_iter.next().unwrap());
+                            column_counter += 1;
+                            loop {
+                                c = char_iter.next().unwrap_or('\0');
+                                column_counter += 1;
+                                if c == '\0' {
+                                    return Err(error_context!(
+                                        "Unterminated lossless float literal"
+                                    ));
+                                }
+                                id_buffer.push(c);
+                                if c == ']' {
+                                    break;
+                                }
+                                if !c.is_ascii_hexdigit() && c != ':' && c != ';' {
+                                    return Err(error_context!(
+                                        "Invalid character in lossless float literal"
+                                    ));
+                                }
+                            }
+                            c = char_iter.next().unwrap_or('\0');
+                            column_counter += 1;
+                            break;
+                        }
                         if c.is_ascii_digit() {
                             id_buffer.push(c);
                             c = char_iter.next().unwrap_or('\0');
@@ -2401,7 +2435,13 @@ mod test {
     fn float() {
         let input = parse!("1.2`20x+1e-5`20+1e+5 * 1.1234e23 +2exp(5)");
 
-        let r = format!("{}", input.printer(PrintOptions::file_no_namespace()));
+        let r = format!(
+            "{}",
+            input.printer(PrintOptions {
+                lossless_floats: false,
+                ..PrintOptions::file_no_namespace()
+            })
+        );
         assert_eq!(
             r,
             "1.123400000000000e28`15.41+1.2000000000000000000`20.00*x+2*𝑒^5"

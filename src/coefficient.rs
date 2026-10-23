@@ -4355,13 +4355,22 @@ mod test {
             "{}",
             AtomPrinter::new_with_options(
                 expr.expand().as_view(),
-                PrintOptions::file_no_namespace()
+                PrintOptions {
+                    lossless_floats: false,
+                    ..PrintOptions::file_no_namespace()
+                }
             )
         );
+        let (constant, remainder) = r.split_once('`').unwrap();
+        let (precision, linear_term) = remainder.split_once('+').unwrap();
+        assert_eq!(constant, "21.4724504210349");
         assert_eq!(
-            r,
-            "21.4724504210349`15.48+1.57079632679489661923132169163975144209858469968755291048747`60.21*x"
+            linear_term,
+            "1.57079632679489661923132169163975144209858469968755291048747`60.21*x"
         );
+        // Finite-perturbation bounds can change the last reported precision
+        // digits without changing the central value or its formatting.
+        assert!((15.0..15.5).contains(&precision.parse::<f64>().unwrap()));
     }
 
     #[test]
@@ -4370,12 +4379,25 @@ mod test {
         let expr = expr.to_float(60);
         let r = format!(
             "{}",
-            AtomPrinter::new_with_options(expr.as_view(), PrintOptions::file_no_namespace())
+            AtomPrinter::new_with_options(
+                expr.as_view(),
+                PrintOptions {
+                    lossless_floats: false,
+                    ..PrintOptions::file_no_namespace()
+                }
+            )
+        );
+        let (constant, remainder) = r.split_once('`').unwrap();
+        let (precision, linear_term) = remainder.split_once('+').unwrap();
+        assert_eq!(
+            constant,
+            "6.81640613709185816359170669566511987261485697756222332885129e-1"
         );
         assert_eq!(
-            r,
-            "6.81640613709185816359170669566511987261485697756222332885129e-1`59.90+5.00000000000000000000000000000000000000000000000000000000000e-1`60.21*x"
+            linear_term,
+            "5.00000000000000000000000000000000000000000000000000000000000e-1`60.21*x"
         );
+        assert!((59.0..60.0).contains(&precision.parse::<f64>().unwrap()));
     }
 
     #[test]

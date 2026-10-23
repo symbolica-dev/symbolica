@@ -166,6 +166,7 @@ mod matrix;
 mod polynomial;
 mod series;
 mod symbolic_integration;
+mod tracking;
 
 use array::EvaluationInput;
 pub use atom::*;
@@ -183,6 +184,7 @@ pub use matrix::*;
 pub use polynomial::*;
 pub use series::*;
 pub use symbolic_integration::*;
+pub use tracking::{PythonMagnitude, PythonTrackedComplexFloat, PythonTrackedInput};
 
 /// Trait for registering Python submodules for Symbolica, which enables
 /// multiple crates to use the same Symbolica kernel.
@@ -661,6 +663,8 @@ pub fn create_symbolica_module<'a, 'b>(
     let _license_guard = bypass_license_check_internal();
 
     register_python_floats(m)?;
+    m.add_class::<PythonMagnitude>()?;
+    m.add_class::<PythonTrackedComplexFloat>()?;
     m.add_class::<Citation>()?;
     m.add_class::<PythonFormattedOutput>()?;
     display::register(m)?;
@@ -3123,27 +3127,24 @@ fn expression_shorthand(
     )
 }
 
+const EXPRESSION_PICKLE_HEADER: &[u8] = b"SYMPKL\x01";
+
 #[pyfunction]
 fn _reconstruct_expression(state: Vec<u8>) -> PyResult<PythonExpression> {
-    let Some((&marker, payload)) = state.split_first() else {
+    let Some(mut payload) = state.strip_prefix(EXPRESSION_PICKLE_HEADER) else {
         return Err(exceptions::PyValueError::new_err(
-            "Cannot reconstruct an expression from empty pickle data",
+            "Unsupported expression pickle: legacy raw pickles are not portable; recreate it with a version that can read the original expression",
         ));
     };
-    let mut legacy = Vec::new();
-    let mut source = if marker == 0 {
-        payload
-    } else {
-        // Older pickles contain raw format-5 atom bytes. Use the regular
-        // migration path so their numbers, powers, and ordering become canonical.
-        legacy.push(5);
-        legacy.extend_from_slice(&(state.len() as u64).to_le_bytes());
-        legacy.extend_from_slice(&state);
-        legacy.as_slice()
-    };
-    Atom::import_with_map(&mut source, &crate::state::StateMap::default())
-        .map(Into::into)
-        .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))
+    let expression = Atom::import(&mut payload, None).map_err(|error| {
+        exceptions::PyValueError::new_err(format!("Invalid expression pickle: {error}"))
+    })?;
+    if !payload.is_empty() {
+        return Err(exceptions::PyValueError::new_err(
+            "Trailing data in expression pickle",
+        ));
+    }
+    Ok(expression.into())
 }
 
 /// Create a new transformer that maps an expression.

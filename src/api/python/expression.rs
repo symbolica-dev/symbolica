@@ -2113,6 +2113,7 @@ impl PythonTransformer {
             function_brackets,
             num_exp_as_superscript,
             print_precision,
+            lossless_floats: false,
             mode: mode.into(),
             precision,
             print_precision: false,
@@ -3399,6 +3400,7 @@ impl PythonExpression {
                     function_brackets,
                     num_exp_as_superscript,
                     print_precision,
+                    lossless_floats: false,
                     mode: mode.into(),
                     precision,
                     print_precision: false,
@@ -4406,15 +4408,12 @@ impl PythonExpression {
         Atom::new().into()
     }
 
-    /// Get a serialized version of the expression.
+    /// Get a versioned serialized expression, including the symbol state it needs.
     pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
-        // Zero is not an atom tag, so it distinguishes versioned pickle data
-        // from the unversioned raw expressions written by older releases.
-        let mut state = vec![0];
-        self.expr
-            .as_view()
-            .write(&mut state)
-            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
+        let mut state = EXPRESSION_PICKLE_HEADER.to_vec();
+        self.expr.as_view().export(&mut state).map_err(|error| {
+            exceptions::PyValueError::new_err(format!("Cannot pickle expression: {error}"))
+        })?;
         Ok(state)
     }
 
@@ -8763,6 +8762,26 @@ impl PythonExpression {
         }
     }
 
+    /// Return the stored absolute errors of a numeric coefficient as (real, imaginary).
+    /// Exact rational coefficients return zero errors. This does not evaluate expressions.
+    pub fn get_error(&self) -> PyResult<(PythonMagnitude, PythonMagnitude)> {
+        super::tracking::coefficient_error(self)
+    }
+
+    /// Evaluate while preserving coefficient and input uncertainty.
+    /// The result exposes per-component Magnitude errors and the ComplexFloat center.
+    /// Inputs may be numerical Expressions, TrackedComplexFloat values or ordinary scalars.
+    /// Error estimates are not certified interval enclosures. Unsupported tracked callbacks
+    /// raise ValueError instead of silently discarding uncertainty.
+    #[pyo3(signature = (constants = None, decimal_digit_precision = None))]
+    pub fn evaluate_with_error(
+        &self,
+        constants: Option<HashMap<PythonExpression, PythonTrackedInput>>,
+        decimal_digit_precision: Option<u32>,
+    ) -> PyResult<PythonTrackedComplexFloat> {
+        super::tracking::evaluate_with_error(self, constants, decimal_digit_precision)
+    }
+
     /// Evaluate the expression, using a map of all constants and user functions.
     ///
     /// Examples
@@ -9055,6 +9074,7 @@ impl PythonExpression {
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
+            eval_tracked_complex: None,
             jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
             #[cfg(feature = "native_code_generation")]
             jit_settings,
@@ -9227,6 +9247,7 @@ impl PythonExpression {
             eval_double_float_complex: None,
             eval_arb_prec: None,
             eval_arb_prec_complex: None,
+            eval_tracked_complex: None,
             jit_compile: jit_compile && cfg!(feature = "native_code_generation"),
             #[cfg(feature = "native_code_generation")]
             jit_settings,

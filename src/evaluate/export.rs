@@ -15,11 +15,28 @@ pub trait ExportNumber {
     /// Check if the number is real.
     fn is_real(&self) -> bool;
 
+    /// Resolve an original floating center for native code generation. Custom
+    /// export domains may override this; the default rejects unresolved values.
+    /// Existing precision in `self` should be honored when the domain has one.
+    fn from_float_for_export(&self, _value: Complex<Float>) -> Result<Self, String>
+    where
+        Self: Sized,
+    {
+        Err("Map floating coefficients to a supported numeric domain before exporting".into())
+    }
+
     /// Convert the number to a complex double.
     fn to_complex_double(&self) -> Complex<f64>;
 }
 
 impl ExportNumber for f64 {
+    fn from_float_for_export(&self, value: Complex<Float>) -> Result<Self, String> {
+        if value.im.is_zero() {
+            Ok(value.re.to_f64())
+        } else {
+            Err("Cannot export a complex floating coefficient in a real domain".into())
+        }
+    }
     fn export(&self) -> String {
         format!("{:e}", self)
     }
@@ -34,6 +51,13 @@ impl ExportNumber for f64 {
 }
 
 impl ExportNumber for F64 {
+    fn from_float_for_export(&self, value: Complex<Float>) -> Result<Self, String> {
+        if value.im.is_zero() {
+            Ok(value.re.to_f64().into())
+        } else {
+            Err("Cannot export a complex floating coefficient in a real domain".into())
+        }
+    }
     fn export(&self) -> String {
         format!("{:e}", self)
     }
@@ -51,6 +75,16 @@ impl ExportNumber for F64 {
 }
 
 impl ExportNumber for Float {
+    fn from_float_for_export(&self, value: Complex<Float>) -> Result<Self, String> {
+        if !value.im.is_zero() {
+            return Err("Cannot export a complex floating coefficient in a real domain".into());
+        }
+        let mut value = value.re;
+        if value.prec() > self.prec() {
+            value.set_precision(self.prec());
+        }
+        Ok(value)
+    }
     fn export(&self) -> String {
         format!("{:e}", self)
     }
@@ -68,6 +102,13 @@ impl ExportNumber for Float {
 }
 
 impl ExportNumber for Rational {
+    fn from_float_for_export(&self, value: Complex<Float>) -> Result<Self, String> {
+        if value.im.is_zero() && value.re.is_finite() {
+            Ok(value.re.to_rational())
+        } else {
+            Err("Map non-real or non-finite floating coefficients to a floating domain before exporting".into())
+        }
+    }
     fn export(&self) -> String {
         self.to_string()
     }
@@ -98,6 +139,15 @@ impl ExportNumber for Rational {
 }
 
 impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
+    fn from_float_for_export(&self, value: Complex<Float>) -> Result<Self, String> {
+        let zero = Float::new(value.re.prec());
+        Ok(Complex::new(
+            self.re
+                .from_float_for_export(Complex::new(value.re, zero.clone()))?,
+            self.im
+                .from_float_for_export(Complex::new(value.im, zero))?,
+        ))
+    }
     fn export(&self) -> String {
         if self.im.is_zero() {
             self.re.export()
@@ -194,6 +244,30 @@ impl ExportSettings {
 }
 
 impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+    pub(super) fn with_resolved_float_constants(&self) -> Result<Option<Self>, String> {
+        if !self
+            .external_fns
+            .iter()
+            .any(|external| external.floating_coefficient.is_some())
+        {
+            return Ok(None);
+        }
+        let mut resolved = self.clone();
+        for external in &mut resolved.external_fns {
+            if let Some(coefficient) = external.floating_coefficient.take() {
+                let value = coefficient.to_tracked_float(None)?;
+                let index = resolved.param_count
+                    + external
+                        .constant_index
+                        .ok_or("Floating constant has no storage slot")?;
+                resolved.stack[index] = resolved.stack[index].from_float_for_export(
+                    Complex::new(value.re.into_value(), value.im.into_value()),
+                )?;
+            }
+        }
+        Ok(Some(resolved))
+    }
+
     pub(super) fn external_cpp_name(
         external_fns: &[ExternalFunctionContainer<T>],
         index: usize,
@@ -375,7 +449,11 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         settings: ExportSettings,
     ) -> Result<String, String> {
         let function_name = F::construct_function_name(function_name);
-        F::export_cpp(self, &function_name, settings)
+        if let Some(resolved) = self.with_resolved_float_constants()? {
+            F::export_cpp(&resolved, &function_name, settings)
+        } else {
+            F::export_cpp(self, &function_name, settings)
+        }
     }
 
     /// Export scalar input/output dimensions for this entry point, independent of batch size.
@@ -402,6 +480,12 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         complex: bool,
         asm: InlineASM,
     ) -> String {
+        if let Some(resolved) = self
+            .with_resolved_float_constants()
+            .expect("Cannot resolve floating export coefficients")
+        {
+            return resolved.export_simd_str(function_name, settings, complex, asm);
+        }
         let mut res = String::new();
         if settings.include_header {
             res += "#include \"xsimd/xsimd.hpp\"\n";
@@ -521,6 +605,12 @@ impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
         settings: ExportSettings,
         number_class: NumberClass,
     ) -> String {
+        if let Some(resolved) = self
+            .with_resolved_float_constants()
+            .expect("Cannot resolve floating export coefficients")
+        {
+            return resolved.export_cuda_str(function_name, settings, number_class);
+        }
         let mut res = String::new();
         if settings.include_header {
             res += "#include <cuda_runtime.h>\n";
@@ -736,6 +826,12 @@ extern "C" {{
         settings: &ExportSettings,
         number_class: NumberClass,
     ) -> String {
+        if let Some(resolved) = self
+            .with_resolved_float_constants()
+            .expect("Cannot resolve floating export coefficients")
+        {
+            return resolved.export_generic_cpp_str(function_name, settings, number_class);
+        }
         let mut res = String::new();
         if settings.include_header {
             res += "#include <iostream>\n#include <cmath>\n\n";
@@ -811,6 +907,12 @@ extern "C" {{
         function_name: &str,
         settings: &ExportSettings,
     ) -> String {
+        if let Some(resolved) = self
+            .with_resolved_float_constants()
+            .expect("Cannot resolve floating export coefficients")
+        {
+            return resolved.export_asm_real_str(function_name, settings);
+        }
         let mut res = String::new();
         if settings.include_header {
             res += "#include <iostream>\n#include <cmath>\n\n#include <complex>\n";
@@ -869,6 +971,12 @@ extern "C" {{
         function_name: &str,
         settings: &ExportSettings,
     ) -> String {
+        if let Some(resolved) = self
+            .with_resolved_float_constants()
+            .expect("Cannot resolve floating export coefficients")
+        {
+            return resolved.export_asm_complex_str(function_name, settings);
+        }
         let mut res = String::new();
         if settings.include_header {
             res += "#include <iostream>\n#include <complex>\n#include <cmath>\n\n";

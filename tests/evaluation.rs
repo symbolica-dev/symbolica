@@ -1,3 +1,8 @@
+#[cfg(feature = "native_code_generation")]
+use symbolica::evaluate::{
+    CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, ExportSettings, InlineASM,
+};
+
 use symbolica::{
     atom::{Atom, AtomCore, EvaluationInfo, Symbol},
     domains::{
@@ -6,10 +11,7 @@ use symbolica::{
         float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike},
         rational::Rational,
     },
-    evaluate::{
-        CompileOptions, CudaComplexf64, CudaLoadSettings, CudaRealf64, EvaluationDomain,
-        ExportSettings, ExpressionEvaluator, InlineASM, OptimizationSettings,
-    },
+    evaluate::{EvaluationDomain, ExpressionEvaluator, OptimizationSettings},
     parse, symbol,
 };
 
@@ -1530,6 +1532,7 @@ fn evaluator_complex() {
     );
 }
 
+#[cfg(feature = "native_code_generation")]
 #[test]
 fn gcc_compiled_evaluator_real() {
     let evaluator = generate_evaluator().map_coeff(&|x| x.re.to_f64());
@@ -1551,6 +1554,7 @@ fn gcc_compiled_evaluator_real() {
     assert!((out[0] - OUT_REAL).abs() / OUT_REAL < 1e-10, "{}", out[0]);
 }
 
+#[cfg(feature = "native_code_generation")]
 #[test]
 fn gcc_compiled_evaluator_complex() {
     let evaluator = generate_evaluator().map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
@@ -1581,6 +1585,7 @@ fn gcc_compiled_evaluator_complex() {
     );
 }
 
+#[cfg(feature = "native_code_generation")]
 #[test]
 fn cuda_compiled_evaluator_real() {
     if std::env::var("CUDA_TEST").is_err() {
@@ -1605,6 +1610,7 @@ fn cuda_compiled_evaluator_real() {
     assert!((out[0] - OUT_REAL).abs() / OUT_REAL < 1e-10);
 }
 
+#[cfg(feature = "native_code_generation")]
 #[test]
 fn cuda_compiled_evaluator_complex() {
     if std::env::var("CUDA_TEST").is_err() {

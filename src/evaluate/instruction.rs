@@ -151,7 +151,8 @@ pub struct ExportedInstructions<T> {
     /// The number of temporary storage slots required to execute `instructions`.
     pub temporary_count: usize,
     /// Constant values referenced by [`Slot::Const`]. Slots listed in
-    /// [`Self::constant_functions`] may contain rational placeholders in an exact
+    /// [`Self::constant_functions`] or [`Self::floating_coefficients`] may contain
+    /// rational placeholders in an exact
     /// evaluator; resolve their definitions at the target precision before use.
     pub constants: Vec<T>,
     /// Symbolic definitions of constant slots evaluated by registered functions.
@@ -160,12 +161,25 @@ pub struct ExportedInstructions<T> {
     /// the value of the registered constant. A consumer must resolve these
     /// definitions at its target precision before using the constant slots.
     pub constant_functions: Vec<ExportedConstantFunction>,
+    /// Original floating coefficients, including precision and error metadata.
+    /// Resolve these slots in the target domain rather than using an exact
+    /// evaluator's rational placeholders in [`Self::constants`].
+    pub floating_coefficients: Vec<ExportedFloatingCoefficient>,
     /// Locally defined evaluators called by [`Instruction::Fun`] instructions in this stream.
     ///
     /// A call resolves to a sub-evaluator when its symbol and tags match the corresponding fields
     /// of an entry in this list. Calls without a matching entry remain ordinary external function
     /// calls. Sub-evaluators may recursively contain their own sub-evaluators.
     pub sub_evaluators: Vec<ExportedSubEvaluator<T>>,
+}
+
+/// An original floating coefficient in the evaluator's constant storage.
+#[derive(Debug, Clone)]
+pub struct ExportedFloatingCoefficient {
+    /// Index in [`ExportedInstructions::constants`].
+    pub index: usize,
+    /// The complete original coefficient, including uncertainty.
+    pub coefficient: FloatingCoefficient,
 }
 
 /// An exact registered constant or fixed-argument function in a constant slot.
@@ -449,6 +463,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
         exported.constant_functions = self
             .external_fns
             .iter()
+            .filter(|external| external.floating_coefficient.is_none())
             .filter_map(|external| {
                 external
                     .constant_index
@@ -462,6 +477,16 @@ impl<T: Clone> ExpressionEvaluator<T> {
                             .collect(),
                         fixed_args: external.fixed_args.clone(),
                     })
+            })
+            .collect();
+        exported.floating_coefficients = self
+            .external_fns
+            .iter()
+            .filter_map(|external| {
+                Some(ExportedFloatingCoefficient {
+                    index: external.constant_index?,
+                    coefficient: external.floating_coefficient.clone()?,
+                })
             })
             .collect();
         exported
@@ -611,6 +636,7 @@ impl<T: Clone> ProgramView<'_, T> {
             temporary_count: self.stack_size - self.reserved_indices,
             constants,
             constant_functions: Vec::new(),
+            floating_coefficients: Vec::new(),
             sub_evaluators,
         }
     }

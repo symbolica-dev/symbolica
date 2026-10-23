@@ -112,6 +112,21 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
             }
         }
 
+        for external in &self.external_fns {
+            if let (Some(index), Some(coefficient)) =
+                (external.constant_index, &external.floating_coefficient)
+            {
+                let value = coefficient.to_tracked_float(None)?;
+                subcomponents[self.param_count + index] = if value.im.is_exact_zero() {
+                    ComplexPhase::Real
+                } else if value.re.is_exact_zero() {
+                    ComplexPhase::Imag
+                } else {
+                    ComplexPhase::Any
+                };
+            }
+        }
+
         let mut div_components = 0;
         let mut mul_components = 0;
 
@@ -249,7 +264,12 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
         #[derive(Clone, PartialEq, Eq, Hash)]
         enum Constant<T: Default + Clone + Eq + Hash> {
             Literal(T),
-            Function(Symbol, Vec<Atom>, Vec<Complex<Rational>>),
+            Function(
+                Symbol,
+                Vec<Atom>,
+                Vec<Complex<Rational>>,
+                Option<FloatingCoefficient>,
+            ),
         }
 
         for (i, c) in self.stack[self.param_count..self.reserved_indices]
@@ -262,7 +282,12 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 .find(|f| f.constant_index == Some(i))
             {
                 constants.insert(
-                    Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone()),
+                    Constant::Function(
+                        ext.symbol,
+                        ext.tags.clone(),
+                        ext.fixed_args.clone(),
+                        ext.floating_coefficient.clone(),
+                    ),
                     i,
                 );
             } else {
@@ -285,11 +310,16 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 .iter()
                 .find(|f| f.constant_index == Some(i))
             {
-                let key = Constant::Function(ext.symbol, ext.tags.clone(), ext.fixed_args.clone());
+                let key = Constant::Function(
+                    ext.symbol,
+                    ext.tags.clone(),
+                    ext.fixed_args.clone(),
+                    ext.floating_coefficient.clone(),
+                );
                 if !constants.contains_key(&key) {
-                    let new_i = constants.len();
+                    let new_i = self.stack.len() - self.param_count;
                     constants.insert(key.clone(), new_i);
-                    self.stack.push(T::default());
+                    self.stack.push(c.clone());
                     // Preserve source indices while scanning incoming constants:
                     // the destination index may name a later incoming literal.
                     let mut destination = ext.clone();
@@ -300,7 +330,7 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
             } else {
                 let key = Constant::Literal(c.clone());
                 if !constants.contains_key(&key) {
-                    let new_i = constants.len();
+                    let new_i = self.stack.len() - self.param_count;
                     constants.insert(key.clone(), new_i);
                     self.stack.push(c.clone());
                 }

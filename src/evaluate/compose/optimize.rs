@@ -187,7 +187,12 @@ impl<T: Default + Clone + Eq + Hash> EvaluatorComposer<T> {
         #[derive(PartialEq, Eq, Hash)]
         enum Constant<'a, T> {
             Literal(&'a T),
-            Function(Symbol, &'a [Atom], &'a [Complex<Rational>]),
+            Function(
+                Symbol,
+                &'a [Atom],
+                &'a [Complex<Rational>],
+                Option<&'a FloatingCoefficient>,
+            ),
         }
         let mut callbacks = HashMap::default();
         for function in &self.external_functions {
@@ -201,7 +206,12 @@ impl<T: Default + Clone + Eq + Hash> EvaluatorComposer<T> {
         let mut unknown = Vec::new();
         for (old, value) in self.instructions.constants.iter().enumerate() {
             let key = if let Some(function) = callbacks.get(&old) {
-                Constant::Function(function.symbol, &function.tags, &function.fixed_args)
+                Constant::Function(
+                    function.symbol,
+                    &function.tags,
+                    &function.fixed_args,
+                    function.floating_coefficient.as_ref(),
+                )
             } else {
                 Constant::Literal(value)
             };
