@@ -236,12 +236,14 @@ builds on that proposal, preserving its additional per-component error metadata.
 The [codec results](binary_float_storage.md) describe direct packed comparison,
 small MPFR imports, whole-word Astro imports and the short-significand fallback.
 
-The final coefficient benchmark binaries were built from tracking snapshot
+The intermediate coefficient benchmark binaries were built from tracking snapshot
 `bbc010eabd72a6d998b0d6448cab418faf20a0f7`, based on main proposal commit
-`64a4870ee87ff5425767959418f9ff3925e8c665`. Subsequent changes reject reserved
-numeric-node flags on import and fix an order-dependent parser test; the measured
-coefficient-operation paths are unchanged. The hexadecimal prototype example
-also received a NaN baseline correction, which does not affect either harness.
+`64a4870ee87ff5425767959418f9ff3925e8c665`. The next changes reject reserved
+numeric-node flags on import and fix an order-dependent parser test; neither
+changes the measured paths. The hexadecimal prototype example also received a
+NaN baseline correction, which does not affect either harness. The later
+allocation follow-up below changes coefficient paths and has separate results;
+the comparison table here describes the intermediate snapshot.
 
 The full comparison harness measures packed coefficient views against the former
 comparator, including its shortcut that skips the imaginary component when real
@@ -267,7 +269,7 @@ The separate [full operation CSV](binary_float_coefficients_final.csv) compares
 `9d1854f3` with measured snapshot `bbc010ea`. This includes the upstream-main
 rebase as well as the codec optimizations, so it does not isolate one change.
 The unchanged `examples/real_float_coefficients.rs` harness ran three alternating
-before/final process pairs per backend, with 50,000 iterations, three internal
+before/intermediate process pairs per backend, with 50,000 iterations, three internal
 samples, `NUMERICA_BENCH_CLOCK=thread` and `taskset -c 2`. The table reports the
 percentage change in median time; negative values mean faster. Real cases have
 equal component precisions and an exact imaginary zero.
@@ -302,13 +304,74 @@ imaginary precision likewise regresses in full decode, 80.38 to 103.50 ns
 operations, four cases, binary hashes and process ranges, including these
 controls and any outliers.
 
-All 216 before/final comparisons have identical packed byte counts; this stage
+All 216 before/intermediate comparisons have identical packed byte counts; this stage
 does not change retained storage and RSS was not measured again. The machine's
 one-minute load average ranged from 2.1 to 2.8. Thread CPU time
 excludes scheduler preemption but not frequency or cache variation. Ranges are
 the minimum and maximum of three process medians, not confidence intervals;
 small changes should be interpreted accordingly. The backend build features and
 allocator choices match the initial-stage setup below.
+
+### Allocation follow-up (2026-10-23)
+
+The [allocation follow-up CSV](binary_float_coefficients_allocation_followup.csv)
+compares the protected `9d1854f3` binaries with tracking snapshot
+`e9736eceddb63b077086db69af137ddb74fc4ef0`, based on main proposal commit
+`eee2128090319be34661ec24937b168d8336a120`. This snapshot constructs exact zero
+directly at its final precision and imports MPFR significands of at most four
+limbs through a read-only stack integer. It includes the earlier upstream rebase;
+the measurements do not isolate either allocation change. The later rebase onto
+upstream `2667847c`, producing tracking `7ed95a55`, adds power-view inlining and
+factor-buffer copying changes. Those normalization changes are not measured
+here, although the float codec is unchanged.
+
+The unchanged operation harness again ran three alternating process pairs per
+backend, 50,000 iterations and three internal samples, pinned to CPU 2 with
+thread CPU time. No comparison or RSS benchmark was repeated. The table shows
+median time changes against `9d1854f3`; negative values mean faster. Real cases
+have matching component precisions.
+
+| Backend | Precision | Case | Construct | Decode | Add | Multiply |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| MPFR | 53 | Real | -2.0% | -35.9% | +3.9% | -9.4% |
+| MPFR | 256 | Real | -5.2% | -48.2% | +0.3% | -14.8% |
+| MPFR | 4096 | Real | +1.9% | -2.6% | +0.9% | +5.8% |
+| MPFR | 53 | Complex | -11.2% | -30.9% | -2.9% | -4.8% |
+| MPFR | 256 | Complex | -7.7% | -44.1% | -6.5% | -7.7% |
+| MPFR | 4096 | Complex | -0.3% | +0.2% | +2.7% | +4.0% |
+| Astro | 53 | Real | +2.7% | -25.4% | -5.7% | -4.3% |
+| Astro | 256 | Real | +16.8% | -44.0% | -6.2% | -14.2% |
+| Astro | 4096 | Real | +2.7% | -83.4% | -3.0% | -21.6% |
+| Astro | 53 | Complex | +6.0% | -6.8% | +0.4% | -4.8% |
+| Astro | 256 | Complex | +6.5% | -39.1% | -4.8% | -12.5% |
+| Astro | 4096 | Complex | +4.2% | -87.6% | -6.8% | -13.4% |
+
+The targeted regressions are addressed. Across both imaginary-precision cases,
+exact-zero decoding takes about 12–13 ns on MPFR and 13–15 ns on Astro,
+compared with 23–34 ns in the initial binary version and 43–47 ns in the
+affected intermediate cases. MPFR 256-bit real decode is now 50.88 ns
+(50.75–50.93), versus 98.22 ns (97.76–98.73): 1.93x faster. Its addition is
+effectively flat, with overlapping ranges, and multiplication improves 14.8%.
+Astro's 53-bit distinct-imaginary-precision decode also improves, 77.66 to
+57.64 ns; its earlier regression is gone. Astro 4096-bit decode improves 6.02x
+for real coefficients and 8.03x for complex coefficients.
+
+Remaining regressions are retained. MPFR 4096-bit real multiplication rises
+from 2871.55 ns (2836.75–2906.01) to 3038.16 ns (2938.01–3178.68), or 5.8%.
+With distinct imaginary precision it rises 7.4%; that case also has a 14.9%
+decode increase with a broad final range of 553.09–728.49 ns, and a 10.8%
+addition increase. Astro construction is slower at 256 bits: 16.8% for matching
+precisions, 19.0% for distinct precisions, 9.9% for uncertain imaginary zero,
+and 6.5% for complex values. Its 53-bit construction increases by 6–10% in the
+distinct-precision, uncertain-zero and complex cases. Smaller changes in packed
+views and predicates remain in the CSV as well; these microbenchmarks do not
+attribute every change to the float codec.
+
+All twelve processes passed their embedded validation, with unchanged packed
+sizes in all 216 comparisons. The one-minute load average ranged from 2.34 to
+2.61. Binary hashes and all process ranges are recorded; outliers and the earlier
+stage's results are preserved. Thread CPU time still includes frequency and
+cache effects, and the ranges are not confidence intervals.
 
 ### Full-coefficient binary encoding: initial stage (2026-10-23)
 
