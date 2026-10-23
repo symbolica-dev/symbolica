@@ -424,6 +424,73 @@ fn float_rational() {
 }
 
 #[test]
+fn float_products_round_once() {
+    // A square root carries one bit more than its argument.
+    for k in 2..200 {
+        let x = Float::with_val(256, k).sqrt();
+        assert_eq!(x.prec(), 257);
+        let y = Float::with_val(256, k) / Float::with_val(256, k + 1);
+        assert_eq!(y.prec(), 256);
+        let xy = x.clone() * &y;
+        assert_eq!(xy, y.clone() * &x, "{k}");
+        assert_eq!(xy.prec(), 256);
+        assert_eq!(xy, x.clone() * y.clone());
+        assert_eq!(xy, y.clone() * x.clone());
+        let mut assigned = x.clone();
+        assigned *= &y;
+        assert_eq!(assigned, xy);
+        let mut assigned = x.clone();
+        assigned *= y.clone();
+        assert_eq!(assigned, xy);
+
+        // The imaginary part of z conj(z) is x (-y) + y x.
+        let z = Complex::new(x.clone(), y.clone());
+        let norm = z.clone() * z.conj();
+        assert!(norm.im.is_fully_zero(), "{k}: {}", norm.im);
+
+        let q = x.clone() / &y;
+        assert_eq!(q.prec(), 256);
+        assert_eq!(q, x.clone() / y.clone());
+        let mut assigned = x.clone();
+        assigned /= &y;
+        assert_eq!(assigned, q);
+    }
+}
+
+#[test]
+fn float_unit_factors_are_exact() {
+    for k in 2..200 {
+        let x = Float::with_val(256, k).sqrt();
+        for bits in [53, 256] {
+            let minus_one = Float::with_val(bits, -1);
+            let one = Float::with_val(bits, 1);
+            for negated in [
+                x.clone() * &minus_one,
+                minus_one.clone() * &x,
+                x.clone() * minus_one.clone(),
+                minus_one.clone() * x.clone(),
+            ] {
+                assert_eq!(negated, -x.clone());
+                assert_eq!(negated.prec(), x.prec());
+                // `x - x`, as evaluators form it.
+                assert!((x.clone() + &negated).is_fully_zero(), "{k} {bits}");
+            }
+            let mut assigned = x.clone();
+            assigned *= &one;
+            assert_eq!(assigned, x);
+            assert_eq!(assigned.prec(), x.prec());
+            assert_eq!(one.clone() * &x, x);
+        }
+
+        // `z - conj(z)` of a real z, as complex evaluators form it.
+        let z = Complex::new(x.clone(), Float::new(256));
+        let minus_one = Complex::new(Float::with_val(256, -1), Float::new(256));
+        let difference = z.clone() + z.conj() * &minus_one;
+        assert!(difference.re.is_fully_zero() && difference.im.is_fully_zero(), "{k}");
+    }
+}
+
+#[test]
 fn float_cancellation() {
     let a = Float::with_val(10, 1000);
     let b = a + 10i64;

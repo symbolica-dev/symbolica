@@ -3,7 +3,7 @@ use symbolica::{
     domains::{
         Ring,
         finite_field::{FiniteFieldCore, Zp},
-        float::{Complex, ErrorPropagatingFloat, Float, RealLike},
+        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, RealLike},
         rational::Rational,
     },
     evaluate::{
@@ -403,6 +403,26 @@ fn error_propagating_float_transcendental_evaluator() {
         .evaluate_single(&epfloat_params);
     assert!((epfloat.get_num().to_f64() - expected).abs() < 1e-12);
     assert!(epfloat.get_precision().is_some());
+}
+
+#[test]
+fn float_evaluator_keeps_exact_differences() {
+    // sqrt(x) carries one bit more than x, and `a - b` is evaluated as
+    // `a + (-1) b` with a `-1` at the working precision.
+    let x = parse!("x");
+    let evaluator = parse!("sqrt(x) - abs(sqrt(x))")
+        .evaluator(&[x])
+        .build()
+        .unwrap();
+    for bits in [128, 256, 512] {
+        let mut evaluator = evaluator
+            .clone()
+            .map_coeff(&|c| Float::with_val(bits, c.re.to_f64()));
+        for k in 2..100 {
+            let result = evaluator.evaluate_single(&[Float::with_val(bits, k)]);
+            assert!(result.is_fully_zero(), "{bits} bits, x = {k}: {result}");
+        }
+    }
 }
 
 #[test]

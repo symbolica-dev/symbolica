@@ -258,14 +258,50 @@ impl Sub<Float> for Float {
 impl Mul<&Float> for Float {
     type Output = Self;
 
+    /// Multiply two floats. The exact product is rounded once, to the smaller
+    /// precision, so that `a * b` equals `b * a`. A factor `±1` only sets the
+    /// sign of the other factor, whatever their precisions: evaluators form
+    /// `a - b` as `a + (-1) b`, and rounding `b` to the precision of the `-1`
+    /// left `b - b` a nonzero residue.
     #[inline]
-    fn mul(mut self, rhs: &Self) -> Self::Output {
+    fn mul(self, rhs: &Self) -> Self::Output {
+        if let Some(product) = unit_product(&self, rhs) {
+            return product;
+        }
         if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+            return self
+                .0
+                .mul_round(&rhs.0, rhs.prec(), RoundingDirection::Nearest)
+                .into();
         }
 
         (self.0 * &rhs.0).into()
     }
+}
+
+/// Whether `x` is exactly `1` or `-1`.
+#[inline]
+fn is_unit(x: &Float) -> bool {
+    // Only `±1` have exponent 1 (magnitude in [1, 2)) among the powers of two.
+    x.0.get_exp() == Some(1) && (x.0 == 1. || x.0 == -1.)
+}
+
+/// The product with a factor of exactly `±1`, which only sets the sign of the
+/// other factor and keeps its precision; `None` when neither factor is `±1`.
+#[inline]
+fn unit_product(a: &Float, b: &Float) -> Option<Float> {
+    let (unit, other) = if is_unit(b) {
+        (b, a)
+    } else if is_unit(a) {
+        (a, b)
+    } else {
+        return None;
+    };
+    Some(if unit.0.is_sign_negative() {
+        -other.clone()
+    } else {
+        other.clone()
+    })
 }
 
 impl Mul<Float> for Float {
@@ -273,6 +309,9 @@ impl Mul<Float> for Float {
 
     #[inline]
     fn mul(self, rhs: Self) -> Self::Output {
+        if let Some(product) = unit_product(&self, &rhs) {
+            return product;
+        }
         if rhs.prec() < self.prec() {
             (rhs.0 * self.0).into()
         } else {
@@ -284,10 +323,15 @@ impl Mul<Float> for Float {
 impl Div<&Float> for Float {
     type Output = Self;
 
+    /// Divide two floats. The exact quotient is rounded once, to the smaller
+    /// precision.
     #[inline]
-    fn div(mut self, rhs: &Self) -> Self::Output {
+    fn div(self, rhs: &Self) -> Self::Output {
         if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+            return self
+                .0
+                .div_round(&rhs.0, rhs.prec(), RoundingDirection::Nearest)
+                .into();
         }
 
         (self.0 / &rhs.0).into()
@@ -298,12 +342,8 @@ impl Div<Float> for Float {
     type Output = Self;
 
     #[inline]
-    fn div(mut self, rhs: Self) -> Self::Output {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        (self.0 / rhs.0).into()
+    fn div(self, rhs: Self) -> Self::Output {
+        self / &rhs
     }
 }
 
@@ -382,8 +422,15 @@ impl SubAssign<Float> for Float {
 impl MulAssign<&Float> for Float {
     #[inline]
     fn mul_assign(&mut self, rhs: &Float) {
+        if let Some(product) = unit_product(self, rhs) {
+            *self = product;
+            return;
+        }
         if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+            self.0 = self
+                .0
+                .mul_round(&rhs.0, rhs.prec(), RoundingDirection::Nearest);
+            return;
         }
 
         self.0.mul_assign(&rhs.0);
@@ -393,11 +440,7 @@ impl MulAssign<&Float> for Float {
 impl MulAssign<Float> for Float {
     #[inline]
     fn mul_assign(&mut self, rhs: Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        self.0.mul_assign(rhs.0);
+        *self *= &rhs;
     }
 }
 
@@ -405,7 +448,10 @@ impl DivAssign<&Float> for Float {
     #[inline]
     fn div_assign(&mut self, rhs: &Float) {
         if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+            self.0 = self
+                .0
+                .div_round(&rhs.0, rhs.prec(), RoundingDirection::Nearest);
+            return;
         }
 
         self.0.div_assign(&rhs.0);
@@ -415,11 +461,7 @@ impl DivAssign<&Float> for Float {
 impl DivAssign<Float> for Float {
     #[inline]
     fn div_assign(&mut self, rhs: Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        self.0.div_assign(rhs.0);
+        *self /= &rhs;
     }
 }
 
