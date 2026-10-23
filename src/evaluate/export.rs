@@ -1,5 +1,16 @@
 use super::*;
 
+// Use the same ordering in plain C++, x86 and AArch64 exports.
+fn cpp_integer_power(base: &str, exponent: i64, one: &str) -> String {
+    if exponent == -1 {
+        format!("{one} / {base}")
+    } else if exponent < -1 {
+        format!("pow({one} / {base}, {})", exponent.unsigned_abs())
+    } else {
+        format!("pow({base}, {exponent})")
+    }
+}
+
 /// A number that can be exported to C++ code.
 pub trait ExportNumber {
     /// Export the number as a string.
@@ -1089,12 +1100,8 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                 }
                 Instr::Pow(o, b, e) => {
                     let base = get_input!(*b);
-                    if *e == -1 {
-                        *out += format!("\t{} = {number_wrapper}(1) / {base};\n", get_output!(o))
-                            .as_str();
-                    } else {
-                        *out += format!("\t{} = pow({base}, {e});\n", get_output!(o)).as_str();
-                    }
+                    let power = cpp_integer_power(&base, *e, &format!("{number_wrapper}(1)"));
+                    *out += format!("\t{} = {power};\n", get_output!(o)).as_str();
                 }
                 Instr::Powf(o, b, e) => {
                     let base = get_input!(*b);
@@ -2185,9 +2192,16 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                             }
                         }
                     } else {
-                        unreachable!(
-                            "Powers other than -1 should have been removed at an earlier stage"
-                        );
+                        // Imported and vectorized programs may retain integer
+                        // powers. They form a register-allocation barrier just
+                        // like other operations emitted as ordinary C++.
+                        end_asm_block!(in_asm_block);
+                        let (MemOrReg::Mem(o), MemOrReg::Mem(b)) = (o, b) else {
+                            unreachable!("integer power operands must be in memory");
+                        };
+                        let base = get_input!(*b);
+                        let power = cpp_integer_power(&base, *e, "1.");
+                        *out += format!("\tZ[{o}] = {power};\n").as_str();
                     }
                 }
                 RegInstr::Sqrt(o, free, b) => {
@@ -3018,7 +3032,8 @@ impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
                         end_asm_block!(in_asm_block);
 
                         let base = get_input!(*b);
-                        *out += format!("\tZ[{o}] = pow({base}, {e});\n").as_str();
+                        let power = cpp_integer_power(&base, *e, "1.");
+                        *out += format!("\tZ[{o}] = {power};\n").as_str();
                     }
                 }
                 Instr::Powf(o, b, e) => {

@@ -330,7 +330,7 @@ impl<T: Real> ExpressionEvaluator<T> {
                     } else if *e >= 0 {
                         stack[*r] = stack[*b].pow(*e as u64);
                     } else {
-                        stack[*r] = stack[*b].pow(e.unsigned_abs()).inv();
+                        stack[*r] = stack[*b].inv().pow(e.unsigned_abs());
                     }
                 }
                 _ => {

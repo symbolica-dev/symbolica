@@ -1788,3 +1788,6 @@ mod test {
         assert_eq!(res[0], jit_res[0]);
     }
 }
+
+#[cfg(test)]
+mod power_tests;
