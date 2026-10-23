@@ -3,7 +3,7 @@ use super::*;
 
 impl<F> Context<'_, F>
 where
-    F: FnMut(&Zp64, &[Element]) -> Option<Element>,
+    F: FnMut(&Zp64, &[Element]) -> Result<Option<Element>>,
 {
     pub(super) fn sparse_row(
         &mut self,
