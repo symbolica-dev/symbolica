@@ -71,7 +71,7 @@ impl Default for ComplexEvaluatorSettings {
     }
 }
 
-impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
+impl<T: FloatLike> ExpressionEvaluator<Complex<T>> {
     /// Set which parameters are fully real. This allows for more optimal
     /// assembly output that uses real arithmetic instead of complex arithmetic
     /// where possible.
@@ -79,13 +79,20 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
     /// You can also set if all encountered sqrt, log, powf, and custom evaluator
     /// operations with real arguments are expected to yield real results.
     ///
+    /// Constants are classified in the current domain: tracked imaginary zeros
+    /// must have zero error, while plain floats use their centers. Unresolved
+    /// exact evaluators conservatively retain the original floating uncertainty.
+    ///
     /// Must be called after all optimization functions and merging are performed
     /// on the evaluator, or the registration will be lost.
     pub fn set_real_params(
         &mut self,
         real_params: &[usize],
         settings: ComplexEvaluatorSettings,
-    ) -> Result<(), String> {
+    ) -> Result<(), String>
+    where
+        Complex<T>: 'static,
+    {
         let mut subcomponents = vec![ComplexPhase::Any; self.stack.len()];
 
         for i in real_params {
@@ -105,25 +112,29 @@ impl<T: Default + PartialEq> ExpressionEvaluator<Complex<T>> {
             .skip(self.param_count)
             .take(self.reserved_indices - self.param_count)
         {
-            if c.im == T::default() {
+            if c.im.is_exact_zero() {
                 *s = ComplexPhase::Real;
-            } else if c.re == T::default() {
+            } else if c.re.is_exact_zero() {
                 *s = ComplexPhase::Imag;
             }
         }
 
-        for external in &self.external_fns {
-            if let (Some(index), Some(coefficient)) =
-                (external.constant_index, &external.floating_coefficient)
-            {
-                let value = coefficient.to_tracked_float(None)?;
-                subcomponents[self.param_count + index] = if value.im.is_exact_zero() {
-                    ComplexPhase::Real
-                } else if value.re.is_exact_zero() {
-                    ComplexPhase::Imag
-                } else {
-                    ComplexPhase::Any
-                };
+        // Only exact evaluators contain placeholders. Resolved domains classify
+        // their current values above, including any tracked conversion error.
+        if std::any::TypeId::of::<Complex<T>>() == std::any::TypeId::of::<Complex<Rational>>() {
+            for external in &self.external_fns {
+                if let (Some(index), Some(coefficient)) =
+                    (external.constant_index, &external.floating_coefficient)
+                {
+                    let value = coefficient.to_tracked_float(None)?;
+                    subcomponents[self.param_count + index] = if value.im.is_exact_zero() {
+                        ComplexPhase::Real
+                    } else if value.re.is_exact_zero() {
+                        ComplexPhase::Imag
+                    } else {
+                        ComplexPhase::Any
+                    };
+                }
             }
         }
 
@@ -714,6 +725,93 @@ impl<T: Default> ExpressionEvaluator<T> {
 
         for _ in 0..self.instructions.len() {
             self.stack.push(T::default());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domains::float::Magnitude;
+
+    fn product_phase<T>(evaluator: &ExpressionEvaluator<T>) -> ComplexPhase {
+        evaluator
+            .instructions
+            .iter()
+            .find_map(|(instruction, phase)| {
+                matches!(instruction, Instr::Mul(..)).then_some(*phase)
+            })
+            .expect("test expression must contain a product")
+    }
+
+    #[test]
+    fn real_parameter_phases_follow_the_current_numeric_domain() {
+        let tracked = |value, error| {
+            ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(128, value), error)
+        };
+        for imaginary_error in [0., 0.25] {
+            let expression = Atom::num(Complex::new(
+                tracked(2., 0.125),
+                tracked(0., imaginary_error),
+            )) * crate::parse!("x");
+            let mut exact = expression
+                .evaluator(&[crate::parse!("x")])
+                .direct_translation(true)
+                .build()
+                .unwrap();
+            let tracked_phase = if imaginary_error == 0. {
+                ComplexPhase::Real
+            } else {
+                ComplexPhase::PartialReal(1)
+            };
+            exact
+                .set_real_params(&[0], ComplexEvaluatorSettings::default())
+                .unwrap();
+            assert_eq!(product_phase(&exact), tracked_phase);
+
+            let mut plain = exact
+                .clone()
+                .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+            plain
+                .set_real_params(&[0], ComplexEvaluatorSettings::default())
+                .unwrap();
+            assert_eq!(product_phase(&plain), ComplexPhase::Real);
+            assert_eq!(
+                plain.evaluate_single(&[Complex::new(2., 0.)]),
+                Complex::new(4., 0.)
+            );
+
+            let mut precise = exact.clone().map_coeff_with_prec(
+                &|c| Complex::new(c.re.to_multi_prec_float(128), c.im.to_multi_prec_float(128)),
+                128,
+            );
+            precise
+                .set_real_params(&[0], ComplexEvaluatorSettings::default())
+                .unwrap();
+            assert_eq!(product_phase(&precise), ComplexPhase::Real);
+
+            let zero = ErrorPropagatingFloat::exact_zero(128);
+            let mut tracked_precise = exact.clone().map_coeff_with_prec(
+                &|c| Complex::new(zero.from_rational(&c.re), zero.from_rational(&c.im)),
+                128,
+            );
+            tracked_precise
+                .set_real_params(&[0], ComplexEvaluatorSettings::default())
+                .unwrap();
+            assert_eq!(product_phase(&tracked_precise), tracked_phase);
+            let output = tracked_precise.evaluate_single(&[Complex::new(tracked(2., 0.), zero)]);
+            assert!(output.im.get_error_magnitude() >= Magnitude::from_f64(2. * imaginary_error));
+
+            let mut tracked_native = exact.map_coeff(&|c| {
+                Complex::new(
+                    ErrorPropagatingFloat::new_with_absolute_error(c.re.to_f64(), 0.),
+                    ErrorPropagatingFloat::new_with_absolute_error(c.im.to_f64(), 0.),
+                )
+            });
+            tracked_native
+                .set_real_params(&[0], ComplexEvaluatorSettings::default())
+                .unwrap();
+            assert_eq!(product_phase(&tracked_native), tracked_phase);
         }
     }
 }
