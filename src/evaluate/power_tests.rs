@@ -184,20 +184,24 @@ fn direct_atom_tree_and_exact_ring_agree_on_negative_powers() {
     }
 }
 
+fn integer_power_program(power: i64) -> ExpressionEvaluator<Complex<Rational>> {
+    ExpressionEvaluator {
+        stack: vec![Complex::<Rational>::default(); 2],
+        param_count: 1,
+        reserved_indices: 1,
+        instructions: vec![(Instr::Pow(1, 0, power), ComplexPhase::Any)],
+        result_indices: vec![1],
+        external_fns: Vec::new(),
+        settings: OptimizationSettings::default(),
+    }
+}
+
 #[test]
 fn native_negative_power_instructions_preserve_the_same_range() {
     // Imported evaluators can contain an integer Pow even when current source
     // lowering normally decomposes it. Exercise the native interpreter too.
     for power in 2..=4 {
-        let source = ExpressionEvaluator {
-            stack: vec![Complex::<Rational>::default(); 2],
-            param_count: 1,
-            reserved_indices: 1,
-            instructions: vec![(Instr::Pow(1, 0, -power), ComplexPhase::Any)],
-            result_indices: vec![1],
-            external_fns: Vec::new(),
-            settings: OptimizationSettings::default(),
-        };
+        let source = integer_power_program(-power);
         let (inputs, expected): (Vec<_>, Vec<_>) = range_cases(power)
             .into_iter()
             .map(|(input, expected)| (vec![input], expected))
@@ -213,15 +217,7 @@ fn raw_negative_powers_keep_their_range_in_cpp_and_assembly() {
         std::env::temp_dir().join(format!("symbolica-negative-powers-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     for power in 2..=4 {
-        let source = ExpressionEvaluator {
-            stack: vec![Complex::<Rational>::default(); 2],
-            param_count: 1,
-            reserved_indices: 1,
-            instructions: vec![(Instr::Pow(1, 0, -power), ComplexPhase::Any)],
-            result_indices: vec![1],
-            external_fns: Vec::new(),
-            settings: OptimizationSettings::default(),
-        };
+        let source = integer_power_program(-power);
         for (mode, assembly) in [InlineASM::None, InlineASM::default()]
             .into_iter()
             .enumerate()
@@ -268,6 +264,62 @@ fn raw_negative_powers_keep_their_range_in_cpp_and_assembly() {
                 complex.evaluate(&[input], &mut output);
                 assert_range_value(&output[0], &expected);
             }
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[cfg(feature = "native_code_generation")]
+fn imported_nonnegative_powers_use_the_cpp_assembly_fallback() {
+    let directory =
+        std::env::temp_dir().join(format!("symbolica-positive-powers-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    for (power, real_expected, complex_expected) in [
+        (0, 1., Complex::new(1., 0.)),
+        (2, 4., Complex::new(3., 4.)),
+        (3, 8., Complex::new(2., 11.)),
+    ] {
+        let source = integer_power_program(power);
+        for (mode, assembly) in [InlineASM::None, InlineASM::default()]
+            .into_iter()
+            .enumerate()
+        {
+            let options = CompileOptions::default()
+                .compiler(std::env::var("SYMBOLICA_TEST_CXX").unwrap_or_else(|_| "g++".into()))
+                .fast_math(false)
+                .unsafe_math(false)
+                .arg("-std=c++17");
+            let name = format!("positive_real_{power}_{mode}");
+            let mut real = source
+                .export_cpp::<f64>(
+                    directory.join(format!("{name}.cpp")),
+                    &name,
+                    ExportSettings::new().inline_asm(assembly),
+                )
+                .unwrap()
+                .compile(directory.join(&name), options.clone())
+                .unwrap()
+                .load()
+                .unwrap();
+            let mut output = [0.];
+            real.evaluate(&[2.], &mut output);
+            assert_eq!(output, [real_expected]);
+            let name = format!("positive_complex_{power}_{mode}");
+            let mut complex = source
+                .export_cpp::<Complex<f64>>(
+                    directory.join(format!("{name}.cpp")),
+                    &name,
+                    ExportSettings::new().inline_asm(assembly),
+                )
+                .unwrap()
+                .compile(directory.join(&name), options)
+                .unwrap()
+                .load()
+                .unwrap();
+            let mut output = [Complex::new(0., 0.)];
+            complex.evaluate(&[Complex::new(2., 1.)], &mut output);
+            assert_eq!(output, [complex_expected]);
         }
     }
     std::fs::remove_dir_all(directory).unwrap();
