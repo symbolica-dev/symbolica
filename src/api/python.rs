@@ -154,6 +154,7 @@ mod array;
 mod atom;
 mod citation;
 mod condition;
+mod display;
 mod evaluator;
 mod expression;
 mod graph;
@@ -169,6 +170,10 @@ mod symbolic_integration;
 use array::EvaluationInput;
 pub use atom::*;
 pub use citation::Citation;
+#[cfg(feature = "python_export")]
+pub use display::{
+    MathMLMarker, MathMLPage, MathMLPageRequest, MathMLPageSource, MathMLViewer, mathml_viewer,
+};
 pub use evaluator::*;
 pub use expression::*;
 pub use graph::*;
@@ -337,6 +342,8 @@ pub enum PythonPrintMode {
     Sympy,
     /// Print using Typst notation.
     Typst,
+    /// Print a native MathML fragment.
+    MathML,
 }
 
 #[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
@@ -356,6 +363,7 @@ impl From<PrintMode> for PythonPrintMode {
             PrintMode::Mathematica => PythonPrintMode::Mathematica,
             PrintMode::Sympy => PythonPrintMode::Sympy,
             PrintMode::Typst => PythonPrintMode::Typst,
+            PrintMode::MathML => PythonPrintMode::MathML,
             _ => {
                 error!("Unsupported PrintMode: {:?}", mode);
                 PythonPrintMode::Symbolica
@@ -372,6 +380,7 @@ impl From<PythonPrintMode> for PrintMode {
             PythonPrintMode::Mathematica => PrintMode::Mathematica,
             PythonPrintMode::Sympy => PrintMode::Sympy,
             PythonPrintMode::Typst => PrintMode::Typst,
+            PythonPrintMode::MathML => PrintMode::MathML,
         }
     }
 }
@@ -555,6 +564,16 @@ impl PythonFormattedOutput {
         Ok(self.render(py, FormattedOutputBackend::Text)?.unwrap())
     }
 
+    /// Return the underlying MathML viewer, when provided by this output.
+    /// This does not import notebook or widget packages. Retain the viewer to
+    /// serve bounded pages, and close it when its display is removed.
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer | None"))]
+    pub fn mathml_viewer(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        Ok(self
+            .notebook_value(py)?
+            .filter(|value| display::is_mathml_viewer(value.bind(py))))
+    }
+
     /// Supply a live display to marimo, or the existing static representation.
     pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Some(value) = self.notebook_value(py)? {
@@ -583,7 +602,13 @@ impl PythonFormattedOutput {
             let kwargs = PyDict::new(py);
             kwargs.set_item("include", include)?;
             kwargs.set_item("exclude", exclude)?;
-            return value.call_method(py, "_repr_mimebundle_", (), Some(&kwargs));
+            let bundle = value.call_method(py, "_repr_mimebundle_", (), Some(&kwargs))?;
+            if let Ok(data) = bundle.bind(py).cast::<PyDict>()
+                && data.contains("text/plain")?
+            {
+                data.set_item("text/plain", self.format_plain(py)?)?;
+            }
+            return Ok(bundle);
         }
         let bundle = PyDict::new(py);
         for (mime, backend) in [
@@ -681,6 +706,7 @@ pub fn create_symbolica_module<'a, 'b>(
     register_python_floats(m)?;
     m.add_class::<Citation>()?;
     m.add_class::<PythonFormattedOutput>()?;
+    display::register(m)?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
     m.add_class::<PythonIntegrationStep>()?;
@@ -824,6 +850,17 @@ fn print_options_to_dict<'py>(
     dict.set_item("level", state.level)?;
     dict.set_item("bracket_level", state.bracket_level)?;
     dict.set_item("indentation_level", state.indentation_level)?;
+    for (name, value) in [
+        ("in_sum", state.in_sum),
+        ("in_product", state.in_product),
+        ("suppress_one", state.suppress_one),
+        ("in_exp", state.in_exp),
+        ("in_exp_base", state.in_exp_base),
+        ("top_level_add_child", state.top_level_add_child),
+        ("superscript", state.superscript),
+    ] {
+        dict.set_item(name, value)?;
+    }
 
     Ok(dict)
 }
@@ -1573,9 +1610,10 @@ impl PythonPrintDefinition {
                         "mathematica" => PythonPrintMode::Mathematica,
                         "sympy" => PythonPrintMode::Sympy,
                         "typst" => PythonPrintMode::Typst,
+                        "mathml" => PythonPrintMode::MathML,
                         _ => {
                             return Err(exceptions::PyValueError::new_err(format!(
-                                "Unknown print mode {name:?}; expected symbolica, latex, mathematica, sympy, or typst"
+                                "Unknown print mode {name:?}; expected symbolica, latex, mathematica, sympy, typst, or mathml"
                             )));
                         }
                     }

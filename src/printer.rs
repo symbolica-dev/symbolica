@@ -19,6 +19,8 @@ use crate::{
 
 pub use numerica::printer::*;
 
+pub(crate) mod mathml;
+
 /// Track if Symbolica should colorize output, based on the `SYMBOLICA_COLOR` environment variable or if stdout is a terminal.
 static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
     std::env::var("SYMBOLICA_COLOR")
@@ -669,6 +671,9 @@ impl AtomView<'_> {
         opts: &PrintOptions,
         print_state: PrintState,
     ) -> Result<bool, Error> {
+        if opts.mode.is_mathml() {
+            return self.format_mathml(fmt, opts, print_state);
+        }
         match self {
             AtomView::Num(n) => n.fmt_output(fmt, opts, print_state),
             AtomView::Var(v) => v.fmt_output(fmt, opts, print_state),

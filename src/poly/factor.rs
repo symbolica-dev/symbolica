@@ -77,7 +77,7 @@ const INTEGER_FACTOR_IRREDUCIBILITY_SCOUT_MAX_DEGREE: usize = 64;
 const MAX_EVALUATED_HENSEL_IMAGE_CELLS: usize = 1 << 22;
 // Maximum number of terms grouped into geometric sequences for one polynomial image.
 const MAX_EVALUATED_HENSEL_GROUPED_TERMS: usize = 1 << 20;
-// Minimum number of base-prime digits for using composite-modulus quadratic Hensel corrections.
+// Default minimum number of base-prime digits for composite-modulus quadratic Hensel corrections.
 const MIN_QUADRATIC_HENSEL_DIGITS: usize = 64;
 // Minimum retained modular factor count for spending another distinct-degree
 // factorization on a wide prime after the small-prime search.
@@ -699,6 +699,13 @@ impl<'a, E: PositiveExponent> DenseZpDistinctDegreeContext<'a, E> {
         }
         debug_assert!(product.len() <= 2 * modulus_degree - 1);
         debug_assert_eq!(reverse_modulus_inverse.len(), modulus_degree);
+
+        // At short degrees, direct monic division avoids setting up two
+        // truncated convolutions and their intermediate coefficient buffers.
+        if modulus_degree <= 16 {
+            Self::remainder_monic(field, product, modulus);
+            return;
+        }
 
         let quotient_len = product.len() - modulus_degree;
         workspace
@@ -1757,6 +1764,18 @@ std::thread_local! {
     static LAST_BIVARIATE_RECONSTRUCTION_PRIME: std::cell::Cell<u32> = const {
         std::cell::Cell::new(0)
     };
+    static BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_TRIAL_PRECISION_ATTEMPTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static BIVARIATE_TRIAL_PRECISION_SUCCESSES: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
     static EXACT_HENSEL_SUBTREE_SPLITS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
@@ -2276,6 +2295,7 @@ struct SparsePolynomialSquareRootContext<E> {
     pending_products: HashMap<u64, Integer>,
     product_heap: BinaryHeap<u64>,
     product_count: usize,
+    maximum_pair_products: usize,
     current_exponents: Vec<E>,
     next_root_exponents: Vec<E>,
 }
@@ -2291,6 +2311,7 @@ impl<E: PositiveExponent> SparsePolynomialSquareRootContext<E> {
             pending_products: HashMap::default(),
             product_heap: BinaryHeap::new(),
             product_count: 0,
+            maximum_pair_products: MAX_SPARSE_SQUARE_ROOT_PAIR_PRODUCTS,
             current_exponents: vec![E::zero(); nvars],
             next_root_exponents: vec![E::zero(); nvars],
         }
@@ -2453,7 +2474,7 @@ impl<E: PositiveExponent> SparsePolynomialSquareRootContext<E> {
             }
 
             let root_index = self.root_coefficients.len();
-            if self.product_count.saturating_add(root_index) > MAX_SPARSE_SQUARE_ROOT_PAIR_PRODUCTS
+            if self.product_count.saturating_add(root_index) > self.maximum_pair_products
             {
                 return None;
             }
@@ -2673,6 +2694,26 @@ fn integer_factor_bivariate_wang_density_supported(
 ) -> bool {
     integer_factor_bivariate_box_density(term_count, first_degree, second_degree)
         > INTEGER_FACTOR_BIVARIATE_WANG_MIN_BOX_DENSITY
+}
+
+/// Choose the main and interpolation variables for a bivariate component.
+/// Keep the shorter Taylor lift when the degrees are close. A reduction of at
+/// least one quarter in the univariate degree favors factoring that smaller
+/// image instead, which can also avoid the lift entirely if it is irreducible.
+fn integer_factor_bivariate_order(degrees: &[usize]) -> [usize; 2] {
+    let mut active = degrees
+        .iter()
+        .enumerate()
+        .filter_map(|(variable, &degree)| (degree > 0).then_some(variable));
+    let mut order = [active.next().unwrap(), active.next().unwrap()];
+    debug_assert!(active.next().is_none());
+    if degrees[order[0]] < degrees[order[1]] {
+        order.swap(0, 1);
+    }
+    if degrees[order[1]].saturating_mul(4) <= degrees[order[0]].saturating_mul(3) {
+        order.swap(0, 1);
+    }
+    order
 }
 
 /// Move a low-degree variable to the front for an anisotropic sparse input.
@@ -2970,7 +3011,26 @@ impl<F: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent>
 
         let mut factors = vec![];
         for x in 0..self.nvars() {
-            if stripped.degree(x) == E::zero() {
+            let mut degree = E::zero();
+            let mut unique_leading_term = false;
+            for exponents in stripped.exponents_iter() {
+                if exponents[x] > degree {
+                    degree = exponents[x];
+                    unique_leading_term = true;
+                } else if exponents[x] == degree {
+                    unique_leading_term = false;
+                }
+            }
+            if degree == E::zero() {
+                continue;
+            }
+
+            // A unique leading term makes this coefficient layer a monomial.
+            // Its polynomial divisors are monomials too; with no common
+            // monomial in the input, no nonconstant coefficient content exists.
+            // Removing exact factors preserves the trivial-common-monomial
+            // invariant, so this also applies to subsequent stripped inputs.
+            if unique_leading_term && content_context.has_trivial_common_monomial {
                 continue;
             }
 
@@ -3013,23 +3073,22 @@ impl<F: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent>
             .0;
 
         let b = self.derivative(lowest_rank_var);
-        let c = self.gcd(&b);
+        let (c, cofactors) = self.gcd_with_cofactors(&b);
 
         if c.is_one() {
             return vec![(self.clone(), 1)];
         }
 
         let mut factors = vec![];
-
-        let mut w = self / &c;
-        let mut y = &b / &c;
+        let (mut w, mut y) = cofactors
+            .unwrap_or_else(|| (F::divide_by_gcd(self.clone(), &c), F::divide_by_gcd(b, &c)));
 
         let mut i = 1;
         while !w.is_constant() {
             let z = y - w.derivative(lowest_rank_var);
-            let g = w.gcd(&z);
-            w = w / &g;
-            y = z / &g;
+            let (g, cofactors) = w.gcd_with_cofactors(&z);
+            (w, y) =
+                cofactors.unwrap_or_else(|| (F::divide_by_gcd(w, &g), F::divide_by_gcd(z, &g)));
 
             if !g.is_one() {
                 factors.push((g, i));
@@ -4226,6 +4285,20 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .unwrap_or_else(|| self.square_root_from_square_free_decomposition())
     }
 
+    /// Try bounded sparse square-root reconstruction without a square-free/GCD fallback.
+    /// This may be used by GCD dispatch without recursively invoking that same dispatch.
+    pub(crate) fn try_sparse_square_root_with_limit(
+        &self,
+        maximum_pair_products: usize,
+    ) -> Option<Self> {
+        let mut context = SparsePolynomialSquareRootContext::new(self.nvars(), self.nterms());
+        context.maximum_pair_products = maximum_pair_products;
+        match context.reconstruct(self)? {
+            ExactPolynomialSquareRoot::Root(root) => Some(root),
+            ExactPolynomialSquareRoot::NotSquare => None,
+        }
+    }
+
     /// Return the exact square root of an integer polynomial when every
     /// square-free component occurs with even multiplicity.
     ///
@@ -4638,6 +4711,50 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     }
 }
 
+impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
+    /// Factor univariate inputs without carrying unused coordinates through every intermediate.
+    /// Restore the complete variable map and exponent width on the returned factors.
+    fn factor_in_active_variable(&self) -> Option<Vec<(Self, usize)>> {
+        if self.nvars() <= 1 {
+            return None;
+        }
+        let mut variable = None;
+        for exponents in self.exponents_iter() {
+            for (index, exponent) in exponents.iter().enumerate() {
+                if !exponent.is_zero() {
+                    if variable.is_some_and(|variable| variable != index) {
+                        return None;
+                    }
+                    variable = Some(index);
+                }
+            }
+        }
+        let variable = variable?;
+        let variables = std::sync::Arc::new(vec![self.variables()[variable].clone()]);
+        let mut compact = Self::new(&Z, Some(self.nterms()), variables);
+        for term in self {
+            compact.append_monomial_back(term.coefficient.clone(), &[term.exponents[variable]]);
+        }
+        Some(
+            compact
+                .factor()
+                .into_iter()
+                .map(|(factor, multiplicity)| {
+                    let mut restored = self.zero_with_capacity(factor.nterms());
+                    let mut exponents = vec![E::zero(); self.nvars()];
+                    for (coefficient, exponent) in
+                        factor.coefficients.into_iter().zip(factor.exponents)
+                    {
+                        exponents[variable] = exponent;
+                        restored.append_monomial_back(coefficient, &exponents);
+                    }
+                    (restored, multiplicity)
+                })
+                .collect(),
+        )
+    }
+}
+
 impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, LexOrder> {
     fn square_free_factorization(&self) -> Vec<(Self, usize)> {
         if self.is_zero() {
@@ -4688,6 +4805,9 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
+        if let Some(factors) = self.factor_in_active_variable() {
+            return factors;
+        }
         if let Some(factors) = self.factor_quadratic_before_square_free() {
             return factors;
         }
@@ -4724,13 +4844,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
             match var_count {
                 0 | 1 => factors.extend(f.factor_reconstruct().into_iter().map(|ff| (ff, p))),
                 2 => {
-                    let mut order: Vec<_> = degrees
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, d)| **d > 0)
-                        .collect();
-                    order.sort_by_key(|o| Reverse(o.1));
-                    let order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
+                    let order = integer_factor_bivariate_order(&degrees);
 
                     factors.extend(
                         f.bivariate_factor_reconstruct(order[0], order[1])
@@ -4866,13 +4980,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
         match var_count {
             0 | 1 => f.factor_reconstruct().len() == 1,
             2 => {
-                let mut order: Vec<_> = degrees
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| **d > 0)
-                    .collect();
-                order.sort_by_key(|o| Reverse(o.1));
-                let order: Vec<_> = order.into_iter().map(|(v, _)| v).collect();
+                let order = integer_factor_bivariate_order(&degrees);
 
                 f.bivariate_factor_reconstruct(order[0], order[1]).len() == 1
             }
@@ -5774,7 +5882,8 @@ where
         let mut sample_point = self.ring().zero();
         let mut uni_f = self.replace(interpolation_var, &sample_point);
 
-        let mut i = 0;
+        let mut tried_points = HashSet::new();
+        tried_points.insert(sample_point.clone());
         let mut rng = rng();
         loop {
             if self.degree(main_var) == uni_f.degree(main_var)
@@ -5783,7 +5892,7 @@ where
                 break;
             }
 
-            if self.ring().size() == Some(i.into()) {
+            if self.ring().size() == Some(tried_points.len().into()) {
                 let field = self
                     .ring()
                     .upgrade(self.ring().extension_degree().to_u64().unwrap() as usize + 1);
@@ -5802,15 +5911,22 @@ where
                     .expect("Galois factors do not descend to the original field");
             }
 
-            // After zero, try a small constant before sampling the whole field.
-            let policy = if i == 0 {
-                self.ring().sampling_policy(Some(0), (0..=1).into())
+            // Count distinct points: repeated random draws do not establish
+            // that the field is too small. Premature upgrades can also change
+            // the representation of coefficients in an existing extension.
+            sample_point = if tried_points.len() == 1 {
+                self.ring().one()
             } else {
-                self.ring().uniform_sampling_policy()
+                let policy = self.ring().uniform_sampling_policy();
+                loop {
+                    let point = self.ring().sample(&mut rng, &policy);
+                    if !tried_points.contains(&point) {
+                        break point;
+                    }
+                }
             };
-            sample_point = self.ring().sample(&mut rng, &policy);
+            tried_points.insert(sample_point.clone());
             uni_f = self.replace(interpolation_var, &sample_point);
-            i += 1;
         }
 
         let mut d = self.degree(interpolation_var).to_u32();
@@ -8529,7 +8645,14 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         } else {
             let mut threshold_power = p.clone();
             let mut reaches_threshold = true;
-            for _ in 1..MIN_QUADRATIC_HENSEL_DIGITS {
+            // Low-degree corrections are cheap enough to benefit from doubling
+            // precision even when only a few base-prime digits remain.
+            let minimum_digits = if self.last_exponents().iter().all(|e| e.to_u32() <= 32) {
+                8
+            } else {
+                MIN_QUADRATIC_HENSEL_DIGITS
+            };
+            for _ in 1..minimum_digits {
                 if &threshold_power >= max_p {
                     reaches_threshold = false;
                     break;
@@ -10008,7 +10131,117 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
         }
 
-        let bound = self.coefficient_bound();
+        // Preserve the specialized initial image for expensive Hensel lifts
+        // at higher degrees.
+        let mut cached_bound = (32..=63).contains(&d).then(|| self.coefficient_bound());
+        let extended_scout = cached_bound.as_ref().is_some_and(|bound| {
+            let candidate = best_factorization.as_ref().unwrap();
+            let (digits, _) = Self::linear_hensel_modulus(bound, candidate.field.get_prime());
+            !Self::has_high_linear_hensel_pressure(
+                d,
+                bound,
+                candidate.distinct_degree.factor_count,
+                digits,
+            )
+        });
+
+        // A short additional scout can certify a moderate-degree, high-height
+        // polynomial before paying for integer Hensel lifting and recombination.
+        // Any rational factor's degree must be a subset sum of the irreducible
+        // factor degrees at every degree-preserving square-free modular image.
+        // Include the full degree in the u64 mask, so degree 64 must stay outside.
+        if ((8..=31).contains(&d) || extended_scout)
+            && self.coefficients.iter().any(|c| c.significant_bits() > 32)
+        {
+            let degree_mask = |candidate: &ModularIntegerFactorization<E>| {
+                let mut mask = 1u64;
+                for (degree, block) in &candidate.distinct_degree.blocks {
+                    for _ in 0..block.degree(var).to_u32() as usize / degree {
+                        mask |= mask << degree;
+                    }
+                }
+                mask
+            };
+            let mut possible = degree_mask(best_factorization.as_ref().unwrap());
+            let mut additional_images = 0;
+            // Inconclusive scouting must not consume the small primes used by
+            // the specialized Hensel search below.
+            let mut scout_primes = pi;
+            for p in scout_primes.by_ref().take(8) {
+                let Ok(p) = u32::try_from(p) else {
+                    break;
+                };
+                let Some(ModularPrimeScreen::Candidate(candidate)) =
+                    self.screen_univariate_mod_prime(var, p, None)
+                else {
+                    continue;
+                };
+                possible &= degree_mask(&candidate);
+                if possible == (1 | (1u64 << d)) {
+                    return vec![self.clone()];
+                }
+                if candidate.distinct_degree.factor_count
+                    < best_factorization
+                        .as_ref()
+                        .unwrap()
+                        .distinct_degree
+                        .factor_count
+                {
+                    best_factorization = Some(candidate);
+                }
+                additional_images += 1;
+                if additional_images == 4 {
+                    break;
+                }
+            }
+
+            // When only one complementary pair of proper factor degrees
+            // remains, a few more images may prove irreducibility before an
+            // expensive lift. Keep the selected image and prime iterator
+            // unchanged if this additional certificate search is inconclusive.
+            if d <= 31
+                && possible.count_ones() <= 4
+                && self
+                    .coefficients
+                    .iter()
+                    .any(|c| c.significant_bits() >= 128)
+            {
+                let candidate = best_factorization.as_ref().unwrap();
+                let bound = cached_bound.get_or_insert_with(|| self.coefficient_bound());
+                let (digits, _) = Self::linear_hensel_modulus(bound, candidate.field.get_prime());
+                if Self::linear_hensel_work(candidate.distinct_degree.factor_count, digits) >= 128
+                    && !Self::has_high_linear_hensel_pressure(
+                        d,
+                        bound,
+                        candidate.distinct_degree.factor_count,
+                        digits,
+                    )
+                {
+                    let extra_primes = scout_primes;
+                    let mut extra_images = 0;
+                    for p in extra_primes.take(8) {
+                        let Ok(p) = u32::try_from(p) else {
+                            break;
+                        };
+                        let Some(ModularPrimeScreen::Candidate(candidate)) =
+                            self.screen_univariate_mod_prime(var, p, None)
+                        else {
+                            continue;
+                        };
+                        possible &= degree_mask(&candidate);
+                        if possible == (1 | (1u64 << d)) {
+                            return vec![self.clone()];
+                        }
+                        extra_images += 1;
+                        if extra_images == 5 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let bound = cached_bound.unwrap_or_else(|| self.coefficient_bound());
 
         // A wider machine prime reduces the number of full correction rounds in
         // the current linear p-adic lift. Restrict it to low-degree, high-height
@@ -10242,10 +10475,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         let (final_digits, max_p) = Self::linear_hensel_modulus(&bound, field.get_prime());
         let product_tree_lift_pressure =
             Self::has_high_linear_hensel_pressure(d, &bound, hs.len(), final_digits);
-        if product_tree_lift_pressure && hs.len() == 3 {
+        // A balanced root can expose an exact integer split early, including
+        // short polynomials whose coefficient bound does not warrant a wide
+        // modular prime. The remaining child then uses its own local bound.
+        if hs.len() == 3
+            && (product_tree_lift_pressure || (d <= 16 && bound.significant_bits() >= 64))
+        {
             balance_three_factor_hensel_root(&mut hs, var);
         }
-        let quadratic_lift_allowed = hs.len() <= 4;
+        // Small, high-coefficient polynomials also benefit when their modular
+        // images split into more than four factors.
+        let quadratic_lift_allowed = hs.len() <= 4 || (d <= 32 && bound.significant_bits() >= 64);
         if product_tree_lift_pressure && hs.len() > 4 {
             return match self.lift_modular_factor_product_tree(&hs, &max_p) {
                 UnivariateHenselProductTreeLiftResult::Lifted(lifted) => {
@@ -10396,6 +10636,13 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         }
         let uni_fs = factor_target.factor_reconstruct();
 
+        // With one image factor there is nothing to recombine: the existing
+        // reconstruction would return the whole input after lifting and undoing
+        // the shift. Avoid preparing a modular lift whose output is unused.
+        if uni_fs.len() == 1 {
+            return vec![self.clone()];
+        }
+
         let shifted_poly = if !sample_point.is_zero() {
             self.shift_var(interpolation_var, &sample_point)
         } else {
@@ -10464,24 +10711,118 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             k += 1;
         }
 
-        let mod_field = FiniteField::<Integer>::new_non_prime(max_p.clone());
+        // When total degree equals main-variable degree, every true factor has
+        // that same equality and a constant main-variable leading coefficient.
+        // With two irreducible univariate images, a smaller true factor can
+        // therefore be recovered after only its main degree + 1 Taylor terms.
+        // Exact division certifies the attempt; a failed attempt retains the full lift.
+        let short_factor = if uni_fs.len() == 2
+            && d2 >= 8
+            && self.exponents_iter().all(|exponents| {
+                u64::from(exponents[main_var].to_u32())
+                    + u64::from(exponents[interpolation_var].to_u32())
+                    <= u64::from(main_degree)
+            }) {
+            uni_fs
+                .iter()
+                .enumerate()
+                .map(|(index, factor)| (index, factor.degree(main_var).to_u32()))
+                .min_by_key(|&(_, degree)| degree)
+                .filter(|&(_, degree)| degree > 0 && degree <= d2 / 2)
+        } else {
+            None
+        };
 
-        // make all factors monic, this is possible since the lcoeff is invertible mod p^k
-        let uni_fs_mod: Vec<_> = uni_fs
-            .iter()
-            .map(|f| {
-                let f1 = f.map_coeff(|c| mod_field.to_element(c.clone()), mod_field.clone());
-                f1.make_monic()
-            })
-            .collect();
-
-        let mut f_mod =
-            shifted_poly.map_coeff(|c| mod_field.to_element(c.clone()), mod_field.clone());
-
-        // make sure the lcoeff is monic at y=0
-        let inv_coeff = mod_field.inv(&mod_field.to_element(uni_f.lcoeff().clone()));
-        let f_mod_monic = f_mod.clone().mul_coeff(inv_coeff);
-        let lcoeff_monic = f_mod_monic.lcoeff_last_varorder(&[main_var, interpolation_var]);
+        // The specialized factor suggests a useful first precision, but cancellation
+        // can hide large coefficients. Exact division below is the certificate; on
+        // failure we repeat at the full proven bound. Keep trial residues within i128
+        // and require a substantial precision reduction to amortize a failed attempt.
+        let trial_precision = short_factor.and_then(|(index, _)| {
+            let image_bits = uni_fs[index]
+                .coefficients
+                .iter()
+                .map(Integer::significant_bits)
+                .max()
+                .unwrap_or(0);
+            let target_bits = (image_bits + shifted_poly.lcoeff().significant_bits() + 8).max(64);
+            if target_bits > 120 || max_p.significant_bits() <= 127 {
+                return None;
+            }
+            let mut modulus = p.clone();
+            let mut precision = 1;
+            while modulus.significant_bits() < target_bits {
+                modulus *= &p;
+                precision += 1;
+            }
+            (modulus.significant_bits() <= 127
+                && modulus.significant_bits() * 3 <= max_p.significant_bits() * 2)
+                .then_some((modulus, precision))
+        });
+        let (mut working_modulus, mut working_k) = trial_precision.unwrap_or((max_p.clone(), k));
+        let (mod_field, uni_fs_mod, mut f_mod, f_mod_monic, lcoeff_monic) = loop {
+            let mod_field = FiniteField::<Integer>::new_non_prime(working_modulus);
+            // The univariate leading coefficients are invertible modulo every power of p.
+            let uni_fs_mod: Vec<_> = uni_fs
+                .iter()
+                .map(|f| {
+                    f.map_coeff(|c| mod_field.to_element(c.clone()), mod_field.clone())
+                        .make_monic()
+                })
+                .collect();
+            let f_mod =
+                shifted_poly.map_coeff(|c| mod_field.to_element(c.clone()), mod_field.clone());
+            let inv_coeff = mod_field.inv(&mod_field.to_element(uni_f.lcoeff().clone()));
+            let f_mod_monic = f_mod.clone().mul_coeff(inv_coeff);
+            let lcoeff_monic = f_mod_monic.lcoeff_last_varorder(&[main_var, interpolation_var]);
+            if let Some((factor_index, factor_degree)) = short_factor {
+                #[cfg(test)]
+                BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS.with(|count| count.set(count.get() + 1));
+                #[cfg(test)]
+                if working_k != k {
+                    BIVARIATE_TRIAL_PRECISION_ATTEMPTS.with(|count| count.set(count.get() + 1));
+                }
+                let lifted = Self::bivariate_hensel_lift_bernardin(
+                    &f_mod_monic,
+                    interpolation_var,
+                    &lcoeff_monic,
+                    &uni_fs_mod,
+                    factor_degree as usize + 1,
+                    field.get_prime(),
+                    working_k,
+                );
+                let leading = f_mod.lcoeff_last_varorder(&[main_var, interpolation_var]);
+                let candidate = (&leading * &lifted[factor_index + 1])
+                    .map_coeff(|coefficient| mod_field.to_symmetric_integer(coefficient), Z)
+                    .make_primitive();
+                if candidate.degree(main_var).to_u32() == factor_degree
+                    && let Some(quotient) = shifted_poly.try_div(&candidate)
+                {
+                    // Both factors have irreducible, degree-preserving specializations;
+                    // constant leading coefficients rule out factors in y alone.
+                    let mut result = vec![candidate, quotient];
+                    if !sample_point.is_zero() {
+                        for factor in &mut result {
+                            *factor = factor
+                                .shift_var(interpolation_var, &self.ring().neg(&sample_point));
+                        }
+                    }
+                    #[cfg(test)]
+                    BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES
+                        .with(|count| count.set(count.get() + 1));
+                    #[cfg(test)]
+                    if working_k != k {
+                        BIVARIATE_TRIAL_PRECISION_SUCCESSES
+                            .with(|count| count.set(count.get() + 1));
+                    }
+                    return result;
+                }
+            }
+            if working_k == k {
+                break (mod_field, uni_fs_mod, f_mod, f_mod_monic, lcoeff_monic);
+            }
+            working_modulus = max_p.clone();
+            working_k = k;
+        };
 
         let mut factors = Self::bivariate_hensel_lift_bernardin(
             &f_mod_monic,
@@ -12613,6 +12954,8 @@ mod test {
 
     use super::{
         BIVARIATE_FIRST_SAMPLE_ACCEPTANCES, BIVARIATE_SAMPLE_FACTORIZATIONS,
+        BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS, BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES,
+        BIVARIATE_TRIAL_PRECISION_ATTEMPTS, BIVARIATE_TRIAL_PRECISION_SUCCESSES,
         BIVARIATE_WANG_SAMPLE_TRIES, BIVARIATE_WIDE_PRIME_ATTEMPTS,
         BIVARIATE_WIDE_PRIME_MIN_BOUND_BITS, BIVARIATE_WIDE_PRIME_START, BOUNDED_DDF_REJECTIONS,
         BivariateFactorRetryContext, COMPETITIVE_SMALL_PRIME_DDF_REJECTIONS,
@@ -12668,6 +13011,38 @@ mod test {
     };
 
     static GLOBAL_FACTOR_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn separable_leading_layer_preserves_polynomial_content() {
+        let variables = Some(Arc::new(vec![
+            symbol!("unused").into(),
+            symbol!("x").into(),
+            symbol!("y").into(),
+            symbol!("z").into(),
+        ]));
+        for (expression, expected) in [
+            ("0", vec!["0"]),
+            ("5", vec!["5"]),
+            ("6*(x^2+x*y+y^2+1)", vec!["6*(x^2+x*y+y^2+1)"]),
+            ("x^2*y+y^2+1", vec!["x^2*y+y^2+1"]),
+            ("y*(x^2+x+y+1)", vec!["y", "x^2+x+y+1"]),
+            ("x^2*y^3", vec!["x^2", "y^3"]),
+            ("(y+1)*(x^2+x+y)", vec!["y+1", "x^2+x+y"]),
+            ("(x+1)*(y+1)*(x+y+z+1)", vec!["x+1", "y+1", "x+y+z+1"]),
+        ] {
+            let polynomial = parse!(expression).to_polynomial::<_, u32>(&Z, variables.clone());
+            let factors = polynomial.factor_separable();
+            assert_eq!(factors.len(), expected.len(), "{expression}");
+            for expression in expected {
+                let factor = parse!(expression).to_polynomial::<_, u32>(&Z, variables.clone());
+                assert!(factors.contains(&factor), "missing {expression}");
+            }
+            assert_eq!(
+                factors.iter().fold(polynomial.one(), |p, f| p * f),
+                polynomial,
+            );
+        }
+    }
 
     #[test]
     fn separable_content_single_monomial_layer_certifies_constant_content() {
@@ -14066,6 +14441,78 @@ mod test {
     }
 
     #[test]
+    fn univariate_factorization_restores_unused_coordinates_and_multiplicities() {
+        for variable_position in [0, 1, 3] {
+            let mut variables: Vec<crate::poly::PolyVariable> = vec![
+                symbol!("x").into(),
+                symbol!("unused0").into(),
+                symbol!("unused1").into(),
+                symbol!("unused2").into(),
+            ];
+            variables.swap(0, variable_position);
+            let variables = Arc::new(variables);
+            let polynomial = parse!("-12*x^300*(x^2+1)^2*(x^3+2^40*x+2)")
+                .to_polynomial::<_, u32>(&Z, variables.clone());
+            let mut expected = [("-12", 1), ("x", 300), ("x^2+1", 2), ("x^3+2^40*x+2", 1)]
+                .into_iter()
+                .map(|(factor, multiplicity)| {
+                    (
+                        parse!(factor).to_polynomial::<_, u32>(&Z, variables.clone()),
+                        multiplicity,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut factors = polynomial.factor();
+            assert!(
+                factors
+                    .iter()
+                    .all(|(factor, _)| factor.variables() == &variables)
+            );
+            factors.sort_by(|a, b| a.0.internal_cmp(&b.0));
+            expected.sort_by(|a, b| a.0.internal_cmp(&b.0));
+            assert_eq!(factors, expected);
+            assert_eq!(
+                factors
+                    .iter()
+                    .fold(polynomial.one(), |p, (f, m)| p * &f.pow(*m)),
+                polynomial
+            );
+        }
+    }
+
+    #[test]
+    fn moderate_degree_prime_scout_preserves_reducible_inputs() {
+        // Eisenstein at 2 and 3 respectively, so both factors are irreducible.
+        for (left_degree, right_degree) in [(4, 5), (8, 9), (16, 16), (20, 20), (31, 32)] {
+            let left =
+                parse!(&format!("x^{left_degree}+2^40*x+2")).to_polynomial::<_, u32>(&Z, None);
+            let right = parse!(&format!("x^{right_degree}+3^25*x+3"))
+                .to_polynomial::<_, u32>(&Z, left.variables().clone());
+            let factors = (&left * &right).factor_reconstruct();
+            assert_eq!(factors.len(), 2);
+            assert!(factors.contains(&left));
+            assert!(factors.contains(&right));
+        }
+        for degree in [8, 17, 31, 32, 40, 63, 64] {
+            let irreducible =
+                parse!(&format!("x^{degree}+2^40*x+2")).to_polynomial::<_, u32>(&Z, None);
+            assert_eq!(irreducible.factor_reconstruct(), vec![irreducible]);
+        }
+        // A narrow degree intersection must never discard a genuine pair of
+        // large-height factors, including equal-degree factors.
+        for (left_degree, right_degree) in [(5, 5), (6, 7), (7, 9), (10, 12), (11, 11)] {
+            let left =
+                parse!(&format!("x^{left_degree}+2^160*x+2")).to_polynomial::<_, u32>(&Z, None);
+            let right = parse!(&format!("x^{right_degree}+3^101*x+3"))
+                .to_polynomial::<_, u32>(&Z, left.variables().clone());
+            let factors = (&left * &right).factor_reconstruct();
+            assert_eq!(factors.len(), 2);
+            assert!(factors.contains(&left));
+            assert!(factors.contains(&right));
+        }
+    }
+
+    #[test]
     fn factor_univariate_1() {
         let poly = parse!("2*(4 + 3*v1)*(3 + 2*v1 + 3*v1^2)*(3 + 8*v1^2)*(4 + v1 + v1^16)")
             .to_polynomial::<_, u8>(&Z, None);
@@ -14295,6 +14742,10 @@ mod test {
         for (prime, modulus_degree) in [
             (3, 1),
             (17, 9),
+            (17, 16),
+            (17, 17),
+            (4_294_967_291, 16),
+            (4_294_967_291, 17),
             (65_000_011, 66),
             (65_000_011, 67),
             (4_294_967_291, 4),
@@ -15038,18 +15489,22 @@ mod test {
             |coefficient| coefficient.to_finite_field(&field),
             field.clone(),
         );
-        let max_p = Integer::from(11).pow(65);
+        for digits in [9, 17, 65] {
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+            let max_p = Integer::from(11).pow(digits);
 
-        let quadratic = product
-            .hensel_lift_with_strategy(left_mod.clone(), right_mod.clone(), None, &max_p, true)
-            .unwrap();
-        let linear = product
-            .hensel_lift_with_strategy(left_mod, right_mod, None, &max_p, false)
-            .unwrap();
+            let quadratic = product
+                .hensel_lift_with_strategy(left_mod.clone(), right_mod.clone(), None, &max_p, true)
+                .unwrap();
+            let linear = product
+                .hensel_lift_with_strategy(left_mod.clone(), right_mod.clone(), None, &max_p, false)
+                .unwrap();
 
-        assert_eq!(&quadratic.0 * &quadratic.1, product);
-        assert_eq!(quadratic, linear);
-        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
+            assert_eq!(&quadratic.0 * &quadratic.1, product);
+            assert_eq!(quadratic, linear);
+            QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
+        }
     }
 
     #[test]
@@ -15060,29 +15515,33 @@ mod test {
         let field = Zp::new(5);
         let left = parse!("x-2").to_polynomial::<_, u8>(&field, variables.clone());
         let right = parse!("x+2").to_polynomial::<_, u8>(&field, variables);
-        let max_p = Integer::from(5).pow(65);
+        for digits in [9, 17, 65] {
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| calls.set(0));
+            let max_p = Integer::from(5).pow(digits);
 
-        let quadratic = polynomial
-            .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, true)
-            .unwrap_err();
-        let linear = polynomial
-            .hensel_lift_with_strategy(left, right, None, &max_p, false)
-            .unwrap_err();
-        let normalize = |factor: MultivariatePolynomial<IntegerRing, u8>| {
-            factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
-        };
-        let quadratic = (normalize(quadratic.0), normalize(quadratic.1));
-        let linear = (normalize(linear.0), normalize(linear.1));
-        let error = &polynomial - &(&quadratic.0 * &quadratic.1);
+            let quadratic = polynomial
+                .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, true)
+                .unwrap_err();
+            let linear = polynomial
+                .hensel_lift_with_strategy(left.clone(), right.clone(), None, &max_p, false)
+                .unwrap_err();
+            let normalize = |factor: MultivariatePolynomial<IntegerRing, u8>| {
+                factor.map_coeff(|coefficient| coefficient.clone().symmetric_mod(&max_p), Z)
+            };
+            let quadratic = (normalize(quadratic.0), normalize(quadratic.1));
+            let linear = (normalize(linear.0), normalize(linear.1));
+            let error = &polynomial - &(&quadratic.0 * &quadratic.1);
 
-        assert_eq!(quadratic, linear);
-        assert!(
-            error
-                .coefficients
-                .iter()
-                .all(|coefficient| (coefficient % &max_p).is_zero())
-        );
-        QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
+            assert_eq!(quadratic, linear);
+            assert!(
+                error
+                    .coefficients
+                    .iter()
+                    .all(|coefficient| (coefficient % &max_p).is_zero())
+            );
+            QUADRATIC_HENSEL_NONUNIT_RETRIES.with(|retries| assert_eq!(retries.get(), 0));
+            QUADRATIC_HENSEL_LIFT_CALLS.with(|calls| assert!(calls.get() > 0));
+        }
     }
 
     #[test]
@@ -16027,6 +16486,147 @@ mod test {
     }
 
     #[test]
+    fn bivariate_factorization_with_unequal_degrees_preserves_factors() {
+        for variables in [
+            vec![
+                symbol!("unused0"),
+                symbol!("x"),
+                symbol!("unused1"),
+                symbol!("y"),
+            ],
+            vec![
+                symbol!("y"),
+                symbol!("unused0"),
+                symbol!("x"),
+                symbol!("unused1"),
+            ],
+        ] {
+            let variables = Some(Arc::new(variables.into_iter().map(Into::into).collect()));
+            let left = parse!("x^8+y+1").to_polynomial::<_, u32>(&Z, variables.clone());
+            let right = parse!("x^7+y^2+2").to_polynomial::<_, u32>(&Z, variables);
+            let polynomial = (&left * &right).mul_coeff(Integer::from(-7));
+            let factors = polynomial.factor();
+            assert_eq!(factors.len(), 3);
+            assert!(factors.contains(&(left.clone(), 1)));
+            assert!(factors.contains(&(right.clone(), 1)));
+            assert!(factors.contains(&(polynomial.constant(Integer::from(-7)), 1)));
+            assert!(!polynomial.is_irreducible());
+            assert!(left.is_irreducible() && right.is_irreducible());
+            assert!(
+                factors
+                    .iter()
+                    .all(|(f, _)| f.variables() == polynomial.variables())
+            );
+        }
+    }
+
+    #[test]
+    fn single_bivariate_image_preserves_input_after_bad_initial_samples() {
+        let variables = Some(Arc::new(vec![
+            symbol!("unused0").into(),
+            symbol!("x").into(),
+            symbol!("unused1").into(),
+            symbol!("y").into(),
+        ]));
+        for expression in [
+            "x^2+y^2+1",
+            "x^2+x*y+y^2",
+            "y^2*x^2+x+y^2+1",
+            "(y^2+1)*x^2+x+1",
+        ] {
+            let polynomial = parse!(expression).to_polynomial::<_, u32>(&Z, variables.clone());
+            assert!(!polynomial.bivariate_irreducibility_test());
+            for (main, interpolation) in [(1, 3), (3, 1)] {
+                assert_eq!(
+                    polynomial.bivariate_factor_reconstruct(main, interpolation),
+                    vec![polynomial.clone()],
+                    "{expression}, main variable {main}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_bivariate_lift_recovers_nonmonic_factors_after_shift() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let variables = Some(Arc::new(vec![
+            symbol!("unused0").into(),
+            symbol!("x").into(),
+            symbol!("unused1").into(),
+            symbol!("y").into(),
+        ]));
+        let left = parse!("2*x^4+y^4").to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("3*x^8+y^8+3").to_polynomial::<_, u8>(&Z, variables);
+        let polynomial = &left * &right;
+        // y=0 is not square-free, so reconstruction must shift and then unshift.
+        let image = polynomial.replace(3, &Integer::zero());
+        assert!(!image.gcd(&image.derivative(1)).is_constant());
+        BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS.with(|count| count.set(0));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| count.set(0));
+        let factors = polynomial.bivariate_factor_reconstruct(1, 3);
+        BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(factors.len(), 2);
+        assert!(factors.contains(&left) && factors.contains(&right));
+        assert_eq!(&factors[0] * &factors[1], polynomial);
+    }
+
+    #[test]
+    fn bivariate_trial_precision_recovers_small_factor() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let left = parse!("x^4+2+y^4").to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("x^8+3+1267650600228229401496703205376*y^8")
+            .to_polynomial::<_, u8>(&Z, variables);
+        let polynomial = &left * &right;
+        BIVARIATE_TRIAL_PRECISION_ATTEMPTS.with(|count| count.set(0));
+        BIVARIATE_TRIAL_PRECISION_SUCCESSES.with(|count| count.set(0));
+        let factors = polynomial.bivariate_factor_reconstruct(0, 1);
+        BIVARIATE_TRIAL_PRECISION_ATTEMPTS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_TRIAL_PRECISION_SUCCESSES.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(factors.len(), 2);
+        assert!(factors.contains(&left) && factors.contains(&right));
+        assert_eq!(&factors[0] * &factors[1], polynomial);
+    }
+
+    #[test]
+    fn bivariate_trial_precision_retries_when_specialization_hides_large_coefficients() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        let left = parse!("x^4+2+1267650600228229401496703205376*y^4")
+            .to_polynomial::<_, u8>(&Z, variables.clone());
+        let right = parse!("x^8+3+y^8").to_polynomial::<_, u8>(&Z, variables);
+        let polynomial = &left * &right;
+        BIVARIATE_TRIAL_PRECISION_ATTEMPTS.with(|count| count.set(0));
+        BIVARIATE_TRIAL_PRECISION_SUCCESSES.with(|count| count.set(0));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| count.set(0));
+        let factors = polynomial.bivariate_factor_reconstruct(0, 1);
+        BIVARIATE_TRIAL_PRECISION_ATTEMPTS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_TRIAL_PRECISION_SUCCESSES.with(|count| assert_eq!(count.get(), 0));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(factors.len(), 2);
+        assert!(factors.contains(&left) && factors.contains(&right));
+        assert_eq!(&factors[0] * &factors[1], polynomial);
+    }
+
+    #[test]
+    fn short_bivariate_lift_rejects_reducible_image_of_irreducible_polynomial() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        // Eisenstein in y at the prime x^4+2 proves irreducibility, although
+        // its degree-preserving image at y=0 has two irreducible factors.
+        let polynomial = parse!("(x^4+2)*(x^8+3)+y^12")
+            .expand()
+            .to_polynomial::<_, u8>(&Z, variables);
+        BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS.with(|count| count.set(0));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| count.set(0));
+        let factors = polynomial.bivariate_factor_reconstruct(0, 1);
+        BIVARIATE_SHORT_RECONSTRUCTION_ATTEMPTS.with(|count| assert_eq!(count.get(), 1));
+        BIVARIATE_SHORT_RECONSTRUCTION_SUCCESSES.with(|count| assert_eq!(count.get(), 0));
+        assert_eq!(factors, vec![polynomial]);
+    }
+
+    #[test]
     fn high_height_two_factor_bivariate_reconstruction_uses_a_wide_prime() {
         let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
         let height = Integer::from(2).pow(130);
@@ -16512,6 +17112,7 @@ mod test {
 
     #[test]
     fn quadratic_factorization_widens_discriminant_exponents() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
         let polynomial = parse!("x^2+y^200*x+z+1").to_polynomial::<_, u8>(&Z, None);
         let degrees = (0..polynomial.nvars())
             .map(|variable| polynomial.degree(variable).to_u32() as usize)
@@ -16734,6 +17335,7 @@ mod test {
 
     #[test]
     fn wang_univariate_retry_relaxes_stale_factor_bound() {
+        let _lock = GLOBAL_FACTOR_SETTINGS_LOCK.lock().unwrap();
         let vars = Some(Arc::new(vec![
             symbol!("m").into(),
             symbol!("x1").into(),

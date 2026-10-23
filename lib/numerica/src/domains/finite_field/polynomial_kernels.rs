@@ -441,9 +441,17 @@ impl<'a> DenseZpMul<'a> {
             return Some(Vec::new());
         }
 
+        // Packing pays off for dense word-size convolutions well before a
+        // million scalar products. Require both inputs to reach the measured
+        // crossover and enough collisions to amortize the packed workspace.
         #[cfg(feature = "integer-gmp")]
-        if self.number_of_products >= 1_000_000
-            && self.output_len().saturating_mul(64) < self.number_of_products
+        if self
+            .request
+            .left_coefficients
+            .len()
+            .min(self.request.right_coefficients.len())
+            >= 64
+            && self.output_len().saturating_mul(16) < self.number_of_products
             && let Some(output) = self.try_ks2()
         {
             return self.decode_output(output);
@@ -1385,6 +1393,25 @@ impl<'a> DenseZp64Mul<'a> {
 }
 
 impl PolynomialKernels<FiniteFieldElement<u32>> for Zp {
+    fn try_dense_univariate_remainder(
+        &self,
+        dividend: &mut Vec<FiniteFieldElement<u32>>,
+        divisor: &[FiniteFieldElement<u32>],
+    ) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if divisor.len() >= 33
+            && dividend.len() >= divisor.len()
+            && divisor.last().is_some_and(|coefficient| coefficient.0 != 0)
+            && std::is_x86_feature_detected!("avx2")
+        {
+            // All rejection checks precede mutation; AVX2 support is checked here.
+            unsafe { super::remainder_kernels::remainder_u32_avx2(self, dividend, divisor) };
+            return true;
+        }
+        let _ = (dividend, divisor);
+        false
+    }
+
     #[inline]
     fn try_dense_mul(
         &self,

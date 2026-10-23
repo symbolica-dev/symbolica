@@ -280,36 +280,37 @@ impl PythonSeries {
 
     /// Convert the series into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.format_with_color_mode(
-            PythonPrintMode::Symbolica,
-            Some(80),
-            4,
-            true,
-            false,
-            true,
-            true,
-            Some([
-                244, 25, 97, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60,
-            ]),
-            true,
-            false,
-            false,
-            None,
-            '·',
-            false,
-            ('(', ')'),
-            true,
-            None,
-            false,
-            None,
-            false,
-            Some(100),
-            None,
-            PythonAliasPrintMode::Transparent,
-            ColorMode::Always,
-        );
+        Ok(display::algebraic_html(&self.series))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(
+            py,
+            self.series.clone(),
+            display::default_options(),
+            page_size,
+        )
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.series.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.series.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the series into a LaTeX representation.
@@ -496,8 +497,8 @@ impl PythonSeries {
 
     /// Convert the series into a rich display object, with tunable settings.
     ///
-    /// In notebooks, the returned object displays as highlighted HTML while
-    /// `str(...)` returns the plain formatted text.
+    /// In notebooks, the returned object displays as native MathML while
+    /// `str(...)` returns the plain formatted text. Set `mathml=False` for highlighted text.
     #[pyo3(signature =
         (max_terms = None,
             mode = PythonPrintMode::Symbolica,
@@ -523,7 +524,7 @@ impl PythonSeries {
             hide_namespace = None,
             include_attributes = false,
             custom_print_mode = None,
-            alias_print_mode = PythonAliasPrintMode::Transparent)
+            alias_print_mode = PythonAliasPrintMode::Transparent, *, mathml = true, page_size = 25)
         )]
     pub fn formatted(
         &self,
@@ -550,9 +551,40 @@ impl PythonSeries {
         include_attributes: bool,
         custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
+        mathml: bool,
+        page_size: usize,
     ) -> PyResult<PythonFormattedOutput> {
+        if matches!(mode, PythonPrintMode::MathML)
+            || (mathml && matches!(mode, PythonPrintMode::Symbolica))
+        {
+            return display::algebraic::formatted(
+                self.series.clone(),
+                PrintOptions {
+                    mode: PrintMode::MathML,
+                    precision,
+                    print_ring,
+                    symmetric_representation_for_finite_field,
+                    multiplication_operator,
+                    hide_all_namespaces: !show_namespaces,
+                    hide_namespace: hide_namespace.map(|s| Cow::Owned(s.to_owned())),
+                    include_attributes,
+                    max_terms,
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
+                    alias_print_mode: alias_print_mode.into(),
+                    ..display::default_options()
+                },
+                page_size,
+            );
+        }
+
         let text = self.format_with_color_mode(
-            mode,
+            if matches!(mode, PythonPrintMode::MathML) {
+                PythonPrintMode::Symbolica
+            } else {
+                mode
+            },
             max_line_length,
             indentation,
             fill_indented_lines,
@@ -578,8 +610,14 @@ impl PythonSeries {
             ColorMode::Never,
         );
 
+        let native_mathml = matches!(mode, PythonPrintMode::MathML)
+            || (mathml && matches!(mode, PythonPrintMode::Symbolica));
         let formatted = self.format_with_color_mode(
-            mode,
+            if native_mathml {
+                PythonPrintMode::MathML
+            } else {
+                mode
+            },
             max_line_length,
             indentation,
             fill_indented_lines,
@@ -617,7 +655,11 @@ impl PythonSeries {
 
         Ok(PythonFormattedOutput::new(
             text,
-            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(if native_mathml {
+                display::algebraic_fragment_html(&formatted)
+            } else {
+                crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()
+            }),
             Some(latex),
         ))
     }

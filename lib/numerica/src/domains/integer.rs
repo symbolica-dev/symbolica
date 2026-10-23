@@ -686,6 +686,76 @@ impl ToFiniteField<u32> for Integer {
     }
 }
 
+/// Precomputed radix powers for reducing many integers modulo one nonzero `u32`.
+///
+/// GMP-backed values within the requested bit bound are reduced by a dot product
+/// of their words and the radix powers. Larger values and other backends use the
+/// ordinary remainder operation. The table is bounded to 1024 native limbs.
+pub struct IntegerModU32Context {
+    modulus: u32,
+    #[cfg(feature = "integer-gmp")]
+    powers: Vec<[u32; 2]>,
+}
+
+impl IntegerModU32Context {
+    pub fn new(modulus: u32, max_bits: u64) -> Self {
+        assert_ne!(modulus, 0, "the modulus must be nonzero");
+        #[cfg(feature = "integer-gmp")]
+        let mut powers = Vec::new();
+        #[cfg(not(feature = "integer-gmp"))]
+        let _ = max_bits;
+        #[cfg(feature = "integer-gmp")]
+        if max_bits > 128 {
+            let limbs = max_bits.div_ceil(64).min(1024) as usize;
+            powers.reserve(limbs);
+            let radix = (1u64 << 32) % u64::from(modulus);
+            let mut power = 1 % u64::from(modulus);
+            for _ in 0..limbs {
+                let low = power as u32;
+                power = power * radix % u64::from(modulus);
+                let high = power as u32;
+                power = power * radix % u64::from(modulus);
+                powers.push([low, high]);
+            }
+        }
+        Self {
+            modulus,
+            #[cfg(feature = "integer-gmp")]
+            powers,
+        }
+    }
+
+    /// Return the standard representative in `[0, modulus)`.
+    #[inline]
+    pub fn reduce(&self, value: &Integer) -> u32 {
+        match value {
+            Integer::Single(value) => value.rem_euclid(i64::from(self.modulus)) as u32,
+            Integer::Double(value) => value.get().rem_euclid(i128::from(self.modulus)) as u32,
+            Integer::Large(value) => {
+                #[cfg(feature = "integer-gmp")]
+                {
+                    let limbs = value.as_raw().as_limbs();
+                    if limbs.len() <= self.powers.len() {
+                        // At most 2048 products smaller than 2^64 fit comfortably in u128.
+                        let mut sum = 0u128;
+                        for (&limb, &[low, high]) in limbs.iter().zip(&self.powers) {
+                            sum += u128::from(u64::from(limb as u32) * u64::from(low));
+                            sum += u128::from((limb >> 32) * u64::from(high));
+                        }
+                        let remainder = (sum % u128::from(self.modulus)) as u32;
+                        return if value.is_negative() && remainder != 0 {
+                            self.modulus - remainder
+                        } else {
+                            remainder
+                        };
+                    }
+                }
+                value.mod_u(self.modulus)
+            }
+        }
+    }
+}
+
 impl ToFiniteField<u64> for Integer {
     fn to_finite_field(&self, field: &Zp64) -> <Zp64 as Set>::Element {
         match self {
@@ -811,6 +881,19 @@ impl FromFiniteField<Mersenne64> for Integer {
 }
 
 impl Integer {
+    /// Decode an integer evaluation in radix `2^digit_bits` into balanced coefficients.
+    ///
+    /// Returns the nonzero `(index, coefficient)` pairs in increasing index order,
+    /// whose radix evaluation equals `self`. Before applying the sign of `self`,
+    /// each coefficient lies in `[-2^(digit_bits-1), 2^(digit_bits-1))`.
+    /// Returns `None` when `digit_bits` is outside `2..=512`, the indices do not
+    /// fit `u32`, or the native-limb kernel is unavailable on this platform.
+    #[cfg(feature = "integer-gmp")]
+    #[inline]
+    pub fn try_decode_balanced_radix(&self, digit_bits: usize) -> Option<Vec<(u32, Integer)>> {
+        polynomial_kernels::try_decode_balanced_radix(self, digit_bits)
+    }
+
     pub fn new(num: i64) -> Integer {
         Integer::Single(num)
     }
@@ -928,8 +1011,7 @@ impl Integer {
                         *accumulator += product;
                     }
                 } else {
-                    let c = MultiPrecisionInteger::from(c.get());
-                    apply!(add_i64_mul_assign, sub_i64_mul_assign, *b, &c);
+                    accumulator.fused_i128_product_assign(*b as i128, c.get(), subtract);
                 }
             }
             (Integer::Double(b), Integer::Double(c)) => {
@@ -940,8 +1022,7 @@ impl Integer {
                         *accumulator += product;
                     }
                 } else {
-                    let c = MultiPrecisionInteger::from(c.get());
-                    apply!(add_i128_mul_assign, sub_i128_mul_assign, b.get(), &c);
+                    accumulator.fused_i128_product_assign(b.get(), c.get(), subtract);
                 }
             }
             (Integer::Single(b), Integer::Large(c)) | (Integer::Large(c), Integer::Single(b)) => {
@@ -2507,16 +2588,18 @@ impl Ring for IntegerRing {
                     if let Some(product) = i128::from(*left).checked_mul(right.get()) {
                         *accumulator -= product;
                     } else {
-                        let right = MultiPrecisionInteger::from(right.get());
-                        accumulator.sub_i64_mul_assign(*left, &right);
+                        accumulator.fused_i128_product_assign(
+                            i128::from(*left),
+                            right.get(),
+                            true,
+                        );
                     }
                 }
                 (Integer::Double(left), Integer::Double(right)) => {
                     if let Some(product) = left.get().checked_mul(right.get()) {
                         *accumulator -= product;
                     } else {
-                        let right = MultiPrecisionInteger::from(right.get());
-                        accumulator.sub_i128_mul_assign(left.get(), &right);
+                        accumulator.fused_i128_product_assign(left.get(), right.get(), true);
                     }
                 }
                 (Integer::Single(left), Integer::Large(right))
@@ -2979,19 +3062,17 @@ impl<'b> Mul<&'b Integer> for &Integer {
                 if let Some(num) = (*n1 as i128).checked_mul(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(
-                        MultiPrecisionInteger::from(r2.get()) * MultiPrecisionInteger::from(*n1),
-                    )
+                    Integer::Large(MultiPrecisionInteger::from_i128_product(
+                        r2.get(),
+                        *n1 as i128,
+                    ))
                 }
             }
             (Integer::Double(r1), Integer::Double(r2)) => {
                 if let Some(num) = r1.get().checked_mul(r2.get()) {
                     Integer::from_double(num)
                 } else {
-                    Integer::Large(
-                        MultiPrecisionInteger::from(r1.get())
-                            * MultiPrecisionInteger::from(r2.get()),
-                    )
+                    Integer::Large(MultiPrecisionInteger::from_i128_product(r1.get(), r2.get()))
                 }
             }
             (Integer::Single(n1), Integer::Large(r2))
@@ -4101,7 +4182,7 @@ mod test {
         DensePolynomialMulRequest,
     };
 
-    use super::{DoubleInteger, Integer, MultiPrecisionInteger};
+    use super::{DoubleInteger, Integer, IntegerModU32Context, MultiPrecisionInteger};
 
     fn chunked_dense_mul(
         output_len: usize,
@@ -4286,6 +4367,68 @@ mod test {
 
         let consumed = MultiPrecisionInteger::from_raw(value.clone().into_raw());
         assert_eq!(consumed, value);
+    }
+
+    #[test]
+    fn fused_fixed_integer_product_boundaries() {
+        let values = [
+            i128::MIN,
+            i128::MIN + 1,
+            -(1i128 << 95),
+            i64::MIN as i128,
+            -1,
+            0,
+            1,
+            i64::MAX as i128,
+            1i128 << 95,
+            i128::MAX,
+        ];
+        let mut accumulators = values
+            .iter()
+            .copied()
+            .map(Integer::from)
+            .collect::<Vec<_>>();
+        let large = MultiPrecisionInteger::from(1) << 300usize;
+        accumulators.push(Integer::from(large.clone()));
+        accumulators.push(Integer::from(-large));
+        for b in values {
+            for c in values {
+                let product = super::RawMultiPrecisionInteger::from(b)
+                    * super::RawMultiPrecisionInteger::from(c);
+                let b = Integer::from(b);
+                let c = Integer::from(c);
+                for initial in &accumulators {
+                    let initial_raw = match initial {
+                        Integer::Single(v) => super::RawMultiPrecisionInteger::from(*v),
+                        Integer::Double(v) => super::RawMultiPrecisionInteger::from(v.get()),
+                        Integer::Large(v) => v.to_raw(),
+                    };
+                    for subtract in [false, true] {
+                        let expected =
+                            Integer::from(MultiPrecisionInteger::from_raw(if subtract {
+                                super::RawMultiPrecisionInteger::from(&initial_raw - &product)
+                            } else {
+                                super::RawMultiPrecisionInteger::from(&initial_raw + &product)
+                            }));
+                        let mut actual = initial.clone();
+                        actual.fused_mul_assign(&b, &c, subtract);
+                        assert_eq!(actual, expected);
+                        if subtract {
+                            let mut batched = initial.clone();
+                            IntegerRing.sub_mul_assign_many(&mut batched, [(&b, &c)]);
+                            assert_eq!(batched, expected);
+                        }
+                    }
+                }
+                // Exact cancellation must also normalize back to a fixed-size integer.
+                let mut actual = Integer::from(MultiPrecisionInteger::from_raw(product));
+                let mut batched = actual.clone();
+                IntegerRing.sub_mul_assign_many(&mut batched, [(&b, &c)]);
+                assert!(matches!(batched, Integer::Single(0)));
+                actual.fused_mul_assign(&b, &c, true);
+                assert!(matches!(actual, Integer::Single(0)));
+            }
+        }
     }
 
     #[test]
@@ -4681,6 +4824,98 @@ mod test {
         assert_eq!(actual, expected);
     }
 
+    #[test]
+    fn precomputed_word_remainders_match_integer_remainders() {
+        let mut state = 42u64;
+        for modulus in [1u32, 3, 9, 65_521, 2_147_483_659, 4_294_967_291, u32::MAX] {
+            for max_bits in [0, 128, 129, 256, 4096, u64::MAX] {
+                let context = IntegerModU32Context::new(modulus, max_bits);
+                for bits in [0usize, 31, 63, 64, 127, 128, 129, 255, 256, 511, 4096] {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let magnitude = Integer::from(
+                        (MultiPrecisionInteger::from(state) << bits)
+                            + MultiPrecisionInteger::from(state.rotate_left(23)),
+                    );
+                    for value in [magnitude.clone(), -magnitude, Integer::zero()] {
+                        let expected = value.clone().to_multi_prec().mod_u(modulus);
+                        assert_eq!(
+                            context.reduce(&value),
+                            expected,
+                            "modulus={modulus}, max_bits={max_bits}, value={value}"
+                        );
+                    }
+                }
+            }
+        }
+        // The bounded table must fall back for inputs larger than its 1024 limbs.
+        let context = IntegerModU32Context::new(17, u64::MAX);
+        let huge = Integer::from(MultiPrecisionInteger::from(1) << 65_537usize);
+        assert_eq!(context.reduce(&huge), 2);
+    }
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn balanced_radix_decoder_matches_integer_division() {
+        let wide = Integer::from(MultiPrecisionInteger::from(1u32) << 127u32);
+        for bits in [
+            2usize, 3, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129, 192, 255, 256, 511, 512,
+        ] {
+            let radix = Integer::from(MultiPrecisionInteger::from(1u32) << bits);
+            let half: Integer = &radix / 2;
+            for magnitude in [
+                Integer::zero(),
+                Integer::one(),
+                &half - 1,
+                half.clone(),
+                &radix - 1,
+                radix.clone(),
+                &radix * &radix - 1,
+                &radix * &radix + &half + 1,
+                wide.clone(),
+            ] {
+                for negative in [false, true] {
+                    let value = if negative {
+                        -magnitude.clone()
+                    } else {
+                        magnitude.clone()
+                    };
+                    let actual = value.try_decode_balanced_radix(bits).unwrap();
+                    let mut remaining = magnitude.clone();
+                    let mut carry = false;
+                    let mut expected = Vec::new();
+                    let mut index = 0;
+                    while !remaining.is_zero() || carry {
+                        let mut coefficient = &remaining % &radix + Integer::from(u8::from(carry));
+                        remaining /= &radix;
+                        carry = coefficient >= half;
+                        if carry {
+                            coefficient -= &radix;
+                        }
+                        if negative {
+                            coefficient = -coefficient;
+                        }
+                        if !coefficient.is_zero() {
+                            expected.push((index, coefficient));
+                        }
+                        index += 1;
+                    }
+                    assert_eq!(actual, expected, "bits={bits}, value={value}");
+                    let reconstructed = actual
+                        .into_iter()
+                        .fold(Integer::zero(), |sum, (index, value)| {
+                            sum + value * radix.pow(index as u64)
+                        });
+                    assert_eq!(reconstructed, value);
+                }
+            }
+        }
+        for bits in [0, 1, 513, usize::MAX] {
+            assert!(wide.try_decode_balanced_radix(bits).is_none());
+        }
+    }
+
     #[cfg(feature = "integer-gmp")]
     #[test]
     fn kronecker_native_decode_handles_radix_limb_boundaries() {
@@ -5011,6 +5246,51 @@ mod test {
             assert_eq!(align_of::<Rational>(), 8);
             assert_eq!(size_of::<FiniteFieldElement<Integer>>(), 32);
             assert_eq!(size_of::<Complex<Integer>>(), 64);
+        }
+    }
+
+    #[test]
+    fn overflowing_fixed_products_match_backend_across_ownership_forms() {
+        let mut values = vec![
+            i128::MIN,
+            i128::MIN + 1,
+            -(1i128 << 95),
+            i64::MIN as i128 - 1,
+            i64::MIN as i128,
+            -1,
+            0,
+            1,
+            i64::MAX as i128,
+            i64::MAX as i128 + 1,
+            1i128 << 95,
+            i128::MAX,
+        ];
+        let mut state = 42u64;
+        for _ in 0..32 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            values.push(((state as i128) << 64) | state.rotate_left(23) as i128);
+        }
+        for &left in &values {
+            for &right in &values {
+                let expected = Integer::from(MultiPrecisionInteger::from_raw(
+                    super::RawMultiPrecisionInteger::from(left)
+                        * super::RawMultiPrecisionInteger::from(right),
+                ));
+                let left = Integer::from(left);
+                let right = Integer::from(right);
+                assert_eq!(&left * &right, expected);
+                assert_eq!(left.clone() * &right, expected);
+                assert_eq!(&left * right.clone(), expected);
+                assert_eq!(left.clone() * right.clone(), expected);
+                let mut assigned = left.clone();
+                assigned *= &right;
+                assert_eq!(assigned, expected);
+                let mut assigned = left;
+                assigned *= right;
+                assert_eq!(assigned, expected);
+            }
         }
     }
 

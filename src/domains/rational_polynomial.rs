@@ -259,6 +259,10 @@ impl<R: Ring, E: PositiveExponent> SelfRing for RationalPolynomial<R, E> {
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, Error> {
+        if opts.mode.is_mathml() {
+            return crate::printer::mathml::rational_polynomial(self, opts, state, f);
+        }
+
         if opts.explicit_rational_polynomial {
             if state.in_sum {
                 f.write_char('+')?;
@@ -945,6 +949,16 @@ where
         } else {
             Some(self.div(a, b))
         }
+    }
+
+    fn format_mathml<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+    ) -> Result<bool, std::fmt::Error> {
+        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
     }
 
     fn format<W: std::fmt::Write>(

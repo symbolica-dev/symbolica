@@ -254,6 +254,100 @@ impl<F: Ring + std::fmt::Display> std::fmt::Display for Series<F> {
 }
 
 impl<F: Ring> Series<F> {
+    /// Add owned series, batching coefficient additions at each power.
+    ///
+    /// The result uses a common ramification grid and is known up to the smallest
+    /// absolute order of the inputs. Coefficients are moved into one batch per
+    /// power and summed with [`Ring::sum`]. In particular, symbolic
+    /// coefficients use [`Atom::add_many`] instead of repeated binary merges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, or if the coefficient fields, variables,
+    /// or expansion points differ. An empty sum has no field or precision to inherit.
+    pub fn sum<I>(series: I) -> Self
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        let mut series = series.into_iter().collect::<Vec<_>>().into_iter();
+        let mut sum = series
+            .next()
+            .expect("cannot add an empty iterator of series");
+        if series.len() == 0 {
+            return sum;
+        }
+
+        let mut ramification = sum.ramification;
+        for s in series.as_slice() {
+            assert_eq!(sum.field, s.field);
+            assert_eq!(sum.variable, s.variable);
+            assert_eq!(sum.expansion_point, s.expansion_point);
+            if ramification % s.ramification != 0 {
+                ramification = Integer::from(ramification as i64)
+                    .lcm(&Integer::from(s.ramification as i64))
+                    .to_i64()
+                    .expect("series ramification is too large")
+                    as usize;
+            }
+        }
+
+        // Two already aligned series need only one binary coefficient merge.
+        if series.len() == 1
+            && sum.shift == series.as_slice()[0].shift
+            && sum.ramification == series.as_slice()[0].ramification
+        {
+            return sum + series.next().unwrap();
+        }
+
+        // Use wider intermediates so refining an infinite-precision identity's
+        // grid does not overflow before the finite common order is selected.
+        let mut shift = i128::MAX;
+        let mut end = i128::MAX;
+        let mut stored_end = i128::MIN;
+        for s in std::iter::once(&sum).chain(series.as_slice()) {
+            let stride = (ramification / s.ramification) as i128;
+            let start = s.shift as i128 * stride;
+            shift = shift.min(start);
+            end = end.min((s.shift as i128 + s.order as i128) * stride);
+            if !s.coefficients.is_empty() {
+                stored_end =
+                    stored_end.max(start + (s.coefficients.len() - 1) as i128 * stride + 1);
+            }
+        }
+
+        let order = usize::try_from(end - shift).expect("series order is too large");
+        let len = usize::try_from(stored_end.min(end).max(shift) - shift)
+            .expect("series coefficient span is too large");
+        let mut coefficients = Vec::with_capacity(len);
+        coefficients.resize_with(len, Vec::new);
+        let first = (
+            sum.shift,
+            sum.ramification,
+            std::mem::take(&mut sum.coefficients),
+        );
+        for (input_shift, input_ramification, input_coefficients) in
+            std::iter::once(first).chain(series.map(|s| (s.shift, s.ramification, s.coefficients)))
+        {
+            let stride = ramification / input_ramification;
+            let offset = usize::try_from(input_shift as i128 * stride as i128 - shift)
+                .expect("series shift is too large");
+            for (i, coefficient) in input_coefficients.into_iter().enumerate() {
+                let index = offset + i * stride;
+                if index >= len {
+                    break;
+                }
+                coefficients[index].push(coefficient);
+            }
+        }
+
+        sum.shift = isize::try_from(shift).expect("series shift is too large");
+        sum.ramification = ramification;
+        sum.order = order;
+        sum.coefficients = coefficients.into_iter().map(|c| sum.field.sum(c)).collect();
+        sum.truncate();
+        sum
+    }
+
     /// Constructs a zero series with fixed order. Instead of using this constructor,
     /// prefer to create new series from existing ones, so that the
     /// variable map and field are inherited.
@@ -564,6 +658,13 @@ impl<F: Ring> Series<F> {
         self.ramification
     }
 
+    pub(crate) fn terms_for_display(&self) -> impl Iterator<Item = (Rational, &F::Element)> {
+        self.coefficients
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (self.get_exponent(i), c))
+    }
+
     /// Get a copy of the variable/
     pub fn get_variable(&self) -> Arc<PolyVariable> {
         self.variable.clone()
@@ -773,6 +874,10 @@ impl<F: Ring> SelfRing for Series<F> {
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
+        if opts.mode.is_mathml() {
+            return crate::printer::mathml::series(self, opts, state, f);
+        }
+
         fn format_exponent<W: std::fmt::Write>(
             exponent: &Rational,
             opts: &PrintOptions,
@@ -1577,6 +1682,213 @@ mod tests {
         symbol,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn sum_batches_symbolic_coefficients() {
+        let x = symbol!("series_sum_x");
+        let coefficients = (0..129)
+            .map(|i| crate::function!(symbol!("series_sum_c"), i))
+            .collect::<Vec<_>>();
+        let expected = Atom::add_many(&coefficients);
+        let kernel = parse!("series_sum_x^-2+sqrt(series_sum_x)-3*series_sum_x^2");
+        let partials = coefficients
+            .iter()
+            .map(|c| {
+                (c * &kernel)
+                    .series(x, 0, SeriesDepth::absolute(2))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let expression = Atom::add_many(coefficients.iter().map(|c| c * &kernel));
+        for result in [
+            Series::sum(partials),
+            expression.series(x, 0, SeriesDepth::absolute(2)).unwrap(),
+        ] {
+            assert_eq!(result.coefficient((-2).into()), Some(expected.clone()));
+            assert_eq!(result.coefficient((1, 2).into()), Some(expected.clone()));
+            assert_eq!(
+                result.coefficient(2.into()).unwrap().expand(),
+                (-&expected * Atom::num(3)).expand()
+            );
+            assert_eq!(result.coefficient(0.into()), Some(Atom::Zero));
+            assert_eq!(result.absolute_order(), Rational::from(3));
+            assert_eq!(result.coefficient(3.into()), None);
+        }
+    }
+
+    #[test]
+    fn sum_aligns_grids_and_preserves_precision_after_cancellation() {
+        let prototype = Series::new(
+            &Q,
+            None,
+            Arc::new(symbol!("series_sum_grid_x").into()),
+            0.into(),
+            4.into(),
+        );
+        let inputs = vec![
+            prototype.monomial(2.into(), (-3, 2).into()),
+            prototype.monomial((-2).into(), (-3, 2).into()),
+            prototype.monomial(3.into(), (1, 3).into()),
+            prototype.monomial(4.into(), 1.into()),
+            // This zero bounds the common precision at 3/2, even though the
+            // first two terms cancel and the other series are known further.
+            Series::new(
+                &Q,
+                None,
+                prototype.variable.clone(),
+                0.into(),
+                (3, 2).into(),
+            ),
+        ];
+        let result = Series::sum(inputs.clone());
+        assert_eq!(result.absolute_order(), (3, 2));
+        assert_eq!(result.coefficient((-3, 2).into()), Some(0.into()));
+        assert_eq!(result.coefficient((1, 3).into()), Some(3.into()));
+        assert_eq!(result.coefficient(1.into()), Some(4.into()));
+        assert_eq!(result.coefficient((3, 2).into()), None);
+        assert_eq!(result.ramification, 6);
+
+        // Compare every known grid point against binary addition, rather than
+        // Series::eq, which does not compare the precision metadata.
+        let binary = inputs.into_iter().reduce(|a, b| a + b).unwrap();
+        assert_eq!(result.absolute_order(), binary.absolute_order());
+        for numerator in -12..9 {
+            let exponent: Rational = (numerator, 6).into();
+            assert_eq!(
+                result.coefficient(exponent.clone()),
+                binary.coefficient(exponent)
+            );
+        }
+
+        let cancelled = Series::sum([
+            prototype.monomial(2.into(), (-1, 2).into()),
+            prototype.monomial((-2).into(), (-1, 2).into()),
+        ]);
+        assert!(cancelled.is_zero());
+        assert_eq!(cancelled.absolute_order(), (7, 2));
+        assert_eq!(cancelled.coefficient(3.into()), Some(0.into()));
+        assert_eq!(cancelled.coefficient((7, 2).into()), None);
+    }
+
+    #[test]
+    fn sum_matches_exact_coefficient_oracle_on_mixed_grids() {
+        use std::collections::BTreeMap;
+
+        let variable: Arc<crate::poly::PolyVariable> =
+            Arc::new(symbol!("series_sum_oracle_x").into());
+        for case in 0..32 {
+            let mut inputs = Vec::new();
+            let mut expected = BTreeMap::<Rational, Rational>::new();
+            let mut end = Rational::from(100);
+            for term in 0..9 {
+                let order = 1 + (case + 3 * term) % 8;
+                let mut s = Series {
+                    coefficients: (0..order)
+                        .map(|i| Rational::from(((case + term + i * 3) % 7) as i64 - 3))
+                        .collect(),
+                    variable: variable.clone(),
+                    expansion_point: Rational::from(0),
+                    field: Q,
+                    shift: ((case + term * 7) % 11) as isize - 5,
+                    order,
+                    ramification: [1, 2, 3, 4][(case + term) % 4],
+                };
+                s.truncate();
+                end = end.min(s.absolute_order());
+                for (i, c) in s.coefficients.iter().enumerate() {
+                    *expected.entry(s.get_exponent(i)).or_default() += c;
+                }
+                inputs.push(s);
+            }
+            let result = Series::sum(inputs);
+            assert_eq!(result.absolute_order(), end, "case {case}");
+            // 12 is the common denominator of all input grids; also check
+            // powers outside the retained interval and the unknown boundary.
+            for numerator in -72..156 {
+                let exponent = Rational::from((numerator, 12));
+                let coefficient = if exponent < end {
+                    Some(expected.get(&exponent).cloned().unwrap_or_default())
+                } else {
+                    None
+                };
+                assert_eq!(result.coefficient(exponent), coefficient, "case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn sum_handles_zero_singleton_and_infinite_identity() {
+        let prototype = Series::new(
+            &Q,
+            None,
+            Arc::new(symbol!("series_sum_zero_x").into()),
+            0.into(),
+            (5, 2).into(),
+        );
+        let zero = Series::sum([prototype.zero(), prototype.zero()]);
+        assert!(zero.is_zero());
+        assert_eq!(zero.absolute_order(), (5, 2));
+        let single = prototype.monomial(7.into(), (-1, 3).into());
+        let result = Series::sum([single.clone()]);
+        assert_eq!(result.coefficients, single.coefficients);
+        assert_eq!(result.absolute_order(), single.absolute_order());
+        let result = Series::sum([prototype.one_inf_prec(), single.clone()]);
+        assert_eq!(result.absolute_order(), single.absolute_order());
+        assert_eq!(result.coefficient(0.into()), Some(1.into()));
+        assert_eq!(result.coefficient((-1, 3).into()), Some(7.into()));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot add an empty iterator of series")]
+    fn sum_rejects_empty_input() {
+        Series::<Q>::sum([]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn sum_rejects_different_expansion_points() {
+        let x: Arc<crate::poly::PolyVariable> = Arc::new(symbol!("series_sum_centre_x").into());
+        Series::sum([
+            Series::new(&Q, None, x.clone(), 0.into(), 4.into()),
+            Series::new(&Q, None, x, 1.into(), 4.into()),
+        ]);
+    }
+
+    #[test]
+    fn sum_applies_custom_coefficient_normalization() {
+        use crate::domains::{Ring, atom::AtomField};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let field = AtomField {
+            statistical_zero_test: false,
+            custom_normalization: Some(Box::new(move |a, out| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                *out = a.expand();
+                true
+            })),
+            ..AtomField::new()
+        };
+        assert_eq!(field.sum([]), Atom::Zero);
+        let coefficient = parse!("(series_sum_a+1)^2");
+        assert_eq!(field.sum([coefficient.clone()]), coefficient);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let prototype = Series::new(
+            &field,
+            None,
+            Arc::new(symbol!("series_sum_normalize_x").into()),
+            Atom::Zero,
+            3.into(),
+        );
+        let result = Series::sum([
+            prototype.constant(coefficient),
+            prototype.constant(parse!("-series_sum_a^2-2*series_sum_a-1")),
+        ]);
+        assert!(result.is_zero());
+        assert_eq!(result.absolute_order(), Rational::from(3));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn absolute_truncation_preserves_finite_zero_precision() {

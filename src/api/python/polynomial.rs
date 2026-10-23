@@ -470,8 +470,8 @@ impl PythonPolynomial {
 
     /// Convert the polynomial into a rich display object, with tunable settings.
     ///
-    /// In notebooks, the returned object displays as highlighted HTML while
-    /// `str(...)` returns the plain formatted text.
+    /// In notebooks, the returned object displays as native MathML while
+    /// `str(...)` returns the plain formatted text. Set `mathml=False` for highlighted text.
     #[pyo3(signature =
         (max_terms = None,
             mode = PythonPrintMode::Symbolica,
@@ -495,7 +495,7 @@ impl PythonPolynomial {
             hide_namespace = None,
             include_attributes = false,
             custom_print_mode = None,
-            alias_print_mode = PythonAliasPrintMode::Transparent)
+            alias_print_mode = PythonAliasPrintMode::Transparent, *, mathml = true, page_size = 25)
         )]
     pub fn formatted(
         &self,
@@ -522,9 +522,40 @@ impl PythonPolynomial {
         include_attributes: bool,
         custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         alias_print_mode: PythonAliasPrintMode,
+        mathml: bool,
+        page_size: usize,
     ) -> PyResult<PythonFormattedOutput> {
+        if matches!(mode, PythonPrintMode::MathML)
+            || (mathml && matches!(mode, PythonPrintMode::Symbolica))
+        {
+            return display::algebraic::formatted(
+                self.poly.clone(),
+                PrintOptions {
+                    mode: PrintMode::MathML,
+                    precision,
+                    print_ring,
+                    symmetric_representation_for_finite_field,
+                    multiplication_operator,
+                    hide_all_namespaces: !show_namespaces,
+                    hide_namespace: hide_namespace.map(|s| Cow::Owned(s.to_owned())),
+                    include_attributes,
+                    max_terms,
+                    custom_print_mode: custom_print_mode
+                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+                        .unwrap_or_default(),
+                    alias_print_mode: alias_print_mode.into(),
+                    ..display::default_options()
+                },
+                page_size,
+            );
+        }
+
         let text = self.format_with_color_mode(
-            mode,
+            if matches!(mode, PythonPrintMode::MathML) {
+                PythonPrintMode::Symbolica
+            } else {
+                mode
+            },
             max_line_length,
             indentation,
             fill_indented_lines,
@@ -550,8 +581,14 @@ impl PythonPolynomial {
             ColorMode::Never,
         );
 
+        let native_mathml = matches!(mode, PythonPrintMode::MathML)
+            || (mathml && matches!(mode, PythonPrintMode::Symbolica));
         let formatted = self.format_with_color_mode(
-            mode,
+            if native_mathml {
+                PythonPrintMode::MathML
+            } else {
+                mode
+            },
             max_line_length,
             indentation,
             fill_indented_lines,
@@ -589,7 +626,11 @@ impl PythonPolynomial {
 
         Ok(PythonFormattedOutput::new(
             text,
-            Some(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()),
+            Some(if native_mathml {
+                display::algebraic_fragment_html(&formatted)
+            } else {
+                crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()
+            }),
             Some(latex),
         ))
     }
@@ -617,17 +658,32 @@ impl PythonPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -2159,17 +2215,32 @@ impl PythonFiniteFieldPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -3441,17 +3512,32 @@ impl PythonPrimeTwoPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -4383,17 +4469,32 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -5409,17 +5510,32 @@ impl PythonGaloisFieldPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -6399,17 +6515,32 @@ impl PythonNumberFieldPolynomial {
 
     /// Convert the polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the polynomial into a LaTeX representation.
@@ -7408,17 +7539,32 @@ impl PythonRationalPolynomial {
 
     /// Convert the rational polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the rational polynomial into a LaTeX representation.
@@ -7865,17 +8011,32 @@ impl PythonFiniteFieldRationalPolynomial {
 
     /// Convert the rational polynomial into an HTML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.poly.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always),
-            PrintState::new(),
-        );
+        Ok(display::algebraic_html(&self.poly))
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a native pager without importing notebook or widget packages.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::algebraic::viewer(py, self.poly.clone(), display::default_options(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display native MathML with paging in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::algebraic::formatted(self.poly.clone(), display::default_options(), 25)?
+            ._display_(py)
     }
 
     /// Convert the rational polynomial into a LaTeX representation.

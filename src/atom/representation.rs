@@ -3455,6 +3455,11 @@ pub struct ListIterator<'a> {
 }
 
 impl<'a> ListIterator<'a> {
+    /// Capture the current boundary for a later `resume_at` on this list.
+    pub(crate) fn cursor(&self) -> (&'a [u8], usize) {
+        (self.data, self.length)
+    }
+
     /// Resume at a previously visited boundary within this list.
     ///
     /// # Safety

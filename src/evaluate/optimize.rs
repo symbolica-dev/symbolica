@@ -478,6 +478,13 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
 
         self.undo_stack_optimization();
 
+        // Constant and temporary remapping can change operand order. Keep
+        // normalization independent of whether an elimination pass runs.
+        for (instruction, _) in &mut self.instructions {
+            if let Instr::Add(_, args) | Instr::Mul(_, args) = instruction {
+                args.sort_unstable();
+            }
+        }
         loop {
             if self.settings.abort_level > 0 || self.remove_common_instructions() == 0 {
                 self.settings.abort_level = 0;
@@ -490,6 +497,10 @@ impl<T: Default + Clone + Eq + Hash> ExpressionEvaluator<T> {
                 self.settings.abort_level = 0;
                 break;
             }
+
+            // Reuse functions and other instructions whose operands became
+            // identical after extracting common pairs.
+            self.remove_common_instructions();
         }
 
         self.optimize_stack();

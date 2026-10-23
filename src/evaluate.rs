@@ -13,7 +13,7 @@ use std::{
     panic,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 #[cfg(feature = "native_code_generation")]
@@ -364,6 +364,125 @@ mod test {
     }
 
     #[test]
+    fn completed_conditionals_reuse_only_their_parent_scope() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let branches = |graph: &ExportedInstructions<Complex<Rational>>| {
+            graph
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count()
+        };
+        let repeated = parse!("(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y)");
+        let exact = repeated
+            .evaluator(&params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(branches(&exact.export_instructions()), 1);
+        let heads = [
+            parse!("if(c,1/x,sqrt(x+2))+x"),
+            parse!("if(c,1/x,sqrt(x+2))+y"),
+        ];
+        let multiple = Atom::evaluator_multiple(&heads, &params)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        assert_eq!(branches(&multiple.export_instructions()), 1);
+        let mut multiple = multiple.map_coeff(&|c| c.re.to_f64());
+        let mut output = [0.; 2];
+        multiple.evaluate(&[1., 2., 3.], &mut output);
+        assert_eq!(output, [2.5, 3.5]);
+        let expression =
+            parse!("if(a,(if(c,1/x,sqrt(x+2))+x)*(if(c,1/x,sqrt(x+2))+y),if(c,1/x,sqrt(x+2))+y)");
+        let exact = expression
+            .evaluator(&[parse!("a"), parse!("c"), parse!("x"), parse!("y")])
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        // The inner expression is completed once in each sibling scope.
+        assert_eq!(branches(&exact.export_instructions()), 3);
+        let mut scalar = exact.clone().map_coeff(&|c| c.re.to_f64());
+        let inputs = [
+            [1., 0., 0., 2.],
+            [0., 0., 0., 2.],
+            [1., 1., -2., 3.],
+            [0., 1., -2., 3.],
+        ];
+        let expected = inputs.map(|[a, c, x, y]| {
+            let selected = if c != 0. { 1. / x } else { (x + 2.).sqrt() };
+            if a != 0. {
+                (selected + x) * (selected + y)
+            } else {
+                selected + y
+            }
+        });
+        for index in [0, 3, 1, 2, 0, 1] {
+            let actual = scalar.evaluate_single(&inputs[index]);
+            assert!(actual.is_finite() && (actual - expected[index]).abs() < 1e-12);
+        }
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&exact, bincode::config::standard()).unwrap();
+            let (decoded, _) = bincode::decode_from_slice::<
+                crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
+                _,
+            >(&bytes, bincode::config::standard())
+            .unwrap();
+            let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
+            assert!((decoded.evaluate_single(&inputs[0]) - expected[0]).abs() < 1e-12);
+        }
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit = scalar
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
+            for (input, expected) in inputs.iter().zip(expected) {
+                let mut output = [0.];
+                jit.evaluate(input, &mut output);
+                assert!((output[0] - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn completed_shared_conditionals_preserve_captures_and_calls() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let exact = parse!("conditional_cache::f(c,x)+conditional_cache::f(c,x+1)")
+            .evaluator(&params)
+            .add_function_with_options(
+                symbol!("conditional_cache::f"),
+                vec![symbol!("b"), symbol!("z")],
+                parse!("(if(b,1/z,z+y)+z)*(if(b,1/z,z+y)+y)"),
+                FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+            )
+            .unwrap()
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        let exported = exact.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let helper = &exported.sub_evaluators[0];
+        assert_eq!(helper.input_count, 3); // b,z,captured y
+        assert_eq!(
+            helper
+                .instructions
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count(),
+            1
+        );
+        let mut scalar = exact.map_coeff(&|c| c.re.to_f64());
+        for (c, x, y) in [(0., 0., 2.), (1., 2., 3.), (0., -1., 4.), (1., -3., -2.)] {
+            let selected = |z| if c != 0. { 1. / z } else { z + y };
+            let term = |z| (selected(z) + z) * (selected(z) + y);
+            let actual = scalar.evaluate_single(&[c, x, y]);
+            assert!(actual.is_finite() && (actual - term(x) - term(x + 1.)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
     fn non_inlined_function_uses_sub_evaluator() {
         fn execute_exported(
             exported: &ExportedInstructions<f64>,
@@ -619,6 +738,223 @@ mod test {
 
             let _ = std::fs::remove_file(source);
             let _ = std::fs::remove_file(library);
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_optimizes_instructions_and_respects_pair_budget() {
+        let build = |rounds| {
+            parse!("shared_body_opt::outer(x)+shared_body_opt::outer(x+1)")
+                .evaluator(&[parse!("x"), parse!("b"), parse!("c"), parse!("d")])
+                .add_function(
+                    symbol!("shared_body_opt::inner"),
+                    vec![symbol!("z")],
+                    parse!("sin(z)"),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    symbol!("shared_body_opt::outer"),
+                    vec![symbol!("a")],
+                    // Inlining inner produces the same instruction as sin(a),
+                    // but in a different symbolic subexpression cache.
+                    parse!("shared_body_opt::inner(a)*b*c+sin(a)*b*d"),
+                    FunctionRegistrationOptions::new().inlining(InliningPolicy::Never),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .cpe_iterations(rounds)
+                .build()
+                .unwrap()
+        };
+        for rounds in [Some(0), Some(1), None] {
+            let exact = build(rounds);
+            assert_eq!(exact.external_fns.len(), 1);
+            let body = exact.external_fns[0].body.as_ref().unwrap();
+            assert_eq!(
+                body.instructions
+                    .iter()
+                    .filter(|(i, _)| matches!(i, super::Instr::BuiltinFun(..)))
+                    .count(),
+                1,
+                "instruction CSE must run even with CPE disabled"
+            );
+            let multiplications: usize = body
+                .instructions
+                .iter()
+                .filter_map(|(i, _)| match i {
+                    super::Instr::Mul(_, args) => Some(args.len() - 1),
+                    _ => None,
+                })
+                .sum();
+            assert_eq!(multiplications, if rounds == Some(0) { 4 } else { 3 });
+            assert!(std::sync::Arc::ptr_eq(
+                body,
+                exact.clone().external_fns[0].body.as_ref().unwrap()
+            ));
+            let mut dual = exact
+                .clone()
+                .vectorize(&Dualizer::new(
+                    crate::domains::dual::HyperDual::<Complex<Rational>>::new(vec![
+                        vec![0],
+                        vec![1],
+                    ]),
+                    vec![],
+                ))
+                .unwrap()
+                .map_coeff(&|c| c.re.to_f64());
+            let mut evaluator = exact.map_coeff(&|c| c.re.to_f64());
+            for x in [0.2_f64, -0.7, 1.3] {
+                let expected = (x.sin() + (x + 1.).sin()) * 2. * (3. + 5.);
+                let actual = evaluator.evaluate_single(&[x, 2., 3., 5.]);
+                assert!((actual - expected).abs() < 1e-12);
+                let mut out = [0.; 2];
+                dual.evaluate(&[x, 1., 2., 0., 3., 0., 5., 0.], &mut out);
+                assert!((out[0] - expected).abs() < 1e-12);
+                let derivative = (x.cos() + (x + 1.).cos()) * 2. * (3. + 5.);
+                assert!((out[1] - derivative).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn non_inlined_function_reuses_temporary_stack_slots() {
+        // Keep this regression on libtest's default stack even when a local Cargo
+        // configuration raises RUST_MIN_STACK.
+        std::thread::Builder::new()
+            .name("non_inlined_function_temporary_stack_slots".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(check_non_inlined_function_temporary_stack_slots)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn check_non_inlined_function_temporary_stack_slots() {
+        let helper = symbol!("symbolica::shared_stack::chain");
+        let argument = symbol!("symbolica::shared_stack::argument");
+        let parent = symbol!("symbolica::shared_stack::parent");
+        let captured = parse!("symbolica::shared_stack::captured");
+        let mut body = Atom::var(argument);
+        for _ in 0..64 {
+            body = symbol!("sin").call((&body,)) + &captured;
+        }
+        let expression = parent.call((parse!("x"),)) + parent.call((parse!("x+1"),));
+        let params = [parse!("x"), captured];
+        let build = |policy| {
+            expression
+                .evaluator(&params)
+                .add_function_with_options(
+                    helper,
+                    vec![argument],
+                    body.clone(),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    parent,
+                    vec![argument],
+                    helper.call((symbol!("sin").call((Atom::var(argument),)),)),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+        };
+        let exact = build(InliningPolicy::Never);
+        assert_eq!(exact.external_fns.len(), 2);
+        let shared = exact.external_fns[0].body.as_ref().unwrap();
+        assert_eq!(exact.external_fns[0].symbol, helper);
+        let parent_body = exact.external_fns[1].body.as_ref().unwrap();
+        assert!(
+            parent_body
+                .instructions
+                .iter()
+                .any(|(instruction, _)| match instruction {
+                    super::Instr::ExternalFun(target, _, args) => args.contains(target),
+                    _ => false,
+                })
+        );
+        assert_eq!(shared.param_count, 2);
+        assert!(shared.instructions.len() >= 64);
+        assert!(shared.stack_size <= shared.param_count + 3);
+        assert!(shared.result_index < shared.stack_size);
+        assert!(
+            shared
+                .instructions
+                .iter()
+                .any(|(instruction, _)| match instruction {
+                    super::Instr::Add(target, args) => args.contains(target),
+                    super::Instr::BuiltinFun(target, _, arg) => target == arg,
+                    _ => false,
+                })
+        );
+        let clone = exact.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            shared,
+            clone.external_fns[0].body.as_ref().unwrap()
+        ));
+        let exported = exact.export_instructions();
+        assert!(
+            exported.sub_evaluators[0].instructions.sub_evaluators[0]
+                .instructions
+                .temporary_count
+                <= 3
+        );
+        let mut shared = exact.map_coeff(&|c| c.re.to_f64());
+        let mut inline = build(InliningPolicy::Always).map_coeff(&|c| c.re.to_f64());
+        for inputs in [[0.2, 0.1], [-0.3, 0.4], [1.5, -0.7]] {
+            assert_eq!(
+                shared.evaluate_single(&inputs),
+                inline.evaluate_single(&inputs)
+            );
+        }
+    }
+
+    #[test]
+    fn non_inlined_stack_reuse_preserves_nested_lazy_branches() {
+        let build = |policy| {
+            parse!("shared_stack_branch::outer(c,x)+shared_stack_branch::outer(c,x+1)")
+                .evaluator(&[parse!("c"), parse!("x"), parse!("q")])
+                .add_function_with_options(
+                    symbol!("shared_stack_branch::inner"),
+                    vec![symbol!("b"), symbol!("z")],
+                    parse!("if(b,1/z+sqrt(z+2),sqrt(z+2)+q*z)+q"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .add_function_with_options(
+                    symbol!("shared_stack_branch::outer"),
+                    vec![symbol!("a"), symbol!("y")],
+                    parse!("if(a,shared_stack_branch::inner(a,y)+q*y,if(q,shared_stack_branch::inner(a,y)*q,1/(y+2)))"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+                .map_coeff(&|c| c.re.to_f64())
+        };
+        let mut shared = build(InliningPolicy::Never);
+        let mut inline = build(InliningPolicy::Always);
+        let inputs = [0., 0., 2., 1., 3., 4., 0., 0., 0., 1., 2., 1., 0., -1., 2.];
+        for index in [0, 2, 1, 4, 3, 0] {
+            let args = &inputs[3 * index..3 * index + 3];
+            let expected = inline.evaluate_single(args);
+            let result = shared.evaluate_single(args);
+            assert!(result.is_finite());
+            assert!((result - expected).abs() < 1e-12);
+        }
+        #[cfg(feature = "native_code_generation")]
+        {
+            let mut jit = shared
+                .jit_compile(JITCompilationSettings::default())
+                .unwrap();
+            for args in inputs.as_chunks::<3>().0 {
+                let mut result = [0.];
+                jit.evaluate(args, &mut result);
+                assert!((result[0] - inline.evaluate_single(args)).abs() < 1e-12);
+            }
         }
     }
 

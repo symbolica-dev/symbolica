@@ -3,6 +3,7 @@ import unittest
 import ast
 import doctest
 import io
+import re
 from pathlib import Path
 
 import symbolica
@@ -545,7 +546,7 @@ class SolutionSetContract(unittest.TestCase):
         generic = Expression.solve(a*x-1, [x])
         for output in (str(generic), repr(generic), generic._repr_html_()):
             self.assertNotIn("Parameters:", output)
-            self.assertIn("a != 0", output)
+            self.assertIn("a != 0", re.sub(r"<[^>]*>", "", output))
             self.assertIn("other parameter values are not covered", output)
             self.assertNotIn("coverage: generic", output)
         family = Expression.solve(x + y - a, [x, y], domain=Reals)
@@ -640,7 +641,7 @@ class SolutionSetContract(unittest.TestCase):
             self.assertNotIn("display_parameter^2", output.getvalue())
         for html in (radical._repr_html_(), branch._repr_html_(), condition._repr_html_(),
                      condition.formula._repr_html_()):
-            self.assertIn("display_parameter²", html)
+            self.assertIn("<msup><mi>display_parameter</mi>", html)
             self.assertNotIn("display_parameter^2", html)
             self.assertNotIn("$$", html)
         real = Expression.solve(x*x-z, [x], domain=Reals)
@@ -652,11 +653,11 @@ class SolutionSetContract(unittest.TestCase):
             self.assertIn(inline_value, branch._repr_html_())
         generic = Expression.solve((z*z-1)*x-1, [x])
         for html in (generic._repr_html_(), generic.coverage_guard._repr_html_()):
-            self.assertIn("display_parameter²", html)
+            self.assertIn("<msup><mi>display_parameter</mi>", html)
             self.assertNotIn("display_parameter^2", html)
         empty = Expression.solve((z*z-1)*(x*x+1), [x], domain=Reals)
         self.assertEqual(len(empty), 0)
-        self.assertIn("display_parameter²", empty._repr_html_())
+        self.assertIn("<msup><mi>display_parameter</mi>", empty._repr_html_())
 
     def test_later_variables_are_preferred_as_free_coordinates(self):
         from itertools import permutations

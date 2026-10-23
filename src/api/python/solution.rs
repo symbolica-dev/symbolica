@@ -36,24 +36,12 @@ fn formatted_atom_with_color(atom: &Atom, color: ColorMode) -> String {
     )
 }
 
-pub(super) fn formatted_atom(atom: &Atom) -> String {
-    formatted_atom_with_color(atom, ColorMode::Always)
-}
-
 fn pretty_atom(atom: &Atom) -> String {
     formatted_atom_with_color(atom, ColorMode::Never)
 }
 
 fn condition_text(condition: &SolutionCondition, atom: &impl Fn(&Atom) -> String) -> String {
     condition.format_with(atom)
-}
-
-pub(super) fn inline_html(formatted: &str) -> String {
-    let html = crate::printer::AnsiHtmlFormatter::new(formatted).to_string();
-    html.strip_prefix("<div style=\"white-space: pre-wrap; margin: 0;\">")
-        .and_then(|s| s.strip_suffix("</div>"))
-        .unwrap_or(&html)
-        .to_owned()
 }
 
 fn guard_text(guard: &[Atom], atom: &impl Fn(&Atom) -> String) -> String {
@@ -64,7 +52,7 @@ fn guard_text(guard: &[Atom], atom: &impl Fn(&Atom) -> String) -> String {
         .join(" & ")
 }
 fn guard_html(guard: &[Atom]) -> String {
-    inline_html(&guard_text(guard, &formatted_atom))
+    display::with_math(|atom| guard_text(guard, &|a| atom(a)))
 }
 fn guard_condition(guard: &[Atom]) -> crate::id::Condition<crate::id::Relation> {
     guard
@@ -92,7 +80,7 @@ fn relation_condition(
 }
 
 fn condition_html(condition: &SolutionCondition) -> String {
-    inline_html(&condition_text(condition, &formatted_atom))
+    display::with_math(|atom| condition_text(condition, &|a| atom(a)))
 }
 
 /// Keep equations aligned without relying on notebook table styles.
@@ -117,12 +105,10 @@ fn solution_html(
         html.push_str("<div style=\"grid-column: 1 / -1\">{}</div>");
     }
     for coordinate in assignments {
-        let variable: PythonExpression = coordinate.0.to_atom().into();
-        let value: PythonExpression = coordinate.1.clone().into();
         html.push_str(&format!(
             "{}<span> = </span>{}",
-            variable._repr_html_()?,
-            value._repr_html_()?,
+            display::embedded_preview(coordinate.0.to_atom().as_view()),
+            display::embedded_preview(coordinate.1.as_view()),
         ));
     }
     if !conditions.is_empty() {
@@ -432,7 +418,9 @@ impl PythonSolution {
             .into_iter()
             .map(|c| c.condition)
             .collect::<Vec<_>>();
-        solution_html(&self.solution, &conditions, None)
+        solution_html(&self.solution, &conditions, None).map(|html| {
+            format!("<div style=\"max-width:100%;min-width:0;overflow-x:auto\">{html}</div>")
+        })
     }
     /// Display the assignments in IPython.
     ///
@@ -620,7 +608,7 @@ impl PythonSolutionSet {
     }
     /// Display all solution branches as aligned equations.
     fn _repr_html_(&self) -> PyResult<String> {
-        let mut html = String::from("<div>");
+        let mut html = String::from("<div style=\"max-width:100%;min-width:0;overflow-x:auto\">");
         if self.set.len() == 0 {
             html.push_str(if self.set.coverage() == SolveCoverage::Complete {
                 "<div>No solutions.</div>"

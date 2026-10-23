@@ -164,6 +164,66 @@ fn complex_root_isolation_refines_across_factors() {
 }
 
 #[test]
+fn separating_wide_root_disks_preserves_precise_certificates() {
+    let field = FloatField::from_rep(Complex::from(Rational::one()));
+    let polynomial = |expression: &str| {
+        Arc::new(
+            parse!(expression)
+                .to_polynomial::<_, u16>(&Q, None)
+                .to_univariate_from_univariate(0)
+                .map_coeff(|c| Complex::from(c.clone()), field.clone()),
+        )
+    };
+    let wide = IsolatedRoot {
+        poly: polynomial("x+1"),
+        index: 0,
+        enclosure: super::ComplexDisk {
+            center: Complex::from(Rational::from(-1)),
+            radius: Rational::from(2),
+        },
+        location: Some(RootLocation::Real),
+        expression: None,
+    };
+    let precise = IsolatedRoot {
+        poly: polynomial("x^8-2"),
+        index: 0,
+        enclosure: super::ComplexDisk {
+            center: Complex::from(Rational::from((
+                -10_905_077_326_652_577i64,
+                10_000_000_000_000_000i64,
+            ))),
+            radius: Rational::from((1, 1_000_000_000_000_000i64)),
+        },
+        location: Some(RootLocation::Real),
+        expression: None,
+    };
+    // Construct certified disks directly so global cache state and other tests
+    // cannot pre-refine the wide disk and hide the unnecessary Newton steps.
+    for root in [&wide, &precise] {
+        assert!(UnivariatePolynomial::<Q>::disk_contains_one_root(
+            &root.poly,
+            &root.enclosure.center,
+            &root.enclosure.radius,
+        ));
+    }
+    assert!(!wide.enclosure.is_disjoint(&precise.enclosure));
+    for reverse in [false, true] {
+        let mut roots = vec![wide.clone(), precise.clone()];
+        if reverse {
+            roots.reverse();
+        }
+        UnivariatePolynomial::<Q>::separate_isolated_roots(&mut roots);
+        assert_pairwise_isolated(&roots);
+        let narrow = &roots[usize::from(!reverse)];
+        assert_eq!(narrow.enclosure.center, precise.enclosure.center);
+        assert_eq!(narrow.enclosure.radius, precise.enclosure.radius);
+        let broad = &roots[usize::from(reverse)];
+        assert_eq!(broad.enclosure.center, wide.enclosure.center);
+        assert!(broad.enclosure.radius < wide.enclosure.radius);
+    }
+}
+
+#[test]
 fn complex_root_isolation_marks_real_roots() {
     let p = parse!("(x+1)*(x-2)*(x^2+1)")
         .to_polynomial::<_, u16>(&Q, None)

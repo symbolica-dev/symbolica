@@ -144,6 +144,25 @@ mod implementation {
     }
 
     impl MultiPrecisionInteger {
+        /// Multiply two i128 operands, using stack-backed operand views with GMP.
+        #[inline]
+        pub(crate) fn from_i128_product(left: i128, right: i128) -> Self {
+            #[cfg(feature = "integer-gmp")]
+            {
+                use rug::{Assign, integer::MiniInteger};
+
+                let left = MiniInteger::from(left);
+                let right = MiniInteger::from(right);
+                let mut result = Self::default();
+                result.0.assign(&*left.borrow() * &*right.borrow());
+                result
+            }
+            #[cfg(feature = "integer-malachite")]
+            {
+                Self::from(left) * Self::from(right)
+            }
+        }
+
         /// Wrap a value from the selected arbitrary-precision backend.
         #[inline]
         pub fn from_raw(value: RawMultiPrecisionInteger) -> Self {
@@ -481,6 +500,32 @@ mod implementation {
         #[inline(always)]
         pub fn sub_mul_assign(&mut self, b: &Self, c: &Self) {
             self.0 -= &b.0 * &c.0;
+        }
+
+        /// Accumulate a signed fixed-size product without allocating operand storage with GMP.
+        #[inline(always)]
+        pub(crate) fn fused_i128_product_assign(&mut self, b: i128, c: i128, subtract: bool) {
+            #[cfg(feature = "integer-gmp")]
+            {
+                use rug::integer::MiniInteger;
+
+                let b = MiniInteger::from(b);
+                let c = MiniInteger::from(c);
+                if subtract {
+                    self.0 -= &*b.borrow() * &*c.borrow();
+                } else {
+                    self.0 += &*b.borrow() * &*c.borrow();
+                }
+            }
+            #[cfg(feature = "integer-malachite")]
+            {
+                let c = Self::from(c);
+                if subtract {
+                    self.sub_i128_mul_assign(b, &c);
+                } else {
+                    self.add_i128_mul_assign(b, &c);
+                }
+            }
         }
 
         #[inline(always)]
@@ -1038,7 +1083,10 @@ mod implementation {
 
                     #[inline]
                     fn mul(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-                        MultiPrecisionInteger::from(self) * rhs
+                        #[cfg(feature = "integer-gmp")]
+                        { rhs * self }
+                        #[cfg(feature = "integer-malachite")]
+                        { MultiPrecisionInteger::from(self) * rhs }
                     }
                 }
 
@@ -1047,7 +1095,18 @@ mod implementation {
 
                     #[inline]
                     fn mul(self, rhs: $t) -> Self::Output {
-                        self * &MultiPrecisionInteger::from(rhs)
+                        #[cfg(feature = "integer-gmp")]
+                        {
+                            use rug::Assign;
+
+                            let mut result = MultiPrecisionInteger::default();
+                            result.0.assign(&self.0 * rhs);
+                            result
+                        }
+                        #[cfg(feature = "integer-malachite")]
+                        {
+                            self * &MultiPrecisionInteger::from(rhs)
+                        }
                     }
                 }
 
@@ -1118,7 +1177,7 @@ mod implementation {
 
                     #[inline]
                     fn mul(self, rhs: &'a MultiPrecisionInteger) -> Self::Output {
-                        MultiPrecisionInteger::from(*self) * rhs
+                        *self * rhs
                     }
                 }
 
@@ -1136,7 +1195,7 @@ mod implementation {
 
                     #[inline]
                     fn mul(self, rhs: &'a $t) -> Self::Output {
-                        self * &MultiPrecisionInteger::from(*rhs)
+                        self * *rhs
                     }
                 }
             )*
@@ -1428,6 +1487,47 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn primitive_products_match_raw_backend() {
+            let values = [
+                i128::MIN,
+                i128::MIN + 1,
+                -(1i128 << 95),
+                i64::MIN as i128,
+                -1,
+                0,
+                1,
+                i64::MAX as i128,
+                1i128 << 95,
+                i128::MAX,
+            ];
+            for left in values {
+                for right in values {
+                    let expected = RawMultiPrecisionInteger::from(left)
+                        * RawMultiPrecisionInteger::from(right);
+                    assert_eq!(
+                        MultiPrecisionInteger::from_i128_product(left, right).as_raw(),
+                        &expected
+                    );
+                }
+            }
+            let large = (MultiPrecisionInteger::from(1) << 300usize) - 17i64;
+            for value in values {
+                let expected = large.as_raw() * RawMultiPrecisionInteger::from(value);
+                assert_eq!((&large * value).as_raw(), &expected);
+                assert_eq!((value * &large).as_raw(), &expected);
+                assert_eq!((&large * &value).as_raw(), &expected);
+                assert_eq!((&value * &large).as_raw(), &expected);
+            }
+            for value in [i64::MIN, -1, 0, 1, i64::MAX] {
+                let expected = large.as_raw() * RawMultiPrecisionInteger::from(value);
+                assert_eq!((&large * value).as_raw(), &expected);
+                assert_eq!((value * &large).as_raw(), &expected);
+                assert_eq!((&large * &value).as_raw(), &expected);
+                assert_eq!((&value * &large).as_raw(), &expected);
+            }
+        }
 
         #[test]
         fn mod_u_matches_euclidean_remainder() {

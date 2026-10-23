@@ -4,6 +4,7 @@ pub mod flint;
 #[cfg(feature = "flint_benchmarks")]
 pub mod paired;
 pub mod polybench_cases;
+pub mod polynomial_fixtures;
 #[cfg(feature = "flint_benchmarks")]
 pub mod rational_shapes;
 pub mod symbolica;

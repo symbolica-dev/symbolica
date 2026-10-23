@@ -1,5 +1,8 @@
 //! Methods for printing rings.
 
+pub(crate) mod mathml;
+pub use mathml::number as mathml_number;
+
 use std::borrow::Cow;
 
 use ahash::HashMap;
@@ -15,6 +18,8 @@ pub enum PrintMode {
     Mathematica,
     Sympy,
     Typst,
+    /// Bounded native MathML fragments for expressions.
+    MathML,
 }
 
 impl PrintMode {
@@ -36,6 +41,10 @@ impl PrintMode {
 
     pub fn is_typst(&self) -> bool {
         *self == PrintMode::Typst
+    }
+
+    pub fn is_mathml(&self) -> bool {
+        *self == PrintMode::MathML
     }
 }
 
@@ -147,6 +156,18 @@ pub struct PrintOptions {
 }
 
 impl PrintOptions {
+    /// Print an expression as a bounded MathML fragment, suitable for embedding
+    /// inside a `<math>` element. Custom printers should also return fragments.
+    pub fn mathml() -> Self {
+        Self {
+            mode: PrintMode::MathML,
+            color_mode: ColorMode::Never,
+            color_builtin_symbols: false,
+            num_exp_as_superscript: false,
+            ..Self::new()
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             max_line_length: None,

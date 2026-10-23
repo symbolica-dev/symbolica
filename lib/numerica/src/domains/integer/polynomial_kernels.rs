@@ -580,6 +580,58 @@ where
     Some(output)
 }
 
+/// Reuse the multiplication decoder for a complete signed integer evaluation.
+#[cfg(feature = "integer-gmp")]
+pub(super) fn try_decode_balanced_radix(
+    value: &Integer,
+    digit_bits: usize,
+) -> Option<Vec<(u32, Integer)>> {
+    if !(2..=512).contains(&digit_bits) {
+        return None;
+    }
+    let output_len = usize::try_from(value.significant_bits())
+        .ok()?
+        .div_ceil(digit_bits)
+        .checked_add(1)?;
+    u32::try_from(output_len).ok()?;
+    let small_limbs;
+    let limbs = match value {
+        Integer::Single(value) => {
+            small_limbs = [value.unsigned_abs(), 0];
+            &small_limbs[..]
+        }
+        Integer::Double(value) => {
+            let magnitude = value.get().unsigned_abs();
+            small_limbs = [magnitude as u64, (magnitude >> 64) as u64];
+            &small_limbs[..]
+        }
+        Integer::Large(value) => value.as_raw().as_limbs(),
+    };
+    macro_rules! decode {
+        ($limbs:literal) => {
+            try_decode_fixed_kronecker_digits::<$limbs, _>(
+                limbs,
+                digit_bits,
+                output_len,
+                true,
+                value.is_negative(),
+                |index| Some(index as u32),
+            )
+        };
+    }
+    match digit_bits.div_ceil(64) {
+        1 => decode!(1),
+        2 => decode!(2),
+        3 => decode!(3),
+        4 => decode!(4),
+        5 => decode!(5),
+        6 => decode!(6),
+        7 => decode!(7),
+        8 => decode!(8),
+        _ => None,
+    }
+}
+
 /// One dense-indexed integer multiplication operation.
 ///
 /// Construction checks the invariants shared by every multiplication strategy. The context then
@@ -1639,10 +1691,10 @@ impl<'a> DenseIntegerMul<'a> {
     #[cfg(feature = "integer-gmp")]
     /// Multiply into a dense array of reusable GMP integer accumulators.
     ///
-    /// This strategy requires at least one [`Integer::Large`] input coefficient. It dispatches
-    /// each coefficient pair by its tagged representation and uses fused GMP add-products for
-    /// large operands, avoiding a separately allocated temporary product. It returns `None` when
-    /// the product is too small or the dense output array would be disproportionately large.
+    /// This strategy requires at least one non-single input coefficient. Double-width inputs
+    /// are converted once and large inputs are borrowed, so the convolution can reuse GMP
+    /// operands without constructing a temporary integer for each coefficient product.
+    /// Returns `None` when the product is too small or the dense output array is too large.
     fn try_large_array(&self) -> Option<Vec<(u32, Integer)>> {
         let Self {
             output_len,
@@ -1654,7 +1706,7 @@ impl<'a> DenseIntegerMul<'a> {
         if !left_coefficients
             .iter()
             .chain(right_coefficients)
-            .any(|coefficient| matches!(coefficient, Integer::Large(_)))
+            .any(|coefficient| !matches!(coefficient, Integer::Single(_)))
         {
             return None;
         }
@@ -1669,42 +1721,48 @@ impl<'a> DenseIntegerMul<'a> {
             return None;
         }
 
+        use std::borrow::Cow;
+
+        enum Coefficient<'a> {
+            Single(i64),
+            Large(Cow<'a, MultiPrecisionInteger>),
+        }
+
+        fn prepare(coefficients: &[Integer]) -> Vec<Coefficient<'_>> {
+            coefficients
+                .iter()
+                .map(|coefficient| match coefficient {
+                    Integer::Single(value) => Coefficient::Single(*value),
+                    Integer::Double(value) => {
+                        Coefficient::Large(Cow::Owned(MultiPrecisionInteger::from(value.get())))
+                    }
+                    Integer::Large(value) => Coefficient::Large(Cow::Borrowed(value)),
+                })
+                .collect()
+        }
+
         #[inline(always)]
-        fn add_product(accumulator: &mut MultiPrecisionInteger, left: &Integer, right: &Integer) {
+        fn add_product(
+            accumulator: &mut MultiPrecisionInteger,
+            left: &Coefficient<'_>,
+            right: &Coefficient<'_>,
+        ) {
             match (left, right) {
-                (Integer::Single(left), Integer::Single(right)) => {
+                (Coefficient::Single(left), Coefficient::Single(right)) => {
                     *accumulator += i128::from(*left) * i128::from(*right);
                 }
-                (Integer::Single(left), Integer::Double(right))
-                | (Integer::Double(right), Integer::Single(left)) => {
-                    if let Some(product) = i128::from(*left).checked_mul(right.get()) {
-                        *accumulator += product;
-                    } else {
-                        let right = MultiPrecisionInteger::from(right.get());
-                        accumulator.add_i64_mul_assign(*left, &right);
-                    }
-                }
-                (Integer::Double(left), Integer::Double(right)) => {
-                    if let Some(product) = left.get().checked_mul(right.get()) {
-                        *accumulator += product;
-                    } else {
-                        let right = MultiPrecisionInteger::from(right.get());
-                        accumulator.add_i128_mul_assign(left.get(), &right);
-                    }
-                }
-                (Integer::Single(left), Integer::Large(right))
-                | (Integer::Large(right), Integer::Single(left)) => {
+                (Coefficient::Single(left), Coefficient::Large(right))
+                | (Coefficient::Large(right), Coefficient::Single(left)) => {
                     accumulator.add_i64_mul_assign(*left, right);
                 }
-                (Integer::Double(left), Integer::Large(right))
-                | (Integer::Large(right), Integer::Double(left)) => {
-                    accumulator.add_i128_mul_assign(left.get(), right);
-                }
-                (Integer::Large(left), Integer::Large(right)) => {
+                (Coefficient::Large(left), Coefficient::Large(right)) => {
                     accumulator.add_mul_assign(left, right);
                 }
             }
         }
+
+        let left_coefficients = prepare(left_coefficients);
+        let right_coefficients = prepare(right_coefficients);
 
         const BLOCK_SIZE: usize = 32;
         let mut output = (0..output_len)
@@ -2784,6 +2842,15 @@ impl<'a> DenseIntegerExactDivision<'a> {
 }
 
 impl PolynomialKernels<Integer> for IntegerRing {
+    fn prefer_brown_resultant(&self, left: &[Integer], right: &[Integer]) -> bool {
+        // At modest degrees and very large coefficient heights, Brown's
+        // sequence spends less time in large exact divisions than Ducos.
+        (4..=65).contains(&left.len())
+            && (4..=65).contains(&right.len())
+            && left.iter().any(|c| c.significant_bits() >= 8192)
+            && right.iter().any(|c| c.significant_bits() >= 8192)
+    }
+
     #[inline]
     fn try_chunked_dense_mul(
         &self,
@@ -2921,6 +2988,62 @@ fn total_degree_limb_workspace_is_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "integer-gmp")]
+    #[test]
+    fn large_array_reuses_double_operands_with_signed_cancellation() {
+        let double = Integer::from_double(1i128 << 100);
+        let large = Integer::from(MultiPrecisionInteger::from(1u32) << 180u32);
+        let inputs = [
+            vec![
+                double.clone(),
+                -double.clone(),
+                Integer::from_double(i128::MIN),
+                Integer::from_double(i128::MAX),
+                double.clone(),
+                -double.clone(),
+                double.clone(),
+                -double.clone(),
+            ],
+            vec![
+                Integer::zero(),
+                Integer::Single(i64::MIN),
+                double.clone(),
+                large.clone(),
+                -large,
+                -double,
+                Integer::Single(i64::MAX),
+                Integer::Single(1),
+            ],
+        ];
+        let indices: Vec<u32> = (0..8).collect();
+        for left in &inputs {
+            for right in &inputs {
+                let mut expected = vec![Integer::zero(); 15];
+                for (i, a) in left.iter().enumerate() {
+                    for (j, b) in right.iter().enumerate() {
+                        expected[i + j] += a * b;
+                    }
+                }
+                let expected: Vec<_> = expected
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, coefficient)| !coefficient.is_zero())
+                    .map(|(i, coefficient)| (i as u32, coefficient))
+                    .collect();
+                let context = DenseIntegerMul::new(DensePolynomialMulRequest {
+                    output_len: 15,
+                    left_coefficients: left,
+                    left_indices: &indices,
+                    right_coefficients: right,
+                    right_indices: &indices,
+                })
+                .unwrap();
+                assert_eq!(context.try_large_array().unwrap(), expected);
+                assert_eq!(context.run().unwrap(), expected);
+            }
+        }
+    }
 
     #[cfg(feature = "integer-gmp")]
     #[test]

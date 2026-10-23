@@ -16,7 +16,7 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
       - name: Generate code coverage
-        run: cargo llvm-cov --workspace --codecov --output-path codecov.json
+        run: cargo llvm-cov nextest --workspace --no-fail-fast --codecov --output-path codecov.json
         env:
           SYMBOLICA_LICENSE: ${{ secrets.SYMBOLICA_LICENSE }}
       - name: Upload coverage to Codecov

@@ -367,6 +367,36 @@ mod astro {
         }
     }
 
+    fn format_decimal_value(value: &BigFloat, digits: usize, scientific: bool) -> String {
+        if value.is_zero() {
+            return if value.is_negative() { "-0" } else { "0" }.to_owned();
+        }
+        if value.is_inf() {
+            return if value.is_negative() { "-inf" } else { "inf" }.to_owned();
+        }
+
+        let text = format_lower_exp_value(value, Some(digits.saturating_sub(1)));
+        let Some((mantissa, exponent)) = text.split_once('e') else {
+            return text;
+        };
+        let Ok(exponent) = exponent.parse::<i32>() else {
+            return text;
+        };
+
+        // Like MPFR, use decimal notation only when the rounded significant
+        // digits contain every digit before the point, and the value is >= 1.
+        if !scientific && exponent >= 0 && (exponent as usize) < digits {
+            let mut text = mantissa.replace('.', "");
+            let point = exponent as usize + 1 + usize::from(text.starts_with('-'));
+            if point < text.len() {
+                text.insert(point, '.');
+            }
+            text
+        } else {
+            format!("{mantissa}e{exponent}")
+        }
+    }
+
     fn parse_integer_at_precision(value: impl Display, prec: usize) -> BigFloat {
         with_constants(|constants| {
             BigFloat::parse(
@@ -578,6 +608,23 @@ mod astro {
     }
 
     impl MultiPrecisionFloat {
+        fn fmt_decimal(&self, f: &mut Formatter<'_>, scientific: bool) -> fmt::Result {
+            // Zero precision, like omitted precision, requests enough digits
+            // to reconstruct the binary value, following MPFR's convention.
+            let digits = f
+                .precision()
+                .filter(|&digits| digits != 0)
+                .unwrap_or_else(|| {
+                    1 + (f64::from(self.prec) * std::f64::consts::LOG10_2).ceil() as usize
+                });
+            let text = format_decimal_value(&self.value, digits, scientific);
+            f.pad_integral(
+                !text.starts_with('-'),
+                "",
+                text.strip_prefix('-').unwrap_or(&text),
+            )
+        }
+
         pub fn new(prec: u32) -> Self {
             Self {
                 value: BigFloat::new(precision(prec)),
@@ -1184,29 +1231,13 @@ mod astro {
 
     impl Display for MultiPrecisionFloat {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            // Display precision counts significant digits for this backend,
-            // as it does for MPFR. Forwarding it to String::fmt truncates the
-            // entire string and can silently remove the scientific exponent.
-            let text = format_lower_exp_value(
-                &self.value,
-                f.precision().map(|digits| digits.saturating_sub(1)),
-            );
-            f.pad_integral(
-                !text.starts_with('-'),
-                "",
-                text.strip_prefix('-').unwrap_or(&text),
-            )
+            self.fmt_decimal(f, false)
         }
     }
 
     impl std::fmt::LowerExp for MultiPrecisionFloat {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            let text = format_lower_exp_value(&self.value, f.precision());
-            f.pad_integral(
-                !text.starts_with('-'),
-                "",
-                text.strip_prefix('-').unwrap_or(&text),
-            )
+            self.fmt_decimal(f, true)
         }
     }
 

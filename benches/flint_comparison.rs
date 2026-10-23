@@ -700,8 +700,10 @@ fn paired_benchmarks() {
     paired_resultants();
     paired_gcd();
     paired_generated_gcd_regimes();
+    paired_rational_gcd_controls();
     paired_generated_factorization();
     paired_polybench();
+    paired_polynomial_fixtures();
 }
 
 fn paired_integer_multiplication() {
@@ -883,6 +885,87 @@ fn paired_gcd() {
 fn paired_generated_gcd_regimes() {
     for case in GENERATED_GCD_CASES {
         paired_gcd_case(case, "generated GCD");
+    }
+}
+
+// Guard GCD dispatch changes with actual divisibility as well as failed trials.
+// Symbolica computes the monic GCD over Q and FLINT runs over Z.
+fn paired_rational_gcd_controls() {
+    for power in [2, 3, 4] {
+        for kind in ["divisible", "proportional", "coprime", "shared factor"] {
+            let config = PairedConfig::from_env(31);
+            let name = format!("rational GCD control: {kind}, power {power}");
+            if !config.matches(&name) {
+                continue;
+            }
+            configure_symbolica_gcd(SymbolicaGcdAlgorithm::Auto);
+            let expression = format!("(1+x+2*y+3*z+x*y+y*z+z*x)^{power}");
+            let common = Atom::parse(&expression, BENCHMARK_NAMESPACE, ParseSettings::default())
+                .unwrap()
+                .to_polynomial::<_, u32>(&Q, None);
+            let parse = |text: &str| {
+                Atom::parse(text, BENCHMARK_NAMESPACE, ParseSettings::default())
+                    .unwrap()
+                    .to_polynomial::<_, u32>(&Q, common.variables().clone())
+            };
+            let context = FmpzMPolyContext::new(&["x", "y", "z"]).unwrap();
+            let flint_common = context.parse(&expression).unwrap();
+            let (left, right, expected, flint_left, flint_right, flint_expected) = match kind {
+                "divisible" => (
+                    &common * &parse("x+1"),
+                    common.clone(),
+                    common.clone(),
+                    flint_common.mul(&context.parse("x+1").unwrap()),
+                    context.parse(&expression).unwrap(),
+                    context.parse(&expression).unwrap(),
+                ),
+                "proportional" => (
+                    common.clone().mul_coeff(Rational::from(6)),
+                    common.clone().mul_coeff(Rational::from(-10)),
+                    common.clone(),
+                    flint_common.mul(&context.parse("6").unwrap()),
+                    flint_common.mul(&context.parse("-10").unwrap()),
+                    flint_common.mul(&context.parse("2").unwrap()),
+                ),
+                "coprime" => (
+                    common.clone(),
+                    common.clone().add_constant(Rational::one()),
+                    common.one(),
+                    context.parse(&expression).unwrap(),
+                    flint_common.add_si(1),
+                    context.parse("1").unwrap(),
+                ),
+                _ => (
+                    &common * &parse("x+y+1"),
+                    &common * &parse("y+z+2"),
+                    common.clone(),
+                    flint_common.mul(&context.parse("x+y+1").unwrap()),
+                    flint_common.mul(&context.parse("y+z+2").unwrap()),
+                    context.parse(&expression).unwrap(),
+                ),
+            };
+            let expected = expected.make_monic();
+            assert_eq!(left.gcd(&right), expected);
+            assert_eq!(right.gcd(&left), expected);
+            assert_eq!(&expected * &left.try_div(&expected).unwrap(), left);
+            assert_eq!(&expected * &right.try_div(&expected).unwrap(), right);
+            assert!(
+                flint_left
+                    .gcd(&flint_right, FlintGcdAlgorithm::Auto)
+                    .unwrap()
+                    .equals(&flint_expected)
+            );
+            run_paired(
+                &config,
+                &name,
+                || left.gcd(&right),
+                || {
+                    flint_left
+                        .gcd(&flint_right, FlintGcdAlgorithm::Auto)
+                        .unwrap()
+                },
+            );
+        }
     }
 }
 
@@ -1276,5 +1359,318 @@ fn paired_rational_shapes() {
                 }
             }
         }
+    }
+}
+
+fn configure_fixture_operations() {
+    configure_factorization_auto();
+    configure_symbolica_gcd(SymbolicaGcdAlgorithm::Auto);
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod fixture_factorization {
+    use super::*;
+    use support::polynomial_fixtures::{self, Case, FACTOR_CASES};
+
+    fn benchmark(bencher: divan::Bencher, case: Case, flint: bool) {
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load(case);
+        let context = FmpzMPolyContext::new(&input.names).unwrap();
+        let reference = context
+            .parse(&polynomial_fixtures::expression(
+                &input.integer,
+                &input.names,
+            ))
+            .unwrap();
+        assert_eq!(
+            polynomial_fixtures::parse_flint(&reference, &input),
+            input.rational
+        );
+        let factors = input.rational.factor();
+        polynomial_fixtures::validate_flint_factors(
+            &input,
+            &factors,
+            &mut reference.factor().unwrap(),
+        );
+        drop(factors);
+        if flint {
+            bencher.bench_local(|| reference.factor().unwrap());
+        } else {
+            bencher.bench_local(|| input.rational.factor());
+        }
+    }
+    #[divan::bench(args = FACTOR_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: Case) {
+        benchmark(bencher, case, false);
+    }
+    #[divan::bench(args = FACTOR_CASES)]
+    fn flint(bencher: divan::Bencher, case: Case) {
+        benchmark(bencher, case, true);
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod fixture_gcd {
+    use super::*;
+    use support::polynomial_fixtures::{self, Case, GCD_CASES};
+
+    fn benchmark(bencher: divan::Bencher, case: Case, flint: bool) {
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load(case);
+        let derivative = input.rational.derivative(case.gcd_variable.unwrap());
+        let context = FmpzMPolyContext::new(&input.names).unwrap();
+        let left = context
+            .parse(&polynomial_fixtures::expression(
+                &input.integer,
+                &input.names,
+            ))
+            .unwrap();
+        let right = context
+            .parse(&polynomial_fixtures::expression(
+                &input.integer.derivative(case.gcd_variable.unwrap()),
+                &input.names,
+            ))
+            .unwrap();
+        assert_eq!(
+            polynomial_fixtures::parse_flint(&left, &input),
+            input.rational
+        );
+        assert_eq!(polynomial_fixtures::parse_flint(&right, &input), derivative);
+        assert_eq!(
+            input.rational.gcd(&derivative),
+            polynomial_fixtures::parse_flint(
+                &left.gcd(&right, FlintGcdAlgorithm::Auto).unwrap(),
+                &input
+            )
+            .make_monic()
+        );
+        if flint {
+            bencher.bench_local(|| left.gcd(&right, FlintGcdAlgorithm::Auto).unwrap());
+        } else {
+            bencher.bench_local(|| input.rational.gcd(&derivative));
+        }
+    }
+    #[divan::bench(args = GCD_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: Case) {
+        benchmark(bencher, case, false);
+    }
+    #[divan::bench(args = GCD_CASES)]
+    fn flint(bencher: divan::Bencher, case: Case) {
+        benchmark(bencher, case, true);
+    }
+}
+
+fn paired_polynomial_fixtures() {
+    use support::polynomial_fixtures;
+    for &case in polynomial_fixtures::ELIMINATION_CASES {
+        let config = PairedConfig::from_env(3);
+        let kind = if case.discriminant {
+            "discriminant"
+        } else {
+            "resultant"
+        };
+        let name = format!("polynomial/{kind}/{}", case.id);
+        if !config.matches(&name) {
+            continue;
+        }
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load_elimination(case);
+        let context = FmpzMPolyContext::new(&input.names).unwrap();
+        let reference = fixture_elimination::validate(&input, &context);
+        run_paired(
+            &config,
+            &name,
+            || input.resultant_or_discriminant(),
+            || fixture_elimination::reference_result(&reference, input.variable),
+        );
+    }
+    for &case in polynomial_fixtures::RESULTANT_CASES {
+        let config = PairedConfig::from_env(3);
+        let name = format!("polynomial/resultant/{}", case.id);
+        if !config.matches(&name) {
+            continue;
+        }
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load_resultant(case);
+        let reference = fixture_resultants::validate(&input);
+        run_paired(
+            &config,
+            &name,
+            || input[0].resultant(&input[1]),
+            || reference[0].resultant_euclidean(&reference[1]),
+        );
+    }
+    for &case in polynomial_fixtures::FACTOR_CASES {
+        let config = PairedConfig::from_env(3);
+        let factor_name = format!("polynomial/factor/{}", case.id);
+        let gcd_name = format!("polynomial/gcd/{}", case.id);
+        let factor = config.matches(&factor_name);
+        let gcd = case.gcd_variable.is_some() && config.matches(&gcd_name);
+        if !factor && !gcd {
+            continue;
+        }
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load(case);
+        let context = FmpzMPolyContext::new(&input.names).unwrap();
+        let left = context
+            .parse(&polynomial_fixtures::expression(
+                &input.integer,
+                &input.names,
+            ))
+            .unwrap();
+        assert_eq!(
+            polynomial_fixtures::parse_flint(&left, &input),
+            input.rational
+        );
+        if factor {
+            let factors = input.rational.factor();
+            polynomial_fixtures::validate_flint_factors(
+                &input,
+                &factors,
+                &mut left.factor().unwrap(),
+            );
+            drop(factors);
+            run_paired(
+                &config,
+                &factor_name,
+                || input.rational.factor(),
+                || left.factor().unwrap(),
+            );
+        }
+        if gcd {
+            let variable = case.gcd_variable.unwrap();
+            let derivative = input.rational.derivative(variable);
+            let right = context
+                .parse(&polynomial_fixtures::expression(
+                    &input.integer.derivative(variable),
+                    &input.names,
+                ))
+                .unwrap();
+            assert_eq!(polynomial_fixtures::parse_flint(&right, &input), derivative);
+            assert_eq!(
+                input.rational.gcd(&derivative),
+                polynomial_fixtures::parse_flint(
+                    &left.gcd(&right, FlintGcdAlgorithm::Auto).unwrap(),
+                    &input
+                )
+                .make_monic()
+            );
+            run_paired(
+                &config,
+                &gcd_name,
+                || input.rational.gcd(&derivative),
+                || left.gcd(&right, FlintGcdAlgorithm::Auto).unwrap(),
+            );
+        }
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod fixture_elimination {
+    use super::*;
+    use support::flint::FmpzMPoly;
+    use support::polynomial_fixtures::{
+        self, ELIMINATION_CASES, EliminationCase, EliminationInput,
+    };
+
+    pub(super) fn reference_result<'a>(input: &[FmpzMPoly<'a>], variable: usize) -> FmpzMPoly<'a> {
+        if input.len() == 1 {
+            input[0].discriminant(variable).unwrap()
+        } else {
+            input[0].resultant(&input[1], variable).unwrap()
+        }
+    }
+
+    pub(super) fn validate<'a>(
+        input: &EliminationInput,
+        context: &'a FmpzMPolyContext,
+    ) -> Vec<FmpzMPoly<'a>> {
+        let reference: Vec<_> = input
+            .polynomials
+            .iter()
+            .map(|p| {
+                context
+                    .parse(&polynomial_fixtures::expression(p, &input.names))
+                    .unwrap()
+            })
+            .collect();
+        let parse_context = polynomial_fixtures::Input {
+            names: input.names.clone(),
+            integer: input.polynomials[0].clone(),
+            rational: input.polynomials[0].map_coeff(|c| Rational::from(c), Q),
+        };
+        for (p, f) in input.polynomials.iter().zip(&reference) {
+            assert_eq!(
+                p.map_coeff(|c| Rational::from(c), Q),
+                polynomial_fixtures::parse_flint(f, &parse_context)
+            );
+        }
+        assert_eq!(
+            input
+                .resultant_or_discriminant()
+                .map_coeff(|c| Rational::from(c), Q),
+            polynomial_fixtures::parse_flint(
+                &reference_result(&reference, input.variable),
+                &parse_context
+            )
+        );
+        reference
+    }
+
+    fn benchmark(bencher: divan::Bencher, case: EliminationCase, flint: bool) {
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load_elimination(case);
+        let context = FmpzMPolyContext::new(&input.names).unwrap();
+        let reference = validate(&input, &context);
+        if flint {
+            bencher.bench_local(|| reference_result(&reference, input.variable));
+        } else {
+            bencher.bench_local(|| input.resultant_or_discriminant());
+        }
+    }
+
+    #[divan::bench(args = ELIMINATION_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: EliminationCase) {
+        benchmark(bencher, case, false);
+    }
+
+    #[divan::bench(args = ELIMINATION_CASES)]
+    fn flint(bencher: divan::Bencher, case: EliminationCase) {
+        benchmark(bencher, case, true);
+    }
+}
+
+#[divan::bench_group(sample_count = 3, sample_size = 1, skip_ext_time)]
+mod fixture_resultants {
+    use super::*;
+    use support::flint::FmpzPoly;
+    use support::polynomial_fixtures::{self, RESULTANT_CASES, SegmentedCase};
+    use symbolica::{poly::univariate::UnivariatePolynomial, prelude::IntegerRing};
+
+    pub(super) fn validate(input: &[UnivariatePolynomial<IntegerRing>; 2]) -> [FmpzPoly; 2] {
+        let reference = input
+            .each_ref()
+            .map(|p| FmpzPoly::from_coefficients(p.coefficients().iter().map(ToString::to_string)));
+        assert_eq!(
+            input[0].resultant(&input[1]).to_string(),
+            reference[0].resultant_euclidean(&reference[1]).to_decimal()
+        );
+        reference
+    }
+
+    #[divan::bench(args = RESULTANT_CASES)]
+    fn symbolica(bencher: divan::Bencher, case: SegmentedCase) {
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load_resultant(case);
+        let _reference = validate(&input);
+        bencher.bench_local(|| input[0].resultant(&input[1]));
+    }
+
+    #[divan::bench(args = RESULTANT_CASES)]
+    fn flint_euclidean(bencher: divan::Bencher, case: SegmentedCase) {
+        configure_fixture_operations();
+        let input = polynomial_fixtures::load_resultant(case);
+        let reference = validate(&input);
+        bencher.bench_local(|| reference[0].resultant_euclidean(&reference[1]));
     }
 }
