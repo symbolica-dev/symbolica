@@ -2322,20 +2322,27 @@ impl Add {
     #[inline]
     pub(crate) fn set_normalized_pair(&mut self, left: &[u8], right: &[u8]) {
         self.data.clear();
+        let data: &mut Vec<u8> = &mut self.data;
         let payload_len = left.len() + right.len();
         if payload_len <= u8::MAX as usize {
-            self.data.reserve(4 + payload_len);
-            self.data
-                .extend_from_slice(&[ADD_ID, 0x11, 2, payload_len as u8]);
+            data.reserve(4 + payload_len);
+            data.extend_from_slice(&[ADD_ID, 0x11, 2, payload_len as u8]);
         } else {
             let header = (2u64, payload_len as u64);
-            self.data
-                .reserve(1 + header.get_packed_size() as usize + payload_len);
-            self.data.push(ADD_ID);
-            header.write_packed(&mut self.data);
+            data.reserve(1 + header.get_packed_size() as usize + payload_len);
+            data.push(ADD_ID);
+            header.write_packed(data);
         }
-        self.data.extend_from_slice(left);
-        self.data.extend_from_slice(right);
+        data.extend_from_slice(left);
+        data.extend_from_slice(right);
+    }
+
+    /// Create a normalized pair directly in a reusable buffer.
+    #[inline]
+    pub(crate) fn new_normalized_pair_into(left: &[u8], right: &[u8], buffer: RawAtom) -> Add {
+        let mut value = Add { data: buffer };
+        value.set_normalized_pair(left, right);
+        value
     }
 
     #[inline]
@@ -4029,6 +4036,24 @@ mod tests {
         assert!(weak.upgrade().is_some());
         drop(cloned);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn normalized_pair_constructor_reuses_buffer() {
+        let left = parse!("pair_constructor_left");
+        let right = parse!("pair_constructor_right");
+        let mut terms = [left.as_view(), right.as_view()];
+        terms.sort_by(|a, b| a.get_term_cmp_slice().cmp(b.get_term_cmp_slice()));
+        let mut buffer = parse!("pair_constructor_previous(x)").into_raw();
+        buffer.reserve(128);
+        let pointer = buffer.as_ptr();
+        let capacity = buffer.capacity();
+
+        let sum = Add::new_normalized_pair_into(terms[0].get_data(), terms[1].get_data(), buffer);
+        assert_eq!(sum.data.as_ptr(), pointer);
+        assert_eq!(sum.data.capacity(), capacity);
+        assert_eq!(sum.to_add_view().iter().collect::<Vec<_>>(), terms);
+        assert!(!sum.as_view().needs_normalization());
     }
 
     #[test]
