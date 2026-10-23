@@ -116,8 +116,18 @@ fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
 
 #[inline]
 fn read_alias_token(data: &[u8]) -> usize {
-    let (slot, generation, _) = data.get_frac_u64();
-    pack_alias_token(slot as usize, generation as usize)
+    read_alias_token_and_rest(data).0
+}
+
+#[inline]
+fn read_alias_token_and_rest(data: &[u8]) -> (usize, &[u8]) {
+    // A freshly allocated slot has generation one, omitted by the packed writer.
+    let (slot, generation, rest) = if data[0] == 1 {
+        (data[1] as u64, 1, &data[2..])
+    } else {
+        read_packed_pair(data)
+    };
+    (pack_alias_token(slot as usize, generation as usize), rest)
 }
 
 #[inline]
@@ -126,19 +136,26 @@ fn write_alias_token(token: usize, dest: &mut Vec<u8>) {
     (slot as u64, generation as u64).write_packed(dest);
 }
 
-fn collect_aliases_from_data(
-    data: &[u8],
+fn collect_aliases_from_data<'a>(
+    data: &'a [u8],
     aliases: &[Arc<AliasHandle>],
     handles: &mut Vec<Arc<AliasHandle>>,
-) {
+) -> &'a [u8] {
+    // Return the boundary decoded during collection, so a parent does not need
+    // to parse and skip the same child again. Ordinary subtrees need only a skip.
+    if !raw_has_alias(data) {
+        return skip_raw_atom(data);
+    }
     match data[0] & TYPE_MASK {
-        NUM_ID | VAR_ID => {}
         ALIAS_ID => {
-            let token = read_alias_token(&data[1..]);
+            let (token, rest) = read_alias_token_and_rest(&data[1..]);
             // Both ownership contexts and collected handles are token-sorted.
             // Deduplicate before cloning, including repeated aliases in a tree.
+            if handles.last().is_some_and(|handle| handle.token() == token) {
+                return rest;
+            }
             let Err(index) = handles.binary_search_by_key(&token, |handle| handle.token()) else {
-                return;
+                return rest;
             };
             if let Some(handle) = aliases
                 .binary_search_by_key(&token, |handle| handle.token())
@@ -148,53 +165,31 @@ fn collect_aliases_from_data(
             {
                 handles.insert(index, handle);
             }
+            rest
         }
         FUN_ID => {
-            if data[0] & HAS_ALIAS_FLAG == 0 {
-                return;
-            }
-            let mut c = function_metadata(data);
-            let n_args;
-            (_, n_args, c) = c.get_frac_u64();
-            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
+            let (n_args, children) = read_packed_denominator(function_metadata(data));
+            collect_aliases_from_data_list(children, n_args as usize, aliases, handles)
         }
-        POW_ID => {
-            if data[0] & HAS_ALIAS_FLAG != 0 {
-                collect_aliases_from_data_list(&data[1..], 2, aliases, handles);
-            }
-        }
-        MUL_ID => {
-            if data[0] & HAS_ALIAS_FLAG == 0 {
-                return;
-            }
-            let mut c = &data[1..];
-            let n_args;
-            (n_args, _, c) = c.get_frac_u64();
-            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
-        }
-        ADD_ID => {
-            if data[0] & HAS_ALIAS_FLAG == 0 {
-                return;
-            }
-            let mut c = &data[1..];
-            let n_args;
-            (n_args, _, c) = c.get_frac_u64();
-            collect_aliases_from_data_list(c, n_args as usize, aliases, handles);
+        POW_ID => collect_aliases_from_data_list(&data[1..], 2, aliases, handles),
+        MUL_ID | ADD_ID => {
+            let (n_args, _, children) = read_packed_pair(&data[1..]);
+            collect_aliases_from_data_list(children, n_args as usize, aliases, handles)
         }
         x => unreachable!("Bad id {}", x),
     }
 }
 
-fn collect_aliases_from_data_list(
-    mut data: &[u8],
+fn collect_aliases_from_data_list<'a>(
+    mut data: &'a [u8],
     n_args: usize,
     aliases: &[Arc<AliasHandle>],
     handles: &mut Vec<Arc<AliasHandle>>,
-) {
+) -> &'a [u8] {
     for _ in 0..n_args {
-        collect_aliases_from_data(data, aliases, handles);
-        data = skip_raw_atom(data);
+        data = collect_aliases_from_data(data, aliases, handles);
     }
+    data
 }
 
 fn skip_raw_atom(mut data: &[u8]) -> &[u8] {
@@ -2239,6 +2234,27 @@ impl Default for Add {
 }
 
 impl Add {
+    /// Store two distinct, sorted, normalized, alias-free terms that are neither
+    /// sums nor coefficients. The caller has already checked these invariants.
+    #[inline]
+    pub(crate) fn set_normalized_pair(&mut self, left: &[u8], right: &[u8]) {
+        self.data.clear();
+        let payload_len = left.len() + right.len();
+        if payload_len <= u8::MAX as usize {
+            self.data.reserve(4 + payload_len);
+            self.data
+                .extend_from_slice(&[ADD_ID, 0x11, 2, payload_len as u8]);
+        } else {
+            let header = (2u64, payload_len as u64);
+            self.data
+                .reserve(1 + header.get_packed_size() as usize + payload_len);
+            self.data.push(ADD_ID);
+            header.write_packed(&mut self.data);
+        }
+        self.data.extend_from_slice(left);
+        self.data.extend_from_slice(right);
+    }
+
     #[inline]
     pub(crate) fn new() -> Add {
         Self::new_into(RawAtom::new())
@@ -2364,7 +2380,7 @@ impl Add {
 
     pub(crate) fn grow_capacity(&mut self, size: usize) {
         if size > self.data.capacity() {
-            let additional = size - self.data.capacity();
+            let additional = size - self.data.len();
             self.data.reserve(additional);
         }
     }
@@ -3824,6 +3840,125 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    fn normalized_pair_headers_cover_payload_widths() {
+        let right = parse!("pair_header_right");
+        let child = Atom::num(1);
+        let mut sum = Add::new();
+        let mut header_sizes = Vec::new();
+        for count in [0, 80, 81, 82, 100, 21_840, 21_841, 21_842, 22_000] {
+            let mut left = Atom::new();
+            let function = left.to_fun(symbol!("pair_header_left"));
+            for _ in 0..count {
+                function.add_arg(child.as_view());
+            }
+            function.set_normalized(true);
+            let mut terms = [left.as_view(), right.as_view()];
+            terms.sort_by(|a, b| a.get_term_cmp_slice().cmp(b.get_term_cmp_slice()));
+            let payload_len = terms
+                .iter()
+                .map(|term| term.get_data().len())
+                .sum::<usize>();
+
+            sum.set_normalized_pair(terms[0].get_data(), terms[1].get_data());
+            let (nargs, size, payload) = read_packed_pair(&sum.data[1..]);
+            assert_eq!((nargs, size as usize), (2, payload_len));
+            assert_eq!(sum.data[0], ADD_ID);
+            assert_eq!(sum.to_add_view().iter().collect::<Vec<_>>(), terms);
+            header_sizes.push(sum.data.len() - payload.len());
+
+            let mut appended = Add::new();
+            appended.extend(terms[0]);
+            appended.extend(terms[1]);
+            appended.set_normalized(true);
+            assert_eq!(sum.data.as_slice(), appended.data.as_slice());
+        }
+        header_sizes.sort_unstable();
+        header_sizes.dedup();
+        assert_eq!(header_sizes, vec![4, 5, 7]);
+    }
+
+    #[test]
+    fn growing_sum_capacity_counts_from_its_length() {
+        let mut sum = Add::new();
+        sum.data.reserve(64);
+        let target = sum.data.capacity() + 1;
+        sum.grow_capacity(target);
+        assert!(sum.data.capacity() >= target);
+        assert_eq!(sum.get_nargs(), 0);
+    }
+
+    #[test]
+    fn alias_token_decoding_preserves_generation_and_next_atom() {
+        let max_component = (1usize << (usize::BITS / 2)) - 1;
+        for slot in [0, 1, 255, 256, 65_535, max_component] {
+            for generation in [1, 2, 255, 256, 65_535, max_component] {
+                let token = pack_alias_token(slot, generation);
+                let mut data = Vec::new();
+                write_alias_token(token, &mut data);
+                data.extend_from_slice(&ZERO_DATA);
+                let (decoded, rest) = read_alias_token_and_rest(&data);
+                assert_eq!(decoded, token);
+                assert_eq!(rest, ZERO_DATA);
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_pair_releases_previous_alias_owners() {
+        let handle = register_alias_atom(parse!("pair_previous_alias(x)"));
+        let weak = Arc::downgrade(&handle);
+        let mut sum = Add::new();
+        sum.extend(handle.to_atom().as_view());
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+        let left = parse!("pair_release_x");
+        let right = parse!("pair_release_y");
+        sum.set_normalized_pair(left.as_view().get_data(), right.as_view().get_data());
+        assert!(sum.data.aliases_vec().is_empty());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn ownership_collection_advances_through_mixed_nested_children() {
+        let used = register_alias_atom(parse!("collection_mixed_body(x)"));
+        let other = register_alias_atom(parse!("collection_other_body(y)"));
+        let unused = register_alias_atom(parse!("collection_unused_body(z)"));
+        let weak_unused = Arc::downgrade(&unused);
+        let mut power = Atom::new();
+        power.to_pow(parse!("f(x^2)").as_view(), used.to_atom().as_view());
+        let mut product = Atom::new();
+        let factors = product.to_mul();
+        factors.extend(other.to_opaque_atom().as_view());
+        factors.extend(parse!("g(x)^3").as_view());
+        factors.extend(power.as_view());
+        let mut child = Atom::new();
+        let function = child.to_fun(symbol!("collection_mixed_child"));
+        function.add_arg(parse!("h(x+y)").as_view());
+        function.add_arg(product.as_view());
+        function.add_arg(used.to_atom().as_view());
+        function.add_arg(parse!("z^2").as_view());
+        let expected = child.inline_aliases(true);
+        let mut parent = Atom::new();
+        let function = parent.to_fun(symbol!("collection_mixed_parent"));
+        function.add_arg(child.as_view());
+        function.add_arg(unused.to_atom().as_view());
+        let AtomView::Fun(parent_view) = parent.as_view() else {
+            unreachable!()
+        };
+        let copied = parent_view.iter().next().unwrap().to_owned();
+        assert_eq!(copied.as_view().aliases_ref().len(), 2);
+        drop(parent);
+        drop(child);
+        drop(product);
+        drop(power);
+        drop(used);
+        drop(other);
+        drop(unused);
+        assert!(weak_unused.upgrade().is_none());
+        assert_eq!(copied.inline_aliases(true), expected);
+    }
 
     #[test]
     fn copying_alias_subviews_retains_only_referenced_owners() {

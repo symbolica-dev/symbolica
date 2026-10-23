@@ -23,18 +23,19 @@ struct AliasEntry {
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AliasHandle {
-    id: usize,
-    generation: usize,
+    // Validated once at registration; ownership searches compare this token
+    // directly without repeatedly packing and checking its immutable parts.
+    token: usize,
     atom: Arc<Atom>,
 }
 
 impl AliasHandle {
     pub(crate) fn id(&self) -> usize {
-        self.id
+        unpack_alias_token(self.token).0
     }
 
     pub(crate) fn token(&self) -> usize {
-        pack_alias_token(self.id, self.generation)
+        self.token
     }
 
     pub(crate) fn to_atom(self: &Arc<Self>) -> Atom {
@@ -58,7 +59,8 @@ impl Drop for AliasHandle {
     fn drop(&mut self) {
         let dependencies = {
             let mut store = ALIAS_STORE.write().unwrap();
-            store.release(self.id, self.generation)
+            let (id, generation) = unpack_alias_token(self.token);
+            store.release(id, generation)
         };
 
         drop(dependencies);
@@ -160,9 +162,9 @@ impl AliasStore {
             .pop()
             .unwrap_or_else(|| ALIASES.push(AliasSlot::new()));
         let generation = ALIASES[index].next_generation();
+        let token = pack_alias_token(index, generation);
         let handle = Arc::new(AliasHandle {
-            id: index,
-            generation,
+            token,
             atom: atom.clone(),
         });
         let dependencies = collect_alias_handles_in(atom.as_view());
@@ -174,8 +176,7 @@ impl AliasStore {
         };
 
         ALIASES[index].entry.store(Some(Arc::new(entry)));
-        self.alias_map
-            .insert(AliasKey(atom), pack_alias_token(index, generation));
+        self.alias_map.insert(AliasKey(atom), token);
         handle
     }
 

@@ -2783,7 +2783,17 @@ impl AtomView<'_> {
         let right = other.get_data();
         if left == right {
             Ordering::Equal
-        } else if representation::raw_has_alias(left) || representation::raw_has_alias(right) {
+        } else {
+            self.cmp_public_unequal(other)
+        }
+    }
+
+    /// Compare after the caller has ruled out identical storage.
+    #[inline]
+    fn cmp_public_unequal(&self, other: &Self) -> Ordering {
+        let left = self.get_data();
+        let right = other.get_data();
+        if representation::raw_has_alias(left) || representation::raw_has_alias(right) {
             representation::aliased_view_cmp(self, other)
         } else {
             self.cmp_structural(other).then_with(|| left.cmp(right))
@@ -3046,9 +3056,15 @@ impl<'a> AtomView<'a> {
 impl AtomView<'_> {
     /// Copy this view into a new owned expression.
     pub fn to_owned(&self) -> Atom {
-        let mut a = Atom::default();
-        a.set_from_view(self);
-        a
+        match self {
+            AtomView::Num(value) => Atom::Num(value.to_owned()),
+            AtomView::Var(value) => Atom::Var(value.to_owned()),
+            AtomView::Alias(value) => Atom::Alias(value.to_owned()),
+            AtomView::Fun(value) => Atom::Fun(value.to_owned()),
+            AtomView::Pow(value) => Atom::Pow(value.to_owned()),
+            AtomView::Mul(value) => Atom::Mul(value.to_owned()),
+            AtomView::Add(value) => Atom::Add(value.to_owned()),
+        }
     }
 
     /// Replace `target` with a copy of this view, reusing its allocation.
@@ -3482,8 +3498,22 @@ impl Hash for Atom {
 }
 
 impl Ord for Atom {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        self.as_view().cmp_public(&other.as_view())
+        if self.as_view().get_data() == other.as_view().get_data() {
+            Ordering::Equal
+        } else {
+            self.cmp_unequal(other)
+        }
+    }
+}
+
+impl Atom {
+    // Equal owned keys need only their bytes. Keep full view construction in
+    // this fallback so it does not enlarge the common equality-only path.
+    #[inline(never)]
+    fn cmp_unequal(&self, other: &Self) -> Ordering {
+        self.as_view().cmp_public_unequal(&other.as_view())
     }
 }
 

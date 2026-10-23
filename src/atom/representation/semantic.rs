@@ -66,6 +66,25 @@ impl Ord for BorrowedAtom {
 #[cold]
 #[inline(never)]
 pub(crate) fn aliased_atom_eq<T: crate::atom::AtomCore>(left: &super::Atom, right: &T) -> bool {
+    if let super::Atom::Alias(alias) = left
+        && alias.data[0] & ALIAS_OPAQUE_FLAG == 0
+        && let [owner] = alias.data.aliases_vec().as_slice()
+    {
+        if alias.data.as_slice() == right.as_atom_view().get_data() {
+            return true;
+        }
+        // An owned alias usually retains exactly its root owner. Borrow the
+        // body before constructing either view, so ordinary bodies can use the
+        // same byte comparison as ordinary owned keys. Alias chains recurse
+        // through this dispatch while their original owners remain alive.
+        return owner.atom() == right;
+    }
+    aliased_atom_eq_views(left, right)
+}
+
+#[cold]
+#[inline(never)]
+fn aliased_atom_eq_views<T: crate::atom::AtomCore>(left: &super::Atom, right: &T) -> bool {
     view_eq(&left.as_view(), &right.as_atom_view())
 }
 
@@ -243,7 +262,13 @@ fn borrowed_alias_body<'a>(view: &AtomView<'a>) -> Option<AtomView<'a>> {
     {
         // A live view already borrows the owner that keeps this body alive.
         // Detached byte views have no ownership context and use registry guards.
-        Some(alias.get_body())
+        Some(if let [owner] = alias.aliases.as_slice() {
+            // Every alias-bearing subtree of a single-owner expression uses
+            // that owner; token decoding and lookup are only needed otherwise.
+            owner.atom().as_view()
+        } else {
+            alias.get_body()
+        })
     } else {
         None
     }
