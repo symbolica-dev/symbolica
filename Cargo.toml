@@ -186,3 +186,6 @@ directories = "6.0"
 [patch.crates-io]
 numerica = { path = "lib/numerica" }
 graphica = { path = "lib/graphica" }
+
+[dev-dependencies]
+serde_json = "1.0"
