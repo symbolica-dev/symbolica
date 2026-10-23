@@ -173,6 +173,14 @@ impl AtomView<'_> {
             return;
         }
 
+        // Polynomial conversion does not yet resolve aliased exponents or
+        // preserve opaque aliases throughout its recursive conversion paths.
+        // Native expansion handles both while retaining unchanged aliases.
+        if self.has_alias() {
+            self.expand_with_ws_into(ws, var, out);
+            return;
+        }
+
         match self {
             AtomView::Alias(a) => {
                 a.get_body()
@@ -656,7 +664,7 @@ impl AtomView<'_> {
 
 #[cfg(test)]
 mod test {
-    use crate::atom::{Atom, AtomCore};
+    use crate::atom::{Atom, AtomCore, AtomView};
     use crate::{parse, symbol};
 
     #[test]
@@ -671,6 +679,41 @@ mod test {
         }
         let body = parse!("2*(x+y)");
         assert_eq!(body.alias(false).expand_num(), body.expand_num());
+    }
+
+    #[test]
+    fn polynomial_expansion_resolves_transparent_integer_exponents() {
+        let x = parse!("x");
+        let expected = parse!("x^2+2*x*y+y^2");
+        for exponent in [
+            Atom::num(2).alias(false),
+            Atom::num(2).alias(false).alias(false),
+        ] {
+            let input = parse!("x+y").pow(exponent);
+            let AtomView::Pow(power) = input.as_view() else {
+                panic!("expected a compressed power");
+            };
+            assert!(matches!(power.get_exp(), AtomView::Alias(_)));
+            for var in [None, Some(x.as_view())] {
+                let result = input.as_view().expand_via_poly::<u16>(var);
+                assert_eq!(result.as_view().get_data(), expected.as_view().get_data());
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_expansion_preserves_opaque_aliases_in_mixed_products() {
+        let x = parse!("x");
+        let y = parse!("y");
+        let opaque = parse!("f(z)").alias(true);
+        let input = parse!("x+y").alias(false).alias(false) * &opaque;
+        let expected = &x * &opaque + &y * &opaque;
+        for var in [None, Some(x.as_view())] {
+            let result = input.as_view().expand_via_poly::<u16>(var);
+            assert_eq!(result, expected);
+            assert_ne!(result, parse!("x*f(z)+y*f(z)"));
+            assert!(result.is_expanded(var));
+        }
     }
 
     fn assert_alias_expands_like_plain(input: &Atom, plain: &Atom) {
