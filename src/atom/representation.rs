@@ -72,7 +72,80 @@ const ALIAS_OPAQUE_FLAG: u8 = 0b00001_000;
 pub(crate) const ALIAS_EXPORT_SECTION_MAGIC: u64 = 0xA11A_5ECA_1100_0001;
 
 const ZERO_DATA: [u8; 3] = [NUM_ID, 1, 0];
-static NO_ALIASES: Vec<Arc<AliasHandle>> = Vec::new();
+static NO_ALIASES: AliasOwners = AliasOwners::Many(Vec::new());
+
+// Borrowed views hold a thin reference to this context, keeping their layout
+// unchanged while single-owner atoms avoid allocating an owner vector.
+#[derive(Debug, Clone)]
+pub(crate) enum AliasOwners {
+    Single(Arc<AliasHandle>),
+    Many(Vec<Arc<AliasHandle>>),
+}
+
+impl AliasOwners {
+    #[inline]
+    fn new() -> Self {
+        Self::Many(Vec::new())
+    }
+
+    #[inline]
+    fn from_vec(mut owners: Vec<Arc<AliasHandle>>) -> Self {
+        if owners.len() == 1 {
+            Self::Single(owners.pop().unwrap())
+        } else {
+            Self::Many(owners)
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Arc<AliasHandle>] {
+        match self {
+            Self::Single(owner) => std::slice::from_ref(owner),
+            Self::Many(owners) => owners,
+        }
+    }
+
+    // The caller has already found this token's insertion point. Only a second
+    // distinct token promotes a single owner to an allocated, sorted vector.
+    fn insert(&mut self, index: usize, owner: Arc<AliasHandle>) {
+        match self {
+            Self::Many(owners) if owners.is_empty() => {
+                debug_assert_eq!(index, 0);
+                *self = Self::Single(owner);
+            }
+            Self::Many(owners) => owners.insert(index, owner),
+            Self::Single(_) => {
+                debug_assert!(index <= 1);
+                let Self::Single(previous) = std::mem::replace(self, Self::new()) else {
+                    unreachable!()
+                };
+                *self = Self::Many(if index == 0 {
+                    vec![owner, previous]
+                } else {
+                    vec![previous, owner]
+                });
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for AliasOwners {
+    type Target = [Arc<AliasHandle>];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for AliasOwners {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for AliasOwners {}
 
 #[inline(always)]
 pub(crate) fn raw_has_alias(data: &[u8]) -> bool {
@@ -108,8 +181,8 @@ fn aliases_from_view(view: AtomView<'_>) -> Vec<Arc<AliasHandle>> {
     collect_alias_handles_in(view)
 }
 
-fn aliases_from_raw_data(data: &[u8]) -> Vec<Arc<AliasHandle>> {
-    let mut handles = Vec::new();
+fn aliases_from_raw_data(data: &[u8]) -> AliasOwners {
+    let mut handles = AliasOwners::new();
     collect_aliases_from_data(data, &[], &mut handles);
     handles
 }
@@ -139,7 +212,7 @@ fn write_alias_token(token: usize, dest: &mut Vec<u8>) {
 fn collect_aliases_from_data<'a>(
     data: &'a [u8],
     aliases: &[Arc<AliasHandle>],
-    handles: &mut Vec<Arc<AliasHandle>>,
+    handles: &mut AliasOwners,
 ) -> &'a [u8] {
     // Return the boundary decoded during collection, so a parent does not need
     // to parse and skip the same child again. Ordinary subtrees need only a skip.
@@ -184,7 +257,7 @@ fn collect_aliases_from_data_list<'a>(
     mut data: &'a [u8],
     n_args: usize,
     aliases: &[Arc<AliasHandle>],
-    handles: &mut Vec<Arc<AliasHandle>>,
+    handles: &mut AliasOwners,
 ) -> &'a [u8] {
     for _ in 0..n_args {
         data = collect_aliases_from_data(data, aliases, handles);
@@ -518,8 +591,8 @@ pub type BorrowedRawAtom = [u8];
 pub struct RawAtom {
     data: Vec<u8>,
     // Unique direct owners in generation-aware token order. All borrowed
-    // ownership contexts come from this field or the empty NO_ALIASES vector.
-    aliases: Option<Box<Vec<Arc<AliasHandle>>>>,
+    // ownership contexts come from this field or the empty NO_ALIASES context.
+    aliases: Option<Box<AliasOwners>>,
 }
 
 impl RawAtom {
@@ -554,13 +627,14 @@ impl RawAtom {
     }
 
     #[inline]
-    pub(crate) fn aliases_vec(&self) -> &Vec<Arc<AliasHandle>> {
+    pub(crate) fn aliases_vec(&self) -> &AliasOwners {
         self.aliases.as_deref().unwrap_or(&NO_ALIASES)
     }
 
     #[inline]
-    fn aliases_mut(&mut self) -> &mut Vec<Arc<AliasHandle>> {
-        self.aliases.get_or_insert_with(|| Box::new(Vec::new()))
+    fn aliases_mut(&mut self) -> &mut AliasOwners {
+        self.aliases
+            .get_or_insert_with(|| Box::new(AliasOwners::new()))
     }
 
     #[inline]
@@ -578,17 +652,29 @@ impl RawAtom {
         self.aliases = None;
     }
 
-    #[inline]
-    pub(crate) fn sync_aliases_from(&mut self, aliases: &[Arc<AliasHandle>]) {
+    fn set_aliases(&mut self, aliases: AliasOwners) {
         if aliases.is_empty() {
             self.clear_aliases();
+        } else if let Some(owners) = &mut self.aliases {
+            **owners = aliases;
         } else {
-            let mut owners = aliases.to_vec();
-            // Callers such as refresh_alias_handles_from_tree may provide slot
-            // order, which differs from token order after slot reuse.
-            owners.sort_unstable_by_key(|handle| handle.token());
-            owners.dedup_by_key(|handle| handle.token());
-            self.aliases = Some(Box::new(owners));
+            self.aliases = Some(Box::new(aliases));
+        }
+    }
+
+    #[inline]
+    pub(crate) fn sync_aliases_from(&mut self, aliases: &[Arc<AliasHandle>]) {
+        match aliases {
+            [] => self.clear_aliases(),
+            [owner] => self.set_aliases(AliasOwners::Single(owner.clone())),
+            aliases => {
+                let mut owners = aliases.to_vec();
+                // Callers such as refresh_alias_handles_from_tree may provide slot
+                // order, which differs from token order after slot reuse.
+                owners.sort_unstable_by_key(|handle| handle.token());
+                owners.dedup_by_key(|handle| handle.token());
+                self.set_aliases(AliasOwners::from_vec(owners));
+            }
         }
     }
 
@@ -609,7 +695,10 @@ impl RawAtom {
         aliases: &[Arc<AliasHandle>],
     ) {
         if has_alias {
-            self.aliases = Self::collect_aliases_from_view_data(data, aliases);
+            // Retain old owners until collection completes: detached views can
+            // require their tokens to stay registered during lookup.
+            let aliases = Self::collect_aliases_from_view_data(data, aliases);
+            self.set_aliases(aliases);
         } else {
             self.clear_aliases();
         }
@@ -617,29 +706,23 @@ impl RawAtom {
 
     // Keep handle allocation, collection and sorting out of the common copying path.
     #[inline(never)]
-    fn collect_aliases_from_view_data(
-        data: &[u8],
-        aliases: &[Arc<AliasHandle>],
-    ) -> Option<Box<Vec<Arc<AliasHandle>>>> {
+    fn collect_aliases_from_view_data(data: &[u8], aliases: &[Arc<AliasHandle>]) -> AliasOwners {
         // This function is only called for alias-bearing views. With exactly
         // one source owner, every alias in the subtree uses that handle. Empty
         // ownership (raw views) and multi-owner parents require selective lookup.
-        if aliases.len() == 1 {
-            return Some(Box::new(aliases.to_vec()));
+        if let [owner] = aliases {
+            return AliasOwners::Single(owner.clone());
         }
-        let mut new_aliases = Vec::new();
+        let mut new_aliases = AliasOwners::new();
         collect_aliases_from_data(data, aliases, &mut new_aliases);
-        if new_aliases.is_empty() {
-            None
-        } else {
-            Some(Box::new(new_aliases))
-        }
+        new_aliases
     }
 
     #[inline]
     pub(crate) fn ensure_aliases_from_data(&mut self) {
         if self.aliases.is_none() && raw_has_alias(&self.data) {
-            self.aliases = Self::collect_aliases_from_view_data(&self.data, &[]);
+            let aliases = Self::collect_aliases_from_view_data(&self.data, &[]);
+            self.set_aliases(aliases);
         }
     }
 }
@@ -2464,7 +2547,7 @@ impl Hash for VarView<'_> {
 #[derive(Copy, Clone, Eq)]
 pub struct AliasView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'b> PartialEq<AliasView<'b>> for AliasView<'_> {
@@ -2551,7 +2634,7 @@ impl<'a> AliasView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct FunView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'b> PartialEq<FunView<'b>> for FunView<'_> {
@@ -2824,7 +2907,7 @@ impl<'a> NumView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct PowView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'a> IntoIterator for PowView<'a> {
@@ -2951,7 +3034,7 @@ impl<'a> PowView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct MulView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'b> PartialEq<MulView<'b>> for MulView<'_> {
@@ -3083,7 +3166,7 @@ impl<'a> MulView<'a> {
 #[derive(Copy, Clone, Eq)]
 pub struct AddView<'a> {
     data: &'a [u8],
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'b> PartialEq<AddView<'b>> for AddView<'_> {
@@ -3225,7 +3308,7 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline]
-    fn from_with_aliases(source: &'a [u8], aliases: &'a Vec<Arc<AliasHandle>>) -> AtomView<'a> {
+    fn from_with_aliases(source: &'a [u8], aliases: &'a AliasOwners) -> AtomView<'a> {
         match source[0] & TYPE_MASK {
             VAR_ID => AtomView::Var(VarView { data: source }),
             FUN_ID => AtomView::Fun(FunView {
@@ -3268,7 +3351,7 @@ impl<'a> AtomView<'a> {
     }
 
     #[inline(always)]
-    pub(crate) fn aliases_vec(&self) -> &'a Vec<Arc<AliasHandle>> {
+    pub(crate) fn aliases_vec(&self) -> &'a AliasOwners {
         match self {
             AtomView::Num(_) => &NO_ALIASES,
             AtomView::Var(_) => &NO_ALIASES,
@@ -3467,7 +3550,7 @@ impl<'a> AtomView<'a> {
 pub struct ListIterator<'a> {
     data: &'a [u8],
     length: usize,
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'a> ListIterator<'a> {
@@ -3647,7 +3730,7 @@ pub struct ListSlice<'a> {
     data: &'a [u8],
     length: usize,
     slice_type: SliceType,
-    aliases: &'a Vec<Arc<AliasHandle>>,
+    aliases: &'a AliasOwners,
 }
 
 impl<'a> ListSlice<'a> {
@@ -3700,10 +3783,7 @@ impl<'a> ListSlice<'a> {
         }
     }
 
-    fn get_entry<'b>(
-        start: &'b [u8],
-        aliases: &'b Vec<Arc<AliasHandle>>,
-    ) -> (AtomView<'b>, &'b [u8]) {
+    fn get_entry<'b>(start: &'b [u8], aliases: &'b AliasOwners) -> (AtomView<'b>, &'b [u8]) {
         let start_id = start[0] & TYPE_MASK;
         let end = Self::skip(start, 1);
         let len = unsafe { end.as_ptr().offset_from(start.as_ptr()) } as usize;
@@ -3840,6 +3920,116 @@ mod tests {
     use super::*;
     use crate::atom::AtomCore;
     use crate::{parse, symbol};
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn inline_owners_keep_original_raw_atom_layout() {
+        // Guard this optimization on the target where it was measured, without
+        // making any public ABI promise about the private storage layout.
+        assert_eq!(std::mem::size_of::<AliasOwners>(), 24);
+        assert_eq!(std::mem::size_of::<RawAtom>(), 32);
+        assert_eq!(std::mem::size_of::<Atom>(), 40);
+        assert_eq!(std::mem::size_of::<AtomView<'_>>(), 32);
+    }
+
+    #[test]
+    fn inline_ownership_promotes_only_for_a_second_distinct_token() {
+        let first = register_alias_atom(parse!("inline_first_owner(x)"));
+        let second = register_alias_atom(parse!("inline_second_owner(y)"));
+        let mut atom = Atom::new();
+        let function = atom.to_fun(symbol!("inline_owner_container"));
+        for _ in 0..8 {
+            function.add_arg(first.to_atom().as_view());
+            assert!(matches!(
+                function.data.aliases_vec(),
+                AliasOwners::Single(_)
+            ));
+        }
+        function.add_arg(second.to_opaque_atom().as_view());
+        let AliasOwners::Many(owners) = function.data.aliases_vec() else {
+            unreachable!()
+        };
+        assert_eq!(owners.len(), 2);
+        assert!(owners[0].token() < owners[1].token());
+        function.add_arg(first.to_atom().as_view());
+        assert_eq!(function.data.aliases_vec().len(), 2);
+        assert!(!atom.inline_aliases(true).as_view().has_alias());
+        assert!(atom.inline_aliases(false).as_view().has_alias());
+    }
+
+    #[test]
+    fn raw_owner_updates_preserve_allocation_and_release_owners() {
+        let handle = register_alias_atom(parse!("layout_transition_body(x)"));
+        let weak = Arc::downgrade(&handle);
+        let bytes = handle.to_atom().as_view().get_data().to_vec();
+        let mut raw = RawAtom::from_data(bytes.clone());
+        raw.reserve(128);
+        let pointer = raw.as_ptr();
+        let capacity = raw.capacity();
+        assert!(raw.aliases.is_none());
+
+        raw.sync_aliases_from(std::slice::from_ref(&handle));
+        let sidecar = raw.aliases.as_ref().unwrap();
+        let sidecar_pointer = &**sidecar as *const AliasOwners;
+        assert_eq!(raw.as_ptr(), pointer);
+        assert_eq!(raw.capacity(), capacity);
+        assert_eq!(raw.as_slice(), bytes);
+
+        // Replacing an ownership context reuses the existing sidecar.
+        raw.sync_aliases_from(std::slice::from_ref(&handle));
+        let sidecar = raw.aliases.as_ref().unwrap();
+        assert_eq!(&**sidecar as *const AliasOwners, sidecar_pointer);
+        drop(handle);
+        assert!(weak.upgrade().is_some());
+
+        raw.clear_aliases();
+        assert!(raw.aliases.is_none());
+        assert_eq!(raw.as_ptr(), pointer);
+        assert_eq!(raw.capacity(), capacity);
+        assert_eq!(raw.as_slice(), bytes);
+        assert!(weak.upgrade().is_none());
+        raw.clear();
+        assert_eq!(raw.as_ptr(), pointer);
+        assert_eq!(raw.capacity(), capacity);
+        assert!(raw.is_empty());
+    }
+
+    #[test]
+    fn raw_owner_recovery_preserves_generation_and_byte_value_semantics() {
+        let body = parse!("layout_recovery_body(x)");
+        let retired = register_alias_atom(body.clone());
+        let old_token = retired.token();
+        drop(retired);
+        let handle = register_alias_atom(body);
+        assert_ne!(handle.token(), old_token);
+        let weak = Arc::downgrade(&handle);
+        let bytes = handle.to_atom().as_view().get_data().to_vec();
+        let mut raw = RawAtom::from_data(bytes.clone());
+        let plain = raw.clone();
+        assert!(raw.aliases.is_none());
+        assert!(raw_has_alias(&raw));
+        raw.ensure_aliases_from_data();
+        assert_eq!(raw.aliases_vec().len(), 1);
+        assert!(Arc::ptr_eq(&raw.aliases_vec()[0], &handle));
+        assert_eq!(raw, plain);
+        fn hash(value: &RawAtom) -> u64 {
+            use std::hash::Hasher;
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            value.hash(&mut state);
+            state.finish()
+        }
+        assert_eq!(hash(&raw), hash(&plain));
+
+        let cloned = raw.clone();
+        drop(handle);
+        let pointer = raw.as_ptr();
+        let data = raw.into_data();
+        assert_eq!(data, bytes);
+        assert_eq!(data.as_ptr(), pointer);
+        assert!(weak.upgrade().is_some());
+        drop(cloned);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn normalized_pair_headers_cover_payload_widths() {
@@ -4002,6 +4192,14 @@ mod tests {
                 let raw_copied = AtomView::from(view.get_data()).to_owned();
                 assert_eq!(copied.as_view().aliases_ref().len(), 1);
                 assert_eq!(raw_copied.as_view().aliases_ref().len(), 1);
+                assert!(matches!(
+                    copied.as_view().aliases_vec(),
+                    AliasOwners::Single(_)
+                ));
+                assert!(matches!(
+                    raw_copied.as_view().aliases_vec(),
+                    AliasOwners::Single(_)
+                ));
                 drop(parent);
                 drop(child);
                 drop(alias);

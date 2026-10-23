@@ -1,12 +1,10 @@
 //! Expression key semantics. RawAtom remains a byte-oriented storage key.
 
-use std::{borrow::Cow, cmp::Ordering, hash::Hash, sync::Arc};
-
-use crate::alias::AliasHandle;
+use std::{borrow::Cow, cmp::Ordering, hash::Hash};
 
 use super::{
-    ADD_ID, ALIAS_ID, ALIAS_OPAQUE_FLAG, AtomView, FUN_ID, HAS_ALIAS_FLAG, MUL_ID, NO_ALIASES,
-    NOT_NORMALIZED, POW_ID, PackedRationalNumberWriter, TYPE_MASK, function_metadata,
+    ADD_ID, ALIAS_ID, ALIAS_OPAQUE_FLAG, AliasOwners, AtomView, FUN_ID, HAS_ALIAS_FLAG, MUL_ID,
+    NO_ALIASES, NOT_NORMALIZED, POW_ID, PackedRationalNumberWriter, TYPE_MASK, function_metadata,
     get_alias_handle, raw_has_alias, read_alias_token, read_packed_pair, skip_raw_atom,
 };
 
@@ -181,9 +179,9 @@ fn aliased_view_eq(left: &AtomView<'_>, right: &AtomView<'_>) -> bool {
 
 fn ordered_children_eq(
     mut left: &[u8],
-    left_aliases: &Vec<Arc<AliasHandle>>,
+    left_aliases: &AliasOwners,
     mut right: &[u8],
-    right_aliases: &Vec<Arc<AliasHandle>>,
+    right_aliases: &AliasOwners,
     nargs: u64,
 ) -> bool {
     for _ in 0..nargs {
@@ -387,10 +385,7 @@ fn expanded_data(data: &[u8]) -> Cow<'_, [u8]> {
     expanded_data_with_aliases(data, &NO_ALIASES)
 }
 
-fn expanded_data_with_aliases<'a>(
-    data: &'a [u8],
-    aliases: &Vec<Arc<AliasHandle>>,
-) -> Cow<'a, [u8]> {
+fn expanded_data_with_aliases<'a>(data: &'a [u8], aliases: &AliasOwners) -> Cow<'a, [u8]> {
     if !raw_has_alias(data) || data[0] & TYPE_MASK == ALIAS_ID && !is_transparent_alias(data) {
         return Cow::Borrowed(data);
     }
@@ -411,7 +406,7 @@ fn alias_handle(data: &[u8]) -> std::sync::Arc<crate::alias::AliasHandle> {
 
 /// Expand one complete encoded atom, retaining all non-alias metadata. Return
 /// whether its expansion still contains opaque aliases.
-fn expand_atom(data: &[u8], aliases: &Vec<Arc<AliasHandle>>, out: &mut Vec<u8>) -> bool {
+fn expand_atom(data: &[u8], aliases: &AliasOwners, out: &mut Vec<u8>) -> bool {
     if !raw_has_alias(data) {
         out.extend_from_slice(data);
         return false;
