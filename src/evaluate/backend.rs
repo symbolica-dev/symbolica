@@ -631,6 +631,17 @@ fn translate_to_symjit(
             Instruction::Pow(lhs, arg, p, is_real) => translator
                 .append_pow(&slot(lhs), &slot(arg), p, is_real)
                 .unwrap(),
+            Instruction::Div(lhs, numerator, denominator, numerator_real, denominator_real) => {
+                translator
+                    .append_div(
+                        &slot(lhs),
+                        &slot(numerator),
+                        &slot(denominator),
+                        numerator_real,
+                        denominator_real,
+                    )
+                    .map_err(|error| error.to_string())?
+            }
             Instruction::Powf(lhs, arg, p, is_real) => translator
                 .append_powf(&slot(lhs), &slot(arg), &slot(p), is_real)
                 .unwrap(),
@@ -650,7 +661,8 @@ fn translate_to_symjit(
                     .append_fun(&slot(lhs), &name, &slot_list(&args), is_real)
                     .map_err(|e| e.to_string())?;
             }
-            Instruction::Join(lhs, cond, true_val, false_val) => translator
+            Instruction::Join(lhs, cond, true_val, false_val)
+            | Instruction::Select(lhs, cond, true_val, false_val) => translator
                 .append_join(&slot(lhs), &slot(cond), &slot(true_val), &slot(false_val))
                 .unwrap(),
             Instruction::Label(id) => translator.append_label(id).unwrap(),

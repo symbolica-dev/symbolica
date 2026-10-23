@@ -278,6 +278,7 @@ impl<T: Real> ExpressionEvaluator<T> {
         external_fns: &mut [ExternalFunctionContainer<T>],
     ) {
         let mut tmp = T::new_zero();
+        let mut div_tmp = None;
         let mut i = 0;
         while i < instructions.len() {
             let (instr, _) = unsafe { &instructions.get_unchecked(i) };
@@ -334,7 +335,9 @@ impl<T: Real> ExpressionEvaluator<T> {
                     }
                 }
                 _ => {
-                    if let Some(idx) = Self::evaluate_impl_no_ops(stack, instr, external_fns) {
+                    if let Some(idx) =
+                        Self::evaluate_impl_no_ops(stack, instr, external_fns, &mut div_tmp)
+                    {
                         i = idx;
                         continue;
                     }
@@ -368,8 +371,18 @@ impl<T: Real> ExpressionEvaluator<T> {
         stack: &mut [T],
         instr: &Instr,
         external_fns: &mut [ExternalFunctionContainer<T>],
+        div_tmp: &mut Option<T>,
     ) -> Option<usize> {
         match instr {
+            Instr::Div(r, numerator, denominator) => {
+                let tmp = div_tmp.get_or_insert_with(T::new_zero);
+                tmp.set_from(&stack[*numerator]);
+                *tmp /= &stack[*denominator];
+                std::mem::swap(&mut stack[*r], tmp);
+            }
+            Instr::Select(r, c, a, b) => {
+                stack[*r] = stack[*c].select_nonzero(&stack[*a], &stack[*b]);
+            }
             Instr::Powf(r, b, e) => {
                 stack[*r] = stack[*b].powf(&stack[*e]);
             }
@@ -503,6 +516,18 @@ impl<T: Clone> ExpressionEvaluator<T> {
 
                     *stack.get_unchecked_mut(*r) = tmp;
                 },
+                Instr::Div(r, numerator, denominator) => {
+                    let inverse = ring.try_inv(&stack[*denominator]).ok_or_else(|| {
+                        EvaluationError::EvaluationFailed {
+                            expression: Atom::num(0),
+                            reason: format!(
+                                "Could not invert {}",
+                                ring.printer(&stack[*denominator])
+                            ),
+                        }
+                    })?;
+                    stack[*r] = ring.mul(&stack[*numerator], &inverse);
+                }
                 Instr::Pow(r, b, e) => {
                     if *e == -1 {
                         stack[*r] = ring.try_inv(&stack[*b]).ok_or_else(|| {
@@ -599,14 +624,14 @@ impl<T: Clone> ExpressionEvaluator<T> {
                 return Ok(Some(label.0));
             }
             Instr::Label(_) => {}
-            Instr::Join(r, c, a, b) => {
+            Instr::Join(r, c, a, b) | Instr::Select(r, c, a, b) => {
                 if !ring.is_zero(&stack[*c]) {
                     stack[*r] = stack[*a].clone();
                 } else {
                     stack[*r] = stack[*b].clone();
                 }
             }
-            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) => {
+            Instr::Add(..) | Instr::Mul(..) | Instr::Pow(..) | Instr::Div(..) => {
                 unreachable!()
             }
         }
@@ -750,6 +775,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                 Instr::Add(_, s) => count.additions += s.len() - 1,
                 Instr::Mul(_, s) => count.multiplications += s.len() - 1,
                 Instr::Pow(_, _, e) => count.add_integer_power(*e),
+                Instr::Div(..) => count.add_integer_power(-1),
                 Instr::Powf(..) | Instr::BuiltinFun(..) | Instr::ExternalFun(..) => {
                     count.add_function_call()
                 }
@@ -801,6 +827,8 @@ impl<T: Default> ExpressionEvaluator<T> {
             Mul(&'a [usize]),
             Pow(usize, i64),
             Powf(usize, usize),
+            Div(usize, usize),
+            Select(usize, usize, usize),
             BuiltinFun(u32, usize),
             ExternalFun(u32, &'a [usize]),
         }
@@ -843,7 +871,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                     *b = rename_map[*b];
                     *p = new_pos;
                 }
-                Instr::Powf(p, a, b) => {
+                Instr::Powf(p, a, b) | Instr::Div(p, a, b) => {
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                     *p = new_pos;
@@ -854,7 +882,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         *x = rename_map[*x];
                     }
                 }
-                Instr::Join(p, a, b, c) => {
+                Instr::Join(p, a, b, c) | Instr::Select(p, a, b, c) => {
                     *a = rename_map[*a];
                     *b = rename_map[*b];
                     *c = rename_map[*c];
@@ -883,6 +911,8 @@ impl<T: Default> ExpressionEvaluator<T> {
                 Instr::Mul(_, a) => Some(CSE::Mul(a)),
                 Instr::Pow(_, b, e) => Some(CSE::Pow(*b, *e)),
                 Instr::Powf(_, b, e) => Some(CSE::Powf(*b, *e)),
+                Instr::Div(_, a, b) => Some(CSE::Div(*a, *b)),
+                Instr::Select(_, c, a, b) => Some(CSE::Select(*c, *a, *b)),
                 Instr::BuiltinFun(_, s, a) => Some(CSE::BuiltinFun(s.get_id(), *a)),
                 Instr::ExternalFun(_, s, a) => Some(CSE::ExternalFun(*s as u32, a)),
                 _ => None,
@@ -1335,7 +1365,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                         *b = rename!(*b);
                         *p = new_pos;
                     }
-                    Instr::Powf(p, a, b) => {
+                    Instr::Powf(p, a, b) | Instr::Div(p, a, b) => {
                         *a = rename!(*a);
                         *b = rename!(*b);
                         *p = new_pos;
@@ -1346,7 +1376,7 @@ impl<T: Default> ExpressionEvaluator<T> {
                             *x = rename!(*x);
                         }
                     }
-                    Instr::Join(p, a, b, c) => {
+                    Instr::Join(p, a, b, c) | Instr::Select(p, a, b, c) => {
                         *a = rename!(*a);
                         *b = rename!(*b);
                         *c = rename!(*c);
@@ -1790,6 +1820,7 @@ mod merge_operand_remapping_tests {
 #[cfg(test)]
 mod cse_tests {
     use super::*;
+    use crate::domains::dual::HyperDual;
 
     fn evaluator(
         params: usize,
@@ -1808,6 +1839,134 @@ mod cse_tests {
             external_fns: vec![],
             settings: OptimizationSettings::default(),
         }
+    }
+
+    #[test]
+    fn direct_division_preserves_finite_ratios_and_operand_order() {
+        let source = evaluator(2, vec![Instr::Div(2, 0, 1)], vec![2]);
+        assert_eq!(source.count_operations().inversions, 1);
+        assert!(matches!(
+            source.export_instructions().instructions[0],
+            Instruction::Div(..)
+        ));
+        let mut eager = source.clone();
+        for (numerator, denominator, expected) in [
+            (1e-320, 1e-320, 1.),
+            (1e308, 1e308, 1.),
+            (6., 3., 2.),
+            (3., 6., 0.5),
+        ] {
+            assert_eq!(eager.evaluate_single(&[numerator, denominator]), expected);
+        }
+        assert!(eager.evaluate_single(&[0., 0.]).is_nan());
+        assert!(eager.evaluate_single(&[1., 1e-320]).is_infinite());
+
+        // Interleave scratch users, including division onto either operand's slot.
+        let alternating = evaluator(
+            3,
+            vec![
+                Instr::Div(3, 0, 1),
+                Instr::Add(4, vec![3, 2]),
+                Instr::Mul(3, vec![4, 1]),
+                Instr::Div(3, 3, 1),
+                Instr::Div(4, 0, 1),
+                Instr::Add(3, vec![3, 4]),
+                Instr::Div(1, 3, 1),
+                Instr::Mul(1, vec![1, 0]),
+            ],
+            vec![3, 1],
+        );
+        let mut interleaved = alternating.clone();
+        for (input, expected) in [
+            ([6., 3., 4.], [8., 16.]),
+            ([2., 4., 1.], [2., 1.]),
+            ([7., 2., -2.], [5., 17.5]),
+            ([6., 3., 4.], [8., 16.]),
+        ] {
+            let mut output = [0.; 2];
+            interleaved.evaluate(&input, &mut output);
+            assert_eq!(output, expected);
+        }
+        #[cfg(feature = "float-mpfr")]
+        {
+            use crate::domains::float::Float;
+            let mut interleaved = alternating.map_coeff(&|value| Float::with_val(192, *value));
+            let mut output = [Float::with_val(32, 0), Float::with_val(32, 0)];
+            for precision in [64, 320, 128, 192] {
+                let input = [6, 3, 4].map(|value| Float::with_val(precision, value));
+                interleaved.evaluate(&input, &mut output);
+                assert_eq!(
+                    output,
+                    [
+                        Float::with_val(precision, 8),
+                        Float::with_val(precision, 16)
+                    ]
+                );
+                assert!(
+                    output
+                        .iter()
+                        .all(|value| value.get_precision() >= precision - 8)
+                );
+            }
+        }
+
+        #[cfg(feature = "bincode")]
+        {
+            let bytes = bincode::encode_to_vec(&eager, bincode::config::standard()).unwrap();
+            let (mut restored, consumed): (ExpressionEvaluator<f64>, _) =
+                bincode::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+            assert_eq!(consumed, bytes.len());
+            assert_eq!(restored.evaluate_single(&[1e-320, 1e-320]), 1.);
+        }
+        let mut output = [0.; 1];
+
+        #[cfg(feature = "native_code_generation")]
+        for direct in [false, true] {
+            let mut compiled = source
+                .clone()
+                .jit_compile(
+                    JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            compiled.evaluate(&[1e-320, 1e-320], &mut output[..1]);
+            assert_eq!(output[0], 1., "direct={direct}");
+            let complex = source.clone().map_coeff(&|value| Complex::new(*value, 0.));
+            let mut compiled = complex
+                .jit_compile(
+                    JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            let mut output = [Complex::new(0., 0.)];
+            compiled.evaluate(
+                &[Complex::new(1e-320, 0.), Complex::new(1e-320, 0.)],
+                &mut output,
+            );
+            assert_eq!(output, [Complex::new(1., 0.)], "complex, direct={direct}");
+        }
+    }
+
+    #[test]
+    fn direct_division_vectorizes_without_reciprocal_intermediates() {
+        let source = evaluator(2, vec![Instr::Div(2, 0, 1)], vec![2])
+            .map_coeff(&|_| Complex::<Rational>::default());
+        let mut vectorized = source
+            .vectorize(&Dualizer::new(
+                HyperDual::<f64>::new(vec![vec![0], vec![1], vec![2]]),
+                vec![],
+            ))
+            .unwrap()
+            .map_coeff(&|value| value.re.to_f64());
+        let mut output = [0.; 3];
+        vectorized.evaluate(&[2., 1., 0., 3., 1., 0.], &mut output);
+        for (actual, expected) in output.into_iter().zip([2. / 3., 1. / 9., -1. / 27.]) {
+            assert!((actual - expected).abs() < 1e-15);
+        }
+        vectorized.evaluate(&[1e-320, 0., 0., 1e-320, 0., 0.], &mut output);
+        assert_eq!(output, [1., 0., 0.]);
     }
 
     #[test]

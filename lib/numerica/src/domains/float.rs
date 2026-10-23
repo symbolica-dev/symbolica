@@ -89,6 +89,18 @@ pub trait FloatLike:
     /// Set this value from another value. May reuse memory.
     fn set_from(&mut self, other: &Self);
 
+    /// Select an already computed value according to whether this value is nonzero.
+    /// SIMD domains select each lane independently. This is a value operation,
+    /// not lazy control flow: both alternatives have already been evaluated.
+    #[inline]
+    fn select_nonzero(&self, nonzero: &Self, zero: &Self) -> Self {
+        if self.is_fully_zero() {
+            zero.clone()
+        } else {
+            nonzero.clone()
+        }
+    }
+
     /// Perform `(self * a) + b`.
     fn mul_add(&self, a: &Self, b: &Self) -> Self;
     fn neg(&self) -> Self;

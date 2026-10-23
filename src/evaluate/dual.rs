@@ -1,5 +1,45 @@
 use super::*;
 
+mod norm;
+
+fn is_zero<T: DualNumberStructure>(
+    a: &Slot,
+    dualizer: &Dualizer<T>,
+    instrs: &InstructionList<Complex<Rational>>,
+) -> bool {
+    dualizer.is_zero(a, instrs)
+}
+
+fn scalar_add<T: DualNumberStructure>(
+    a: &Slot,
+    b: &Slot,
+    dualizer: &Dualizer<T>,
+    instrs: &mut InstructionList<Complex<Rational>>,
+) -> Slot {
+    if is_zero(a, dualizer, instrs) {
+        *b
+    } else if instrs.is_zero(b) {
+        *a
+    } else {
+        instrs.add(VectorInstruction::Add(*a, *b))
+    }
+}
+
+fn scalar_mul<T: DualNumberStructure>(
+    a: &Slot,
+    b: &Slot,
+    dualizer: &Dualizer<T>,
+    instrs: &mut InstructionList<Complex<Rational>>,
+) -> Slot {
+    if is_zero(a, dualizer, instrs) || instrs.is_one(b) {
+        *a
+    } else if is_zero(b, dualizer, instrs) || instrs.is_one(a) {
+        *b
+    } else {
+        instrs.add(VectorInstruction::Mul(*a, *b))
+    }
+}
+
 impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Import a generated evaluator's scalar constants and shared function table.
     fn import_vector_context<V: Vectorize<T>>(
@@ -101,6 +141,11 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 }
                 Instr::Pow(o, a, p) => (*o, VectorInstruction::Pow(slots[*a], *p)),
                 Instr::Powf(o, a, b) => (*o, VectorInstruction::Powf(slots[*a], slots[*b])),
+                Instr::Div(o, a, b) => (*o, VectorInstruction::Div(slots[*a], slots[*b])),
+                Instr::Select(o, c, a, b) => (
+                    *o,
+                    VectorInstruction::Select(slots[*c], slots[*a], slots[*b]),
+                ),
                 Instr::BuiltinFun(o, f, a) => (*o, VectorInstruction::BuiltinFun(*f, slots[*a])),
                 Instr::ExternalFun(o, f, args) => (
                     *o,
@@ -160,14 +205,14 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         }
                         needed[*arg] = true;
                     }
-                    Instr::Powf(out, a, b) => {
+                    Instr::Powf(out, a, b) | Instr::Div(out, a, b) => {
                         if !needed[*out] {
                             return None;
                         }
                         needed[*a] = true;
                         needed[*b] = true;
                     }
-                    Instr::Join(out, c, a, b) => {
+                    Instr::Join(out, c, a, b) | Instr::Select(out, c, a, b) => {
                         if !needed[*out] {
                             return None;
                         }
@@ -374,6 +419,10 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                     o,
                     VectorInstruction::Powf(get_slot!(slot_map[&b]), get_slot!(slot_map[&e])),
                 ),
+                Instr::Div(o, a, b) => (
+                    o,
+                    VectorInstruction::Div(get_slot!(slot_map[&a]), get_slot!(slot_map[&b])),
+                ),
                 Instr::BuiltinFun(o, f, a) => {
                     (o, VectorInstruction::BuiltinFun(f, get_slot!(slot_map[&a])))
                 }
@@ -558,6 +607,14 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                         .push(VectorInstruction::IfElse(get_slot!(slot_map[&c]), l));
                     continue;
                 }
+                Instr::Select(o, c, t, f) => (
+                    o,
+                    VectorInstruction::Select(
+                        get_slot!(slot_map[&c]),
+                        get_slot!(slot_map[&t]),
+                        get_slot!(slot_map[&f]),
+                    ),
+                ),
                 Instr::Join(o, c, t, f) => (
                     o,
                     VectorInstruction::Join(
@@ -636,6 +693,12 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                     self.instructions
                         .push((Instr::Pow(out, from_slot!(slot), e), ComplexPhase::Any));
                 }
+                VectorInstruction::Div(numerator, denominator) => {
+                    self.instructions.push((
+                        Instr::Div(out, from_slot!(numerator), from_slot!(denominator)),
+                        ComplexPhase::Any,
+                    ));
+                }
                 VectorInstruction::Powf(slot, slot1) => {
                     self.instructions.push((
                         Instr::Powf(out, from_slot!(slot), from_slot!(slot1)),
@@ -665,6 +728,12 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
                 VectorInstruction::Label(label) => {
                     self.instructions
                         .push((Instr::Label(label), ComplexPhase::Any));
+                }
+                VectorInstruction::Select(cond, t, f) => {
+                    self.instructions.push((
+                        Instr::Select(out, from_slot!(cond), from_slot!(t), from_slot!(f)),
+                        ComplexPhase::Any,
+                    ));
                 }
                 VectorInstruction::Join(cond, t, f) => {
                     self.instructions.push((
@@ -765,6 +834,16 @@ pub struct Dualizer<T: DualNumberStructure> {
 }
 
 impl<T: DualNumberStructure> Dualizer<T> {
+    fn is_zero(&self, slot: &Slot, instructions: &InstructionList<Complex<Rational>>) -> bool {
+        instructions.is_zero(slot)
+            || match slot {
+                Slot::Param(index) => self
+                    .zero_components
+                    .contains(&(*index / self.dual.get_len(), *index % self.dual.get_len())),
+                _ => false,
+            }
+    }
+
     /// Create a new dualizer for the given dual number structure.
     /// You can specify which components are always zero
     /// by providing a list of `(component index, dual index)` pairs.
@@ -891,39 +970,6 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
         i: &VectorInstruction,
         instrs: &mut InstructionList<Complex<Rational>>,
     ) -> Vec<VectorInstruction> {
-        fn is_zero<T: DualNumberStructure>(
-            a: &Slot,
-            dualizer: &Dualizer<T>,
-            instrs: &InstructionList<Complex<Rational>>,
-        ) -> bool {
-            if instrs.is_zero(a) {
-                return true;
-            }
-
-            if let Slot::Param(x) = a {
-                dualizer
-                    .zero_components
-                    .contains(&(*x / dualizer.get_dimension(), *x % dualizer.get_dimension()))
-            } else {
-                false
-            }
-        }
-
-        fn scalar_add<T: DualNumberStructure>(
-            a: &Slot,
-            b: &Slot,
-            dualizer: &Dualizer<T>,
-            instrs: &mut InstructionList<Complex<Rational>>,
-        ) -> Slot {
-            if is_zero(a, dualizer, instrs) {
-                *b
-            } else if instrs.is_zero(b) {
-                *a
-            } else {
-                instrs.add(VectorInstruction::Add(*a, *b))
-            }
-        }
-
         fn scalar_yield_add<T: DualNumberStructure>(
             a: &Slot,
             b: &Slot,
@@ -936,21 +982,6 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 VectorInstruction::Assign(*a)
             } else {
                 VectorInstruction::Add(*a, *b)
-            }
-        }
-
-        fn scalar_mul<T: DualNumberStructure>(
-            a: &Slot,
-            b: &Slot,
-            dualizer: &Dualizer<T>,
-            instrs: &mut InstructionList<Complex<Rational>>,
-        ) -> Slot {
-            if is_zero(a, dualizer, instrs) || instrs.is_one(b) {
-                *a
-            } else if is_zero(b, dualizer, instrs) || instrs.is_one(a) {
-                *b
-            } else {
-                instrs.add(VectorInstruction::Mul(*a, *b))
             }
         }
 
@@ -1197,16 +1228,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
 
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
-                Symbol::ABS_ID => {
-                    let n = instrs.add(VectorInstruction::BuiltinFun(Symbol::ABS, *a));
-
-                    let inv_val = instrs.add(VectorInstruction::Pow(*a, -1));
-                    let scale = instrs.add(VectorInstruction::Mul(n, inv_val));
-
-                    (0..self.dual.get_len())
-                        .map(|j| scalar_yield_mul(&a.index(j), &scale, self, instrs))
-                        .collect()
-                }
+                Symbol::ABS_ID => self.norm_components(*a, instrs),
                 Symbol::CONJ_ID => {
                     // assume variables are real
                     (0..self.dual.get_len())
@@ -1252,6 +1274,33 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     .map(|x| scalar_yield_mul(x, &a_inv, self, instrs))
                     .collect()
             }
+            VectorInstruction::Div(a, b) => {
+                // Taylor coefficients of a=b*q, solved in increasing total degree.
+                let zero = instrs.add_repeated_constant(Complex::new_zero());
+                let negative =
+                    instrs.add_constant_in_first_component(Complex::from(Rational::from(-1)));
+                let mut quotient = vec![zero; self.dual.get_len()];
+                quotient[0] = instrs.add(VectorInstruction::Div(*a, *b));
+                let shape = self.dual.get_shape();
+                let mut order = (1..shape.len()).collect::<Vec<_>>();
+                order.sort_by_key(|index| shape[*index].iter().sum::<usize>());
+                for index in order {
+                    let mut numerator = a.index(index);
+                    for &(left, right, target) in mult_table {
+                        if target == index {
+                            let product =
+                                scalar_mul(&quotient[left], &b.index(right), self, instrs);
+                            let minus = scalar_mul(&product, &negative, self, instrs);
+                            numerator = scalar_add(&numerator, &minus, self, instrs);
+                        }
+                    }
+                    quotient[index] = instrs.add(VectorInstruction::Div(numerator, *b));
+                }
+                quotient
+                    .into_iter()
+                    .map(VectorInstruction::Assign)
+                    .collect()
+            }
             VectorInstruction::Powf(b, e) => {
                 let input = VectorInstruction::BuiltinFun(Symbol::LOG, *b);
                 let log: Vec<_> = self
@@ -1272,6 +1321,9 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 let exp_in = VectorInstruction::BuiltinFun(Symbol::EXP, adjacent[0]);
                 self.map_instruction(&exp_in, instrs)
             }
+            VectorInstruction::Select(c, a, b) => (0..self.dual.get_len())
+                .map(|j| VectorInstruction::Select(c.index(0), a.index(j), b.index(j)))
+                .collect(),
             VectorInstruction::Join(c, a, b) => (0..self.dual.get_len())
                 .map(|j| VectorInstruction::Join(c.index(0), a.index(j), b.index(j)))
                 .collect(),
@@ -1297,6 +1349,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
 
 #[cfg(test)]
 mod test {
+    use crate::domains::float::{FloatLike, Real, SingleFloat};
     use numerica::domains::{
         dual::HyperDual,
         float::{Complex, Float},
@@ -1326,6 +1379,275 @@ mod test {
                 vec![],
             ))
             .unwrap()
+    }
+
+    #[test]
+    fn complex_absolute_value_has_real_mixed_derivatives() {
+        let source = dualize(
+            "abs(z)",
+            &[parse!("z")],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+        )
+        .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        // Taylor coefficients of |3 + 4i + x + i*y| for real x and y.
+        let input = [
+            Complex::new(3., 4.),
+            Complex::new(1., 0.),
+            Complex::new(0., 1.),
+            Complex::new(0., 0.),
+            Complex::new(0., 0.),
+        ];
+        let check = |output: &[Complex<f64>; 5]| {
+            for (actual, expected) in output.iter().zip([5., 0.6, 0.8, 8. / 125., -12. / 125.]) {
+                assert!(
+                    (actual.re - expected).abs() < 1e-12,
+                    "{actual:?} != {expected}"
+                );
+                assert!(actual.im.abs() < 1e-12, "non-real derivative: {actual:?}");
+            }
+        };
+        let mut output = [Complex::new(0., 0.); 5];
+        source.clone().evaluate(&input, &mut output);
+        check(&output);
+        #[cfg(feature = "native_code_generation")]
+        for direct in [false, true] {
+            let mut compiled = source
+                .jit_compile(
+                    crate::evaluate::JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            compiled.evaluate(&input, &mut output);
+            check(&output);
+        }
+    }
+
+    #[test]
+    fn absolute_value_preserves_extreme_primal_scales() {
+        let mut evaluator =
+            dualize("abs(x)", &[parse!("x")], vec![vec![0], vec![1]]).map_coeff(&|c| c.re.to_f64());
+        for x in [1e200, -1e200, 1e-200, -1e-200] {
+            let mut out = [0.; 2];
+            evaluator.evaluate(&[x, 1.], &mut out);
+            assert_eq!(out[0], x.abs());
+            assert!((out[1] - x.signum()).abs() < 1e-12, "{x}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_value_preserves_extreme_nonprimal_coefficients() {
+        let exact = dualize(
+            "abs(x)",
+            &[parse!("x")],
+            vec![vec![0], vec![1], vec![2], vec![3]],
+        );
+        let mut evaluator = exact.clone().map_coeff(&|c| c.re.to_f64());
+        for x in [1e-200_f64, -1e-200, 1e-320, -1e-320, 1e308, -1e308] {
+            let mut out = [0.; 4];
+            evaluator.evaluate(&[x, 1., 0., 0.], &mut out);
+            assert_eq!(out[0], x.abs());
+            assert!((out[1] - x.signum()).abs() < 1e-12, "{x}: {out:?}");
+            assert_eq!(&out[2..], &[0., 0.], "{x}: {out:?}");
+        }
+        let mut simd = exact.map_coeff(&|c| wide::f64x4::splat(c.re.to_f64()));
+        let x = [1e-320_f64, -1e-320, 1e308, -1e308];
+        let mut out = [wide::f64x4::ZERO; 4];
+        simd.evaluate(
+            &[
+                x.into(),
+                wide::f64x4::ONE,
+                wide::f64x4::ZERO,
+                wide::f64x4::ZERO,
+            ],
+            &mut out,
+        );
+        assert_eq!(out[0].to_array(), x.map(f64::abs));
+        for (actual, expected) in out[1].to_array().into_iter().zip(x.map(f64::signum)) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+        assert_eq!(out[2].to_array(), [0.; 4]);
+        assert_eq!(out[3].to_array(), [0.; 4]);
+    }
+
+    #[test]
+    fn absolute_value_preserves_extreme_mixed_complex_coefficients() {
+        let mut evaluator = dualize(
+            "abs(z)",
+            &[parse!("z")],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]],
+        )
+        .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64()));
+        for (primal, left, right, expected) in [
+            (1e-200, 1., 1., 1e200),
+            (1e-320, 1e200, 1e-250, 1e-50 / 1e-320),
+            (1e308, 1e-200, 1e308, 1e-200),
+        ] {
+            let mut out = [Complex::new(0., 0.); 4];
+            evaluator.evaluate(
+                &[
+                    Complex::new(primal, 0.),
+                    Complex::new(0., left),
+                    Complex::new(0., right),
+                    Complex::new(0., 0.),
+                ],
+                &mut out,
+            );
+            assert_eq!(out[0], Complex::new(primal, 0.));
+            assert_eq!(out[1], Complex::new(0., 0.));
+            assert_eq!(out[2], Complex::new(0., 0.));
+            assert!(
+                (out[3].re - expected).abs() <= expected.abs() * 1e-12,
+                "{primal}, {left}, {right}: {:?} != {expected}",
+                out[3]
+            );
+            assert_eq!(out[3].im, 0.);
+        }
+    }
+
+    #[test]
+    fn absolute_value_matches_zero_jet_norm_convention() {
+        let mut evaluator = dualize("abs(x)", &[parse!("x")], vec![vec![0], vec![1], vec![2]])
+            .map_coeff(&|c| c.re.to_f64());
+        let mut out = [1.; 3];
+        evaluator.evaluate(&[0., 0., 0.], &mut out);
+        assert_eq!(out, [0.; 3]);
+        evaluator.evaluate(&[0., 1., 0.], &mut out);
+        assert_eq!(out[0], 0.);
+        assert!(out[1..].iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn absolute_value_preserves_arbitrary_precision_mixed_coefficients() {
+        let source = dualize(
+            "abs(z)",
+            &[parse!("z")],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]],
+        );
+        for precision in [192, 1000] {
+            let prototype = Float::new(precision);
+            let primal = prototype.from_rational(&Rational::from(10).pow(400).inv());
+            let left = prototype.from_rational(&Rational::from(10).pow(300));
+            let right = prototype.from_rational(&Rational::from(10).pow(250).inv());
+            let expected = left.clone() * &right / &primal;
+            let zero = prototype.zero();
+            let mut evaluator = source.clone().map_coeff_with_prec(
+                &|value| {
+                    Complex::new(
+                        prototype.from_rational(&value.re),
+                        prototype.from_rational(&value.im),
+                    )
+                },
+                precision,
+            );
+            let mut output = vec![Complex::new(zero.clone(), zero.clone()); 4];
+            evaluator.evaluate(
+                &[
+                    Complex::new(primal.clone(), zero.clone()),
+                    Complex::new(zero.clone(), left),
+                    Complex::new(zero.clone(), right),
+                    Complex::new(zero.clone(), zero.clone()),
+                ],
+                &mut output,
+            );
+            assert_eq!(output[0], Complex::new(primal, zero.clone()));
+            assert_eq!(output[1], Complex::new(zero.clone(), zero.clone()));
+            assert_eq!(output[2], Complex::new(zero.clone(), zero.clone()));
+            let error = (output[3].re.clone() - &expected).norm() / expected;
+            assert!(
+                error < prototype.from_rational(&Rational::from(10).pow(40).inv()),
+                "precision={precision}: {error}"
+            );
+            assert_eq!(output[3].im, zero);
+        }
+    }
+
+    #[test]
+    fn absolute_value_selects_heterogeneous_simd_zero_domains() {
+        let source = dualize("abs(x)", &[parse!("x")], vec![vec![0], vec![1], vec![2]])
+            .map_coeff(&|value| wide::f64x4::splat(value.re.to_f64()));
+        let input = [
+            wide::f64x4::from([0., 0., 1e-320, -1e308]),
+            wide::f64x4::from([0., 1., 1., 1.]),
+            wide::f64x4::ZERO,
+        ];
+        let expected = [
+            [0., 0., 1e-320, 1e308],
+            [0., f64::NAN, 1., -1.],
+            [0., f64::NAN, 0., 0.],
+        ];
+        let check = |output: &[wide::f64x4; 3]| {
+            for (actual, expected) in output.iter().zip(expected) {
+                for (actual, expected) in actual.to_array().into_iter().zip(expected) {
+                    assert!(
+                        actual == expected || (actual.is_nan() && expected.is_nan()),
+                        "{actual} != {expected}"
+                    );
+                }
+            }
+        };
+        let mut output = [wide::f64x4::ZERO; 3];
+        source.clone().evaluate(&input, &mut output);
+        check(&output);
+        #[cfg(feature = "native_code_generation")]
+        for direct in [false, true] {
+            let mut compiled = source
+                .clone()
+                .jit_compile(
+                    crate::evaluate::JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            compiled.evaluate(&input, &mut output);
+            check(&output);
+        }
+    }
+
+    #[cfg(feature = "native_code_generation")]
+    #[test]
+    fn absolute_value_compiled_mixed_coefficients_keep_finite_range() {
+        let source = dualize(
+            "abs(z)",
+            &[parse!("z")],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]],
+        )
+        .map_coeff(&|value| Complex::new(value.re.to_f64(), value.im.to_f64()));
+        for direct in [false, true] {
+            let mut compiled = source
+                .clone()
+                .jit_compile(
+                    crate::evaluate::JITCompilationSettings::new()
+                        .direct_translation(direct)
+                        .optimization_level(2),
+                )
+                .unwrap();
+            for (primal, left, right, expected) in [
+                (1e-200, 1., 1., 1e200),
+                (1e-320, 1e200, 1e-250, 1e-50 / 1e-320),
+                (1e308, 1e-200, 1e308, 1e-200),
+            ] {
+                let mut output = [Complex::new(0., 0.); 4];
+                compiled.evaluate(
+                    &[
+                        Complex::new(primal, 0.),
+                        Complex::new(0., left),
+                        Complex::new(0., right),
+                        Complex::new(0., 0.),
+                    ],
+                    &mut output,
+                );
+                assert_eq!(output[0], Complex::new(primal, 0.));
+                assert_eq!(output[1], Complex::new(0., 0.));
+                assert_eq!(output[2], Complex::new(0., 0.));
+                assert!(
+                    (output[3].re - expected).abs() <= expected.abs() * 1e-12,
+                    "direct={direct}: {:?} != {expected}",
+                    output[3]
+                );
+                assert_eq!(output[3].im, 0.);
+            }
+        }
     }
 
     #[test]
