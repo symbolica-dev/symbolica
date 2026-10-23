@@ -872,6 +872,9 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline]
             fn pow(&self, e: u64) -> Self {
+                if e == 0 {
+                    return self.one();
+                }
                 // TODO: use binary exponentiation
                 let mut res = self.clone();
                 for _ in 1..e {
@@ -1963,6 +1966,9 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
+        if e == 0 {
+            return self.one();
+        }
         // TODO: use binary exponentiation
         let mut res = self.clone();
         for _ in 1..e {
@@ -2385,6 +2391,53 @@ mod test {
 
     create_hyperdual_from_depths!(Dual, [1, 2, 3]);
     create_hyperdual_from_components!(ReorderedDual, [[0, 0], [0, 1], [1, 0]]);
+
+    create_hyperdual_from_components!(PowerDual, [[0, 0], [1, 0], [0, 1], [2, 0], [1, 1]]);
+
+    #[test]
+    fn integer_powers_preserve_components_precision_and_shape() {
+        use super::DualNumberStructure;
+        use crate::domains::float::{Complex, Float, SingleFloat};
+
+        fn carriers<T: Real + SingleFloat>(prototype: T)
+        where
+            Complex<T>: Real,
+        {
+            for primal in [0, 2] {
+                let values = [primal, 1, 3, 5, 7]
+                    .map(|v| Complex::new(prototype.zero(), prototype.from_i64(v)));
+                let fixed = PowerDual {
+                    values: values.clone(),
+                };
+                let dynamic = HyperDual::from_values(
+                    vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+                    values.to_vec(),
+                );
+                for power in 0..=3 {
+                    let fixed_result = fixed.pow(power);
+                    let dynamic_result = dynamic.pow(power);
+                    assert_eq!(
+                        fixed_result.values.as_slice(),
+                        dynamic_result.values.as_slice()
+                    );
+                    assert_eq!(fixed_result.get_shape(), fixed.get_shape());
+                    assert_eq!(dynamic_result.get_shape(), dynamic.get_shape());
+                    if power == 0 {
+                        assert_eq!(fixed_result.values, fixed.one().values);
+                        assert_eq!(dynamic_result.values, dynamic.one().values);
+                    } else if power == 1 {
+                        assert_eq!(fixed_result.values, values);
+                    }
+                    for actual in &fixed_result.values {
+                        assert_eq!(actual.re.get_precision(), prototype.get_precision());
+                        assert_eq!(actual.im.get_precision(), prototype.get_precision());
+                    }
+                }
+            }
+        }
+        carriers(0.);
+        carriers(Float::new(192));
+    }
 
     #[test]
     fn real_functions() {
