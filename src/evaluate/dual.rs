@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod primal_tests;
+
 impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Import a generated evaluator's scalar constants and shared function table.
     fn import_vector_context<V: Vectorize<T>>(
@@ -1018,8 +1021,10 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                 .map(|j| scalar_yield_add(&a.index(j), &b.index(j), self, instrs))
                 .collect(),
             VectorInstruction::Mul(a, b) => {
-                let mut current_index = vec![];
-                for j in 0..self.dual.get_len() {
+                // Keep the scalar primal domain even when derivative seeds
+                // are known zero, including products such as 0*Inf.
+                let mut current_index = vec![instrs.add(VectorInstruction::Mul(*a, *b))];
+                for j in 1..self.dual.get_len() {
                     current_index.push(scalar_mul(&a.index(j), b, self, instrs));
                 }
 
@@ -1270,7 +1275,11 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     .map(|x| instrs.add(VectorInstruction::Assign(x)))
                     .collect();
                 let exp_in = VectorInstruction::BuiltinFun(Symbol::EXP, adjacent[0]);
-                self.map_instruction(&exp_in, instrs)
+                let mut result = self.map_instruction(&exp_in, instrs);
+                // exp(e*log(b)) supplies derivatives, while native powf keeps
+                // its own primal domain, including 0^0 = 1.
+                result[0] = i.clone();
+                result
             }
             VectorInstruction::Join(c, a, b) => (0..self.dual.get_len())
                 .map(|j| VectorInstruction::Join(c.index(0), a.index(j), b.index(j)))
