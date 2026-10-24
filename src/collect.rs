@@ -6,7 +6,7 @@ use numerica::domains::{
 };
 
 use crate::{
-    atom::{Add, Atom, AtomCore, AtomOrView, AtomView, Indeterminate, Symbol},
+    atom::{Add, Atom, AtomCore, AtomOrView, AtomView, CompactAtomView, Indeterminate, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
         algebraic::AlgebraicExtension,
@@ -1628,7 +1628,9 @@ impl<'a> AtomView<'a> {
         // map every indeterminate to its position in the ordering, the first position wins
         let mut index = HashMap::default();
         for (i, x) in xs.iter().enumerate() {
-            index.entry(x.as_atom_view()).or_insert(i);
+            index
+                .entry(CompactAtomView::from(x.as_atom_view()))
+                .or_insert(i);
         }
 
         Workspace::get_local().with(|ws| {
@@ -1663,13 +1665,13 @@ impl<'a> AtomView<'a> {
     /// `x^n` with a positive integer `n`, return the position of `x` and the power `n`.
     fn horner_indeterminate<'b>(
         atom: AtomView<'b>,
-        index: &HashMap<AtomView<'b>, usize>,
+        index: &HashMap<CompactAtomView<'b>, usize>,
         start: usize,
     ) -> Option<(usize, i64)> {
         // Evaluator candidates can be whole non-polynomial expressions, such
         // as exp(x), stored as a non-integer power. Factor only exact matches:
         // decomposing their exponents would require additional algebraic laws.
-        if let Some(&i) = index.get(&atom)
+        if let Some(&i) = index.get(&CompactAtomView::from(atom))
             && i >= start
         {
             return Some((i, 1));
@@ -1681,7 +1683,7 @@ impl<'a> AtomView<'a> {
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
                     && n > 0
-                    && let Some(&i) = index.get(&b)
+                    && let Some(&i) = index.get(&CompactAtomView::from(b))
                     && i >= start
                 {
                     Some((i, n))
@@ -1697,7 +1699,7 @@ impl<'a> AtomView<'a> {
     /// contains as a factor with a positive integer power. Return its position and power.
     fn horner_first_indeterminate<'b>(
         term: AtomView<'b>,
-        index: &HashMap<AtomView<'b>, usize>,
+        index: &HashMap<CompactAtomView<'b>, usize>,
         start: usize,
     ) -> Option<(usize, i64)> {
         if let AtomView::Mul(m) = term {
@@ -1721,7 +1723,7 @@ impl<'a> AtomView<'a> {
         &self,
         ws: &Workspace,
         xs: &'b [T],
-        index: &HashMap<AtomView<'b>, usize>,
+        index: &HashMap<CompactAtomView<'b>, usize>,
         start: usize,
     ) -> AtomOrView<'a> {
         if start >= xs.len() {

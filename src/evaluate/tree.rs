@@ -1368,7 +1368,7 @@ impl<'a> AtomView<'a> {
         let args = params
             .iter()
             .enumerate()
-            .map(|(i, p)| (*p, Slot::Param(i)))
+            .map(|(i, p)| ((*p).into(), Slot::Param(i)))
             .collect();
         for expr in expressions {
             let res = expr.linearize_impl(
@@ -1655,7 +1655,7 @@ impl<'a> AtomView<'a> {
         arg_slots: Vec<Slot>,
         fn_map: &'a FunctionMap,
         context: &mut LinearizationContext<'a>,
-        params: &HashMap<AtomView<'a>, Slot>,
+        params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
@@ -1673,14 +1673,14 @@ impl<'a> AtomView<'a> {
                     .inputs
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| (*p, Slot::Param(i))),
+                    .map(|(i, p)| ((*p).into(), Slot::Param(i))),
             );
             body_params.extend(
                 function
                     .args
                     .iter()
                     .zip(arg_slots)
-                    .map(|(arg, slot)| (arg.as_view(), slot)),
+                    .map(|(arg, slot)| (arg.as_view().into(), slot)),
             );
         }
         // Aliases inherit the caller's bindings and cache. Ordinary functions, including
@@ -1714,13 +1714,13 @@ impl<'a> AtomView<'a> {
         &self,
         fn_map: &'a FunctionMap,
         context: &mut LinearizationContext<'a>,
-        params: &HashMap<AtomView<'a>, Slot>,
+        params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
-            if let Some(slot) = params.get(self) {
+            if let Some(slot) = params.get(&CompactAtomView::from(*self)) {
                 return Ok(*slot);
             }
         }
@@ -1877,7 +1877,7 @@ impl<'a> AtomView<'a> {
         &self,
         fn_map: &'a FunctionMap,
         context: &mut LinearizationContext<'a>,
-        params: &HashMap<AtomView<'a>, Slot>,
+        params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
@@ -2028,7 +2028,7 @@ impl<'a> AtomView<'a> {
         &self,
         fn_map: &'a FunctionMap,
         context: &mut LinearizationContext<'a>,
-        params: &HashMap<AtomView<'a>, Slot>,
+        params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
@@ -2105,7 +2105,7 @@ impl<'a> AtomView<'a> {
         &self,
         fn_map: &'a FunctionMap,
         context: &mut LinearizationContext<'a>,
-        params: &HashMap<AtomView<'a>, Slot>,
+        params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
