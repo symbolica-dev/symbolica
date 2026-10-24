@@ -19,6 +19,25 @@ pub use rug::{
     ops::{CompleteRound, Pow},
 };
 
+/// A compact upper estimate of the absolute value, preserving the backend exponent.
+pub(crate) trait MultiPrecisionFloatMagnitude {
+    fn absolute_magnitude(&self) -> crate::domains::float::Magnitude;
+}
+
+#[cfg(feature = "float-mpfr")]
+impl MultiPrecisionFloatMagnitude for MultiPrecisionFloat {
+    fn absolute_magnitude(&self) -> crate::domains::float::Magnitude {
+        // Directed rounding must be away from zero before discarding the sign.
+        let rounding = if self.is_sign_negative() {
+            rug::float::Round::Down
+        } else {
+            rug::float::Round::Up
+        };
+        let (mantissa, exponent) = self.to_f64_exp_round(rounding);
+        crate::domains::float::Magnitude::from_f64_exp(mantissa, i64::from(exponent))
+    }
+}
+
 pub(crate) trait MultiPrecisionFloatRounding {
     fn add_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
     fn sub_round(&self, rhs: &Self, prec: u32, direction: RoundingDirection) -> Self;
@@ -340,6 +359,52 @@ mod astro {
                 value,
                 prec: precision,
             })
+        }
+    }
+
+    impl super::MultiPrecisionFloatMagnitude for MultiPrecisionFloat {
+        fn absolute_magnitude(&self) -> crate::domains::float::Magnitude {
+            use crate::domains::float::Magnitude;
+
+            let Some((words, _, _, exponent, _)) = self.value.as_raw_parts() else {
+                return Magnitude::from_f64(if self.is_nan() {
+                    f64::NAN
+                } else {
+                    f64::INFINITY
+                });
+            };
+            let Some(index) = words.iter().rposition(|&word| word != 0) else {
+                return Magnitude::ZERO;
+            };
+            let top = words[index] as u64;
+            let significant = u64::BITS - top.leading_zeros();
+            let word_bits = astro_float::WORD_BIT_SIZE;
+            let (mut significand, discarded) = if significant >= 32 {
+                let shift = significant - 32;
+                (
+                    top >> shift,
+                    top & ((1u64 << shift) - 1) != 0 || words[..index].iter().any(|&w| w != 0),
+                )
+            } else {
+                let needed = 32 - significant;
+                let mut significand = top << needed;
+                let discarded = if index == 0 {
+                    false
+                } else {
+                    let next = words[index - 1] as u64;
+                    let shift = word_bits as u32 - needed;
+                    significand |= next >> shift;
+                    next & ((1u64 << shift) - 1) != 0 || words[..index - 1].iter().any(|&w| w != 0)
+                };
+                (significand, discarded)
+            };
+            significand += u64::from(discarded);
+            let scale = i64::from(exponent) - (words.len() - index) as i64 * word_bits as i64
+                + i64::from(significant)
+                - 32;
+            // A 33-bit rounded significand is exactly representable as f64.
+            // The full exponent stays separate; no logarithms or allocation.
+            Magnitude::from_f64_exp(significand as f64, scale)
         }
     }
 

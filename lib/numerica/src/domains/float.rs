@@ -14,6 +14,7 @@ mod double;
 mod error;
 mod field;
 mod interval;
+mod magnitude;
 mod multiprecision;
 mod native;
 #[cfg(feature = "python")]
@@ -33,6 +34,7 @@ pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
 pub use field::{FloatComparisonError, FloatField};
 pub use interval::{ComplexBall, RealBall};
+pub use magnitude::Magnitude;
 pub use multiprecision::Float;
 pub use native::F64;
 #[cfg(feature = "python")]
@@ -141,6 +143,29 @@ pub trait SingleFloat: FloatLike {
 pub trait RealLike: SingleFloat {
     fn to_usize_clamped(&self) -> usize;
     fn to_f64(&self) -> f64;
+
+    /// Estimate the absolute value as a nonnegative, upward-rounded magnitude.
+    ///
+    /// The default bounds the result of conversion to `f64`. Custom types with
+    /// greater precision or a wider exponent range must override it to avoid
+    /// losing low bits or underflowing to zero during that conversion. Built-in
+    /// `Float` reads its backend representation directly; `RealBall` bounds the
+    /// absolute value of every point in the ball, including its radius.
+    #[inline]
+    fn absolute_magnitude(&self) -> Magnitude {
+        Magnitude::from_f64(self.to_f64())
+    }
+
+    /// Bound the absolute value from below for use in denominators.
+    ///
+    /// The default assumes `absolute_magnitude` rounds a point value upward
+    /// once. Types returning a looser upper bound must override this method.
+    /// For intervals, this bounds the absolute value of the closest point to zero.
+    #[inline]
+    fn absolute_magnitude_lower(&self) -> Magnitude {
+        self.absolute_magnitude().next_down()
+    }
+
     fn round_to_nearest_integer(&self) -> Integer;
 }
 

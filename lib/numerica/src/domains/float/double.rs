@@ -9,7 +9,9 @@ use rand::Rng;
 use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
-use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
+use super::{
+    Constructible, FixedPrecision, Float, FloatLike, Magnitude, Real, RealLike, SingleFloat,
+};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
@@ -425,6 +427,29 @@ impl SingleFloat for DoubleFloat {
 }
 
 impl RealLike for DoubleFloat {
+    fn absolute_magnitude(&self) -> Magnitude {
+        let hi = self.0.hi();
+        let lo = self.0.lo();
+        if !hi.is_finite() || !lo.is_finite() {
+            return Magnitude::from_f64(hi + lo);
+        }
+        if hi == 0. {
+            return Magnitude::from_f64(lo);
+        }
+
+        let upper = Magnitude::from_f64(hi);
+        // A normalized low limb is at most half an ulp of the high limb.
+        // Therefore the 32-bit upward rounding of |hi| already covers it,
+        // except when |hi| itself lies exactly on a magnitude boundary.
+        // Retaining the low limb's sign makes the predecessor a lower bound.
+        let outward_low = if hi.is_sign_negative() { -lo } else { lo };
+        if outward_low > 0. && upper.to_f64() == Some(hi.abs()) {
+            upper + Magnitude::ONE.scale_pow2(upper.exponent() as i64 - 31)
+        } else {
+            upper
+        }
+    }
+
     fn to_usize_clamped(&self) -> usize {
         if !self.0.is_finite() {
             return if self.0.hi().is_sign_negative() {
@@ -861,5 +886,67 @@ mod pow_tests {
             (square - DoubleFloat::from(1.)) / delta,
             DoubleFloat::from(-2.) + delta
         );
+    }
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::*;
+
+    fn as_float(magnitude: Magnitude) -> Float {
+        let significand = Float::with_val(160, magnitude.significand());
+        let exponent = magnitude.exponent() as i64 - 31;
+        let scale = Float::with_val(160, 2).pow(exponent.unsigned_abs());
+        if exponent >= 0 {
+            significand * scale
+        } else {
+            significand / scale
+        }
+    }
+
+    #[test]
+    fn absolute_magnitude_is_tight_for_signed_low_limbs() {
+        let tiny = 2f64.powi(-54);
+        for (hi, lo) in [
+            (1., tiny),
+            (1., -tiny),
+            (-1., tiny),
+            (-1., -tiny),
+            (1. + 2f64.powi(-31), tiny),
+            (1. + 2f64.powi(-31), -tiny),
+            (1. + 2f64.powi(-32), tiny),
+            (1. + 2f64.powi(-32), -tiny),
+            (f64::MAX, 2f64.powi(969)),
+            (f64::MAX, -2f64.powi(969)),
+            (-f64::MAX, 2f64.powi(969)),
+            (-f64::MAX, -2f64.powi(969)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (f64::from_bits(1), 0.),
+            (-f64::from_bits(1), 0.),
+        ] {
+            let value = DoubleFloat::from_compensated_sum(hi, lo);
+            let exact = Float::from(value).norm();
+            let upper = value.absolute_magnitude();
+            assert!(upper.is_finite(), "{hi:?}, {lo:?}");
+            assert!(as_float(upper) >= exact, "upper: {hi:?}, {lo:?}");
+            assert!(as_float(upper.next_down()) < exact, "lower: {hi:?}, {lo:?}");
+        }
+        let below = DoubleFloat::from_compensated_sum(1., -tiny);
+        assert_eq!(below.absolute_magnitude(), Magnitude::ONE);
+    }
+
+    #[test]
+    fn absolute_magnitude_handles_zero_and_nonfinite_components() {
+        for zero in [0., -0.] {
+            assert!(DoubleFloat::from(zero).absolute_magnitude().is_zero());
+        }
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                DoubleFloat::from(infinite)
+                    .absolute_magnitude()
+                    .is_infinite()
+            );
+        }
+        assert!(DoubleFloat::from(f64::NAN).absolute_magnitude().is_nan());
     }
 }

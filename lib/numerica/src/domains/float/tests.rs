@@ -244,8 +244,13 @@ fn error_propagation() {
         + b.acosh() / f.atanh()
         + b.powf(&a);
     assert_eq!(*r.get_num(), 17293.219725825093);
-    // error is 14.836811363436391 when the f64 could have theoretically grown in between
-    assert_eq!(r.get_precision(), Some(14.836795991431746));
+    let expected_precision = 14.836795991431746;
+    let precision = r.get_precision().unwrap();
+    // Upward rounding of the 32-bit error magnitudes slightly reduces the
+    // reported precision. Allow accumulated magnitude rounding, with only
+    // binary64 logarithm rounding in the opposite direction.
+    assert!(precision <= expected_precision + 1e-12);
+    assert!(expected_precision - precision < 1e-8);
 }
 
 #[test]
@@ -253,7 +258,10 @@ fn error_truncation() {
     let a = ErrorPropagatingFloat::new(0.0000000123456789, 9.)
         .exp()
         .log();
-    assert_eq!(a.get_precision(), Some(8.046104745509947));
+    let expected_precision = 8.046104745509947;
+    let precision = a.get_precision().unwrap();
+    assert!(precision <= expected_precision + 1e-12);
+    assert!(expected_precision - precision < 1e-8);
 }
 
 #[test]

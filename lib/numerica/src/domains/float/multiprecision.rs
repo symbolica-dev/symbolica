@@ -11,12 +11,13 @@ use xprec::{CompensatedArithmetic, Df64};
 #[cfg(feature = "float-mpfr")]
 use crate::domains::backend::float::CompleteRound;
 
-use super::{DoubleFloat, FloatLike, Real, RealLike, SingleFloat};
+use super::{DoubleFloat, FloatLike, Magnitude, Real, RealLike, SingleFloat};
 use crate::domains::{
     InternalOrdering,
     backend::float::{
         Assign, Constant, MultiPrecisionFloat, MultiPrecisionFloatInteger,
-        MultiPrecisionFloatRational, MultiPrecisionFloatRounding, Pow, RoundingDirection,
+        MultiPrecisionFloatMagnitude, MultiPrecisionFloatRational, MultiPrecisionFloatRounding,
+        Pow, RoundingDirection,
     },
     integer::Integer,
     rational::Rational,
@@ -1002,6 +1003,10 @@ impl SingleFloat for Float {
 }
 
 impl RealLike for Float {
+    fn absolute_magnitude(&self) -> Magnitude {
+        self.0.absolute_magnitude()
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.0
             .to_integer()
@@ -1247,7 +1252,40 @@ impl Rational {
 
 #[cfg(test)]
 mod precision_tests {
-    use super::Float;
+    use super::{Float, Magnitude, RealLike};
+
+    #[test]
+    fn absolute_magnitude_preserves_extended_exponents() {
+        let large = Float::parse("1e1000", Some(160)).unwrap();
+        let small = Float::parse("1e-1000", Some(160)).unwrap();
+        assert!(large.absolute_magnitude() > Magnitude::from_f64(f64::MAX));
+        assert!(small.absolute_magnitude() > Magnitude::ZERO);
+        assert!(small.absolute_magnitude() < Magnitude::from_f64(f64::MIN_POSITIVE));
+        assert_eq!(large.absolute_magnitude(), (-large).absolute_magnitude());
+        assert_eq!(small.absolute_magnitude(), (-small).absolute_magnitude());
+    }
+
+    #[test]
+    fn absolute_magnitude_rounds_discarded_mantissa_bits_up() {
+        let value = Float::parse("1.000000000000000000000000000001", Some(160)).unwrap();
+        let magnitude = value.absolute_magnitude();
+        assert!(magnitude > Magnitude::from_f64(1.0));
+        assert_eq!(magnitude, (-value).absolute_magnitude());
+        for value in [
+            0.0,
+            1.0,
+            -16.0,
+            0.25,
+            32.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                Float::with_val(160, value).absolute_magnitude(),
+                Magnitude::from_f64(value)
+            );
+        }
+    }
 
     #[test]
     fn zero_does_not_restore_lost_precision() {

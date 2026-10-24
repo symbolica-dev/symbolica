@@ -7,7 +7,7 @@ use std::{
 
 use rand::Rng;
 
-use super::{Complex, Float, FloatLike, Real, RealLike, RoundingDirection, SingleFloat};
+use super::{Complex, Float, FloatLike, Magnitude, Real, RealLike, RoundingDirection, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A closed real interval represented by a center and a nonnegative radius.
@@ -580,6 +580,23 @@ impl SingleFloat for RealBall {
 }
 
 impl RealLike for RealBall {
+    fn absolute_magnitude(&self) -> Magnitude {
+        self.center.absolute_magnitude() + self.radius.absolute_magnitude()
+    }
+
+    fn absolute_magnitude_lower(&self) -> Magnitude {
+        let zero = self.center.zero();
+        let lower = self.lower_bound();
+        if lower > zero {
+            return lower.absolute_magnitude().next_down();
+        }
+        let upper = self.upper_bound();
+        if upper < zero {
+            return upper.absolute_magnitude().next_down();
+        }
+        Magnitude::ZERO
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.center.to_usize_clamped()
     }
@@ -590,6 +607,54 @@ impl RealLike for RealBall {
 
     fn round_to_nearest_integer(&self) -> Integer {
         self.center.round_to_nearest_integer()
+    }
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::{Float, Magnitude, RealBall, RealLike};
+
+    #[test]
+    fn absolute_magnitude_includes_radius_and_preserves_extended_range() {
+        let tiny = Float::parse("1e-1000", Some(160)).unwrap();
+        let large = Float::parse("1e1000", Some(160)).unwrap();
+        for value in [tiny, large] {
+            let expected = value.absolute_magnitude();
+            let zero = Float::with_val(160, 0);
+            assert_eq!(
+                RealBall::new(zero, value.clone()).absolute_magnitude(),
+                expected
+            );
+            assert_eq!(RealBall::exact(-value).absolute_magnitude(), expected);
+        }
+        let ball = RealBall::new(Float::with_val(160, -3), Float::with_val(160, 4));
+        assert_eq!(ball.absolute_magnitude(), Magnitude::from_f64(7.0));
+        assert_eq!(
+            RealBall::exact(Float::with_val(160, 0)).absolute_magnitude(),
+            Magnitude::ZERO
+        );
+    }
+
+    #[test]
+    fn absolute_magnitude_lower_bounds_the_closest_point_to_zero() {
+        for center in [-1, 0, 1] {
+            let ball = RealBall::new(Float::with_val(160, center), Float::with_val(160, 1));
+            assert_eq!(ball.absolute_magnitude_lower(), Magnitude::ZERO);
+        }
+        for center in [-3, 3] {
+            let ball = RealBall::new(Float::with_val(160, center), Float::with_val(160, 1));
+            let lower = ball.absolute_magnitude_lower();
+            assert!(lower > Magnitude::ZERO);
+            assert!(lower <= Magnitude::from_f64(2.0));
+            assert!(lower < ball.absolute_magnitude().next_down());
+        }
+        let tiny = Float::parse("1e-1000", Some(160)).unwrap();
+        let ball = RealBall::exact(tiny.clone());
+        assert_eq!(
+            ball.absolute_magnitude_lower(),
+            tiny.absolute_magnitude().next_down()
+        );
+        assert!(ball.absolute_magnitude_lower() > Magnitude::ZERO);
     }
 }
 
