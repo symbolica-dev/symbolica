@@ -1,5 +1,8 @@
 //! Low-level representation of expressions.
 
+mod compact;
+pub use compact::CompactAtomView;
+
 use ahash::HashMap;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{Buf, BufMut};

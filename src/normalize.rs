@@ -4,7 +4,8 @@ use smallvec::SmallVec;
 
 use crate::{
     atom::{
-        Add, AddView, Atom, AtomCore, AtomView, Fun, InlineVar, MulView, PowView, Symbol,
+        Add, AddView, Atom, AtomCore, AtomView, CompactAtomView, Fun, InlineVar, MulView, PowView,
+        Symbol,
         representation::{FunView, InlineNum, ListIterator},
     },
     coefficient::{Coefficient, CoefficientView},
@@ -1057,7 +1058,7 @@ impl AtomView<'_> {
         let mut new_sum = workspace.new_atom();
         let ns = new_sum.to_add();
 
-        let mut atom_sort_buf: SmallVec<[(AtomView<'_>, &[u8]); 20]> =
+        let mut atom_sort_buf: SmallVec<[(CompactAtomView<'_>, &[u8]); 20]> =
             SmallVec::with_capacity(a.get_nargs());
 
         let mut norm_arg = None;
@@ -1090,7 +1091,7 @@ impl AtomView<'_> {
                     // If every term changes, just read ns in one pass.
                     staged_prefix = Some(x);
                 } else {
-                    atom_sort_buf.resize(atom_sort_buf.len() + count, (x, &[]));
+                    atom_sort_buf.resize(atom_sort_buf.len() + count, (x.into(), &[]));
                 }
             } else {
                 if let AtomView::Num(n) = x {
@@ -1102,28 +1103,28 @@ impl AtomView<'_> {
                     }
                 }
                 if let Some(marker) = staged_prefix.take() {
-                    atom_sort_buf.resize(ns.get_nargs(), (marker, &[]));
+                    atom_sort_buf.resize(ns.get_nargs(), (marker.into(), &[]));
                 }
                 if let AtomView::Add(sum) = x {
                     for term in sum {
-                        atom_sort_buf.push((term, term.get_term_cmp_slice()));
+                        atom_sort_buf.push((term.into(), term.get_term_cmp_slice()));
                     }
                 } else {
-                    atom_sort_buf.push((x, x.get_term_cmp_slice()));
+                    atom_sort_buf.push((x.into(), x.get_term_cmp_slice()));
                 }
             }
         }
 
         if staged_prefix.is_some() {
             for term in ns.to_add_view().iter() {
-                atom_sort_buf.push((term, term.get_term_cmp_slice()));
+                atom_sort_buf.push((term.into(), term.get_term_cmp_slice()));
             }
         } else if ns.get_nargs() != 0 {
             let mut normalized = ns.to_add_view().iter();
             for entry in &mut atom_sort_buf {
-                if entry.0.needs_normalization() {
+                if entry.0.unpack().needs_normalization() {
                     let term = normalized.next().unwrap();
-                    *entry = (term, term.get_term_cmp_slice());
+                    *entry = (term.into(), term.get_term_cmp_slice());
                 }
             }
             debug_assert!(normalized.next().is_none());
@@ -1143,7 +1144,7 @@ impl AtomView<'_> {
 
         for b in atom_sort_buf.chunk_by(|x, y| x.1 == y.1) {
             if b.len() == 1 {
-                let first = b[0].0;
+                let first = b[0].0.unpack();
                 if let AtomView::Num(n) = first
                     && matches!(
                         n.get_coeff_view(),
@@ -1175,7 +1176,7 @@ impl AtomView<'_> {
             // requires it. Restarting preserves the original addition
             // order and does not introduce integer zero into a field.
             let integer_sum = b.iter().try_fold(0i64, |sum, (cur, _)| {
-                if let CoefficientView::Natural(n, 1, 0, 1) = coefficient(*cur) {
+                if let CoefficientView::Natural(n, 1, 0, 1) = coefficient(cur.unpack()) {
                     sum.checked_add(n)
                 } else {
                     None
@@ -1184,14 +1185,14 @@ impl AtomView<'_> {
             let coeff = if let Some(sum) = integer_sum {
                 Coefficient::from(sum)
             } else {
-                let mut coeff = coefficient(b[0].0).to_owned();
+                let mut coeff = coefficient(b[0].0.unpack()).to_owned();
                 for (cur, _) in &b[1..] {
-                    coeff = coeff + coefficient(*cur).to_owned();
+                    coeff = coeff + coefficient(cur.unpack()).to_owned();
                 }
                 coeff
             };
 
-            let first = b[0].0;
+            let first = b[0].0.unpack();
             if coeff.is_zero() {
                 continue;
             }

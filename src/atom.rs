@@ -76,8 +76,8 @@ use std::{
 pub use self::alias::{AliasedAtom, AliasedAtomPrinter};
 pub use self::core::AtomCore;
 pub use self::representation::{
-    Add, AddView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice, Mul, MulView, Num,
-    NumView, Pow, PowView, Var, VarView,
+    Add, AddView, CompactAtomView, Fun, InlineNum, InlineVar, KeyLookup, ListIterator, ListSlice,
+    Mul, MulView, Num, NumView, Pow, PowView, Var, VarView,
 };
 use self::representation::{FunView, RawAtom};
 pub use self::zero_test::ZeroTestSettings;
