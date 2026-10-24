@@ -95,13 +95,17 @@ rounding while reconstructing a number. The readable decimal backtick suffixes
 remain accepted for input and optional human formatting; they do not encode all
 stored metadata losslessly.
 
-Expression pickles now contain a versioned checked atom export including the
-required symbol state. They can restore expressions in a fresh process with a
+Expression pickles use a `SYMPKL\x01` envelope containing a checked atom export and
+the required symbol state. They can restore expressions in a fresh process with a
 different symbol registration order. Legacy raw-expression pickles are rejected;
 recreate them using an environment that can read their original representation.
 Saved evaluators also have a new explicit format version and must be rebuilt from
 their expressions when upgrading from an older format. Checked atom/state exports
-use versions 6/11 and reject incompatible versions.
+use versions 7/12 and reject all earlier versions before reading their payloads.
+Atom/state versions 6/11 were used by both main's untracked compact layout and an
+older tracked layout, so these identifiers cannot distinguish the incompatible
+representations. To migrate an older export, read it with its original version
+and export lossless expression text for the current version.
 
 ## Numerical propagation
 

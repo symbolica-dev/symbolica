@@ -221,12 +221,17 @@ fn rational_rename() {
 fn import_rejects_legacy_float_encoding() {
     let mut export = Vec::new();
     parse!("1.25*x").export(&mut export).unwrap();
-    // Version 6 stored float coefficients without their absolute errors.
-    export[4..6].copy_from_slice(&6u16.to_le_bytes());
-    let err = Atom::import(&mut export.as_slice(), None).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    assert!(
-        err.to_string()
-            .contains("Unsupported export format version 6")
-    );
+    // These versions cannot identify the current tracked representation. In
+    // particular, version 11 was used by incompatible main and tracked layouts.
+    for version in [6u16, 10, 11] {
+        export[4..6].copy_from_slice(&version.to_le_bytes());
+        // Supply only the magic and version: rejection must precede any payload
+        // read, rather than depend on the old representation's byte layout.
+        let err = Atom::import(&mut &export[..6], None).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains(&format!("Unsupported export format version {version}"))
+        );
+    }
 }

@@ -75,11 +75,13 @@ borrowed view nor the owned complex arithmetic type grows. An imaginary zero
 with any nonzero error, including NaN, infinity, or errors outside the binary64
 range, still uses the full payload. Signed zero is canonicalized as before.
 
-Each stored magnitude occupies eight bytes. Tracked atom format version 6 and state
-format version 11 reject previous external formats, including the hexadecimal
+Each stored magnitude occupies eight bytes. Tracked atom format version 7 and state
+format version 12 reject previous external formats, including the hexadecimal
 float payloads in versions 3 and 8, the initial binary formats 4 and 9, and
-the untracked main proposal formats 5 and 10. Older readers cannot decode the binary
-central values or shortened imaginary payloads. Rejection also
+the untracked main proposal formats 5 and 10. Versions 6 and 11 were used by both
+main's untracked compact layout and an older tracked layout, so those ambiguous
+identifiers are also rejected. Older readers cannot decode the current compact
+nodes and tracked float payloads. Rejection also
 prevents mixing alternate encodings of equal atoms, whose equality and hashing
 use packed bytes. Bincode uses the same versioned atom format when enabled.
 
@@ -148,7 +150,9 @@ exact requires the explicit `treat_floats_as_exact(true)` setting.
 ### Production binary float payloads (2026-10-23)
 
 Both MPFR and Astro now use the same canonical binary central-value format.
-Tracked atom/state formats are 6/11; the independent main proposal uses 5/10. Packed coefficients write directly into their final
+Current tracked atom/state formats are 7/12. The original independent main proposal
+used 5/10; main's later compact-node formats 6/11 conflict with the identifiers of
+the older tracked layout and cannot be imported here. Packed coefficients write directly into their final
 buffer; calculating their size does not allocate. Borrowed zero and finite
 checks read the class byte without constructing a multiprecision value.
 `Float::serialize()` returns binary bytes, `serialize_into()` appends to a
