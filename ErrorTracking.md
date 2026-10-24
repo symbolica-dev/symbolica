@@ -117,6 +117,20 @@ complex `log`, cover principal-argument jumps across the negative real axis.
 Square root retains its nonlinear handling at zero and across complex branch
 cuts. Bounds can deliberately become large or unbounded near singularities.
 
+For small argument errors at fixed order, gamma, erf, polygamma, polylog and
+Bessel J/Y/I/K use analytic first derivatives. A derivative `u + i*v` maps
+component errors `dx, dy` to `|u|*dx + |v|*dy` and `|v|*dx + |u|*dy`, without
+narrowing them to binary64. A local second-derivative allowance retains curvature
+in stationary output directions. Integer-order Bessel and polylog limits at zero
+are evaluated explicitly; real inputs stay real, and purely imaginary erf inputs
+stay purely imaginary.
+
+Larger or poorly conditioned neighborhoods, uncertain order parameters, zeta,
+and unavailable analytic derivatives retain the extra-precision numerical-probe
+fallback. Pole, branch-cut and broad-oscillation checks remain in place. The
+curvature allowance and the probe fallback are numerical estimates, not certified
+interval bounds.
+
 The implementation still relies on backend arithmetic and precision-based
 roundoff estimates. It does not certify every intermediate rounding operation or
 the domain of every perturbed input, and it does not track correlations.

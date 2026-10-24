@@ -1,7 +1,9 @@
 //! Uncertainty estimates for the numerical special-function implementations.
 //!
-//! Symmetric, extra-precision probes retain nonlinear changes at stationary
-//! points. Probes use at least a resolvable local step, scaling their response
+//! Analytic argument derivatives propagate small errors component by component,
+//! with a local curvature allowance. Symmetric, extra-precision probes retain
+//! the fallback for larger errors, uncertain orders and unsupported derivatives.
+//! Probes use at least a resolvable local step, scaling their response
 //! by the actual error with wide-exponent magnitudes. Mixed-coordinate probes
 //! account for simultaneous argument and order perturbations. These inflated
 //! numerical estimates are not certified interval enclosures: sampling cannot
@@ -9,6 +11,8 @@
 
 use super::*;
 use crate::domains::float::Magnitude;
+
+mod linear;
 
 type Tracked = Complex<ErrorPropagatingFloat<Float>>;
 
@@ -229,6 +233,27 @@ fn positive_real_neighborhood(argument: &Tracked) -> bool {
         && !reaches_zero(argument.re.get_num(), argument.re.get_error_magnitude())
 }
 
+fn regular_bessel_origin(
+    function: SpecialFunction,
+    order: Option<&Tracked>,
+    argument: &Tracked,
+) -> bool {
+    matches!(
+        function,
+        SpecialFunction::BesselJ | SpecialFunction::BesselI
+    ) && argument.re.get_num().is_zero()
+        && argument.im.get_num().is_zero()
+        && order.is_some_and(|order| {
+            order.re.is_exact()
+                && order.im.is_exact_zero()
+                && order
+                    .re
+                    .get_num()
+                    .try_to_rational()
+                    .is_some_and(|value| value.is_integer())
+        })
+}
+
 fn broad_oscillatory_neighborhood(
     function: SpecialFunction,
     order: Option<&Tracked>,
@@ -282,7 +307,7 @@ fn broad_oscillatory_neighborhood(
     ) {
         // The z^order factor changes phase on the scale |order|/|z|,
         // even when the absolute argument perturbation is very small.
-        if !order_size.is_zero() {
+        if !order_size.is_zero() && !regular_bessel_origin(function, order, argument) {
             let distance = argument
                 .re
                 .get_num()
@@ -328,7 +353,7 @@ fn probe_rate(function: SpecialFunction, order: Option<&Tracked>, argument: &Tra
         | SpecialFunction::BesselY
         | SpecialFunction::BesselI
         | SpecialFunction::BesselK
-            if !order_size.is_zero() =>
+            if !order_size.is_zero() && !regular_bessel_origin(function, order, argument) =>
         {
             let distance = argument
                 .re
@@ -413,6 +438,59 @@ fn variation(value: &Complex<Float>, origin: &Complex<Float>, ratio: Magnitude) 
     ]
 }
 
+/// Use the analytic complex Jacobian only in a small local neighborhood.
+/// The remainder is a numerical curvature estimate, not an interval certificate.
+fn linear_estimate(
+    function: SpecialFunction,
+    order: Option<&Tracked>,
+    argument: &Tracked,
+    work_order: Option<&Complex<Float>>,
+    work_argument: &Complex<Float>,
+    origin: &Complex<Float>,
+    precision: u32,
+) -> Option<[Magnitude; 2]> {
+    // The analytic formulas differentiate the argument at fixed order. Keep
+    // mixed argument/order uncertainty on the existing probing path.
+    if order.is_some_and(|order| !order.re.is_exact() || !order.im.is_exact()) {
+        return None;
+    }
+    let real_error = argument.re.get_error_magnitude();
+    let imaginary_error = argument.im.get_error_magnitude();
+    let radius = real_error + imaginary_error;
+    if radius.is_zero() {
+        return Some([Magnitude::ZERO; 2]);
+    }
+    let rate = probe_rate(function, order, argument);
+    let local_size = radius * rate;
+    if !local_size.is_finite() || local_size > Magnitude::ONE.scale_pow2(-16) {
+        return None;
+    }
+    let (first, second) =
+        linear::derivatives(function, work_order, work_argument, origin, precision)?;
+    let upper = |value: &Float| value.absolute_magnitude() + roundoff(value);
+    let real_weight = upper(&first.re);
+    let imaginary_weight = upper(&first.im);
+    let first_size = real_weight + imaginary_weight;
+    let second_size = upper(&second.re) + upper(&second.im);
+    if first_size.is_zero() && second_size.is_zero() {
+        // A higher-order stationary point needs the finite-perturbation path.
+        return None;
+    }
+    let linear_size = first_size * radius;
+    let curvature =
+        (second_size * radius * radius + linear_size * local_size * local_size).scale_pow2(1);
+    // Near a badly conditioned first derivative, local Taylor coefficients
+    // alone are insufficient. Exact stationary points keep their quadratic
+    // allowance, while other poorly conditioned neighborhoods use probes.
+    if !first_size.is_zero() && curvature > linear_size.scale_pow2(-16) {
+        return None;
+    }
+    Some([
+        real_weight * real_error + imaginary_weight * imaginary_error + curvature,
+        imaginary_weight * real_error + real_weight * imaginary_error + curvature,
+    ])
+}
+
 pub(super) fn evaluate(
     function: SpecialFunction,
     order: Option<&Tracked>,
@@ -430,6 +508,9 @@ pub(super) fn evaluate(
     let order_center = order.map(|value| center(value, precision));
     let value = function.value(order_center.as_ref(), &argument_center, precision)?;
     let real_output = real_neighborhood(function, order, argument);
+    // erf has real Taylor coefficients and is odd, hence erf(i*y) is purely
+    // imaginary for every real y, including a purely imaginary uncertainty.
+    let imaginary_output = matches!(function, SpecialFunction::Erf) && argument.re.is_exact_zero();
     let finish_result = |mut value: Complex<Float>, mut errors: [Magnitude; 2]| {
         if real_output {
             // Integer Bessel powers and complex series may leave an imaginary
@@ -440,6 +521,12 @@ pub(super) fn evaluate(
             }
             value.im = Float::new(value.im.prec());
             errors[1] = Magnitude::ZERO;
+        } else if imaginary_output {
+            if !errors[1].is_infinite() {
+                errors[1] += value.re.absolute_magnitude();
+            }
+            value.re = Float::new(value.re.prec());
+            errors[0] = Magnitude::ZERO;
         }
         finish(value, errors)
     };
@@ -475,6 +562,22 @@ pub(super) fn evaluate(
     else {
         return Some(unresolved(value, Magnitude::INFINITY));
     };
+
+    if let Some(mut estimates) = linear_estimate(
+        function,
+        order,
+        argument,
+        work_order.as_ref(),
+        &work_argument,
+        &origin,
+        work,
+    ) {
+        let correction = variation(&origin, &value, Magnitude::ONE);
+        for component in 0..2 {
+            estimates[component] += correction[component];
+        }
+        return Some(finish_result(value, estimates));
+    }
 
     let mut axes = Vec::new();
     // The resolvable probe floor must also stay inside the local phase regime;
