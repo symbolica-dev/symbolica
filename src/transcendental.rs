@@ -6,7 +6,7 @@ use std::{
 mod cpp;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
+    atom::{Atom, AtomCore, AtomOrView, AtomView, EvalFn, EvaluationInfo, FunctionBuilder, Symbol},
     coefficient::{Coefficient, CoefficientView},
     domains::{
         algebraic::{AlgebraicExtension, AlgebraicNumber, Root},
@@ -630,15 +630,35 @@ impl SpecialSymbols {
                             .unwrap_or_else(|| Float::with_val(53, f64::NAN))
                         })
                     })
-                    .register_tagged(|tags| {
+                    .register_tagged(|tags| -> EvalFn<f64> {
                         let order = complex_float_tag("polylog", tags, 53).ok();
-                        Box::new(move |args: &[f64]| polylog_eval_f64(order.clone(), args))
+                        if order.as_ref().is_some_and(|order| {
+                            order.im.is_zero() && order.re == Float::with_val(order.re.prec(), 2)
+                        }) {
+                            Box::new(move |args: &[f64]| match args {
+                                [arg] if arg.is_finite() => dilog_f64(*arg),
+                                _ => polylog_eval_f64(order.as_ref(), args),
+                            })
+                        } else {
+                            Box::new(move |args: &[f64]| polylog_eval_f64(order.as_ref(), args))
+                        }
                     })
-                    .register_tagged(|tags| {
+                    .register_tagged(|tags| -> EvalFn<Complex<f64>> {
                         let order = complex_float_tag("polylog", tags, 53).ok();
-                        Box::new(move |args: &[Complex<f64>]| {
-                            polylog_eval_complex_f64(order.clone(), args)
-                        })
+                        if order.as_ref().is_some_and(|order| {
+                            order.im.is_zero() && order.re == Float::with_val(order.re.prec(), 2)
+                        }) {
+                            Box::new(move |args: &[Complex<f64>]| match args {
+                                [arg] if arg.re.is_finite() && arg.im.is_finite() => {
+                                    dilog_complex_f64(*arg)
+                                }
+                                _ => polylog_eval_complex_f64(order.as_ref(), args),
+                            })
+                        } else {
+                            Box::new(move |args: &[Complex<f64>]| {
+                                polylog_eval_complex_f64(order.as_ref(), args)
+                            })
+                        }
                     }),
                 )
             },
@@ -3035,7 +3055,7 @@ fn polygamma_eval_complex_f64(order: Option<u32>, args: &[Complex<f64>]) -> Comp
     polygamma_numeric_eval(order, &complex_f64_to_float(arg, 53), 53).to_f64()
 }
 
-fn polylog_eval_f64(order: Option<Complex<Float>>, args: &[f64]) -> f64 {
+fn polylog_eval_f64(order: Option<&Complex<Float>>, args: &[f64]) -> f64 {
     let Some(order) = order else {
         return f64::NAN;
     };
@@ -3043,21 +3063,230 @@ fn polylog_eval_f64(order: Option<Complex<Float>>, args: &[f64]) -> f64 {
         return f64::NAN;
     };
     let arg = Complex::new(Float::with_val(53, *arg), Float::new(53));
-    polylog_numeric_eval(&order, &arg, 53)
+    polylog_numeric_eval(order, &arg, 53)
         .map(|x| x.re.to_f64())
         .unwrap_or(f64::NAN)
 }
 
-fn polylog_eval_complex_f64(order: Option<Complex<Float>>, args: &[Complex<f64>]) -> Complex<f64> {
+fn polylog_eval_complex_f64(order: Option<&Complex<Float>>, args: &[Complex<f64>]) -> Complex<f64> {
     let Some(order) = order else {
         return Complex::new(f64::NAN, f64::NAN);
     };
     let [arg] = args else {
         return Complex::new(f64::NAN, f64::NAN);
     };
-    polylog_numeric_eval(&order, &complex_f64_to_float(arg, 53), 53)
+    polylog_numeric_eval(order, &complex_f64_to_float(arg, 53), 53)
         .map(|x| x.to_f64())
         .unwrap_or_else(|| Complex::new(f64::NAN, f64::NAN))
+}
+
+/// `pi^2/6` and `pi^2/3`, correctly rounded to binary64.
+const PI_SQUARED_OVER_SIX: f64 = 1.644_934_066_848_226_4;
+const PI_SQUARED_OVER_THREE: f64 = 3.289_868_133_696_452_9;
+
+/// `B_(2k)/(2k+1)!` for `k = 1..=10`: with `u = -log(1-z)`,
+/// `Li2(z) = u - u^2/4 + sum_k B_(2k)/(2k+1)! u^(2k+1)` for `|u| < 2 pi`.
+const DILOG_BERNOULLI: [f64; 10] = [
+    1.0 / 36.0,
+    -1.0 / 3600.0,
+    1.0 / 211680.0,
+    -1.0 / 10886400.0,
+    1.0 / 526901760.0,
+    -4.064_761_645_144_225_5e-11,
+    8.921_691_020_456_452_6e-13,
+    -1.993_929_586_072_107_6e-14,
+    4.518_980_029_619_918_2e-16,
+    -1.035_651_761_218_124_7e-17,
+];
+
+/// The Bernoulli series of `Li2(w)` in `u = -log(1-w)`.
+///
+/// Callers keep `|u| <= pi/3`, where the omitted `k = 11` term is below
+/// `1e-18` relative to the result.
+#[inline]
+fn dilog_bernoulli_series_f64(u: f64) -> f64 {
+    let v = u * u;
+    // Estrin's scheme, as in the complex series. No mul_add: without a target
+    // FMA feature it becomes a libm call.
+    let b = &DILOG_BERNOULLI;
+    let (v2, linear) = (v * v, |c0: f64, c1: f64| c0 + c1 * v);
+    let v4 = v2 * v2;
+    let low = linear(b[0], b[1]) + v2 * linear(b[2], b[3]);
+    let high = linear(b[4], b[5]) + v2 * linear(b[6], b[7]);
+    let sum = low + v4 * high + v4 * v4 * linear(b[8], b[9]);
+    u - v / 4.0 + u * v * sum
+}
+
+#[inline]
+fn dilog_bernoulli_series_complex_f64(u: Complex<f64>) -> Complex<f64> {
+    let v = mul_complex_f64(u, u);
+    // Estrin's scheme in v: short dependency chains instead of nine
+    // dependent complex multiply-adds.
+    let b = &DILOG_BERNOULLI;
+    let linear = |c0: f64, c1: f64| Complex::new(c0 + c1 * v.re, c1 * v.im);
+    let add = |a: Complex<f64>, b: Complex<f64>| Complex::new(a.re + b.re, a.im + b.im);
+    let v2 = mul_complex_f64(v, v);
+    let v4 = mul_complex_f64(v2, v2);
+    let v8 = mul_complex_f64(v4, v4);
+    let low = add(linear(b[0], b[1]), mul_complex_f64(v2, linear(b[2], b[3])));
+    let high = add(linear(b[4], b[5]), mul_complex_f64(v2, linear(b[6], b[7])));
+    let sum = add(
+        add(low, mul_complex_f64(v4, high)),
+        mul_complex_f64(v8, linear(b[8], b[9])),
+    );
+    let uv = Complex::new(u.re * v.re - u.im * v.im, u.re * v.im + u.im * v.re);
+    Complex::new(
+        u.re - v.re / 4.0 + (uv.re * sum.re - uv.im * sum.im),
+        u.im - v.im / 4.0 + (uv.re * sum.im + uv.im * sum.re),
+    )
+}
+
+/// Principal `log(1 + w)` without losing the relative precision of small `w`.
+#[inline]
+fn log_one_plus_complex_f64(w: Complex<f64>) -> Complex<f64> {
+    let real = 1.0 + w.re;
+    let modulus_log = if w.re.abs() < 0.5 && w.im.abs() < 0.5 {
+        // |1+w|^2 - 1 = w.re (2 + w.re) + w.im^2, without forming |1+w|^2.
+        0.5 * (w.re * (2.0 + w.re) + w.im * w.im).ln_1p()
+    } else {
+        log_modulus_f64(real, w.im)
+    };
+    Complex::new(modulus_log, w.im.atan2(real))
+}
+
+/// `log(|x + i y|)` for finite, not both zero, components.
+#[inline]
+fn log_modulus_f64(x: f64, y: f64) -> f64 {
+    let squared = x * x + y * y;
+    if squared.is_normal() && squared.is_finite() {
+        0.5 * squared.ln()
+    } else {
+        x.hypot(y).ln()
+    }
+}
+
+#[inline]
+fn log_complex_f64(z: Complex<f64>) -> Complex<f64> {
+    Complex::new(log_modulus_f64(z.re, z.im), z.im.atan2(z.re))
+}
+
+/// `1/z` without overflowing or underflowing `|z|^2` (Smith's algorithm).
+#[inline]
+fn inverse_complex_f64(z: Complex<f64>) -> Complex<f64> {
+    if z.re.abs() >= z.im.abs() {
+        let ratio = z.im / z.re;
+        let denominator = z.re + z.im * ratio;
+        Complex::new(1.0 / denominator, -ratio / denominator)
+    } else {
+        let ratio = z.re / z.im;
+        let denominator = z.re * ratio + z.im;
+        Complex::new(ratio / denominator, -1.0 / denominator)
+    }
+}
+
+#[inline]
+fn mul_complex_f64(a: Complex<f64>, b: Complex<f64>) -> Complex<f64> {
+    Complex::new(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
+}
+
+/// The real dilogarithm `Li2(x)` in binary64, for real `x`.
+///
+/// For `x > 1` this returns the real part of the continuation, which is the
+/// same on both sides of the cut. It agrees with the numerical value of
+/// `polylog(2, x)` to a few ulps away from the zero of `Re Li2(x)` near
+/// `x = 12.6`, where only absolute accuracy is retained. Non-finite input
+/// gives `NaN`.
+pub fn dilog_f64(x: f64) -> f64 {
+    if !x.is_finite() {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        // Like polylog(2, 0), including for a negative zero.
+        return 0.0;
+    }
+    if x < -1.0 {
+        // Li2(x) = -Li2(1/x) - pi^2/6 - log(-x)^2/2.
+        let log = (-x).ln();
+        let series = dilog_bernoulli_series_f64(-(-1.0 / x).ln_1p());
+        -series - PI_SQUARED_OVER_SIX - 0.5 * log * log
+    } else if x <= 0.5 {
+        dilog_bernoulli_series_f64(-(-x).ln_1p())
+    } else if x < 1.0 {
+        // Li2(x) = -Li2(1-x) + pi^2/6 - log(x) log(1-x); 1-x is exact.
+        let log = x.ln();
+        -dilog_bernoulli_series_f64(-log) + PI_SQUARED_OVER_SIX - log * (1.0 - x).ln()
+    } else if x == 1.0 {
+        PI_SQUARED_OVER_SIX
+    } else if x <= 2.0 {
+        // The real part of the reflection on the cut, with exact 1-x.
+        let log = x.ln();
+        -dilog_bernoulli_series_f64(-log) + PI_SQUARED_OVER_SIX - log * (x - 1.0).ln()
+    } else {
+        // Re Li2(x) = -Li2(1/x) + pi^2/3 - log(x)^2/2.
+        let log = x.ln();
+        -dilog_bernoulli_series_f64(-(-1.0 / x).ln_1p()) + PI_SQUARED_OVER_THREE - 0.5 * log * log
+    }
+}
+
+/// The principal-branch complex dilogarithm `Li2(z)` in binary64.
+///
+/// Exactly real arguments follow `polylog(2, x)`: for `x > 1` the result is the
+/// lower lip `Li2(x - i0)`, `Im Li2(x) = -pi log(x)`, independent of the sign of
+/// the zero imaginary part; for `x <= 1` the imaginary part is zero, with the
+/// same sign as before (`-0` only at `x = -1`). A nonzero
+/// imaginary part, however small, selects its own side of the cut. The normwise
+/// relative error is below `1.2e-15` (about 10 units of `2^-53`, reached next to
+/// `Re z = 1/2`, where the reflection formula cancels; a few units elsewhere).
+/// Non-finite input gives `NaN` components.
+pub fn dilog_complex_f64(z: Complex<f64>) -> Complex<f64> {
+    if !z.re.is_finite() || !z.im.is_finite() {
+        return Complex::new(f64::NAN, f64::NAN);
+    }
+    if z.im == 0.0 {
+        let imaginary = if z.re > 1.0 {
+            -std::f64::consts::PI * z.re.ln()
+        } else if z.re == -1.0 {
+            // polylog(2, -1) = -(1-2^(-1)) zeta(2) carries a negative zero.
+            -0.0
+        } else {
+            0.0
+        };
+        return Complex::new(dilog_f64(z.re), imaginary);
+    }
+
+    let one_minus_re = 1.0 - z.re;
+    if z.re > 0.5 && one_minus_re * one_minus_re + z.im * z.im <= 1.0 {
+        // |1-z| <= 1: Li2(z) = -Li2(1-z) + pi^2/6 - log(z) log(1-z), where the
+        // series variable of Li2(1-z) is -log(z). Here 1/2 < Re z < 2, so z-1
+        // is exact and log(z) keeps its relative precision near z = 1.
+        let log_z = log_one_plus_complex_f64(Complex::new(-one_minus_re, z.im));
+        let log_one_minus_z = log_complex_f64(Complex::new(one_minus_re, -z.im));
+        let series = dilog_bernoulli_series_complex_f64(Complex::new(-log_z.re, -log_z.im));
+        let product = mul_complex_f64(log_z, log_one_minus_z);
+        return Complex::new(
+            -series.re + PI_SQUARED_OVER_SIX - product.re,
+            -series.im - product.im,
+        );
+    }
+
+    let squared_modulus = z.re * z.re + z.im * z.im;
+    if squared_modulus <= 1.0 {
+        // |z| <= 1 and Re z <= 1/2, so |log(1-z)| <= pi/3.
+        let log = log_one_plus_complex_f64(Complex::new(-z.re, -z.im));
+        return dilog_bernoulli_series_complex_f64(Complex::new(-log.re, -log.im));
+    }
+
+    // |z| > 1 and |1-z| > 1, so Re(1/z) < 1/2 and |1/z| < 1:
+    // Li2(z) = -Li2(1/z) - pi^2/6 - log(-z)^2/2.
+    let inverse = inverse_complex_f64(z);
+    let log = log_one_plus_complex_f64(Complex::new(-inverse.re, -inverse.im));
+    let series = dilog_bernoulli_series_complex_f64(Complex::new(-log.re, -log.im));
+    let log_minus_z = log_complex_f64(Complex::new(-z.re, -z.im));
+    let square = mul_complex_f64(log_minus_z, log_minus_z);
+    Complex::new(
+        -series.re - PI_SQUARED_OVER_SIX - 0.5 * square.re,
+        -series.im - 0.5 * square.im,
+    )
 }
 
 fn zeta_eval_f64(args: &[f64]) -> f64 {
@@ -5906,6 +6135,252 @@ mod tests {
                 factor * polylog_numeric_eval(&order, &(z.clone() * z.clone()), BITS).unwrap();
             assert_precision_complex(&left, &right, BITS, "fractional-order duplication");
         }
+    }
+
+    /// Arguments covering every continuation region of the binary64 dilogarithm,
+    /// its region boundaries, both sides of the cut, and extreme magnitudes.
+    #[cfg(feature = "float-mpfr")]
+    fn dilog_f64_sample_arguments() -> Vec<Complex<f64>> {
+        let mut points = Vec::new();
+        for i in -30..=30 {
+            for j in -30..=30 {
+                points.push(Complex::new(f64::from(i) * 0.137, f64::from(j) * 0.093));
+            }
+        }
+        let third = std::f64::consts::FRAC_PI_3;
+        let angles = (0..48).map(|k| f64::from(k) * std::f64::consts::PI / 24.0 + 1e-3);
+        for angle in angles.chain([third, -third, 1e-12, -1e-12, std::f64::consts::PI]) {
+            for radius in [
+                1e-300, 1e-200, 1e-20, 1e-8, 1e-3, 0.3, 0.999, 1.0, 1.001, 3.0, 1e3, 1e8, 1e20,
+                1e200, 1e300,
+            ] {
+                points.push(Complex::new(radius * angle.cos(), radius * angle.sin()));
+            }
+            for distance in [1e-14, 1e-8, 1e-3, 0.5, 0.999_999, 1.0, 1.000_001] {
+                points.push(Complex::new(
+                    1.0 + distance * angle.cos(),
+                    distance * angle.sin(),
+                ));
+            }
+        }
+        for x in [
+            -1e300,
+            -1e10,
+            -3.0,
+            -1.0 - 1e-15,
+            -1.0,
+            -0.5,
+            -1e-12,
+            1e-300,
+            0.25,
+            0.5,
+            0.75,
+            1.0 - f64::EPSILON / 2.0,
+            1.0,
+            1.0 + f64::EPSILON,
+            1.5,
+            2.0,
+            3.0,
+            100.0,
+            1e10,
+            1e300,
+        ] {
+            for y in [1e-300, -1e-300, 1e-14, -1e-14] {
+                points.push(Complex::new(x, y));
+            }
+        }
+        // Both sides of Re z = 1/2, where the reflection formula cancels most.
+        for j in -200..=200 {
+            let y = f64::from(j) * 0.005;
+            for x in [
+                0.5 - f64::EPSILON / 4.0,
+                0.5 + f64::EPSILON / 2.0,
+                0.499_999_999_9,
+                0.500_000_000_1,
+            ] {
+                points.push(Complex::new(x, y));
+            }
+        }
+        // Deterministic pseudo-random arguments with scattered magnitudes.
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..4000 {
+            let radius = 10f64.powf(16.0 * next() - 8.0);
+            let angle = 2.0 * std::f64::consts::PI * next();
+            points.push(Complex::new(radius * angle.cos(), radius * angle.sin()));
+        }
+        points
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    fn reference_dilog(z: Complex<f64>) -> Complex<Float> {
+        const BITS: u32 = 256;
+        let argument = Complex::new(Float::with_val(BITS, z.re), Float::with_val(BITS, z.im));
+        polylog_integer_numeric_eval(2, &argument, BITS, 0).unwrap()
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn dilog_complex_f64_matches_multiprecision() {
+        let mut worst = (0.0, Complex::new(0.0, 0.0));
+        for z in dilog_f64_sample_arguments() {
+            let actual = super::dilog_complex_f64(z);
+            let expected = reference_dilog(z);
+            let difference = Complex::new(
+                Float::with_val(256, actual.re) - &expected.re,
+                Float::with_val(256, actual.im) - &expected.im,
+            );
+            let error = (difference.norm().re / expected.norm().re).to_f64();
+            if error > worst.0 {
+                worst = (error, z);
+            }
+        }
+        // About 10 units of 2^-53 next to Re z = 1/2 (1.1e-15 at
+        // 0.5000000000000001 +- 0.005i), a few units elsewhere; the old route
+        // rounded the same reference once.
+        eprintln!(
+            "binary64 Li2: worst relative error {:e} at {:?}",
+            worst.0, worst.1
+        );
+        assert!(
+            worst.0 < 1.2e-15,
+            "worst relative error {:e} at {:?}",
+            worst.0,
+            worst.1
+        );
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn dilog_f64_matches_multiprecision() {
+        let mut arguments: Vec<f64> = (-400..=400).map(|i| f64::from(i) * 0.0371).collect();
+        arguments.extend([
+            -1e300,
+            -1e10,
+            -3.0,
+            -1.0,
+            -1e-300,
+            1e-300,
+            1e-20,
+            1e-8,
+            0.5,
+            1.0 - 1e-15,
+            1.0,
+            1.0 + 1e-15,
+            2.0,
+            2.0 + 1e-15,
+            12.0,
+            13.0,
+            1e10,
+            1e300,
+        ]);
+        for x in arguments {
+            let actual = super::dilog_f64(x);
+            let expected = reference_dilog(Complex::new(x, 0.0)).re;
+            let error = (Float::with_val(256, actual) - &expected).norm().to_f64();
+            // Re Li2(x) changes sign near x = 12.6, so for x > 1 the cut's
+            // pi^2/3 term, not the result, sets the attainable absolute error.
+            let scale = expected.norm().to_f64() + if x > 1.0 { 3.3 } else { 0.0 };
+            assert!(
+                error <= 1e-15 * scale,
+                "x={x:e}: {actual:e} vs {expected}, error {error:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn dilog_f64_preserves_cut_conventions() {
+        let pi_log_two = std::f64::consts::PI * std::f64::consts::LN_2;
+        for imaginary in [0.0, -0.0] {
+            // Exactly real arguments use the lower lip, as polylog(2, x) does.
+            let value = super::dilog_complex_f64(Complex::new(2.0, imaginary));
+            assert!((value.re - std::f64::consts::PI.powi(2) / 4.0).abs() < 1e-15);
+            assert!((value.im + pi_log_two).abs() < 1e-15);
+            for x in [-3.0, -0.5, 0.0, 0.5, 1.0] {
+                let value = super::dilog_complex_f64(Complex::new(x, imaginary));
+                assert!(value.im == 0.0 && value.im.is_sign_positive(), "{x}");
+                assert_eq!(value.re, super::dilog_f64(x));
+            }
+        }
+        // A nonzero imaginary part selects its own side, however small.
+        for sign in [-1.0, 1.0] {
+            let value = super::dilog_complex_f64(Complex::new(2.0, sign * 1e-300));
+            assert!((value.im - sign * pi_log_two).abs() < 1e-15);
+        }
+        let zero = super::dilog_complex_f64(Complex::new(-0.0, -0.0));
+        assert!(zero.re == 0.0 && zero.re.is_sign_positive());
+        assert!(zero.im == 0.0 && zero.im.is_sign_positive());
+        assert_eq!(super::dilog_f64(1.0), std::f64::consts::PI.powi(2) / 6.0);
+        assert_eq!(super::dilog_f64(-1.0), -std::f64::consts::PI.powi(2) / 12.0);
+        assert!(super::dilog_f64(f64::NAN).is_nan());
+        assert!(
+            super::dilog_complex_f64(Complex::new(f64::INFINITY, 0.0))
+                .re
+                .is_nan()
+        );
+    }
+
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn dilog_f64_keeps_previous_signed_zeros() {
+        // The previous binary64 route evaluated polylog(2, z) with MPFR at 53
+        // bits. Exact zero components of the result keep their signs.
+        let order = Complex::new(Float::with_val(53, 2), Float::new(53));
+        for x in [-1e10, -3.0, -1.0, -0.5, 0.0, 0.25, 0.5, 1.0, 2.0, 1e10] {
+            for y in [0.0, -0.0] {
+                let z = Complex::new(x, y);
+                let argument = Complex::new(Float::with_val(53, x), Float::with_val(53, y));
+                let previous = polylog_numeric_eval(&order, &argument, 53).unwrap();
+                let previous = Complex::new(previous.re.to_f64(), previous.im.to_f64());
+                let value = super::dilog_complex_f64(z);
+                for (new, old) in [(value.re, previous.re), (value.im, previous.im)] {
+                    if old == 0.0 {
+                        assert_eq!(new.to_bits(), old.to_bits(), "{z:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binary64_polylog_evaluators_use_dilog_kernel() {
+        let evaluator = parse!("polylog(2,x)")
+            .evaluator(&[parse!("x")])
+            .build()
+            .unwrap();
+        let mut complex = evaluator
+            .clone()
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+        let mut real = evaluator.map_coeff(&|x| x.re.to_f64());
+        for z in [
+            Complex::new(0.3, 0.1),
+            Complex::new(-2.5, 0.7),
+            Complex::new(5.0, -1e-3),
+            Complex::new(5.0, 0.0),
+            Complex::new(0.5, -0.0),
+        ] {
+            let value = complex.evaluate_single(&[z]);
+            let expected = super::dilog_complex_f64(z);
+            assert_eq!(value.re.to_bits(), expected.re.to_bits());
+            assert_eq!(value.im.to_bits(), expected.im.to_bits());
+        }
+        for x in [-2.5, 0.3, 5.0] {
+            assert_eq!(real.evaluate_single(&[x]), super::dilog_f64(x));
+        }
+
+        // Other orders keep the multiprecision route.
+        let mut trilog = parse!("polylog(3,x)")
+            .evaluator(&[parse!("x")])
+            .build()
+            .unwrap()
+            .map_coeff(&|x| Complex::new(x.re.to_f64(), x.im.to_f64()));
+        let value = trilog.evaluate_single(&[Complex::new(0.5, 0.0)]);
+        assert!((value.re - 0.537_213_193_608_040_2).abs() < 1e-15);
     }
 
     #[test]
