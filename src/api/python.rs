@@ -1126,8 +1126,20 @@ fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
 }
 
 /// Return whether the current Python call stack contains a library unlock frame.
+///
+/// A thread without a Python thread state (a Rayon worker of a dependant crate, or
+/// any other thread Python did not create) has no Python frames, so the answer is
+/// `false` without attaching. Attaching would wait for the GIL, which the thread
+/// that handed the worker its job may hold while it waits for the worker: a
+/// deadlock (for example a Spenso tensor network executed in parallel from a
+/// package whose library key is registered).
 pub(crate) fn has_library_unlock_frame() -> bool {
     if REGISTERED_LIBRARY_UNLOCKS.read().unwrap().is_empty() {
+        return false;
+    }
+    // SAFETY: `PyGILState_GetThisThreadState` only reads this thread's
+    // thread-state slot and may be called without holding the GIL.
+    if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
         return false;
     }
     Python::try_attach(|py| has_library_unlock_frame_attached(py).unwrap_or(false)).unwrap_or(false)
@@ -2682,6 +2694,34 @@ mod library_registration_tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn threads_without_python_state_do_not_wait_for_python() {
+        Python::initialize();
+        let mut claims = crate::license::verify_token(crate::license::TEST_UNLOCK_TOKEN).unwrap();
+        claims.package = "symbolica_foreign_thread_unlock_test".into();
+        let package = claims.package.clone();
+        let (worker, answer) = Python::attach(|py| -> PyResult<_> {
+            let globals = PyDict::new(py);
+            register_library_unlock_module(claims, &globals, Arc::new(AtomicBool::new(true)))?;
+            // Ask from a thread that Python did not create (as a Rayon worker of a
+            // dependant crate does) while this thread is attached and waits for it.
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let _ = sender.send(has_library_unlock_frame());
+            });
+            let answer = receiver.recv_timeout(std::time::Duration::from_secs(10));
+            Ok((worker, answer))
+        })
+        .unwrap();
+        // Detached again: a worker that waited to attach can now finish.
+        worker.join().unwrap();
+        REGISTERED_LIBRARY_UNLOCKS
+            .write()
+            .unwrap()
+            .retain(|r| r.claims.package != package);
+        assert_eq!(answer, Ok(false));
     }
 }
 
