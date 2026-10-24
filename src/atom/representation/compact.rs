@@ -191,7 +191,8 @@ mod tests {
         use std::cmp::Ordering;
 
         let negative = Atom::num(-2);
-        let positive = Atom::num(1);
+        // The inline negative sorts after the escaped positive by header byte.
+        let positive = Atom::num(16);
         let left = negative.as_view();
         let right = positive.as_view();
         let compact_left = CompactAtomView::from(left);
@@ -208,6 +209,47 @@ mod tests {
         assert_eq!(
             compact_left.unpack().cmp(&compact_right.unpack()),
             Ordering::Less
+        );
+    }
+
+    #[test]
+    fn inline_number_keys_borrow_parent_storage() {
+        let arguments = (-15..=15)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let parent = parse!(&format!("inline_number_keys({arguments})"));
+        let AtomView::Fun(function) = parent.as_view() else {
+            unreachable!()
+        };
+        let storage = parent.as_view().get_data().as_ptr_range();
+        let mut hashed = ahash::HashMap::default();
+        let mut ordered = std::collections::BTreeMap::new();
+        for (value, child) in (-15..=15).zip(function.iter()) {
+            let key = CompactAtomView::from(child);
+            assert_eq!(key.get_data().len(), 1);
+            assert_eq!(key.get_data().as_ptr(), child.get_data().as_ptr());
+            assert!(storage.contains(&key.get_data().as_ptr()));
+            assert_eq!(key.unpack(), Atom::num(value).as_view());
+            let mut expected = Writes::default();
+            child.hash(&mut expected);
+            let mut actual = Writes::default();
+            key.hash(&mut actual);
+            assert_eq!(actual.0, expected.0);
+            hashed.insert(key, value);
+            ordered.insert(key, value);
+        }
+        assert_eq!(hashed.len(), 31);
+        assert_eq!(ordered.len(), 31);
+        for value in -15..=15 {
+            let query = Atom::num(value);
+            let bytes = query.as_view().get_data();
+            assert_eq!(hashed.get(bytes), Some(&value));
+            assert_eq!(ordered.get(bytes), Some(&value));
+        }
+        assert_eq!(
+            ordered.values().copied().collect::<Vec<_>>(),
+            (-15..=15).collect::<Vec<_>>()
         );
     }
 

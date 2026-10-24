@@ -38,8 +38,8 @@ use crate::{
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
 // Versions 7–9 are reserved for historical error-tracking coefficient layouts.
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 10;
-pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[10];
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 11;
+pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[10, 11];
 pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
@@ -1785,8 +1785,14 @@ mod tests {
         let mut export = vec![];
         State::export(&mut export).unwrap();
 
-        let i = State::import(&mut export.as_slice(), None).unwrap();
-        assert!(i.is_empty());
+        assert_eq!(&export[4..6], &11u16.to_le_bytes());
+        // The state metadata layout is shared; embedded atom records carry
+        // their own format identifier and migrate independently.
+        for version in [10u16, 11] {
+            export[4..6].copy_from_slice(&version.to_le_bytes());
+            let i = State::import(&mut export.as_slice(), None).unwrap();
+            assert!(i.is_empty());
+        }
     }
 
     #[test]

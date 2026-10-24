@@ -3085,8 +3085,26 @@ fn expression_shorthand(
 }
 
 #[pyfunction]
-fn _reconstruct_expression(state: Vec<u8>) -> PythonExpression {
-    unsafe { Atom::from_raw(state).into() }
+fn _reconstruct_expression(state: Vec<u8>) -> PyResult<PythonExpression> {
+    let Some((&marker, payload)) = state.split_first() else {
+        return Err(exceptions::PyValueError::new_err(
+            "Cannot reconstruct an expression from empty pickle data",
+        ));
+    };
+    let mut legacy = Vec::new();
+    let mut source = if marker == 0 {
+        payload
+    } else {
+        // Older pickles contain raw format-5 atom bytes. Use the regular
+        // migration path so their numbers, powers, and ordering become canonical.
+        legacy.push(5);
+        legacy.extend_from_slice(&(state.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&state);
+        legacy.as_slice()
+    };
+    Atom::import_with_map(&mut source, &crate::state::StateMap::default())
+        .map(Into::into)
+        .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Create a new transformer that maps an expression.
