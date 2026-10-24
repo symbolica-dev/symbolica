@@ -1720,13 +1720,12 @@ impl<'a> AtomView<'a> {
         subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
-            if let Some(slot) = params.get(&CompactAtomView::from(*self)) {
+            if let Some(slot) = params.get(self.get_data()) {
                 return Ok(*slot);
             }
         }
 
-        let key: CompactAtomView<'a> = (*self).into();
-        if let Some(s) = subexpressions.get(&key) {
+        if let Some(s) = subexpressions.get(self.get_data()) {
             return Ok(*s);
         }
 

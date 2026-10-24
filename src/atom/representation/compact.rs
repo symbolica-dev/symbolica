@@ -14,6 +14,8 @@ use crate::atom::AtomCore;
 /// This representation is useful for stored collections and byte keys. Call
 /// [`Self::unpack`] for the typed, exhaustively matchable enum; prefer keeping an
 /// `AtomView` when repeatedly matching the expression's type.
+/// Collections can look up keys by their encoded byte slices through
+/// [`Borrow`](std::borrow::Borrow).
 ///
 /// The view borrows immutable expression storage and cannot outlive its owner.
 ///
@@ -39,6 +41,13 @@ use crate::atom::AtomCore;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CompactAtomView<'a> {
     data: &'a [u8],
+}
+
+impl std::borrow::Borrow<[u8]> for CompactAtomView<'_> {
+    #[inline]
+    fn borrow(&self) -> &[u8] {
+        self.data
+    }
 }
 
 impl<'a> From<AtomView<'a>> for CompactAtomView<'a> {
@@ -140,8 +149,23 @@ mod tests {
             let mut actual = Writes::default();
             compact.hash(&mut actual);
             assert_eq!(expected.0, actual.0);
-            let clone = atom.clone();
-            assert!(compact == CompactAtomView::from(clone.as_view()));
+            let borrowed: &[u8] = std::borrow::Borrow::borrow(&compact);
+            assert_eq!(borrowed, view.get_data());
+            assert_eq!(borrowed.as_ptr(), view.get_data().as_ptr());
+            let mut borrowed_writes = Writes::default();
+            borrowed.hash(&mut borrowed_writes);
+            assert_eq!(actual.0, borrowed_writes.0);
+
+            let mut map = ahash::HashMap::default();
+            map.insert(compact, 42);
+            {
+                // The query owner can be shorter-lived than the stored key.
+                let clone = atom.clone();
+                assert!(compact == CompactAtomView::from(clone.as_view()));
+                assert_eq!(map.get(clone.as_view().get_data()), Some(&42));
+            }
+            assert_eq!(map.get(view.get_data()), Some(&42));
+            assert_eq!(map.get(&[][..]), None);
             for other in &cases {
                 let right = other.as_view();
                 assert_eq!(compact == CompactAtomView::from(right), view == right);
