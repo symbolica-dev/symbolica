@@ -3,7 +3,7 @@ use std::{ops::DerefMut, sync::Arc};
 use smallvec::SmallVec;
 
 use crate::{
-    atom::{Atom, AtomView, ListIterator},
+    atom::{Atom, AtomView, InlineNum, ListIterator},
     coefficient::CoefficientView,
     combinatorics::CombinationWithReplacementIterator,
     domains::{integer::Integer, rational::Q},
@@ -202,6 +202,11 @@ impl AtomView<'_> {
 
         match self {
             AtomView::Pow(p) => {
+                if p.has_small_integer_power() {
+                    // The variable and integer exponent are leaves, and a
+                    // variable power cannot distribute over a sum or product.
+                    return;
+                }
                 let (base, exp) = p.get_base_exp();
 
                 let mut new_base = workspace.new_atom();
@@ -270,9 +275,7 @@ impl AtomView<'_> {
                         let mut hhh = workspace.new_atom();
                         for (a, pow) in args.iter().zip(new_term) {
                             if *pow != 0 {
-                                let mut new_exp_h = workspace.new_atom();
-                                new_exp_h.to_num(*pow as i64);
-                                hhh.to_pow(*a, new_exp_h.as_view());
+                                hhh.to_pow(*a, InlineNum::new(*pow as i64, 1).as_view());
                                 p.extend(hhh.as_view());
                             }
                         }
@@ -623,6 +626,24 @@ mod test {
     }
 
     #[test]
+    fn compact_powers_leave_expansion_unchanged() {
+        use crate::atom::Atom;
+
+        let base = parse!("compact_expansion_x");
+        let mut out = Atom::num(42);
+        for exponent in -17..=16 {
+            let mut power = Atom::new();
+            power.to_pow(base.as_view(), Atom::num(exponent).as_view());
+            for variable in [None, Some(base.as_view())] {
+                // Expansion leaves these unchanged even before normalization,
+                // including temporary powers with exponent zero or one.
+                assert!(!power.as_view().expand_into(variable, &mut out));
+                assert_eq!(out, power);
+            }
+        }
+    }
+
+    #[test]
     fn expand_num() {
         let exp = parse!("5+2*v3*(v1-v2)*(v4+v5)").expand_num();
         let res = parse!("5+v3*(v4+v5)*(2*v1-2*v2)");
@@ -662,6 +683,14 @@ mod test {
             "4*v1+4*v2+6*v1^2+4*v1^3+v1^4+6*v2^2+4*v2^3+v2^4+12*v1*v2+12*v1*v2^2+4*v1*v2^3+12*v1^2*v2+6*v1^2*v2^2+4*v1^3*v2+1"
         );
         assert_eq!(exp, res);
+    }
+
+    #[test]
+    fn exponent_crosses_packed_integer_boundary() {
+        use crate::atom::Atom;
+
+        let expr = parse!("(1+inline_expansion_x)^257");
+        assert_eq!(expr.expand(), expr.expand_via_poly::<u16, Atom>(None));
     }
 
     #[test]

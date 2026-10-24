@@ -894,6 +894,20 @@ impl AtomView<'_> {
     #[cfg_attr(debug_assertions, inline(never))]
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn normalize_pow(p: &PowView<'_>, workspace: &Workspace, out: &mut Atom) {
+        if let Some((base, exponent)) = p.get_small_integer_power() {
+            // Both children are already canonical leaves. Only zero and one
+            // simplify, so keep the encoded power instead of rebuilding it.
+            match exponent {
+                0 => {
+                    out.to_num(1);
+                }
+                1 => out.set_from_view(&base.as_view()),
+                _ => out.set_from_view(&p.as_view()),
+            }
+            out.set_normalized(true);
+            return;
+        }
+
         let (base, exp) = p.get_base_exp();
 
         // Most callers already have canonical operands. Only stage children
@@ -2401,6 +2415,33 @@ mod test {
                 power.as_view().normalize(ws, &mut out);
                 assert_eq!(out, expected);
                 assert!(!out.as_view().needs_normalization());
+            }
+        });
+    }
+
+    #[test]
+    fn compact_variable_power_normalization() {
+        use crate::atom::Symbol;
+
+        Workspace::get_local().with(|ws| {
+            let mut out = Atom::num(42);
+            for base in [parse!("compact_normalization_x"), Atom::var(Symbol::E)] {
+                for exponent in -17..=16 {
+                    let mut power = Atom::new();
+                    power.to_pow(base.as_view(), Atom::num(exponent).as_view());
+                    let expected = match exponent {
+                        0 => Atom::num(1),
+                        1 => base.clone(),
+                        _ => {
+                            let mut expected = power.clone();
+                            expected.set_normalized(true);
+                            expected
+                        }
+                    };
+                    power.as_view().normalize(ws, &mut out);
+                    assert_eq!(out, expected, "{base}^{exponent}");
+                    assert!(!out.as_view().needs_normalization());
+                }
             }
         });
     }

@@ -4397,7 +4397,14 @@ impl PythonExpression {
 
     /// Get a serialized version of the expression.
     pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
-        Ok(self.expr.clone().into_raw())
+        // Zero is not an atom tag, so it distinguishes versioned pickle data
+        // from the unversioned raw expressions written by older releases.
+        let mut state = vec![0];
+        self.expr
+            .as_view()
+            .write(&mut state)
+            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
+        Ok(state)
     }
 
     /// Reconstruct an expression from a serialized version.
@@ -4406,7 +4413,7 @@ impl PythonExpression {
             .import("symbolica.symbolica")
             .or_else(|_| py.import("symbolica"))?;
         let reconstruct = module.getattr("_reconstruct_expression")?.unbind();
-        let state = PyBytes::new(py, &self.expr.clone().into_raw()).unbind();
+        let state = PyBytes::new(py, &self.__getstate__()?).unbind();
 
         Ok((reconstruct, (state,)))
     }

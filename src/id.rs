@@ -1300,15 +1300,19 @@ impl<'a> AtomView<'a> {
     }
 
     fn position_in_impl(&self, part: AtomView, index: &mut Vec<usize>) -> bool {
-        let part_ptr = part.get_data().as_ptr();
-        let self_ptr = self.get_data().as_ptr();
+        // Every view borrows its canonical bytes from the original expression,
+        // including numbers stored entirely in their header.
+        let part_data = part.get_data();
+        let self_data = self.get_data();
+        let part_ptr = part_data.as_ptr();
+        let self_ptr = self_data.as_ptr();
 
         if self_ptr == part_ptr {
             return true;
         }
 
         // check if the pointer fits within the data range
-        if part_ptr < self_ptr || part_ptr >= self_ptr.wrapping_add(self.get_data().len()) {
+        if part_ptr < self_ptr || part_ptr >= self_ptr.wrapping_add(self_data.len()) {
             return false;
         }
 
@@ -7576,5 +7580,118 @@ mod test {
         let pat = pat.set_optional(symbol!("x___"));
         let e = parse!("f").replace(&pat).with(&rhs);
         assert_eq!(e, parse!("g()"));
+    }
+}
+
+#[cfg(test)]
+mod compact_power_position_tests {
+    use crate::{
+        atom::{AtomIndex, ListIterator, ListSlice},
+        prelude::*,
+    };
+
+    #[test]
+    fn compact_exponent_positions_distinguish_equal_occurrences() {
+        for exponent in [-17, -16, -15, -2, -1, 2, 14, 15, 16] {
+            let expression = parse!(&format!(
+                "compact_power_position_f(x^({exponent}),y^({exponent}),{exponent})"
+            ));
+            let first = expression.index([0, 1]).unwrap();
+            let second = expression.index([1, 1]).unwrap();
+            let ordinary = expression.index(2).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first, ordinary);
+            assert_eq!(expression.position(first), Some(vec![0, 1]));
+            assert_eq!(expression.position(second), Some(vec![1, 1]));
+            assert_eq!(expression.position(ordinary), Some(vec![2]));
+            assert_eq!(
+                expression.position(AtomView::from(first.get_data())),
+                Some(vec![0, 1])
+            );
+            assert_eq!(
+                expression.position(AtomView::from(second.get_data())),
+                Some(vec![1, 1])
+            );
+            assert_eq!(first.position(first), Some(vec![]));
+            assert_eq!(first.position(second), None);
+            assert_eq!(expression.position(first.to_owned()), None);
+            assert_eq!(
+                expression.position(first.terms().next().unwrap()),
+                Some(vec![0, 1])
+            );
+            assert_eq!(
+                expression.position(ListIterator::from_one(second).next().unwrap()),
+                Some(vec![1, 1])
+            );
+            assert_eq!(ListSlice::from_one(first), ListSlice::from_one(ordinary));
+            assert_eq!(
+                expression.position(expression.index([1, 0]).unwrap()),
+                Some(vec![1, 0])
+            );
+        }
+    }
+
+    #[test]
+    fn inline_number_positions_survive_borrowed_byte_views() {
+        let arguments = (-17..=17)
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let expression = parse!(&format!(
+            "inline_number_positions_f({arguments},g(0,1,-15,15),h(x)^2,(x+y)^2,-2*x)"
+        ));
+
+        fn check(root: AtomView<'_>, node: AtomView<'_>, path: &mut Vec<usize>) {
+            assert_eq!(root.position(node), Some(path.clone()));
+            let borrowed = AtomView::from(node.get_data());
+            assert_eq!(borrowed, node);
+            assert_eq!(root.position(borrowed), Some(path.clone()));
+            assert_eq!(node.get_byte_size(), node.get_data().len());
+            let children = match node {
+                AtomView::Fun(f) => f.iter(),
+                AtomView::Mul(m) => m.iter(),
+                AtomView::Add(a) => a.iter(),
+                AtomView::Pow(p) => p.iter(),
+                AtomView::Num(_) | AtomView::Var(_) => return,
+            };
+            for (index, child) in children.enumerate() {
+                path.push(index);
+                check(root, child, path);
+                path.pop();
+            }
+        }
+
+        check(expression.as_view(), expression.as_view(), &mut Vec::new());
+        for (index, value) in (-17..=17).enumerate() {
+            let number = expression.index(index).unwrap();
+            let expected_size = if (-15..=15).contains(&value) { 1 } else { 3 };
+            assert_eq!(number.get_byte_size(), expected_size);
+            assert_eq!(number, Atom::num(value));
+        }
+    }
+
+    #[test]
+    fn inline_number_position_replacement_changes_only_selected_occurrence() {
+        let expression = parse!("inline_number_replace_f(2,2,g(2),x^2,(x+y)^2)");
+        for (path, expected) in [
+            (vec![1], "inline_number_replace_f(2,7,g(2),x^2,(x+y)^2)"),
+            (vec![2, 0], "inline_number_replace_f(2,2,g(7),x^2,(x+y)^2)"),
+            (vec![3, 1], "inline_number_replace_f(2,2,g(2),x^7,(x+y)^2)"),
+            (vec![4, 1], "inline_number_replace_f(2,2,g(2),x^2,(x+y)^7)"),
+        ] {
+            let mut replacements = 0;
+            let result = expression.replace_map(|node, _, out| {
+                if expression
+                    .position(AtomView::from(node.get_data()))
+                    .as_ref()
+                    == Some(&path)
+                {
+                    **out = Atom::num(7);
+                    replacements += 1;
+                }
+            });
+            assert_eq!(replacements, 1);
+            assert_eq!(result, parse!(expected));
+        }
     }
 }

@@ -3153,14 +3153,7 @@ impl AtomView<'_> {
     /// Return the size in bytes of the expression's encoded representation,
     /// excluding separately stored symbol metadata.
     pub fn get_byte_size(&self) -> usize {
-        match self {
-            AtomView::Num(n) => n.get_byte_size(),
-            AtomView::Var(v) => v.get_byte_size(),
-            AtomView::Fun(f) => f.get_byte_size(),
-            AtomView::Pow(p) => p.get_byte_size(),
-            AtomView::Mul(m) => m.get_byte_size(),
-            AtomView::Add(a) => a.get_byte_size(),
-        }
+        self.get_data().len()
     }
 }
 

@@ -38,9 +38,12 @@ const NUM_MASK: u8 = 0b00001111;
 const DEN_MASK: u8 = 0b01110000;
 const SIGN: u8 = 0b10000000;
 
-/// Inspect a canonical one-byte integer atom without general coefficient dispatch.
+/// Inspect an inline integer or a one-byte integer payload without coefficient dispatch.
 #[inline]
 pub(crate) fn small_integer_atom(data: &[u8]) -> Option<i64> {
+    if data.len() == 1 {
+        return Some(i64::from(data[0] >> 3) - 16);
+    }
     if (data[1] | SIGN) != (U8_NUM | SIGN) {
         return None;
     }
@@ -313,6 +316,17 @@ const SKIP_TABLE: [u8; (NUM_MASK | DEN_MASK) as usize + 1] = {
     dest[U64_NUM_U64_DEN as usize] = 16;
     dest
 };
+
+/// Skip a variable's packed symbol ID and extra attributes.
+///
+/// # Safety
+/// `data` must contain the complete unsigned packed pair from a valid variable.
+#[inline(always)]
+pub(crate) unsafe fn skip_packed_variable(data: &[u8]) -> &[u8] {
+    let tag = unsafe { *data.get_unchecked(0) };
+    let size = unsafe { *SKIP_TABLE.get_unchecked(tag as usize) } as usize + 1;
+    unsafe { data.get_unchecked(size..) }
+}
 
 #[inline(always)]
 const fn get_size_of_natural(num_type: u8) -> u8 {
@@ -1133,6 +1147,30 @@ impl PackedRationalNumberWriter for (u64, u64) {
 mod tests {
     use super::*;
     use crate::domains::float::{Complex, Float};
+
+    #[test]
+    fn small_integer_atoms_cover_inline_and_escaped_payloads() {
+        use crate::atom::{Atom, AtomView};
+
+        for value in -255..=255 {
+            let atom = Atom::num(value);
+            let AtomView::Num(number) = atom.as_view() else {
+                unreachable!()
+            };
+            assert_eq!(small_integer_atom(atom.as_view().get_data()), Some(value));
+            assert_eq!(number.small_integer(), Some(value));
+            assert_eq!(number.small_integer_is_zero(), Some(value == 0));
+        }
+        for source in ["-256", "256", "1/2", "1+2*𝑖", "1.25"] {
+            let atom = crate::parse!(source);
+            let AtomView::Num(number) = atom.as_view() else {
+                unreachable!()
+            };
+            assert_eq!(small_integer_atom(atom.as_view().get_data()), None);
+            assert_eq!(number.small_integer(), None);
+            assert_eq!(number.small_integer_is_zero(), None);
+        }
+    }
 
     #[test]
     fn checked_packed_coefficients_accept_existing_variants() {
