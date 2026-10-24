@@ -17,7 +17,6 @@ use std::{
 };
 
 use ahash::HashMap;
-use bytes::Buf;
 use smallvec::{SmallVec, smallvec};
 
 #[cfg(feature = "integer-gmp")]
@@ -795,20 +794,59 @@ pub struct SerializedRationalPolynomial<'a>(pub &'a [u8]);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 /// A borrowed floating-point value encoded with its binary precision.
+/// A four-byte view represents zero at that precision, without a value payload.
 /// The bytes must contain a valid serialized float.
 pub struct SerializedFloat<'a>(pub &'a [u8]);
 
 impl SerializedFloat<'_> {
-    /// Decode the floating-point value at its stored precision.
-    pub fn to_float(&self) -> Float {
-        let mut d = self.0;
-        let prec = d.get_u32_le();
-        Float::deserialize(d, prec)
+    /// Decode a coefficient component, rejecting malformed precision or binary values.
+    pub fn try_to_float(&self) -> Result<Float, String> {
+        let precision = self
+            .0
+            .get(..4)
+            .ok_or_else(|| "Missing coefficient float precision".to_owned())?;
+        let precision = u32::from_le_bytes(precision.try_into().unwrap());
+        let value = if self.0.len() == 4 {
+            &[0][..]
+        } else {
+            &self.0[4..]
+        };
+        Float::try_deserialize(value, precision)
     }
 
-    /// Decode the value and return whether it is zero.
+    /// Decode a valid floating-point value at its stored precision.
+    pub fn to_float(&self) -> Float {
+        if self.0.len() == 4 {
+            return Float::new(u32::from_le_bytes(self.0.try_into().unwrap()));
+        }
+        self.try_to_float()
+            .expect("invalid serialized coefficient float")
+    }
+
+    /// Test zero without allocating a multiprecision value.
     pub fn is_zero(&self) -> bool {
-        self.to_float().is_zero() // TODO: improve
+        self.0.len() == 4 || Float::serialized_is_zero(&self.0[4..])
+    }
+
+    /// Test finiteness without allocating a multiprecision value.
+    pub fn is_finite(&self) -> bool {
+        self.0.len() == 4 || Float::serialized_is_finite(&self.0[4..])
+    }
+
+    /// Compare central values without allocating, ignoring stored precision.
+    /// NaN is unordered, as it is for the decoded floating-point values.
+    pub fn partial_cmp_value(&self, other: &Self) -> Option<Ordering> {
+        let value = if self.0.len() == 4 {
+            &[0][..]
+        } else {
+            &self.0[4..]
+        };
+        let other = if other.0.len() == 4 {
+            &[0][..]
+        } else {
+            &other.0[4..]
+        };
+        Float::serialized_partial_cmp(value, other)
     }
 }
 
@@ -2343,14 +2381,9 @@ impl Ord for CoefficientView<'_> {
                 .cmp(&Rational::from_int_unchecked(*n2, *d2))
                 .then_with(|| d.to_rat().cmp(&Rational::from_int_unchecked(*ni2, *di2))),
             (CoefficientView::Float(fr1, fi1), CoefficientView::Float(fr2, fi2)) => fr1
-                .to_float()
-                .partial_cmp(&fr2.to_float())
+                .partial_cmp_value(fr2)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    fi1.to_float()
-                        .partial_cmp(&fi2.to_float())
-                        .unwrap_or(Ordering::Equal)
-                }),
+                .then_with(|| fi1.partial_cmp_value(fi2).unwrap_or(Ordering::Equal)),
             (CoefficientView::Float(fr1, fi1), CoefficientView::Natural(n2, d2, ni2, di2)) => {
                 cmp_float_rational(
                     fr1,
