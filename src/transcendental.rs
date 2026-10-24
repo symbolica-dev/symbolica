@@ -4,6 +4,12 @@ use std::{
 };
 
 mod cpp;
+mod harmonic_polylog;
+
+pub use harmonic_polylog::{
+    SixthRootGplEvaluator, SixthRootGplLetter, SixthRootHplEvaluator,
+    gpl_at_one_with_sixth_root_letters, hpl_at_sixth_root, sixth_root_gpl, sixth_root_hpl,
+};
 
 use crate::{
     atom::{Atom, AtomCore, AtomOrView, AtomView, EvaluationInfo, FunctionBuilder, Symbol},
