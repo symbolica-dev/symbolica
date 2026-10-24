@@ -580,10 +580,12 @@ impl SingleFloat for RealBall {
 }
 
 impl RealLike for RealBall {
+    /// Bound the absolute value of every point in the ball, including its radius.
     fn absolute_magnitude(&self) -> Magnitude {
         self.center.absolute_magnitude() + self.radius.absolute_magnitude()
     }
 
+    /// Bound the distance of the whole ball from zero from below.
     fn absolute_magnitude_lower(&self) -> Magnitude {
         let zero = self.center.zero();
         let lower = self.lower_bound();

@@ -120,7 +120,11 @@ fn reciprocal_and_quotient_keep_small_denominator_contributions() {
     let tiny = E::new(1e-310_f64, 10.);
     let quotient = tiny / tiny;
     assert_eq!(*quotient.get_num(), 1.);
-    near(quotient.get_error_magnitude(), number("2e-10"));
+    // Tracking also includes the rounding of the central binary64 quotient.
+    near(
+        quotient.get_error_magnitude(),
+        number("2e-10") + Float::with_val(BITS, 1_f64.get_epsilon()),
+    );
 }
 
 #[test]
@@ -140,10 +144,11 @@ fn subnormal_contributions_are_added_before_f64_conversion() {
         product.get_error_magnitude(),
         Float::with_val(BITS, f64::from_bits(1)),
     );
-    assert_eq!(
-        product.get_error_magnitude().to_f64(),
-        Some(f64::from_bits(1))
-    );
+    // The finite-product cross term and output roundoff put the stored error
+    // slightly above one subnormal. Its upward binary64 projection may then
+    // require two subnormal units, although the wide error remains close to one.
+    let projected = product.get_error_magnitude().to_f64().unwrap();
+    assert!((f64::from_bits(1)..=f64::from_bits(2)).contains(&projected));
 }
 
 #[test]
@@ -161,7 +166,7 @@ fn finite_accuracy_outside_f64_range_is_not_unavailable_or_exact() {
     let value = E::new_with_accuracy(1_f64, 400.);
     near(value.get_error_magnitude(), p10(-400));
     outside_f64(value.get_error_magnitude());
-    // Main's fixed-precision truncation floor is still allowed to dominate.
+    // The fixed-precision truncation floor is still allowed to dominate.
     let truncated = value.truncate();
     assert!(truncated.get_error_magnitude().is_finite());
     assert_eq!(truncated.get_absolute_error(), 1_f64.get_epsilon());
@@ -172,10 +177,13 @@ fn finite_accuracy_outside_f64_range_is_not_unavailable_or_exact() {
 }
 
 #[test]
-fn unavailable_errors_remain_nan_through_scaling_and_truncation() {
+fn unavailable_errors_remain_nan_except_for_exact_zero_annihilation() {
     let unknown = E::new_with_error_magnitude(Float::with_val(BITS, 1), Magnitude::NAN);
+    // The tracked exact-zero fast path preserves the algebraic zero at a
+    // finite center, including an unavailable estimate on the other operand.
+    let annihilated = unknown.clone() * exact(Float::with_val(BITS, 0));
+    assert!(annihilated.is_exact_zero());
     for result in [
-        unknown.clone() * exact(Float::with_val(BITS, 0)),
         unknown.clone() * Rational::from(0),
         unknown.clone() / Rational::from(2),
         unknown.truncate(),
@@ -244,9 +252,12 @@ fn internal_division_ratio_does_not_underflow_before_final_error() {
 #[test]
 fn scalar_conversion_and_zero_center_products_preserve_nonzero_errors() {
     let tiny = E::<f64>::from(f64::from_bits(1));
-    assert_eq!(tiny.get_error_magnitude(), Magnitude::ONE.scale_pow2(-1126));
+    assert_eq!(
+        tiny.get_error_magnitude(),
+        Magnitude::ONE.scale_pow2(-1074) * Magnitude::from_f64(1_f64.get_epsilon()),
+    );
     outside_f64(tiny.get_error_magnitude());
-    assert_eq!(E::<f64>::from(0.).get_absolute_error(), f64::EPSILON);
+    assert_eq!(E::<f64>::from(0.).get_absolute_error(), 0_f64.get_epsilon());
 
     for accuracy in [2., 200.] {
         let zero = E::new_with_accuracy(Float::with_val(BITS, 0), accuracy);
@@ -363,12 +374,16 @@ fn explicit_exactness_is_distinct_from_finite_accuracy_requests() {
         tiny.clone() * exact(p10(400)),
         tiny.clone() / exact(p10(-400)),
         tiny * Rational::from(10).pow(400),
-        E::new(p10(-200), 10.) * exact(Float::with_val(BITS, 0)),
     ] {
         assert!(result.get_num().is_finite());
-        assert!(result.get_error_magnitude().is_zero());
-        assert_eq!(result.get_absolute_error(), 0.);
+        // Explicitly exact inputs can still incur rounding in a nontrivial
+        // arithmetic operation. At 2048 bits this error is tiny but nonzero.
+        outside_f64(result.get_error_magnitude());
+        assert!(result.get_precision().unwrap() > 600.);
+        assert_eq!(result.get_absolute_error(), f64::from_bits(1));
     }
+    let annihilated = E::new(p10(-200), 10.) * exact(Float::with_val(BITS, 0));
+    assert!(annihilated.is_exact_zero());
     let exact_one = exact(Float::with_val(BITS, 1));
     assert!(exact_one.get_error_magnitude().is_zero());
     let exact_zero = exact(Float::with_val(BITS, 0));

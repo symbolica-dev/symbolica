@@ -132,6 +132,11 @@ impl SingleFloat for f64 {
 }
 
 impl RealLike for f64 {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
     fn to_usize_clamped(&self) -> usize {
         *self as usize
     }
@@ -600,6 +605,11 @@ impl SingleFloat for F64 {
 }
 
 impl RealLike for F64 {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.0.to_usize_clamped()
     }

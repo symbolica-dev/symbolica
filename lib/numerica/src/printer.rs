@@ -120,6 +120,11 @@ pub struct PrintOptions {
     pub function_brackets: (char, char),
     /// Whether to print the exponent of numbers as a superscript.
     pub num_exp_as_superscript: bool,
+    /// Whether to print the tracked precision of floating point coefficients.
+    pub print_precision: bool,
+    /// Preserve floating centers, component precisions, and errors in a machine-readable literal.
+    /// Enabled by [`Self::file`]; ordinary display uses readable decimal numbers.
+    pub lossless_floats: bool,
     /// The precision of floating point numbers to print. If None, the available precision is used.
     pub precision: Option<usize>,
     /// Whether to print matrices in a tabular format (e.g. with newlines and indentation).
@@ -173,6 +178,8 @@ impl PrintOptions {
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
+            print_precision: false,
+            lossless_floats: false,
             precision: None,
             pretty_matrix: false,
             hide_namespace: None,
@@ -203,6 +210,8 @@ impl PrintOptions {
             function_brackets: ('[', ']'),
             num_exp_as_superscript: false,
             mode: PrintMode::Mathematica,
+            print_precision: true,
+            lossless_floats: false,
             precision: None,
             pretty_matrix: false,
             hide_namespace: Some(Cow::Borrowed("symbolica")),
@@ -234,6 +243,8 @@ impl PrintOptions {
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Latex,
+            print_precision: false,
+            lossless_floats: false,
             precision: None,
             pretty_matrix: false,
             hide_namespace: None,
@@ -265,6 +276,8 @@ impl PrintOptions {
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Typst,
+            print_precision: false,
+            lossless_floats: false,
             precision: None,
             pretty_matrix: false,
             hide_namespace: None,
@@ -296,6 +309,8 @@ impl PrintOptions {
             function_brackets: ('(', ')'),
             num_exp_as_superscript: false,
             mode: PrintMode::Symbolica,
+            print_precision: true,
+            lossless_floats: true,
             precision: None,
             pretty_matrix: false,
             hide_namespace: None,

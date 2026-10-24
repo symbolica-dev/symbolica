@@ -274,12 +274,22 @@ impl Mul<&Float> for Float {
     type Output = Self;
 
     #[inline]
-    fn mul(mut self, rhs: &Self) -> Self::Output {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+    fn mul(self, rhs: &Self) -> Self::Output {
+        // These are identities of the stored plain values. ErrorPropagatingFloat
+        // still propagates the uncertainty of an approximate unit separately.
+        if let Some(negative) = rhs.unit_sign() {
+            return if negative { -self } else { self };
+        }
+        if let Some(negative) = self.unit_sign() {
+            return if negative { -rhs.clone() } else { rhs.clone() };
         }
 
-        (self.0 * &rhs.0).into()
+        if self.prec() > rhs.prec() {
+            // Round the exact product once, rather than first rounding an input.
+            self.mul_round(rhs, rhs.prec(), RoundingDirection::Nearest)
+        } else {
+            (self.0 * &rhs.0).into()
+        }
     }
 }
 
@@ -288,10 +298,18 @@ impl Mul<Float> for Float {
 
     #[inline]
     fn mul(self, rhs: Self) -> Self::Output {
+        if let Some(negative) = self.unit_sign() {
+            return if negative { -rhs } else { rhs };
+        }
+        if let Some(negative) = rhs.unit_sign() {
+            return if negative { -self } else { self };
+        }
+        // Both operands are owned: reuse the lower-precision allocation and
+        // round once without repeating the unit checks in borrowed multiplication.
         if rhs.prec() < self.prec() {
-            (rhs.0 * self.0).into()
+            (rhs.0 * &self.0).into()
         } else {
-            (self.0 * rhs.0).into()
+            (self.0 * &rhs.0).into()
         }
     }
 }
@@ -300,12 +318,15 @@ impl Div<&Float> for Float {
     type Output = Self;
 
     #[inline]
-    fn div(mut self, rhs: &Self) -> Self::Output {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+    fn div(self, rhs: &Self) -> Self::Output {
+        if let Some(negative) = rhs.unit_sign() {
+            return if negative { -self } else { self };
         }
-
-        (self.0 / &rhs.0).into()
+        if self.prec() > rhs.prec() {
+            self.div_round(rhs, rhs.prec(), RoundingDirection::Nearest)
+        } else {
+            (self.0 / &rhs.0).into()
+        }
     }
 }
 
@@ -313,12 +334,8 @@ impl Div<Float> for Float {
     type Output = Self;
 
     #[inline]
-    fn div(mut self, rhs: Self) -> Self::Output {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        (self.0 / rhs.0).into()
+    fn div(self, rhs: Self) -> Self::Output {
+        self / &rhs
     }
 }
 
@@ -397,44 +414,52 @@ impl SubAssign<Float> for Float {
 impl MulAssign<&Float> for Float {
     #[inline]
     fn mul_assign(&mut self, rhs: &Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+        if let Some(negative) = rhs.unit_sign() {
+            if negative {
+                *self = -self.clone();
+            }
+            return;
         }
-
-        self.0.mul_assign(&rhs.0);
+        if let Some(negative) = self.unit_sign() {
+            *self = if negative { -rhs.clone() } else { rhs.clone() };
+            return;
+        }
+        if self.prec() > rhs.prec() {
+            *self = self.mul_round(rhs, rhs.prec(), RoundingDirection::Nearest);
+        } else {
+            self.0.mul_assign(&rhs.0);
+        }
     }
 }
 
 impl MulAssign<Float> for Float {
     #[inline]
     fn mul_assign(&mut self, rhs: Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        self.0.mul_assign(rhs.0);
+        self.mul_assign(&rhs)
     }
 }
 
 impl DivAssign<&Float> for Float {
     #[inline]
     fn div_assign(&mut self, rhs: &Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
+        if let Some(negative) = rhs.unit_sign() {
+            if negative {
+                *self = -self.clone();
+            }
+            return;
         }
-
-        self.0.div_assign(&rhs.0);
+        if self.prec() > rhs.prec() {
+            *self = self.div_round(rhs, rhs.prec(), RoundingDirection::Nearest);
+        } else {
+            self.0.div_assign(&rhs.0);
+        }
     }
 }
 
 impl DivAssign<Float> for Float {
     #[inline]
     fn div_assign(&mut self, rhs: Float) {
-        if self.prec() > rhs.prec() {
-            self.set_prec(rhs.prec());
-        }
-
-        self.0.div_assign(rhs.0);
+        self.div_assign(&rhs)
     }
 }
 
@@ -613,6 +638,16 @@ impl From<&DoubleFloat> for Float {
 }
 
 impl Float {
+    /// Identify ±1 without two arbitrary-precision comparisons on every product.
+    #[inline]
+    fn unit_sign(&self) -> Option<bool> {
+        if self.0.get_exp() != Some(1) {
+            return None;
+        }
+        let negative = self.0.is_sign_negative();
+        (self.0 == if negative { -1 } else { 1 }).then_some(negative)
+    }
+
     /// Wrap a value from the selected arbitrary-precision float backend.
     #[inline]
     pub fn from_raw(value: MultiPrecisionFloat) -> Self {
@@ -1003,8 +1038,11 @@ impl SingleFloat for Float {
 }
 
 impl RealLike for Float {
-    fn absolute_magnitude(&self) -> Magnitude {
-        self.0.absolute_magnitude()
+    #[inline]
+    fn zero_with_prec_hint(prec: u32) -> Self {
+        // Allocate at the final precision instead of creating a one-bit zero
+        // and resizing it. This also serves omitted imaginary coefficients.
+        Float::new(prec)
     }
 
     fn to_usize_clamped(&self) -> usize {
@@ -1017,6 +1055,16 @@ impl RealLike for Float {
 
     fn to_f64(&self) -> f64 {
         self.0.to_f64()
+    }
+
+    #[inline]
+    fn absolute_magnitude(&self) -> Magnitude {
+        self.0.absolute_magnitude()
+    }
+
+    #[inline]
+    fn minimum_roundoff(&self) -> Magnitude {
+        self.0.minimum_roundoff()
     }
 
     #[inline(always)]

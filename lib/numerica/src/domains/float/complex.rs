@@ -7,7 +7,7 @@ use std::{
 use rand::Rng;
 
 use super::{Constructible, FixedPrecision, FloatLike, Real, SingleFloat};
-use super::{DoubleFloat, Float, RealLike};
+use super::{DoubleFloat, ErrorPropagatingFloat, Float, RealLike};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A complex number, `re + i * im`, where `i` is the imaginary unit.
@@ -18,6 +18,23 @@ use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 pub struct Complex<T> {
     pub re: T,
     pub im: T,
+}
+
+impl<T: RealLike> From<Complex<T>> for Complex<ErrorPropagatingFloat<T>> {
+    fn from(value: Complex<T>) -> Self {
+        Complex {
+            re: if value.re.is_exact_zero() {
+                ErrorPropagatingFloat::new_with_absolute_error(value.re, 0.)
+            } else {
+                ErrorPropagatingFloat::from(value.re)
+            },
+            im: if value.im.is_exact_zero() {
+                ErrorPropagatingFloat::new_with_absolute_error(value.im, 0.)
+            } else {
+                ErrorPropagatingFloat::from(value.im)
+            },
+        }
+    }
 }
 
 impl<T: Default> Default for Complex<T> {
@@ -82,6 +99,19 @@ impl<T> Complex<T> {
 
 impl<T: FloatLike> Complex<T> {
     #[inline]
+    fn has_finite_real_axis(&self) -> bool {
+        self.im.is_exact_zero()
+            && matches!(
+                self.re.real_classify(),
+                Some(
+                    std::num::FpCategory::Zero
+                        | std::num::FpCategory::Subnormal
+                        | std::num::FpCategory::Normal
+                )
+            )
+    }
+
+    #[inline]
     pub fn new_zero() -> Self
     where
         T: Constructible,
@@ -145,7 +175,7 @@ impl<T: Real> Complex<T> {
     // Used only after an unscaled exponential/hyperbolic factor overflowed.
     #[cold]
     fn exp_product(exponent: &T, factor: T, half: bool) -> T {
-        if factor.is_fully_zero() {
+        if factor.is_exact_zero() {
             return factor;
         }
         let two = exponent.from_usize(2);
@@ -215,7 +245,7 @@ impl<T: Real> Complex<T> {
         let s = phi.sin();
         if r.needs_rescaling() && r.real_cmp(&r).is_some() {
             let product = |factor: T| {
-                if factor.is_fully_zero() {
+                if factor.is_exact_zero() {
                     r.one().copy_sign(&r) * factor
                 } else {
                     r.clone() * factor
@@ -230,12 +260,12 @@ impl<T: Real> Complex<T> {
 
 impl<T: SingleFloat> Complex<T> {
     pub fn is_real(&self) -> bool {
-        self.im.is_zero()
+        self.im.is_exact_zero()
     }
 
     #[inline]
     pub fn to_real(&self) -> Option<&T> {
-        if self.im.is_zero() {
+        if self.im.is_exact_zero() {
             Some(&self.re)
         } else {
             None
@@ -468,6 +498,16 @@ impl<T: FloatLike> Mul<&Complex<T>> for Complex<T> {
 
     #[inline]
     fn mul(self, rhs: &Self) -> Self::Output {
+        if self.has_finite_real_axis() && rhs.has_finite_real_axis() {
+            // Retain the signed-zero arithmetic of the imaginary component.
+            let im = rhs.im.clone() * &self.re + self.im.clone() * &rhs.re;
+            let mut re = self.re * &rhs.re;
+            if re.is_fully_zero() {
+                // A zero product can change sign when subtracting signed zero.
+                re -= self.im * &rhs.im;
+            }
+            return Self::new(re, im);
+        }
         Complex::new(
             self.re.clone() * &rhs.re - self.im.clone() * &rhs.im,
             self.re.clone() * &rhs.im + self.im.clone() * &rhs.re,
@@ -523,7 +563,7 @@ impl<T: FloatLike> Mul<T> for &Complex<T> {
 impl<T: FloatLike> MulAssign for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: Self) {
-        *self = self.clone().mul(rhs);
+        self.mul_assign(&rhs);
     }
 }
 
@@ -537,7 +577,16 @@ impl<T: FloatLike> MulAssign<T> for Complex<T> {
 impl<T: FloatLike> MulAssign<&Complex<T>> for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: &Self) {
-        *self = self.clone().mul(rhs);
+        if self.has_finite_real_axis() && rhs.has_finite_real_axis() {
+            let im = rhs.im.clone() * &self.re + self.im.clone() * &rhs.re;
+            self.re *= &rhs.re;
+            if self.re.is_fully_zero() {
+                self.re -= self.im.clone() * &rhs.im;
+            }
+            self.im = im;
+        } else {
+            *self = self.clone().mul(rhs);
+        }
     }
 }
 
@@ -571,12 +620,18 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
 
     #[inline]
     fn div(self, rhs: &Self) -> Self::Output {
-        // Axis denominators need no squared norm. This also preserves finite
-        // subnormal ratios in SIMD domains without scalar range classification.
-        if rhs.im.is_fully_zero() {
+        if self.has_finite_real_axis() && rhs.has_finite_real_axis() && !rhs.re.is_fully_zero() {
+            // Dividing the real components directly avoids forming a squared
+            // denominator and propagating the same denominator error twice.
+            let im = self.im * &rhs.re - rhs.im.clone() * &self.re;
+            return Self::new(self.re / &rhs.re, im);
+        }
+        // Exact axis denominators need no squared norm. This also preserves
+        // subnormal SIMD ratios without discarding uncertainty in a zero center.
+        if rhs.im.is_exact_zero() {
             return Self::new(self.re / &rhs.re, self.im / &rhs.re);
         }
-        if rhs.re.is_fully_zero() {
+        if rhs.re.is_exact_zero() {
             return Self::new(self.im / &rhs.im, -self.re / &rhs.im);
         }
 
@@ -584,8 +639,8 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
         let re = self.re.clone() * &rhs.re + self.im.clone() * &rhs.im;
         let im = self.im.clone() * &rhs.re - self.re.clone() * &rhs.im;
         if !n.needs_rescaling()
-            && (!re.needs_rescaling() || re.is_fully_zero())
-            && (!im.needs_rescaling() || im.is_fully_zero())
+            && (!re.needs_rescaling() || re.is_exact_zero())
+            && (!im.needs_rescaling() || im.is_exact_zero())
         {
             return Complex::new(re / &n, im / &n);
         }
@@ -605,7 +660,7 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
             Some(_) => a,
             None => return Complex::new(re / &n, im / &n),
         };
-        if scale.is_fully_zero() {
+        if scale.is_exact_zero() {
             return Complex::new(re / &n, im / &n);
         }
         let (c, d) = (rhs.re.clone() / &scale, rhs.im.clone() / &scale);
@@ -616,7 +671,7 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
         } else {
             a
         };
-        if numerator_scale.is_fully_zero() {
+        if numerator_scale.is_exact_zero() {
             return self;
         }
         let (a, b) = (self.re / &numerator_scale, self.im / &numerator_scale);
@@ -626,7 +681,7 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
                 q * &ratio
             } else {
                 let product = q.clone() * &numerator_scale;
-                if !product.needs_rescaling() || q.is_fully_zero() {
+                if !product.needs_rescaling() || q.is_exact_zero() {
                     product / &scale
                 } else {
                     (q / &scale) * &numerator_scale
@@ -640,10 +695,10 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
         // Keep a component that was already safe: normalizing a very small
         // component alongside a large one can otherwise discard its contribution.
         if !n.needs_rescaling() {
-            if !re.needs_rescaling() || re.is_fully_zero() {
+            if !re.needs_rescaling() || re.is_exact_zero() {
                 result.re = re / &n;
             }
-            if !im.needs_rescaling() || im.is_fully_zero() {
+            if !im.needs_rescaling() || im.is_exact_zero() {
                 result.im = im / n;
             }
         } else {
@@ -655,6 +710,27 @@ impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod exact_axis_division_tests {
+    use super::*;
+    use crate::domains::float::ErrorPropagatingFloat;
+
+    #[test]
+    fn zero_center_with_error_does_not_select_an_axis_denominator() {
+        let exact = |value: f64| ErrorPropagatingFloat::new_with_absolute_error(value, 0.);
+        let uncertain_zero = ErrorPropagatingFloat::new_with_absolute_error(0., 0.125);
+        let numerator = Complex::new(exact(2.), exact(0.));
+
+        let real_axis_center = numerator.clone() / Complex::new(exact(1.5), uncertain_zero);
+        assert!(real_axis_center.im.get_num().is_fully_zero());
+        assert!(!real_axis_center.im.is_exact());
+
+        let imaginary_axis_center = numerator / Complex::new(uncertain_zero, exact(1.5));
+        assert!(imaginary_axis_center.re.get_num().is_fully_zero());
+        assert!(!imaginary_axis_center.re.is_exact());
     }
 }
 
@@ -705,7 +781,7 @@ impl<T: FloatLike> Div<T> for &Complex<T> {
 
 impl<T: FloatLike> DivAssign for Complex<T> {
     fn div_assign(&mut self, rhs: Self) {
-        *self = self.clone().div(rhs);
+        self.div_assign(&rhs);
     }
 }
 
@@ -717,7 +793,13 @@ impl<T: FloatLike> DivAssign<T> for Complex<T> {
 
 impl<T: FloatLike> DivAssign<&Complex<T>> for Complex<T> {
     fn div_assign(&mut self, rhs: &Self) {
-        *self = self.clone().div(rhs);
+        if self.has_finite_real_axis() && rhs.has_finite_real_axis() && !rhs.re.is_fully_zero() {
+            let im = self.im.clone() * &rhs.re - rhs.im.clone() * &self.re;
+            self.re /= &rhs.re;
+            self.im = im;
+        } else {
+            *self = self.clone().div(rhs);
+        }
     }
 }
 
@@ -882,7 +964,7 @@ impl<T: FloatLike> FloatLike for Complex<T> {
                 Some(_) => a,
                 None => return self.one() / self,
             };
-            if scale.is_fully_zero() {
+            if scale.is_exact_zero() {
                 return self.one() / self;
             }
             let (c, d) = (self.re.clone() / &scale, self.im.clone() / &scale);
@@ -930,6 +1012,10 @@ impl<T: FloatLike> FloatLike for Complex<T> {
     #[inline(always)]
     fn is_fully_zero(&self) -> bool {
         self.re.is_fully_zero() && self.im.is_fully_zero()
+    }
+
+    fn has_error(&self) -> bool {
+        self.re.has_error() || self.im.has_error()
     }
 }
 
@@ -1012,6 +1098,21 @@ impl<T: Real> Real for Complex<T> {
             return Self::new(nan.clone(), nan);
         }
 
+        if let Some((re, im)) = self.re.sqrt_complex_branch_cut(&self.im) {
+            return Self::new(re, im);
+        }
+
+        if self.re.is_fully_zero()
+            && self.im.is_fully_zero()
+            && (self.re.has_error() || self.im.has_error())
+        {
+            // The derivative is singular at the origin. Bound the modulus
+            // first, then its square root, avoiding a zero scale division.
+            // Either component may be nonzero even on an uncertain real axis.
+            let bound = self.re.hypot(&self.im).sqrt();
+            return Self::new(bound.clone(), bound.copy_sign(&self.im));
+        }
+
         let (a, b) = (self.re.norm(), self.im.norm());
         let order = a.real_cmp(&b);
         if order.is_none() {
@@ -1019,7 +1120,7 @@ impl<T: Real> Real for Complex<T> {
             return Self::from_polar_coordinates(r.sqrt(), phi / prototype.from_usize(2));
         }
         // Keep exact axes and signed-zero branch lips without a division by zero.
-        if self.im.is_fully_zero() {
+        if self.im.is_exact_zero() {
             let root = a.sqrt();
             return if self.re.real_cmp(&self.re.zero()) == Some(Ordering::Less) {
                 Self::new(prototype.zero(), root.copy_sign(&self.im))
@@ -1086,7 +1187,7 @@ impl<T: Real> Real for Complex<T> {
             ((a.clone() - &one) * (a.clone() + one) + b.clone() * b).log1p() / two
         } else {
             let h = a.hypot(&b);
-            if h.needs_rescaling() && !a.is_fully_zero() && a.real_cmp(&b).is_some() {
+            if h.needs_rescaling() && !a.is_exact_zero() && a.real_cmp(&b).is_some() {
                 let r = b / &a;
                 a.log() + (r.clone() * r).log1p() / two
             } else {
@@ -1098,10 +1199,13 @@ impl<T: Real> Real for Complex<T> {
 
     #[inline]
     fn exp(&self) -> Self {
+        if self.has_finite_real_axis() {
+            return Self::new(self.re.exp(), self.im.clone());
+        }
         let r = self.re.exp();
         let c = self.im.cos();
         let s = self.im.sin();
-        if !r.needs_rescaling() || r.is_fully_zero() || self.re.real_cmp(&self.re.zero()).is_none()
+        if !r.needs_rescaling() || r.is_exact_zero() || self.re.real_cmp(&self.re.zero()).is_none()
         {
             Self::new(r.clone() * c, r * s)
         } else {
@@ -1114,12 +1218,18 @@ impl<T: Real> Real for Complex<T> {
 
     #[inline]
     fn sin(&self) -> Self {
+        if self.has_finite_real_axis() {
+            return Self::new(self.re.sin(), self.im.clone() * self.re.cos());
+        }
         let t = Self::new(-self.im.clone(), self.re.clone()).sinh();
         Self::new(t.im, -t.re)
     }
 
     #[inline]
     fn cos(&self) -> Self {
+        if self.has_finite_real_axis() {
+            return Self::new(self.re.cos(), -self.im.clone() * self.re.sin());
+        }
         Self::new(-self.im.clone(), self.re.clone()).cosh()
     }
 
@@ -1270,7 +1380,7 @@ impl<T: Real> Real for Complex<T> {
                 - Self::new(minus.clone(), y.clone()).log().re)
                 / &two
         };
-        let im = if minus.is_fully_zero() && y.is_fully_zero() {
+        let im = if minus.is_exact_zero() && y.is_exact_zero() {
             self.im.clone()
         } else {
             (self.im.clone() * &two).atan2(&(minus * plus - y.clone() * y)) / two
@@ -1280,9 +1390,9 @@ impl<T: Real> Real for Complex<T> {
 
     #[inline]
     fn powf(&self, e: &Self) -> Self {
-        if e.re == self.re.zero() && e.im == self.im.zero() {
+        if e.is_exact_zero() {
             self.pow(0)
-        } else if e.im == self.im.zero() {
+        } else if e.im.is_exact_zero() && !e.re.has_error() {
             // Exact half powers retain Cartesian root precision and branch lips.
             let half = e.re.one() / e.re.from_usize(2);
             if e.re == half {
@@ -1300,7 +1410,7 @@ impl<T: Real> Real for Complex<T> {
                 return self.sqrt().inv().pow(3);
             }
             let (r, phi) = self.clone().to_polar_coordinates();
-            let radius = if r.needs_rescaling() && !self.is_fully_zero() {
+            let radius = if r.needs_rescaling() && !self.is_exact_zero() {
                 (self.log().re * &e.re).exp()
             } else {
                 r.powf(&e.re)

@@ -325,10 +325,23 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
     const FIXED_PRECISION: Option<u32> = Some(53);
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        Ok(Complex::new(
-            ErrorPropagatingFloat::new(f.re.to_f64(), 15.954589770191003),
-            ErrorPropagatingFloat::new(f.im.to_f64(), 15.954589770191003),
-        ))
+        let f: Complex<ErrorPropagatingFloat<Float>> = f.into();
+        let convert = |f: ErrorPropagatingFloat<Float>| {
+            let value = f.get_num().to_f64();
+            let rounding = if value.is_finite() && f.get_num().is_finite() {
+                // Compare centers directly: relative epsilon understates the
+                // rounding of nonzero subnormals, and misses total underflow.
+                (f.get_num().clone() - Float::with_val(f.get_num().prec().max(53), value))
+                    .absolute_magnitude()
+            } else {
+                crate::domains::float::Magnitude::INFINITY
+            };
+            ErrorPropagatingFloat::new_with_error_magnitude(
+                value,
+                f.get_error_magnitude() + rounding,
+            )
+        };
+        Ok(Complex::new(convert(f.re), convert(f.im)))
     }
 }
 
@@ -336,10 +349,9 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<Float>> {
     const FIXED_PRECISION: Option<u32> = None;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        Ok(Complex::new(
-            ErrorPropagatingFloat::new_with_native_precision(f.re),
-            ErrorPropagatingFloat::new_with_native_precision(f.im),
-        ))
+        // Plain complex zeros identify exact axes. Preserve them when attaching
+        // native-precision errors to the nonzero components.
+        Ok(f.into())
     }
 }
 
@@ -348,7 +360,7 @@ mod tracked_precision_tests {
     use crate::{
         atom::{Atom, AtomCore, Symbol},
         domains::{
-            float::{Complex, ErrorPropagatingFloat, Float, Magnitude},
+            float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Magnitude, RealLike},
             rational::Rational,
         },
         evaluate::EvaluationDomain,
@@ -391,14 +403,9 @@ mod tracked_precision_tests {
             converted.re.get_error_magnitude(),
             Magnitude::from_f64(2.).scale_pow2(-2048)
         );
-        // Keep the existing convention: an input zero has one native epsilon
-        // of absolute error, rather than becoming an exact zero.
-        assert_eq!(
-            converted.im.get_error_magnitude(),
-            Magnitude::ONE.scale_pow2(-4096)
-        );
+        assert!(converted.im.is_exact_zero());
         assert_eq!(converted.re.get_error_magnitude().to_f64(), None);
-        assert_eq!(converted.im.get_error_magnitude().to_f64(), None);
+        assert_eq!(converted.im.get_error_magnitude().to_f64(), Some(0.));
     }
 
     #[test]
@@ -430,9 +437,77 @@ mod tracked_precision_tests {
             assert_eq!(mapped.get_num().prec(), 2048);
             assert_eq!(mapped.get_num(), direct.get_num());
             assert_eq!(mapped.get_error_magnitude(), direct.get_error_magnitude());
-            assert!(!mapped.get_error_magnitude().is_zero());
             assert!(mapped.get_error_magnitude().is_finite());
-            assert_eq!(mapped.get_error_magnitude().to_f64(), None);
+            if mapped.is_exact_zero() {
+                assert_eq!(mapped.get_error_magnitude().to_f64(), Some(0.));
+            } else {
+                assert!(!mapped.get_error_magnitude().is_zero());
+                assert_eq!(mapped.get_error_magnitude().to_f64(), None);
+            }
+        }
+        assert!(direct.im.is_exact_zero());
+        assert!(mapped.im.is_exact_zero());
+    }
+
+    #[test]
+    fn tracked_binary64_conversion_preserves_exact_axes_and_underflow_error() {
+        type Tracked64 = ErrorPropagatingFloat<f64>;
+        let real = Complex::new(Float::with_val(24, 1), Float::new(4096));
+        let converted = Complex::<Tracked64>::try_from_complex_float(real).unwrap();
+        assert!(converted.im.is_exact_zero());
+        assert!(converted.re.get_error_magnitude() >= Magnitude::ONE.scale_pow2(-24));
+
+        let tiny = Float::with_val(128, 0.5).pow(4000);
+        let source = Complex::new(Float::with_val(2048, 1), tiny.clone());
+        let wide = Complex::<Tracked>::try_from_complex_float(source.clone()).unwrap();
+        assert_eq!(wide.im.get_num(), &tiny);
+        assert_eq!(wide.im.get_num().prec(), 128);
+        assert!(!wide.im.get_error_magnitude().is_zero());
+        assert_eq!(wide.im.get_error_magnitude().to_f64(), None);
+
+        let converted = Complex::<Tracked64>::try_from_complex_float(source.clone()).unwrap();
+        assert_eq!(*converted.im.get_num(), 0.);
+        assert!(!converted.im.is_exact_zero());
+        assert!(converted.im.get_error_magnitude() >= tiny.absolute_magnitude());
+        assert_eq!(converted.im.get_error_magnitude().to_f64(), None);
+        assert!(Tracked64::try_from_complex_float(source).is_err());
+
+        // 3 * 2^-1076 rounds upward to 2^-1074. Its conversion error is
+        // 2^-1076, much larger than a relative epsilon at this subnormal.
+        let quarter_subnormal = Float::with_val(256, 0.5).pow(1076);
+        let source = Complex::new(
+            Float::with_val(256, 1),
+            quarter_subnormal.clone() * Float::with_val(256, 3),
+        );
+        let converted = Complex::<Tracked64>::try_from_complex_float(source).unwrap();
+        assert_eq!(*converted.im.get_num(), f64::from_bits(1));
+        assert!(converted.im.get_error_magnitude() >= quarter_subnormal.absolute_magnitude());
+    }
+
+    #[test]
+    fn tracked_binary64_real_constants_stay_real_in_both_evaluators() {
+        type Tracked64 = ErrorPropagatingFloat<f64>;
+        let expression = Atom::var(Symbol::PI) + Atom::var(Symbol::E);
+        let direct = expression
+            .evaluate(&std::collections::HashMap::<Atom, Complex<Tracked64>>::new())
+            .unwrap();
+        let mut evaluator = expression
+            .evaluator::<Atom>(&[])
+            .build()
+            .unwrap()
+            .map_coeff(&|c: &Complex<Rational>| {
+                Complex::<Tracked64>::try_from_complex_float(Complex::new(
+                    c.re.to_multi_prec_float(53),
+                    c.im.to_multi_prec_float(53),
+                ))
+                .unwrap()
+            });
+        let optimized = evaluator.evaluate_single(&[]);
+        for value in [direct, optimized] {
+            assert!(value.im.is_exact_zero());
+            assert!(!value.re.is_exact());
+            assert!(value.re.get_error_magnitude().is_finite());
+            assert!((value.re.value - std::f64::consts::PI - std::f64::consts::E).abs() < 1e-14);
         }
     }
 }

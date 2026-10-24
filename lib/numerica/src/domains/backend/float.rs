@@ -22,10 +22,14 @@ pub use rug::{
 /// A compact upper estimate of the absolute value, preserving the backend exponent.
 pub(crate) trait MultiPrecisionFloatMagnitude {
     fn absolute_magnitude(&self) -> crate::domains::float::Magnitude;
+
+    /// Half the spacing between zero and the smallest positive backend value.
+    fn minimum_roundoff(&self) -> crate::domains::float::Magnitude;
 }
 
 #[cfg(feature = "float-mpfr")]
 impl MultiPrecisionFloatMagnitude for MultiPrecisionFloat {
+    #[inline]
     fn absolute_magnitude(&self) -> crate::domains::float::Magnitude {
         // Directed rounding must be away from zero before discarding the sign.
         let rounding = if self.is_sign_negative() {
@@ -35,6 +39,15 @@ impl MultiPrecisionFloatMagnitude for MultiPrecisionFloat {
         };
         let (mantissa, exponent) = self.to_f64_exp_round(rounding);
         crate::domains::float::Magnitude::from_f64_exp(mantissa, i64::from(exponent))
+    }
+
+    #[inline]
+    fn minimum_roundoff(&self) -> crate::domains::float::Magnitude {
+        // MPFR has abrupt underflow: the minimum positive value is 2^(emin-1),
+        // independent of precision. A result rounded up to that value can have
+        // much more error than the usual relative epsilon predicts. Read emin
+        // each time because callers may configure MPFR's exponent range.
+        crate::domains::float::Magnitude::ONE.scale_pow2(i64::from(rug::float::exp_min()) - 2)
     }
 }
 
@@ -405,6 +418,17 @@ mod astro {
             // A 33-bit rounded significand is exactly representable as f64.
             // The full exponent stays separate; no logarithms or allocation.
             Magnitude::from_f64_exp(significand as f64, scale)
+        }
+
+        #[inline]
+        fn minimum_roundoff(&self) -> crate::domains::float::Magnitude {
+            // Astro has gradual underflow. Its subnormal spacing is
+            // 2^(EXPONENT_MIN-p), where storage precision p is word-aligned.
+            // Magnitude saturates upward if this floor exceeds its own range.
+            let word_bits = astro_float::WORD_BIT_SIZE as i64;
+            let precision = (i64::from(self.prec.max(1)) + word_bits - 1) / word_bits * word_bits;
+            crate::domains::float::Magnitude::ONE
+                .scale_pow2(i64::from(astro_float::EXPONENT_MIN) - precision - 1)
         }
     }
 

@@ -89,6 +89,17 @@ pub trait FloatLike:
         false
     }
 
+    /// Whether this value carries an explicit nonzero uncertainty estimate.
+    /// Ordinary floating point values do not store such an estimate.
+    fn has_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this value is zero without any explicitly tracked uncertainty.
+    fn is_exact_zero(&self) -> bool {
+        self.is_fully_zero() && !self.has_error()
+    }
+
     /// Set this value from another value. May reuse memory.
     fn set_from(&mut self, other: &Self);
 
@@ -166,7 +177,22 @@ pub trait RealLike: SingleFloat {
         self.absolute_magnitude().next_down()
     }
 
+    /// Absolute rounding floor for operations that produce a nonzero value.
+    /// Domains with subnormal numbers override this with half their smallest
+    /// positive spacing; relative epsilon alone is insufficient near underflow.
+    #[inline]
+    fn minimum_roundoff(&self) -> Magnitude {
+        Magnitude::ZERO
+    }
+
     fn round_to_nearest_integer(&self) -> Integer;
+
+    /// Construct zero with a binary precision hint, where supported.
+    fn zero_with_prec_hint(prec: u32) -> Self {
+        let mut zero = Self::new_zero();
+        zero.set_precision(prec);
+        zero
+    }
 }
 
 /// A float that can be constructed without any parameters, such as `f64` (excluding multi-precision floats).
@@ -256,6 +282,15 @@ pub trait Real: FloatLike {
         // cancellation-induced precision loss in dynamically sized floats.
         let two = self.from_usize(2);
         (self.clone() / (self.one() + self).sqrt() / &two).asinh() * two
+    }
+
+    /// Optional component-uncertainty handling for the principal complex square
+    /// root near its branch cut. Return replacement real and imaginary components,
+    /// or `None` to use the ordinary complex formula. Scalar domains without
+    /// explicit uncertainty need not override this hook.
+    #[inline]
+    fn sqrt_complex_branch_cut(&self, _imaginary: &Self) -> Option<(Self, Self)> {
+        None
     }
 
     fn sqrt(&self) -> Self;

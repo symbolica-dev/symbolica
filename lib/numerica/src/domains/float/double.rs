@@ -427,6 +427,11 @@ impl SingleFloat for DoubleFloat {
 }
 
 impl RealLike for DoubleFloat {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
     fn absolute_magnitude(&self) -> Magnitude {
         let hi = self.0.hi();
         let lo = self.0.lo();

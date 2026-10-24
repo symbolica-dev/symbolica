@@ -236,32 +236,54 @@ fn error_propagation() {
     let e = ErrorPropagatingFloat::new(0.7, 16.);
     let f = ErrorPropagatingFloat::new(0.4, 16.);
 
-    let r = a.sqrt() + b.log() + b.sin() - a.cos() + b.tan() - c.asin() + d.acos() - a.atan2(&b)
-        + b.sinh()
-        - a.cosh()
-        + b.tanh()
-        - e.asinh()
-        + b.acosh() / f.atanh()
-        + b.powf(&a);
+    fn expression<T: Real>(a: T, b: T, c: T, d: T, e: T, f: T) -> T {
+        a.sqrt() + b.log() + b.sin() - a.cos() + b.tan() - c.asin() + d.acos() - a.atan2(&b)
+            + b.sinh()
+            - a.cosh()
+            + b.tanh()
+            - e.asinh()
+            + b.acosh() / f.atanh()
+            + b.powf(&a)
+    }
+    let inputs = [a, b, c, d, e, f];
+    let [a, b, c, d, e, f] = inputs.clone();
+    let r = expression(a, b, c, d, e, f);
     assert_eq!(*r.get_num(), 17293.219725825093);
-    let expected_precision = 14.836795991431746;
-    let precision = r.get_precision().unwrap();
-    // Upward rounding of the 32-bit error magnitudes slightly reduces the
-    // reported precision. Allow accumulated magnitude rounding, with only
-    // binary64 logarithm rounding in the opposite direction.
-    assert!(precision <= expected_precision + 1e-12);
-    assert!(expected_precision - precision < 1e-8);
+    assert!(r.get_precision().unwrap() > 14.);
+    // Check the supplied uncertainty against independently evaluated high-
+    // precision corners, rather than pinning a particular propagation formula.
+    for corner in 0..64 {
+        let values: [Float; 6] = std::array::from_fn(|i| {
+            let sign = if corner & (1 << i) == 0 { -1 } else { 1 };
+            Float::with_val(256, *inputs[i].get_num())
+                + Float::with_val(256, inputs[i].get_absolute_error()) * sign
+        });
+        let [a, b, c, d, e, f] = values;
+        let expected = expression(a, b, c, d, e, f);
+        let difference = (expected - Float::with_val(256, *r.get_num())).absolute_magnitude();
+        assert!(
+            difference <= r.get_error_magnitude(),
+            "corner {corner}: difference {difference:?}, error {:?}",
+            r.get_error_magnitude()
+        );
+    }
 }
 
 #[test]
 fn error_truncation() {
-    let a = ErrorPropagatingFloat::new(0.0000000123456789, 9.)
-        .exp()
-        .log();
-    let expected_precision = 8.046104745509947;
-    let precision = a.get_precision().unwrap();
-    assert!(precision <= expected_precision + 1e-12);
-    assert!(expected_precision - precision < 1e-8);
+    let input = ErrorPropagatingFloat::new(0.0000000123456789, 9.);
+    let a = input.exp().log();
+    // Rounding exp(x) near one loses accuracy before log brings the center
+    // back to x. Check independent endpoints rather than one error formula.
+    assert!(a.get_precision().unwrap() > 7.);
+    assert!(a.get_precision().unwrap() < input.get_precision().unwrap());
+    for sign in [-1, 1] {
+        let endpoint = Float::with_val(256, *input.get_num())
+            + Float::with_val(256, input.get_absolute_error()) * sign;
+        let reference = endpoint.exp().log();
+        let difference = (reference - Float::with_val(256, *a.get_num())).absolute_magnitude();
+        assert!(difference <= a.get_error_magnitude());
+    }
 }
 
 #[test]
@@ -547,4 +569,253 @@ fn complex_gcd() {
     let gcd = Complex::new(Rational::new(3, 2), Rational::new(1, 2))
         .gcd(&Complex::new(Rational::new(1, 1), Rational::new(-1, 1)));
     assert_eq!(gcd, Complex::new((1, 2).into(), (-1, 2).into()));
+}
+
+#[test]
+fn mixed_precision_products_and_quotients_round_once() {
+    use crate::domains::float::RoundingDirection;
+    for precision in [128, 256, 512] {
+        let tiny: Rational = (Integer::one(), Integer::from(2).pow(precision as u64)).into();
+        let exact = Rational::one() + tiny;
+        for higher_precision in [precision + 1, 2 * precision] {
+            let high =
+                Float::from_rational_round(&exact, higher_precision, RoundingDirection::Nearest);
+            for sign in [1, -1] {
+                let high = high.clone() * sign;
+                for low in [
+                    Float::with_val(precision, 1.5),
+                    Float::with_val(precision, 1.25),
+                ] {
+                    let product = Float::from_rational_round(
+                        &(high.to_rational() * low.to_rational()),
+                        precision,
+                        RoundingDirection::Nearest,
+                    );
+                    let quotient = Float::from_rational_round(
+                        &(high.to_rational() / low.to_rational()),
+                        precision,
+                        RoundingDirection::Nearest,
+                    );
+                    for result in [
+                        high.clone() * &low,
+                        low.clone() * &high,
+                        high.clone() * low.clone(),
+                        low.clone() * high.clone(),
+                    ] {
+                        assert_eq!(
+                            result, product,
+                            "product at {precision}/{higher_precision} bits"
+                        );
+                        assert_eq!(result.prec(), precision);
+                    }
+                    for result in [high.clone() / &low, high.clone() / low.clone()] {
+                        assert_eq!(
+                            result, quotient,
+                            "quotient at {precision}/{higher_precision} bits"
+                        );
+                        assert_eq!(result.prec(), precision);
+                    }
+                    let mut result = high.clone();
+                    result *= &low;
+                    assert_eq!(result, product);
+                    let mut result = high.clone();
+                    result *= low.clone();
+                    assert_eq!(result, product);
+                    let mut result = high.clone();
+                    result /= &low;
+                    assert_eq!(result, quotient);
+                    let mut result = high.clone();
+                    result /= low.clone();
+                    assert_eq!(result, quotient);
+
+                    let z = Complex::new(high.clone(), low);
+                    let norm = z.clone() * z.conj();
+                    assert!(
+                        norm.im.is_fully_zero(),
+                        "conjugate product at {precision}/{higher_precision} bits: {norm}"
+                    );
+                    let tracked: Complex<ErrorPropagatingFloat<Float>> = z.into();
+                    let norm = tracked.clone() * tracked.conj();
+                    assert!(norm.im.get_num().is_fully_zero());
+                    assert!(
+                        !norm.im.is_exact(),
+                        "uncorrelated input errors must remain represented"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn plain_float_units_preserve_sqrt_precision() {
+    for precision in [128, 256, 512] {
+        let root = Float::with_val(precision, 2).sqrt();
+        for unit_precision in [2, precision, 2 * precision] {
+            for sign in [1, -1] {
+                let unit = Float::with_val(unit_precision, sign);
+                let expected = if sign == 1 {
+                    root.clone()
+                } else {
+                    -root.clone()
+                };
+                for result in [
+                    root.clone() * &unit,
+                    unit.clone() * &root,
+                    root.clone() * unit.clone(),
+                    unit.clone() * root.clone(),
+                    root.clone() / &unit,
+                    root.clone() / unit.clone(),
+                ] {
+                    assert_eq!(result, expected);
+                    assert_eq!(result.prec(), root.prec());
+                }
+                let mut result = root.clone();
+                result *= &unit;
+                assert_eq!(result, expected);
+                assert_eq!(result.prec(), root.prec());
+                let mut result = root.clone();
+                result *= unit.clone();
+                assert_eq!(result, expected);
+                assert_eq!(result.prec(), root.prec());
+                let mut result = root.clone();
+                result /= &unit;
+                assert_eq!(result, expected);
+                assert_eq!(result.prec(), root.prec());
+                let mut result = root.clone();
+                result /= unit;
+                assert_eq!(result, expected);
+                assert_eq!(result.prec(), root.prec());
+            }
+        }
+    }
+}
+
+#[test]
+fn tracked_units_retain_uncertainty() {
+    for precision in [128, 256, 512] {
+        let value = ErrorPropagatingFloat::new_with_absolute_error(
+            Float::with_val(precision, 2).sqrt(),
+            0.,
+        );
+        for sign in [1, -1] {
+            let unit = ErrorPropagatingFloat::new_with_absolute_error(
+                Float::with_val(precision / 2, sign),
+                0.125,
+            );
+            let expected_error = value.get_num().absolute_magnitude() * unit.get_error_magnitude();
+            for result in [
+                value.clone() * &unit,
+                unit.clone() * &value,
+                value.clone() / &unit,
+            ] {
+                assert!(!result.is_exact());
+                assert!(result.get_error_magnitude() >= expected_error);
+            }
+        }
+    }
+}
+
+#[test]
+fn tracked_real_complex_operations_preserve_exact_imaginary_zero() {
+    fn check<T: RealLike + Real>(
+        x: Complex<ErrorPropagatingFloat<T>>,
+        y: Complex<ErrorPropagatingFloat<T>>,
+    ) {
+        for (name, result) in [
+            ("add", x.clone() + &y),
+            ("sub", x.clone() - &y),
+            ("mul", x.clone() * &y),
+            ("div", x.clone() / &y),
+            ("pow", x.pow(3)),
+            ("powf", x.powf(&y)),
+            ("sqrt", x.sqrt()),
+            ("log", x.log()),
+            ("exp", x.exp()),
+            ("sin", x.sin()),
+            ("cos", x.cos()),
+        ] {
+            assert!(
+                result.im.is_exact_zero(),
+                "{name} introduced imaginary uncertainty: {result}"
+            );
+            assert!(!result.re.is_exact(), "{name} discarded real uncertainty");
+            assert!(
+                result.re.get_num().is_finite(),
+                "{name} returned a nonfinite center"
+            );
+        }
+    }
+    check(
+        Complex::from(ErrorPropagatingFloat::new_with_absolute_error(2., 0.001)),
+        Complex::from(ErrorPropagatingFloat::new_with_absolute_error(1.5, 0.001)),
+    );
+    for precision in [128, 256, 512] {
+        for other_precision in [precision / 2, precision, 2 * precision] {
+            check(
+                Complex::from(ErrorPropagatingFloat::new_with_absolute_error(
+                    Float::with_val(precision, 2),
+                    0.001,
+                )),
+                Complex::from(ErrorPropagatingFloat::new_with_absolute_error(
+                    Float::with_val(other_precision, 1.5),
+                    0.001,
+                )),
+            );
+        }
+    }
+}
+
+#[test]
+fn tracked_complex_sqrt_at_uncertain_origin_has_finite_error() {
+    for precision in [128, 256, 512] {
+        let exact = Complex::new(
+            ErrorPropagatingFloat::<Float>::exact_zero(precision),
+            ErrorPropagatingFloat::<Float>::exact_zero(precision),
+        )
+        .sqrt();
+        assert!(exact.re.is_exact_zero());
+        assert!(exact.im.is_exact_zero());
+    }
+    fn check<T: RealLike + Real>(value: Complex<ErrorPropagatingFloat<T>>) {
+        let re_error = value.re.get_error_magnitude();
+        let im_error = value.im.get_error_magnitude();
+        let root = value.sqrt();
+        for component in [&root.re, &root.im] {
+            assert!(component.get_num().is_fully_zero());
+            assert!(component.get_error_magnitude().is_finite());
+            assert!(!component.is_exact());
+        }
+        // Compare with independently evaluated points, not the rounding excess
+        // of a particular sequence of magnitude operations.
+        for re_sign in [-1, 0, 1] {
+            for im_sign in [-1, 0, 1] {
+                let sample = Complex::new(
+                    Float::with_val(256, re_error.to_f64().unwrap()) * re_sign,
+                    Float::with_val(256, im_error.to_f64().unwrap()) * im_sign,
+                )
+                .sqrt();
+                assert!(sample.re.absolute_magnitude() <= root.re.get_error_magnitude());
+                assert!(sample.im.absolute_magnitude() <= root.im.get_error_magnitude());
+            }
+        }
+    }
+    for (re_error, im_error) in [(0.001, 0.002), (0., 0.002), (0.001, 0.)] {
+        check(Complex::new(
+            ErrorPropagatingFloat::new_with_absolute_error(0., re_error),
+            ErrorPropagatingFloat::new_with_absolute_error(0., im_error),
+        ));
+        for precision in [128, 256, 512] {
+            check(Complex::new(
+                ErrorPropagatingFloat::new_with_absolute_error(
+                    Float::with_val(precision, 0),
+                    re_error,
+                ),
+                ErrorPropagatingFloat::new_with_absolute_error(
+                    Float::with_val(2 * precision, 0),
+                    im_error,
+                ),
+            ));
+        }
+    }
 }
