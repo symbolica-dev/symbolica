@@ -571,8 +571,6 @@ impl PythonMatrix {
                 lossless_floats: false,
                 mode: mode.into(),
                 precision,
-                print_precision: false,
-                lossless_floats: false,
                 pretty_matrix,
                 hide_all_namespaces: !show_namespaces,
                 color_namespace: true,
