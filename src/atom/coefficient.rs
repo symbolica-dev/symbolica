@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use bytes::{Buf, BufMut};
 
 use crate::{
@@ -10,6 +8,7 @@ use crate::{
     domains::{
         backend::integer::{from_lsf_bytes, lsf_byte_size, write_lsf_bytes},
         finite_field::FiniteFieldElement,
+        float::SingleFloat,
         integer::{Integer, IntegerRing, Z},
         rational::Fraction,
         rational_polynomial::RationalPolynomial,
@@ -26,6 +25,7 @@ const ARB_NUM: u8 = 0b00000111;
 const RAT_POLY: u8 = 0b00001000;
 const FLOAT: u8 = 0b00001001;
 const COMPLEX: u8 = 0b00001010;
+const COMPACT_FLOAT: u8 = 0b00001011;
 const INDETERMINATE: u8 = 0b00001100;
 const COMPLEX_INFINITY: u8 = 0b00001101;
 const DIRECTED_INFINITY: u8 = 0b00001111;
@@ -138,6 +138,111 @@ pub(crate) fn read_packed_pair(data: &[u8]) -> (u64, u64, &[u8]) {
         (data[1] as u64, data[2] as u64, &data[3..])
     } else {
         read_packed_pair_wide(data)
+    }
+}
+
+/// Read an integer pair at an import boundary, before trusted packed readers run.
+pub(crate) fn read_packed_pair_checked(data: &[u8]) -> Result<(u64, u64, &[u8]), String> {
+    let (&tag, mut rest) = data
+        .split_first()
+        .ok_or_else(|| "Missing packed integer header".to_owned())?;
+    let numerator_width = tag & NUM_MASK;
+    let denominator_width = (tag & DEN_MASK) >> 4;
+    if !(1..=4).contains(&numerator_width) || denominator_width > 4 {
+        return Err("Invalid packed integer widths".to_owned());
+    }
+    let mut read = |width: u8| -> Result<u64, String> {
+        if width == 0 {
+            return Ok(1);
+        }
+        let size = 1usize << (width - 1);
+        let bytes = rest
+            .get(..size)
+            .ok_or_else(|| "Truncated packed integer".to_owned())?;
+        let mut value = [0; 8];
+        value[..size].copy_from_slice(bytes);
+        rest = &rest[size..];
+        Ok(u64::from_le_bytes(value))
+    };
+    let numerator = read(numerator_width)?;
+    let denominator = read(denominator_width)?;
+    Ok((numerator, denominator, rest))
+}
+
+fn take_checked(data: &[u8], length: u64) -> Result<(&[u8], &[u8]), String> {
+    let length = usize::try_from(length)
+        .map_err(|_| "Packed payload length does not fit in usize".to_owned())?;
+    if length > data.len() {
+        return Err("Truncated packed payload".to_owned());
+    }
+    Ok(data.split_at(length))
+}
+
+/// Validate coefficient boundaries and binary floats without creating atom views.
+/// Rational-polynomial payloads remain opaque here; their own domain decodes them.
+pub(crate) fn validate_packed_coefficient(data: &[u8]) -> Result<&[u8], String> {
+    fn rational(data: &[u8], require_large: bool) -> Result<&[u8], String> {
+        let (&tag, rest) = data
+            .split_first()
+            .ok_or_else(|| "Missing rational coefficient".to_owned())?;
+        if tag & NUM_MASK == ARB_NUM {
+            let (numerator, denominator, rest) = read_packed_pair_checked(rest)?;
+            let total = numerator
+                .checked_add(denominator)
+                .ok_or_else(|| "Rational payload length overflow".to_owned())?;
+            Ok(take_checked(rest, total)?.1)
+        } else if require_large {
+            Err("Invalid infinity direction coefficient".to_owned())
+        } else {
+            Ok(read_packed_pair_checked(data)?.2)
+        }
+    }
+
+    fn component(data: &[u8], allow_zero: bool) -> Result<(), String> {
+        if data.len() < 5 && !(allow_zero && data.len() == 4) {
+            return Err("Invalid floating coefficient component length".to_owned());
+        }
+        SerializedFloat(data).try_to_float().map(|_| ())
+    }
+
+    let (&tag, rest) = data
+        .split_first()
+        .ok_or_else(|| "Missing coefficient header".to_owned())?;
+    match tag {
+        COMPACT_FLOAT => {
+            let header = rest;
+            let (real_length, imaginary_length, rest) = read_packed_pair_checked(header)?;
+            if header[0] & SIGN != 0
+                || (header.len() - rest.len()) as u64
+                    != (real_length, imaginary_length).get_packed_size()
+            {
+                return Err("Noncanonical floating coefficient length header".to_owned());
+            }
+            let (real, rest) = take_checked(rest, real_length)?;
+            let (imaginary, rest) = take_checked(rest, imaginary_length)?;
+            component(real, false)?;
+            if !imaginary.is_empty() {
+                component(imaginary, true)?;
+                if (imaginary.len() == 4 && imaginary == &real[..4])
+                    || (imaginary.len() > 4 && SerializedFloat(imaginary).is_zero())
+                {
+                    return Err("Noncanonical imaginary zero coefficient".to_owned());
+                }
+            }
+            Ok(rest)
+        }
+        FLOAT => Err("Noncanonical fixed-length floating coefficient".to_owned()),
+        COMPLEX | DIRECTED_INFINITY => {
+            let rest = rational(rest, tag == DIRECTED_INFINITY)?;
+            rational(rest, tag == DIRECTED_INFINITY)
+        }
+        INDETERMINATE | COMPLEX_INFINITY => Ok(rest),
+        RAT_POLY => {
+            let (length, rest) = take_checked(rest, 4)?;
+            Ok(take_checked(rest, u32::from_le_bytes(length.try_into().unwrap()) as u64)?.1)
+        }
+        _ if tag & NUM_MASK == FIN_NUM => Ok(read_packed_pair_checked(rest)?.2),
+        _ => rational(data, false),
     }
 }
 
@@ -352,18 +457,26 @@ impl PackedRationalNumberWriter for Coefficient {
                 write_multi_rational(&dir.im, dest);
             }
             Coefficient::Float(f) => {
-                dest.put_u8(FLOAT);
-
-                // TODO: improve serialization
-                let s = f.re.serialize();
-                dest.put_u64_le(s.len() as u64 + 4);
+                // Zero bytes inherit the real precision; four bytes preserve a
+                // distinct imaginary precision. Both represent an exactly zero value.
+                let im_is_zero = f.im.is_zero();
+                let im_len = if im_is_zero {
+                    u64::from(f.re.prec() != f.im.prec()) * 4
+                } else {
+                    f.im.serialized_size() as u64 + 4
+                };
+                let lengths = (f.re.serialized_size() as u64 + 4, im_len);
+                dest.reserve((1 + lengths.get_packed_size() + lengths.0 + lengths.1) as usize);
+                dest.put_u8(COMPACT_FLOAT);
+                lengths.write_packed(dest);
                 dest.put_u32_le(f.re.prec());
-                dest.write_all(&s).unwrap();
-
-                let s = f.im.serialize();
-                dest.put_u64_le(s.len() as u64 + 4);
-                dest.put_u32_le(f.im.prec());
-                dest.write_all(&s).unwrap();
+                f.re.serialize_into(dest);
+                if im_len != 0 {
+                    dest.put_u32_le(f.im.prec());
+                }
+                if !im_is_zero {
+                    f.im.serialize_into(dest);
+                }
             }
             Coefficient::FiniteField(num, f) => {
                 dest.put_u8(FIN_NUM);
@@ -497,9 +610,13 @@ impl PackedRationalNumberWriter for Coefficient {
                 1 + packed_size_multi_rat(&c.re) + packed_size_multi_rat(&c.im)
             }
             Coefficient::Float(f) => {
-                let s = f.re.serialize();
-                let si = f.im.serialize();
-                1 + 8 + 4 + s.len() as u64 + 8 + 4 + si.len() as u64
+                let im_len = if f.im.is_zero() {
+                    u64::from(f.re.prec() != f.im.prec()) * 4
+                } else {
+                    f.im.serialized_size() as u64 + 4
+                };
+                let lengths = (f.re.serialized_size() as u64 + 4, im_len);
+                1 + lengths.get_packed_size() + lengths.0 + lengths.1
             }
             Coefficient::FiniteField(m, i) => 2 + (*m.inner(), i.0 as u64).get_packed_size(),
             Coefficient::RationalPolynomial(_) => {
@@ -539,6 +656,17 @@ impl PackedRationalNumberReader for [u8] {
             (
                 CoefficientView::RationalPolynomial(SerializedRationalPolynomial(&start[..len])),
                 source,
+            )
+        } else if disc == COMPACT_FLOAT {
+            let (len, len_i, start) = read_packed_pair(source);
+            let (re, rest) = start.split_at(len as usize);
+            let (im, rest) = rest.split_at(len_i as usize);
+            // An omitted imaginary zero inherits its precision from the real
+            // component. Keep a normal borrowed view without an allocation.
+            let im = if im.is_empty() { &re[..4] } else { im };
+            (
+                CoefficientView::Float(SerializedFloat(re), SerializedFloat(im)),
+                rest,
             )
         } else if disc == FLOAT {
             let len = source.get_u64_le() as usize;
@@ -841,6 +969,9 @@ impl PackedRationalNumberReader for [u8] {
             let size = get_size_of_natural(var_size & NUM_MASK)
                 + get_size_of_natural((var_size & DEN_MASK) >> 4);
             dest.advance(size as usize);
+        } else if v_num == COMPACT_FLOAT {
+            let (real_size, imaginary_size, rest) = read_packed_pair(dest);
+            dest = &rest[(real_size + imaginary_size) as usize..];
         } else if v_num == FLOAT {
             let size = dest.get_u64_le() as usize;
             dest.advance(size);
@@ -995,5 +1126,109 @@ impl PackedRationalNumberWriter for (u64, u64) {
             get_size_of_natural(U64_NUM)
         };
         size as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domains::float::{Complex, Float};
+
+    #[test]
+    fn checked_packed_coefficients_accept_existing_variants() {
+        use crate::domains::{
+            finite_field::{FiniteFieldCore, Zp64},
+            rational::Rational,
+        };
+
+        let field = Zp64::new(17);
+        let field_element = field.to_element(5);
+        let complex = Complex::new(Rational::from((1, 3)), Rational::from((2, 5)));
+        for coefficient in [
+            Coefficient::from(0),
+            Coefficient::from((-1, 3)),
+            Coefficient::from((-i128::MAX, 3)),
+            Coefficient::from(complex.clone()),
+            Coefficient::from(Complex::new(
+                Rational::from(i128::MAX),
+                Rational::from((2, 5)),
+            )),
+            Coefficient::from(Complex::new(
+                Rational::from((2, 5)),
+                Rational::from(-i128::MAX),
+            )),
+            Coefficient::Infinity(Some(complex)),
+            Coefficient::Infinity(None),
+            Coefficient::Indeterminate,
+            Coefficient::from_finite_field(field, field_element),
+        ] {
+            let mut packed = Vec::new();
+            coefficient.write_packed(&mut packed);
+            packed.extend_from_slice(b"trailing bytes");
+            assert_eq!(
+                validate_packed_coefficient(&packed).unwrap(),
+                b"trailing bytes"
+            );
+        }
+        // Only the outer length is interpreted for rational polynomials.
+        let opaque = [RAT_POLY, 3, 0, 0, 0, 255, 0, 128, 42];
+        assert_eq!(validate_packed_coefficient(&opaque).unwrap(), &[42]);
+    }
+
+    #[test]
+    fn compact_binary_float_roundtrips_and_rejects_fixed_length_imports() {
+        for precision in [2, 53, 256, 4096] {
+            for imaginary_precision in [precision, precision + 17] {
+                for imaginary_value in [0., 0.25] {
+                    let value = Complex::new(
+                        Float::with_val(precision, 1) / Float::with_val(precision, 3),
+                        Float::with_val(imaginary_precision, imaginary_value),
+                    );
+                    let coefficient = Coefficient::Float(value.clone());
+                    let mut compact = Vec::new();
+                    coefficient.write_packed(&mut compact);
+                    assert_eq!(compact.len() as u64, coefficient.get_packed_size());
+                    let (_, imaginary_length, _) = read_packed_pair(&compact[1..]);
+                    assert_eq!(
+                        imaginary_length,
+                        if value.im.is_zero() {
+                            u64::from(value.re.prec() != value.im.prec()) * 4
+                        } else {
+                            value.im.serialized_size() as u64 + 4
+                        }
+                    );
+                    let mut fixed = vec![FLOAT];
+                    for part in [&value.re, &value.im] {
+                        let bytes = part.serialize();
+                        fixed.put_u64_le(bytes.len() as u64 + 4);
+                        fixed.put_u32_le(part.prec());
+                        fixed.extend_from_slice(&bytes);
+                    }
+                    assert!(fixed.len() > compact.len());
+                    for mut packed in [compact, fixed] {
+                        packed.extend_from_slice(b"trailing bytes");
+                        if packed[0] == COMPACT_FLOAT {
+                            assert_eq!(
+                                validate_packed_coefficient(&packed).unwrap(),
+                                b"trailing bytes"
+                            );
+                        } else {
+                            assert!(validate_packed_coefficient(&packed).is_err());
+                        }
+                        assert_eq!(packed.skip_rational(), b"trailing bytes");
+                        let (CoefficientView::Float(re, im), rest) = packed.get_coeff_view() else {
+                            unreachable!()
+                        };
+                        assert_eq!(rest, b"trailing bytes");
+                        assert_eq!(re.try_to_float().unwrap(), value.re);
+                        assert_eq!(im.try_to_float().unwrap(), value.im);
+                        assert_eq!(re.to_float().prec(), value.re.prec());
+                        assert_eq!(im.to_float().prec(), value.im.prec());
+                        assert!(re.is_finite() && im.is_finite());
+                        assert_eq!(im.is_zero(), value.im.is_zero());
+                    }
+                }
+            }
+        }
     }
 }

@@ -19,6 +19,7 @@ mod native;
 #[cfg(feature = "python")]
 mod python;
 mod rational;
+mod serialization;
 mod simd;
 
 #[cfg(test)]

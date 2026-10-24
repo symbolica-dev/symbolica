@@ -2154,7 +2154,16 @@ mod test {
         let b = parse!(input, Mathematica);
         assert_eq!(b, parse!("a‖Alpha‖b+‖Beta‖"));
         let s = b.format_string(&PrintOptions::mathematica(), PrintState::default());
-        assert_eq!(s, input);
+        // Sum order depends on the registered symbol IDs. Check the round trip
+        // and each escaped name without depending on other tests' registrations.
+        assert_eq!(parse!(s, Mathematica), b);
+        for name in ["a\\[Alpha]b", "\\[Beta]"] {
+            let symbol = parse!(name, Mathematica);
+            assert_eq!(
+                symbol.format_string(&PrintOptions::mathematica(), PrintState::default()),
+                name
+            );
+        }
 
         let input =
             "Pattern[f, Blank[]][Pattern[x, BlankSequence[]], Pattern[v, BlankNullSequence[]]]";

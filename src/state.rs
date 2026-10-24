@@ -37,8 +37,9 @@ use crate::{
 };
 
 pub(crate) const SYMBOLICA_MAGIC: u32 = 0x37871367;
-pub(crate) const EXPORT_FORMAT_VERSION: u16 = 6;
-pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[6];
+// Versions 7–9 are reserved for historical error-tracking coefficient layouts.
+pub(crate) const EXPORT_FORMAT_VERSION: u16 = 10;
+pub(crate) const SUPPORTED_IMPORT_VERSIONS: &[u16] = &[10];
 pub(crate) const FULL_STATE_EXPORT_FLAG: u8 = 1;
 
 /// An id for a given finite field in a registry.
@@ -1763,6 +1764,20 @@ mod tests {
 
     fn test_normalization_function() -> NormalizationFunction {
         Box::new(|_, _| {})
+    }
+
+    #[test]
+    fn rejects_previous_state_formats_before_reading_payload() {
+        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, u16::MAX] {
+            let mut bytes = super::SYMBOLICA_MAGIC.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&version.to_le_bytes());
+            // No payload is necessary: reject the version before attempting
+            // to read symbol definitions or embedded atom storage.
+            let error = State::import(&mut &bytes[..], None)
+                .err()
+                .expect("unsupported state format was accepted");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
     }
 
     #[test]

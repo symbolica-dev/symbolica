@@ -207,6 +207,142 @@ mod astro {
         prec: u32,
     }
 
+    impl MultiPrecisionFloat {
+        /// Borrow nonzero finite magnitude limbs in least-significant-first order.
+        /// The value is `sign * integer(words) * 2^(exponent - words.len()*WORD_BITS)`.
+        pub(crate) fn binary_parts(&self) -> Option<(&[astro_float::Word], i64)> {
+            let (words, bits, _, exponent, _) = self.value.as_raw_parts()?;
+            (bits != 0).then_some((words, i64::from(exponent)))
+        }
+
+        /// Decode an exact finite value from normalized little-endian bytes.
+        /// The value is `sign * integer(significand) * 2^(normalized_exponent - 8*len)`.
+        pub(crate) fn from_binary_parts(
+            precision: u32,
+            negative: bool,
+            normalized_exponent: i64,
+            significand: &[u8],
+        ) -> Result<Self, String> {
+            if precision == 0 {
+                return Err("Binary float precision must be positive".into());
+            }
+            let Some((&first, rest)) = significand.split_first() else {
+                return Err("Binary float significand is empty".into());
+            };
+            if first == 0 || rest.last().unwrap_or(&first) & 0x80 == 0 {
+                return Err("Binary float significand is not canonical".into());
+            }
+            if normalized_exponent > i64::from(astro_float::EXPONENT_MAX) {
+                return Err("Binary float exponent exceeds the Astro range".into());
+            }
+
+            let word_bits = astro_float::WORD_BIT_SIZE;
+            let source_bits = significand
+                .len()
+                .checked_mul(8)
+                .ok_or("Binary float significand is too large")?;
+            let significant_bits = source_bits - first.trailing_zeros() as usize;
+            // Astro arithmetic can retain a full word of value bits beyond its
+            // requested precision. Preserve those bits and the requested hint
+            // independently rather than silently rounding during import.
+            let required_bits = (precision as usize).max(significant_bits);
+            let word_count = required_bits
+                .checked_add(word_bits - 1)
+                .ok_or("Binary float precision is too large")?
+                / word_bits;
+            let storage_bits = word_count
+                .checked_mul(word_bits)
+                .ok_or("Binary float precision is too large")?;
+            if storage_bits >= (isize::MAX / 2 + astro_float::EXPONENT_MIN as isize) as usize {
+                return Err("Binary float precision exceeds the Astro range".into());
+            }
+
+            let exponent = normalized_exponent.max(i64::from(astro_float::EXPONENT_MIN));
+            let padding_bits = storage_bits
+                .checked_sub(source_bits)
+                .ok_or("Binary float significand does not fit its storage")?;
+            let shift = normalized_exponent
+                .checked_sub(exponent)
+                .and_then(|shift| shift.checked_add(padding_bits as i64))
+                .ok_or("Binary float exponent is out of range")?;
+            // Below emin, the exact value must fit Astro's subnormal spacing.
+            // Canonical bytes have at most seven low zero bits, so this also
+            // rejects extreme negative exponents before allocating a buffer.
+            if shift < -i64::from(first.trailing_zeros()) {
+                return Err("Binary float value is below the exact Astro range".into());
+            }
+
+            let mut words = smallvec::SmallVec::<[astro_float::Word; 4]>::new();
+            words
+                .try_reserve_exact(word_count)
+                .map_err(|_| "Cannot allocate binary float significand")?;
+            words.resize(word_count, 0);
+            if significand.len() >= std::mem::size_of::<astro_float::Word>()
+                && shift >= 0
+                && shift % 8 == 0
+            {
+                // Normal values need only byte padding. Import whole words
+                // instead of updating each destination word once per byte.
+                const WORD_BYTES: usize = std::mem::size_of::<astro_float::Word>();
+                let byte_offset = shift as usize / 8;
+                let mut word = byte_offset / WORD_BYTES;
+                let offset = byte_offset % WORD_BYTES;
+                let mut source = significand;
+                if offset != 0 {
+                    let count = source.len().min(WORD_BYTES - offset);
+                    let mut bytes = [0; WORD_BYTES];
+                    bytes[offset..offset + count].copy_from_slice(&source[..count]);
+                    words[word] = astro_float::Word::from_le_bytes(bytes);
+                    source = &source[count..];
+                    word += 1;
+                }
+                let mut chunks = source.chunks_exact(WORD_BYTES);
+                let count = chunks.len();
+                for (destination, bytes) in
+                    words[word..word + count].iter_mut().zip(chunks.by_ref())
+                {
+                    *destination = astro_float::Word::from_le_bytes(bytes.try_into().unwrap());
+                }
+                if !chunks.remainder().is_empty() {
+                    let mut bytes = [0; WORD_BYTES];
+                    bytes[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+                    words[word + count] = astro_float::Word::from_le_bytes(bytes);
+                }
+            } else {
+                // Short significands avoid chunk setup. Subnormal values may
+                // need a non-byte-aligned shift, including dropping up to seven
+                // low bits already checked to be zero.
+                for (index, &byte) in significand.iter().enumerate() {
+                    let bit = index as i64 * 8 + shift;
+                    if bit < 0 {
+                        words[0] |= (byte >> -bit as u32) as astro_float::Word;
+                    } else {
+                        let word = bit as usize / word_bits;
+                        let offset = bit as usize % word_bits;
+                        words[word] |= (byte as astro_float::Word) << offset;
+                        if offset > word_bits - 8 {
+                            words[word + 1] |= (byte as astro_float::Word) >> (word_bits - offset);
+                        }
+                    }
+                }
+            }
+            let value = BigFloat::from_raw_parts(
+                &words,
+                (source_bits as i64 + shift) as usize,
+                if negative { Sign::Neg } else { Sign::Pos },
+                exponent as i32,
+                false,
+            );
+            if value.is_nan() {
+                return Err("Cannot construct exact binary float in Astro".into());
+            }
+            Ok(Self {
+                value,
+                prec: precision,
+            })
+        }
+    }
+
     impl PartialEq for MultiPrecisionFloat {
         fn eq(&self, other: &Self) -> bool {
             (self.is_nan() && other.is_nan()) || self.value == other.value
@@ -1620,6 +1756,205 @@ mod astro {
 
         fn div(self, rhs: MultiPrecisionFloat) -> Self::Output {
             MultiPrecisionFloat::with_val(rhs.prec, self) / rhs
+        }
+    }
+
+    #[cfg(test)]
+    mod binary_tests {
+        use super::*;
+
+        #[test]
+        fn binary_parts_borrow_finite_limbs_and_exclude_special_values() {
+            let value = MultiPrecisionFloat::with_val(53, -1.25);
+            let (words, exponent) = value.binary_parts().unwrap();
+            assert_eq!(
+                words.as_ptr(),
+                value.value.mantissa_digits().unwrap().as_ptr()
+            );
+            assert_eq!(exponent, 1);
+            for value in [0., -0., f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+                assert!(
+                    MultiPrecisionFloat::with_val(53, value)
+                        .binary_parts()
+                        .is_none()
+                );
+            }
+            // Astro and the shared wire format both use one unsigned NaN.
+            assert!(!MultiPrecisionFloat::with_val(53, -f64::NAN).is_sign_negative());
+        }
+
+        #[test]
+        fn binary_decode_preserves_extra_astro_bits_at_requested_precision() {
+            // Astro division uses 64 storage bits even with a 53-bit precision
+            // hint. The final nonzero bits must survive binary decoding.
+            let third = MultiPrecisionFloat::with_val(53, 1) / MultiPrecisionFloat::with_val(53, 3);
+            let significand = 0xaaaa_aaaa_aaaa_aaabu64.to_le_bytes();
+            for negative in [false, true] {
+                let decoded =
+                    MultiPrecisionFloat::from_binary_parts(53, negative, -1, &significand).unwrap();
+                let expected = if negative {
+                    -third.clone()
+                } else {
+                    third.clone()
+                };
+                assert_eq!(decoded, expected);
+                assert_eq!(decoded.prec(), 53);
+                assert_eq!(decoded.value.precision(), Some(64));
+            }
+        }
+
+        #[test]
+        fn binary_decode_preserves_dense_byte_boundaries() {
+            use crate::domains::float::Float;
+
+            for length in [1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 513] {
+                let mut bytes: Vec<_> = (0..length).map(|i| (i * 37 + 1) as u8).collect();
+                *bytes.last_mut().unwrap() |= 0x80;
+                for precision in [length as u32 * 8, length as u32 * 8 + 64] {
+                    for negative in [false, true] {
+                        let decoded =
+                            MultiPrecisionFloat::from_binary_parts(precision, negative, 1, &bytes)
+                                .unwrap();
+                        let mut expected = vec![if negative { 2 } else { 1 }, 2];
+                        expected.extend_from_slice(&bytes);
+                        assert_eq!(Float::from_raw(decoded).serialize(), expected);
+                    }
+                }
+            }
+
+            // An exactly byte-aligned subnormal also uses the word-copy path.
+            let exponent = i64::from(astro_float::EXPONENT_MIN) - 8;
+            let decoded = MultiPrecisionFloat::from_binary_parts(
+                128,
+                false,
+                exponent,
+                &[1, 2, 3, 4, 5, 6, 7, 8, 0x80],
+            )
+            .unwrap();
+            let (words, bits, _, raw_exponent, _) = decoded.value.as_raw_parts().unwrap();
+            assert_eq!(raw_exponent, astro_float::EXPONENT_MIN);
+            assert_eq!(bits, 120);
+            let stored: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let mut expected = vec![0; 16];
+            expected[6..15].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 0x80]);
+            assert_eq!(stored, expected);
+        }
+
+        #[test]
+        fn binary_decode_preserves_precision_at_word_boundaries() {
+            for precision in [1, 7, 8, 24, 31, 32, 33, 53, 63, 64, 65, 127, 128, 129, 256] {
+                for negative in [false, true] {
+                    let decoded =
+                        MultiPrecisionFloat::from_binary_parts(precision, negative, 1, &[0x80])
+                            .unwrap();
+                    assert_eq!(decoded.prec(), precision);
+                    assert_eq!(decoded.to_f64(), if negative { -1. } else { 1. });
+                    let storage_bits = (precision as usize).div_ceil(astro_float::WORD_BIT_SIZE)
+                        * astro_float::WORD_BIT_SIZE;
+                    assert_eq!(decoded.value.mantissa_max_bit_len(), Some(storage_bits));
+                }
+            }
+        }
+
+        #[test]
+        fn binary_decode_preserves_astro_subnormals_and_exponent_endpoints() {
+            for precision in [24, 53, 65, 128, 256] {
+                let storage_bits = (precision as usize).div_ceil(astro_float::WORD_BIT_SIZE)
+                    * astro_float::WORD_BIT_SIZE;
+                let minimum_exponent = i64::from(astro_float::EXPONENT_MIN);
+                for negative in [false, true] {
+                    for (exponent, significand, mut expected) in [
+                        (
+                            minimum_exponent - storage_bits as i64 + 1,
+                            vec![0x80],
+                            BigFloat::min_positive(precision as usize),
+                        ),
+                        (
+                            minimum_exponent,
+                            vec![0x80],
+                            BigFloat::min_positive_normal(precision as usize),
+                        ),
+                        (
+                            i64::from(astro_float::EXPONENT_MAX),
+                            vec![0xff; storage_bits / 8],
+                            BigFloat::max_value(precision as usize),
+                        ),
+                    ] {
+                        if negative {
+                            expected.set_sign(Sign::Neg);
+                        }
+                        let decoded = MultiPrecisionFloat::from_binary_parts(
+                            precision,
+                            negative,
+                            exponent,
+                            &significand,
+                        )
+                        .unwrap();
+                        assert_eq!(decoded.value, expected);
+                        assert_eq!(decoded.prec(), precision);
+                    }
+                }
+
+                // The smallest exact subnormals require discarding only zero
+                // padding bits from the canonical byte, not rounding its value.
+                for (significand, adjustment, expected_word) in [(0xc0, 2, 3), (0xa0, 3, 5)] {
+                    let decoded = MultiPrecisionFloat::from_binary_parts(
+                        precision,
+                        false,
+                        minimum_exponent - storage_bits as i64 + adjustment,
+                        &[significand],
+                    )
+                    .unwrap();
+                    let (words, exponent) = decoded.binary_parts().unwrap();
+                    assert_eq!(exponent, minimum_exponent);
+                    assert_eq!(words[0], expected_word);
+                    assert!(words[1..].iter().all(|&word| word == 0));
+                }
+            }
+        }
+
+        #[test]
+        fn binary_decode_shifts_subnormal_bytes_across_limb_boundaries() {
+            let significand = [1, 2, 3, 4, 5, 6, 7, 8, 0x80];
+            let decoded = MultiPrecisionFloat::from_binary_parts(
+                128,
+                false,
+                i64::from(astro_float::EXPONENT_MIN) - 3,
+                &significand,
+            )
+            .unwrap();
+            let mut expected = ((0x80u128 << 64) | 0x0807_0605_0403_0201) << 53;
+            let (words, exponent) = decoded.binary_parts().unwrap();
+            assert_eq!(exponent, i64::from(astro_float::EXPONENT_MIN));
+            for &word in words {
+                assert_eq!(word, expected as astro_float::Word);
+                expected >>= astro_float::WORD_BIT_SIZE;
+            }
+            assert_eq!(expected, 0);
+        }
+
+        #[test]
+        fn binary_decode_rejects_invalid_or_inexact_finite_values() {
+            for significand in [&[][..], &[0][..], &[1][..], &[0, 0x80][..], &[1, 0x7f][..]] {
+                assert!(MultiPrecisionFloat::from_binary_parts(53, false, 0, significand).is_err());
+            }
+            assert!(MultiPrecisionFloat::from_binary_parts(0, false, 1, &[0x80]).is_err());
+            for exponent in [i64::MAX, i64::MIN, i64::from(astro_float::EXPONENT_MAX) + 1] {
+                assert!(
+                    MultiPrecisionFloat::from_binary_parts(53, false, exponent, &[0x80]).is_err()
+                );
+            }
+            let storage_bits =
+                53usize.div_ceil(astro_float::WORD_BIT_SIZE) * astro_float::WORD_BIT_SIZE;
+            let minimum_exponent = i64::from(astro_float::EXPONENT_MIN) - storage_bits as i64 + 1;
+            assert!(
+                MultiPrecisionFloat::from_binary_parts(53, false, minimum_exponent - 1, &[0x80])
+                    .is_err()
+            );
+            assert!(
+                MultiPrecisionFloat::from_binary_parts(53, false, minimum_exponent, &[0x81])
+                    .is_err()
+            );
         }
     }
 }

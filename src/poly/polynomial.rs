@@ -8045,7 +8045,7 @@ mod test {
 
     #[test]
     fn integer_polynomial_crt_context_large_batch_matches_generic_crt() {
-        let modulus = Integer::from(MultiPrecisionInteger::from(1) << 400usize) + 123;
+        let modulus = (Integer::from(1) << 400usize) + 123;
         let template = parse!("x").to_polynomial::<_, u16>(&Z, None);
         let mut accumulated = template.zero();
         let mut image_integer = template.zero();
