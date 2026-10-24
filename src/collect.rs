@@ -1671,7 +1671,7 @@ impl<'a> AtomView<'a> {
         // Evaluator candidates can be whole non-polynomial expressions, such
         // as exp(x), stored as a non-integer power. Factor only exact matches:
         // decomposing their exponents would require additional algebraic laws.
-        if let Some(&i) = index.get(&CompactAtomView::from(atom))
+        if let Some(&i) = index.get(atom.get_data())
             && i >= start
         {
             return Some((i, 1));
@@ -1683,7 +1683,7 @@ impl<'a> AtomView<'a> {
                 if let AtomView::Num(n) = e
                     && let CoefficientView::Natural(n, 1, 0, _) = n.get_coeff_view()
                     && n > 0
-                    && let Some(&i) = index.get(&CompactAtomView::from(b))
+                    && let Some(&i) = index.get(b.get_data())
                     && i >= start
                 {
                     Some((i, n))
