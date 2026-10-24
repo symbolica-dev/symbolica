@@ -311,9 +311,8 @@ impl EvaluationDomain for ErrorPropagatingFloat<Float> {
     const FIXED_PRECISION: Option<u32> = None;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        let dr = -f.re.get_epsilon().log10();
         if f.is_real() {
-            Ok(ErrorPropagatingFloat::new(f.re, dr))
+            Ok(ErrorPropagatingFloat::new_with_native_precision(f.re))
         } else {
             Err(format!(
                 "Cannot convert from Complex<Float> to Float because the result {f} is not real"
@@ -334,15 +333,107 @@ impl EvaluationDomain for Complex<ErrorPropagatingFloat<f64>> {
 }
 
 impl EvaluationDomain for Complex<ErrorPropagatingFloat<Float>> {
-    const FIXED_PRECISION: Option<u32> = Some(53);
+    const FIXED_PRECISION: Option<u32> = None;
 
     fn try_from_complex_float(f: Complex<Float>) -> Result<Self, String> {
-        let dr = -f.re.get_epsilon().log10();
-        let di = -f.im.get_epsilon().log10();
         Ok(Complex::new(
-            ErrorPropagatingFloat::new(f.re, dr),
-            ErrorPropagatingFloat::new(f.im, di),
+            ErrorPropagatingFloat::new_with_native_precision(f.re),
+            ErrorPropagatingFloat::new_with_native_precision(f.im),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tracked_precision_tests {
+    use crate::{
+        atom::{Atom, AtomCore, Symbol},
+        domains::{
+            float::{Complex, ErrorPropagatingFloat, Float, Magnitude},
+            rational::Rational,
+        },
+        evaluate::EvaluationDomain,
+    };
+
+    type Tracked = ErrorPropagatingFloat<Float>;
+
+    #[test]
+    fn tracked_real_conversion_preserves_errors_beyond_f64_range() {
+        for value in [0, 1, -2] {
+            let converted = Tracked::try_from_complex_float(Complex::new(
+                Float::with_val(2048, value),
+                Float::with_val(2048, 0),
+            ))
+            .unwrap();
+            let scale = if value == 0 { 1. } else { (value as f64).abs() };
+            assert_eq!(converted.get_num(), &Float::with_val(2048, value));
+            assert_eq!(converted.get_num().prec(), 2048);
+            assert_eq!(
+                converted.get_error_magnitude(),
+                Magnitude::from_f64(scale).scale_pow2(-2048)
+            );
+            assert!(converted.get_error_magnitude().is_finite());
+            assert!(!converted.get_error_magnitude().is_zero());
+            assert_eq!(converted.get_error_magnitude().to_f64(), None);
+            assert!(converted.get_absolute_error() > 0.);
+        }
+    }
+
+    #[test]
+    fn tracked_complex_conversion_uses_each_components_precision() {
+        let converted = Complex::<Tracked>::try_from_complex_float(Complex::new(
+            Float::with_val(2048, -2),
+            Float::with_val(4096, 0),
+        ))
+        .unwrap();
+        assert_eq!(converted.re.get_num().prec(), 2048);
+        assert_eq!(converted.im.get_num().prec(), 4096);
+        assert_eq!(
+            converted.re.get_error_magnitude(),
+            Magnitude::from_f64(2.).scale_pow2(-2048)
+        );
+        // Keep the existing convention: an input zero has one native epsilon
+        // of absolute error, rather than becoming an exact zero.
+        assert_eq!(
+            converted.im.get_error_magnitude(),
+            Magnitude::ONE.scale_pow2(-4096)
+        );
+        assert_eq!(converted.re.get_error_magnitude().to_f64(), None);
+        assert_eq!(converted.im.get_error_magnitude().to_f64(), None);
+    }
+
+    #[test]
+    fn tracked_constants_use_the_requested_arbitrary_precision() {
+        assert_eq!(Tracked::FIXED_PRECISION, None);
+        assert_eq!(Complex::<Tracked>::FIXED_PRECISION, None);
+        let pi = Atom::var(Symbol::PI);
+        let direct = pi
+            .evaluate_with_prec(
+                &std::collections::HashMap::<Atom, Complex<Tracked>>::new(),
+                2048,
+            )
+            .unwrap();
+        let mut evaluator = pi
+            .evaluator::<Atom>(&[])
+            .build()
+            .unwrap()
+            .map_coeff_with_prec(
+                &|c: &Complex<Rational>| {
+                    Complex::new(
+                        Tracked::new_with_native_precision(c.re.to_multi_prec_float(2048)),
+                        Tracked::new_with_native_precision(c.im.to_multi_prec_float(2048)),
+                    )
+                },
+                2048,
+            );
+        let mapped = evaluator.evaluate_single(&[]);
+        for (direct, mapped) in [(&direct.re, &mapped.re), (&direct.im, &mapped.im)] {
+            assert_eq!(mapped.get_num().prec(), 2048);
+            assert_eq!(mapped.get_num(), direct.get_num());
+            assert_eq!(mapped.get_error_magnitude(), direct.get_error_magnitude());
+            assert!(!mapped.get_error_magnitude().is_zero());
+            assert!(mapped.get_error_magnitude().is_finite());
+            assert_eq!(mapped.get_error_magnitude().to_f64(), None);
+        }
     }
 }
 
