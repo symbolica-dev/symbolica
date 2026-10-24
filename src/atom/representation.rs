@@ -2144,6 +2144,9 @@ impl<'a> NumView<'a> {
 
     #[inline]
     pub(crate) fn is_exact_one(&self) -> bool {
+        if self.data.len() == 1 {
+            return self.data[0] == inline_number_header(1);
+        }
         if self.data.is_small_int() {
             self.data.is_one_rat()
         } else {
@@ -2204,6 +2207,7 @@ mod compact_number_tests {
             assert_eq!(compact.get_byte_size(), 1);
             assert_eq!(compact.is_zero(), value == 0);
             assert_eq!(compact.is_one(), value == 1);
+            assert_eq!(compact.is_exact_one(), value == 1);
             assert!(!compact.is_rational_polynomial());
             assert_eq!(hash(compact), hash(expected));
             assert_eq!(hash(compact.as_view()), hash(standalone.get_data()));
