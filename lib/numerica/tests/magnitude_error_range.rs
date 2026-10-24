@@ -358,6 +358,17 @@ fn exact_projections_retain_sub_f64_product_and_quotient_errors() {
 
 #[test]
 fn explicit_exactness_is_distinct_from_finite_accuracy_requests() {
+    let tiny = exact(p10(-200));
+    for result in [
+        tiny.clone() * exact(p10(400)),
+        tiny.clone() / exact(p10(-400)),
+        tiny * Rational::from(10).pow(400),
+        E::new(p10(-200), 10.) * exact(Float::with_val(BITS, 0)),
+    ] {
+        assert!(result.get_num().is_finite());
+        assert!(result.get_error_magnitude().is_zero());
+        assert_eq!(result.get_absolute_error(), 0.);
+    }
     let exact_one = exact(Float::with_val(BITS, 1));
     assert!(exact_one.get_error_magnitude().is_zero());
     let exact_zero = exact(Float::with_val(BITS, 0));
