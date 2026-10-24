@@ -591,20 +591,20 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         let reader = self.reader();
 
         let out_wrap = Mutex::new(new_out);
-        let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
-
-        t.install(
-            #[inline(always)]
-            || {
-                reader.par_bridge().for_each_init(
-                    || inherited_unlock.activate(),
-                    |_, x| {
-                        let r = f(x);
-                        out_wrap.lock().unwrap().push(r);
-                    },
-                );
-            },
-        );
+        LicenseManager::with_inherited_library_unlock(|scope| {
+            t.install(
+                #[inline(always)]
+                || {
+                    reader.par_bridge().for_each_init(
+                        || scope.activate(),
+                        |_, x| {
+                            let r = f(x);
+                            out_wrap.lock().unwrap().push(r);
+                        },
+                    );
+                },
+            );
+        });
 
         out_wrap.into_inner().unwrap()
     }
@@ -706,20 +706,20 @@ impl AtomView<'_> {
         if let AtomView::Add(aa) = self {
             let out_wrap = Mutex::new(vec![]);
             let args = aa.iter().collect::<Vec<_>>();
-            let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
-
-            p.install(
-                #[inline(always)]
-                || {
-                    args.par_iter().for_each_init(
-                        || inherited_unlock.activate(),
-                        |_, x| {
-                            let r = f(*x);
-                            out_wrap.lock().unwrap().push(r);
-                        },
-                    );
-                },
-            );
+            LicenseManager::with_inherited_library_unlock(|scope| {
+                p.install(
+                    #[inline(always)]
+                    || {
+                        args.par_iter().for_each_init(
+                            || scope.activate(),
+                            |_, x| {
+                                let r = f(*x);
+                                out_wrap.lock().unwrap().push(r);
+                            },
+                        );
+                    },
+                );
+            });
 
             let res = out_wrap.into_inner().unwrap();
 
