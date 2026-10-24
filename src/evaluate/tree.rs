@@ -1,7 +1,7 @@
 use std::{collections::HashMap as StdHashMap, hash::BuildHasher};
 
 use crate::{
-    atom::{AtomOrView, InlineVar},
+    atom::{AtomOrView, CompactAtomView, InlineVar},
     coefficient::ConvertToRing,
     state::Workspace,
 };
@@ -1361,7 +1361,8 @@ impl<'a> AtomView<'a> {
         let mut instr = Vec::new();
 
         // we can only safely remove entries that don't depend on any of the function arguments
-        let mut subexpression: HashMap<AtomView, Slot> = HashMap::default();
+        // Stored keys only compare and hash bytes; no typed dispatch is needed.
+        let mut subexpression: HashMap<CompactAtomView, Slot> = HashMap::default();
 
         let mut result_indices = vec![];
         let args = params
@@ -1657,7 +1658,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         if !context.expanding_functions.insert(function.id) {
             return Err(EvaluationError::EvaluatorConstructionFailed {
@@ -1716,7 +1717,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(slot) = params.get(self) {
@@ -1724,7 +1725,8 @@ impl<'a> AtomView<'a> {
             }
         }
 
-        if let Some(s) = subexpressions.get(self) {
+        let key: CompactAtomView<'a> = (*self).into();
+        if let Some(s) = subexpressions.get(&key) {
             return Ok(*s);
         }
 
@@ -1826,7 +1828,7 @@ impl<'a> AtomView<'a> {
             }
         };
 
-        subexpressions.insert(*self, res);
+        subexpressions.insert((*self).into(), res);
         Ok(res)
     }
 
@@ -1878,7 +1880,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Fun(f) = self else {
             unreachable!()
@@ -1909,7 +1911,7 @@ impl<'a> AtomView<'a> {
             let c = Instruction::Fun(temp, Box::new((name, vec![], vec![arg_eval])), false);
             instr.push(c);
 
-            subexpressions.insert(*self, temp);
+            subexpressions.insert((*self).into(), temp);
             return Ok(temp);
         }
 
@@ -1964,7 +1966,7 @@ impl<'a> AtomView<'a> {
             ));
             // Use the same scope-local cache as arithmetic expressions.
             // This branch returns before the common insertion below.
-            subexpressions.insert(*self, temp);
+            subexpressions.insert((*self).into(), temp);
             return Ok(temp);
         } else {
             return Err(EvaluationError::UndefinedFunction {
@@ -2018,7 +2020,7 @@ impl<'a> AtomView<'a> {
             instr,
             subexpressions,
         )?;
-        subexpressions.insert(*self, res);
+        subexpressions.insert((*self).into(), res);
         Ok(res)
     }
 
@@ -2029,7 +2031,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Pow(p) = self else {
             unreachable!()
@@ -2044,7 +2046,7 @@ impl<'a> AtomView<'a> {
             let c = Instruction::Fun(temp, Box::new((Symbol::EXP, vec![], vec![e_eval])), false);
             instr.push(c);
 
-            subexpressions.insert(*self, temp);
+            subexpressions.insert((*self).into(), temp);
             return Ok(temp);
         }
 
@@ -2075,7 +2077,7 @@ impl<'a> AtomView<'a> {
                 temp
             };
 
-            subexpressions.insert(*self, res);
+            subexpressions.insert((*self).into(), res);
             return Ok(res);
         }
 
@@ -2087,7 +2089,7 @@ impl<'a> AtomView<'a> {
                     Instruction::Fun(temp, Box::new((Symbol::SQRT, vec![], vec![b_eval])), false);
                 instr.push(c);
 
-                subexpressions.insert(*self, temp);
+                subexpressions.insert((*self).into(), temp);
                 return Ok(temp);
             }
         }
@@ -2106,7 +2108,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<AtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<AtomView<'a>, Slot>,
+        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Fun(f) = self else {
             unreachable!()
@@ -2221,7 +2223,7 @@ impl<'a> AtomView<'a> {
                 )?
             };
 
-            subexpressions.insert(*self, res);
+            subexpressions.insert((*self).into(), res);
             return Ok(res);
         }
 
@@ -2260,7 +2262,7 @@ impl<'a> AtomView<'a> {
         instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
         // The completed result now dominates this scope. Branch-local
         // values remain in their cloned caches, never in the parent.
-        subexpressions.insert(*self, temp);
+        subexpressions.insert((*self).into(), temp);
         Ok(temp)
     }
 }

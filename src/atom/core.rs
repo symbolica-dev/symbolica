@@ -2596,6 +2596,7 @@ mod private {
     impl Sealed for InlineNum {}
     impl Sealed for Indeterminate {}
     impl<'a> Sealed for AtomView<'a> {}
+    impl Sealed for crate::atom::CompactAtomView<'_> {}
     impl<T: AsRef<super::Atom>> Sealed for T {}
     impl Sealed for super::AtomOrView<'_> {}
     impl Sealed for super::AliasedAtom {}
