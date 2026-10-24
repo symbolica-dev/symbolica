@@ -252,7 +252,7 @@ NUMERICA_BENCH_CLOCK=thread taskset -c 2 target/release/examples/binary_float_se
 The representation and codec changes are independently reviewable in
 [PR 126](https://github.com/symbolica-dev/symbolica/pull/126). The tracking branch
 builds on that proposal, preserving its additional per-component error metadata.
-The [codec results](binary_float_storage.md) describe direct packed comparison,
+The [historical codec results](https://github.com/symbolica-dev/symbolica/blob/1e51900739f5e0f3271acfc9cba794f1833d8a18/benches/binary_float_storage.md) describe direct packed comparison,
 small MPFR imports, whole-word Astro imports and the short-significand fallback.
 
 The intermediate coefficient benchmark binaries were built from tracking snapshot
@@ -281,8 +281,9 @@ Float-payload-only comparison.
 | Astro | 4096 | 2.11x | 1.30x |
 
 The [full comparison CSV](binary_coefficient_comparison.csv) records binary
-hashes and process ranges. Reproduce with
-`examples/binary_coefficient_comparison.rs` and `NUMERICA_BENCH_CLOCK=thread`.
+hashes and process ranges. Reproduce with the
+[historical comparison harness](https://github.com/symbolica-dev/symbolica/blob/1e51900739f5e0f3271acfc9cba794f1833d8a18/examples/binary_coefficient_comparison.rs)
+and `NUMERICA_BENCH_CLOCK=thread`.
 
 The separate [full operation CSV](binary_float_coefficients_final.csv) compares
 `9d1854f3` with measured snapshot `bbc010ea`. This includes the upstream-main
