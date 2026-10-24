@@ -361,6 +361,19 @@ pub trait DualNumberStructure {
     fn get_len(&self) -> usize;
     /// Get the shape of the dual number.
     fn get_shape(&self) -> Vec<&[usize]>;
+    /// Borrow the derivative multi-index of a component, in [`Self::get_shape`] order.
+    /// Returns `None` when `index` is outside the stored shape.
+    ///
+    /// The static dual macros and [`HyperDual`] borrow directly without allocating.
+    /// The default uses [`Self::get_shape`] for compatibility with existing
+    /// implementations. The borrowed row remains valid after that temporary
+    /// vector of references is dropped.
+    ///
+    /// This inspects the shape independently of the values. In particular,
+    /// resizing [`HyperDual::values`] does not add or remove shape components.
+    fn get_shape_component(&self, index: usize) -> Option<&[usize]> {
+        self.get_shape().get(index).copied()
+    }
     /// Get the multiplication table of the dual number.
     fn get_multiplication_table(&self) -> &[(usize, usize, usize)];
     /// Get the maximum derivative depth of the dual number.
@@ -461,6 +474,10 @@ macro_rules! create_hyperdual_from_components {
 
             fn get_shape(&self) -> Vec<&[usize]> {
                 Self::SHAPE.iter().map(|s| s.as_slice()).collect()
+            }
+
+            fn get_shape_component(&self, index: usize) -> Option<&[usize]> {
+                Self::SHAPE.get(index).map(|component| component.as_slice())
             }
 
             fn get_multiplication_table(&self) -> &[(usize, usize, usize)] {
@@ -1440,6 +1457,10 @@ impl<T> DualNumberStructure for HyperDual<T> {
 
     fn get_shape(&self) -> Vec<&[usize]> {
         self.shape.shape.iter().map(|s| s.as_slice()).collect()
+    }
+
+    fn get_shape_component(&self, index: usize) -> Option<&[usize]> {
+        self.shape.shape.get(index).map(Vec::as_slice)
     }
 
     fn get_multiplication_table(&self) -> &[(usize, usize, usize)] {
