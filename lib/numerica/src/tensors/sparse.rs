@@ -1581,6 +1581,10 @@ pub struct SparseRowReducer<F: Field> {
     /// Whether to keep the L matrix, just record the pattern or don't record anything at all
     mode: LuLMode,
 
+    /// Whether L keeps a row for every linearly dependent input row (see
+    /// [`SparseRowReducer::set_retain_dependent_l`]).
+    retain_dependent_l: bool,
+
     /// Collection of some internal scratch data
     scratch: Scratch<F>,
 }
@@ -1596,6 +1600,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, field),
             pivots: vec![None; ncols as usize],
             mode: mode,
+            retain_dependent_l: true,
         }
     }
 
@@ -1627,6 +1632,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1664,6 +1670,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1698,6 +1705,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1727,6 +1735,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1759,6 +1768,7 @@ impl<F: Field> SparseRowReducer<F> {
             u,
             pivots,
             mode: LuLMode::None,
+            retain_dependent_l: true,
         }
     }
 
@@ -1776,6 +1786,40 @@ impl<F: Field> SparseRowReducer<F> {
     /// I.e. there is a pivot on column `j` and row `pivots()[j]` and no pivot present if `None`.
     pub fn pivots(&self) -> &Vec<Option<u32>> {
         &self.pivots
+    }
+
+    /// Return the number of stored entries of U, including the pivot entries.
+    pub fn u_nnz(&self) -> usize {
+        self.u.values.len()
+    }
+
+    /// Return the number of stored entries of L: the size of its pattern in
+    /// [`LuLMode::Full`] and [`LuLMode::Pattern`], and 0 in [`LuLMode::None`].
+    pub fn l_entries(&self) -> usize {
+        self.l.col_idcs.len()
+    }
+
+    /// Choose whether L keeps a row for every linearly dependent input row (the default).
+    ///
+    /// When `retain` is `false`, the L entries (the pattern and, in [`LuLMode::Full`], the values)
+    /// computed while eliminating an input row that turns out to be linearly dependent are
+    /// discarded, and no L row is recorded for it. L then has exactly one row per row of U:
+    /// row `i` of L expresses the `i`-th linearly independent input row in terms of the rows
+    /// `0..=i` of U, i.e. L is the square lower triangular factor of the independent input rows.
+    ///
+    /// This bounds the memory of L by the independent rows. With the default, every dependent
+    /// row stores the pivot rows it was reduced with, which dominates the memory when most input
+    /// rows are dependent, as in Laporta-style reductions of integration-by-parts identities.
+    ///
+    /// The setting applies to rows added afterwards and has no effect in [`LuLMode::None`].
+    pub fn set_retain_dependent_l(&mut self, retain: bool) {
+        self.retain_dependent_l = retain;
+    }
+
+    /// Return whether L keeps a row for every linearly dependent input row, see
+    /// [`Self::set_retain_dependent_l`].
+    pub fn retains_dependent_l(&self) -> bool {
+        self.retain_dependent_l
     }
 
     /// Adds a new row to the system and processes it in the next forward solving step.
@@ -2097,19 +2141,7 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         //else: need to finish L
-        match self.mode {
-            LuLMode::Full => {
-                //finish the row
-                self.l.row_ptrs.push(self.l.col_idcs.len());
-                self.l.nrows += 1;
-            }
-            LuLMode::Pattern => {
-                //finish the row
-                self.l.row_ptrs.push(self.l.col_idcs.len());
-                self.l.nrows += 1;
-            }
-            LuLMode::None => (), //nothing to be done
-        }
+        self.finish_dependent_l_row();
 
         //row is linearly dependent
         None
@@ -2297,7 +2329,22 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         //else: need to finish L
+        self.finish_dependent_l_row();
+
+        //row is linearly dependent
+        None
+    }
+
+    /// Finish the L row of an input row that turned out to be linearly dependent: either record
+    /// it, or drop the entries pushed while eliminating it (see `set_retain_dependent_l`).
+    fn finish_dependent_l_row(&mut self) {
         match self.mode {
+            LuLMode::Full | LuLMode::Pattern if !self.retain_dependent_l => {
+                //drop the slice of the dependent row
+                let start = *self.l.row_ptrs.last().unwrap();
+                self.l.col_idcs.truncate(start);
+                self.l.values.truncate(start);
+            }
             LuLMode::Full => {
                 //finish the row
                 self.l.row_ptrs.push(self.l.col_idcs.len());
@@ -2310,9 +2357,6 @@ impl<F: Field> SparseRowReducer<F> {
             }
             LuLMode::None => (), //nothing to be done
         }
-
-        //row is linearly dependent
-        None
     }
 
     /// Apply a back substitution step to the given row.
@@ -2650,7 +2694,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{SelfRing, Set, rational::Q};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    use crate::domains::{
+        Ring, RingOps, SelfRing, Set,
+        finite_field::{FiniteFieldCore, Zp64},
+        rational::Q,
+    };
 
     use crate::tensors::{
         matrix::Matrix,
@@ -3065,5 +3115,115 @@ mod tests {
 
         assert_eq!(count_entries, 9);
         assert_eq!(count_rows, 5);
+    }
+
+    #[test]
+    fn dropping_dependent_l_rows_keeps_the_factorisation_of_the_independent_rows() {
+        let mut rng = StdRng::seed_from_u64(0xd20b);
+        let field = Zp64::new(13);
+        for _ in 0..60 {
+            let ncols = rng.random_range(1..40u32);
+            let nrows = rng.random_range(1..80);
+            // random rows; about half of them are combinations of earlier rows
+            let mut rows: Vec<Vec<<Zp64 as Set>::Element>> = vec![];
+            for _ in 0..nrows {
+                let mut dense = vec![field.zero(); ncols as usize];
+                if !rows.is_empty() && rng.random_bool(0.5) {
+                    for _ in 0..rng.random_range(1..=3) {
+                        let other = rows[rng.random_range(0..rows.len())].clone();
+                        let factor = field.to_element(rng.random_range(1..13));
+                        for (d, o) in dense.iter_mut().zip(&other) {
+                            *d = field.add(&*d, &field.mul(&factor, o));
+                        }
+                    }
+                } else {
+                    for d in dense.iter_mut() {
+                        if rng.random_bool(0.2) {
+                            *d = field.to_element(rng.random_range(0..13));
+                        }
+                    }
+                }
+                rows.push(dense);
+            }
+
+            for back_subs in [false, true] {
+                for mode in [LuLMode::Full, LuLMode::Pattern] {
+                    let mut keep = SparseRowReducer::new(ncols, field.clone(), mode);
+                    let mut drop = SparseRowReducer::new(ncols, field.clone(), mode);
+                    drop.set_retain_dependent_l(false);
+                    assert!(keep.retains_dependent_l() && !drop.retains_dependent_l());
+
+                    let mut independent = SparseMatrix::new(0, ncols, field.clone());
+                    let mut kept_l_rows = vec![];
+                    for row in &rows {
+                        let (col_idcs, values): (Vec<u32>, Vec<_>) = row
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, v)| !field.is_zero(v))
+                            .map(|(c, v)| (c as u32, *v))
+                            .unzip();
+                        let (a, b) = if back_subs {
+                            (
+                                keep.add_row_with_back_subs(&values, &col_idcs),
+                                drop.add_row_with_back_subs(&values, &col_idcs),
+                            )
+                        } else {
+                            (
+                                keep.add_row(&values, &col_idcs),
+                                drop.add_row(&values, &col_idcs),
+                            )
+                        };
+                        assert_eq!(a, b);
+                        if a.is_some() {
+                            kept_l_rows.push(keep.l().nrows() - 1);
+                            independent.add_row(values, col_idcs);
+                            // the L row of an accepted row is the last one in both modes
+                            assert_eq!(drop.l().nrows(), drop.u().nrows());
+                        }
+                    }
+
+                    assert_eq!(keep.pivots(), drop.pivots());
+                    assert_eq!(keep.u(), drop.u());
+                    assert_eq!(drop.u_nnz(), drop.u().nvalues());
+
+                    // L of the dropping reducer = rows of the kept L that belong to accepted rows
+                    let l = drop.l();
+                    assert_eq!(l.nrows(), drop.u().nrows());
+                    assert_eq!(l.ncols(), drop.u().nrows());
+                    let mut expected_entries = 0;
+                    for (i, &k) in kept_l_rows.iter().enumerate() {
+                        let kl = keep.l();
+                        let (ks, ke) = (kl.row_ptrs[k as usize], kl.row_ptrs[k as usize + 1]);
+                        let (ds, de) = (l.row_ptrs[i], l.row_ptrs[i + 1]);
+                        assert_eq!(kl.col_idcs[ks..ke], l.col_idcs[ds..de]);
+                        if mode == LuLMode::Full {
+                            assert_eq!(kl.values[ks..ke], l.values[ds..de]);
+                        }
+                        expected_entries += ke - ks;
+                    }
+                    assert_eq!(drop.l_entries(), expected_entries);
+                    assert!(drop.l_entries() <= keep.l_entries());
+
+                    if mode == LuLMode::Full {
+                        // L * U reproduces exactly the independent input rows
+                        assert_eq!(&(drop.l() * drop.u()), &independent);
+                    } else {
+                        assert!(l.values.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_dependent_l_rows_has_no_effect_without_l() {
+        let field = Zp64::new(13);
+        let one = field.one();
+        let mut reducer = SparseRowReducer::new(2, field.clone(), LuLMode::None);
+        reducer.set_retain_dependent_l(false);
+        assert_eq!(reducer.add_row(&[one, one], &[0, 1]), Some(0));
+        assert_eq!(reducer.add_row(&[one, one], &[0, 1]), None);
+        assert_eq!(reducer.l_entries(), 0);
+        assert_eq!(reducer.u_nnz(), 2);
     }
 }
