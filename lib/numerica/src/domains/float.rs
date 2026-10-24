@@ -142,6 +142,21 @@ pub trait RealLike: SingleFloat {
     fn to_usize_clamped(&self) -> usize;
     fn to_f64(&self) -> f64;
     fn round_to_nearest_integer(&self) -> Integer;
+
+    /// Multiply by `rhs`, using `coefficient` as a hint for the integer value
+    /// represented by `self`. The value and precision match `self.clone() * rhs`,
+    /// including when converting the coefficient to `self` rounded its value.
+    fn mul_integer_coefficient(&self, rhs: &Self, _coefficient: &Integer) -> Self {
+        self.clone() * rhs
+    }
+
+    /// Divide and round to the nearest integer, with the same precision and
+    /// rounding convention as `(self.clone() / rhs).round_to_nearest_integer()`.
+    /// Implementations may avoid computing fractional digits that cannot affect
+    /// the rounded integer.
+    fn div_round_to_nearest_integer(&self, rhs: &Self) -> Integer {
+        (self.clone() / rhs).round_to_nearest_integer()
+    }
 }
 
 /// A float that can be constructed without any parameters, such as `f64` (excluding multi-precision floats).
