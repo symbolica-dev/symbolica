@@ -2720,14 +2720,14 @@ mod library_registration_tests {
     }
 
     #[test]
-    fn scoped_workers_inherit_python_frame_license_and_revocation() {
+    fn workers_inherit_python_frame_license_and_rejection() {
         use pyo3::types::PyCFunction;
 
         Python::initialize();
         Python::attach(|py| -> PyResult<()> {
             let mut claims =
                 crate::license::verify_token(crate::license::TEST_UNLOCK_TOKEN).unwrap();
-            claims.package = "symbolica_scoped_frame_registration_test".into();
+            claims.package = "symbolica_worker_frame_registration_test".into();
             let package = claims.package.clone();
             let globals = PyDict::new(py);
             let enabled = Arc::new(AtomicBool::new(true));
@@ -2743,42 +2743,41 @@ mod library_registration_tests {
                     assert!(has_library_unlock_frame());
                     let captured = library_unlock_frame_license().unwrap();
                     assert!(Arc::ptr_eq(&captured, &observed));
-                    LicenseManager::with_inherited_library_unlock(|unlock| {
-                        // Keep the caller attached while its worker runs: inherited
-                        // authorization must not need Python or the caller's GIL.
-                        std::thread::scope(|threads| {
-                            let (completed, completion) = std::sync::mpsc::channel();
-                            let observed = observed.clone();
-                            let worker = threads.spawn(move || {
-                                assert!(!crate::license::current_thread_is_unlocked());
-                                assert!(!has_library_unlock_frame());
-                                unlock.run(|| {
+                    let unlock = crate::license::InheritedLibraryUnlock::capture();
+                    // Keep the caller attached while its worker runs: inherited
+                    // authorization must not need Python or the caller's GIL.
+                    std::thread::scope(|threads| {
+                        let (completed, completion) = std::sync::mpsc::channel();
+                        let observed = observed.clone();
+                        let worker = threads.spawn(move || {
+                            assert!(!crate::license::current_thread_is_unlocked());
+                            assert!(!has_library_unlock_frame());
+                            {
+                                let _guard = unlock.activate();
+                                assert!(crate::license::current_thread_is_unlocked());
+                                assert!(LicenseManager::is_licensed());
+                                {
+                                    let nested = crate::license::InheritedLibraryUnlock::capture();
+                                    let _nested_guard = nested.activate();
                                     assert!(crate::license::current_thread_is_unlocked());
-                                    assert!(LicenseManager::is_licensed());
-                                    LicenseManager::with_inherited_library_unlock(|nested| {
-                                        nested.run(|| {
-                                            assert!(crate::license::current_thread_is_unlocked());
-                                        });
-                                    });
-                                    observed.store(false, Relaxed);
-                                    assert!(!crate::license::current_thread_is_unlocked());
-                                    LicenseManager::with_inherited_library_unlock(|nested| {
-                                        nested.run(|| {
-                                            assert!(!crate::license::current_thread_is_unlocked());
-                                        });
-                                    });
-                                });
+                                }
+                                observed.store(false, Relaxed);
                                 assert!(!crate::license::current_thread_is_unlocked());
-                                completed.send(()).unwrap();
-                            });
-                            let completed =
-                                completion.recv_timeout(std::time::Duration::from_secs(5));
-                            // A regression that attaches on the worker must fail
-                            // this test without deadlocking its automatic join.
-                            let joined = args.py().detach(|| worker.join());
-                            assert!(completed.is_ok(), "worker needed the caller's GIL");
-                            joined.unwrap();
+                                {
+                                    let nested = crate::license::InheritedLibraryUnlock::capture();
+                                    let _nested_guard = nested.activate();
+                                    assert!(!crate::license::current_thread_is_unlocked());
+                                }
+                            }
+                            assert!(!crate::license::current_thread_is_unlocked());
+                            completed.send(()).unwrap();
                         });
+                        let completed = completion.recv_timeout(std::time::Duration::from_secs(5));
+                        // A regression that attaches on the worker must fail
+                        // this test without deadlocking its automatic join.
+                        let joined = args.py().detach(|| worker.join());
+                        assert!(completed.is_ok(), "worker needed the caller's GIL");
+                        joined.unwrap();
                     });
                     assert!(!has_library_unlock_frame());
                     assert!(library_unlock_frame_license().is_none());

@@ -168,100 +168,98 @@ fn search_horner_order_with_seeds<T: Clone + Ord + Send + Sync>(
         .max(1)
         .min(candidates);
     let abort = AtomicBool::new(false);
-    LicenseManager::with_inherited_library_unlock(|inherited_unlock| {
-        std::thread::scope(|scope| {
-            for worker in 0..workers {
-                let best = &best;
-                let abort = &abort;
-                let permutations = &permutations;
-                let score = &score;
-                let initial_order = &initial_order;
-                let run = move || {
-                    inherited_unlock.run(|| {
-                        let mut rng = MonteCarloRng::new(0, worker);
-                        let mut order = initial_order.clone();
-                        let mut last = initial;
-                        let worker_candidates = (candidates - 1 - worker) / workers + 1;
-                        // Keep short searches in one basin. Longer searches also try
-                        // reversed, shuffled, and perturbed-best starts, all charged to
-                        // the same candidate budget.
-                        let chain_length = if worker_candidates >= 128 {
-                            worker_candidates.div_ceil(4)
-                        } else {
-                            worker_candidates
-                        };
-                        let mut mutation = 0;
-                        // Striding includes the remainder when the budget is not divisible
-                        // by the number of workers.
-                        for (step, candidate) in (worker..candidates).step_by(workers).enumerate() {
-                            if abort.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            if worker + 1 == workers
-                                && let Some(check) = &settings.abort_check
-                                && check()
-                            {
-                                abort.store(true, Ordering::Relaxed);
-                                break;
-                            }
-                            let previous = order.clone();
-                            let restart =
-                                permutations.is_none() && step > 0 && step % chain_length == 0;
-                            if let Some(permutations) = &permutations {
-                                order = permutations[candidate]
-                                    .iter()
-                                    .map(|&i| vars[i].clone())
-                                    .collect();
-                            } else if restart {
-                                match step / chain_length {
-                                    1 => order = vars.iter().rev().cloned().collect(),
-                                    2 => {
-                                        order = vars.to_vec();
-                                        for i in (1..order.len()).rev() {
-                                            order.swap(i, rng.random_range(0..=i));
-                                        }
-                                    }
-                                    _ => {
-                                        order = best.lock().unwrap().1.clone();
-                                        for _ in 0..3 {
-                                            mutate_horner_order(&mut order, &mut rng, mutation);
-                                            mutation += 1;
-                                        }
-                                    }
-                                }
-                            } else {
-                                mutate_horner_order(&mut order, &mut rng, mutation);
-                                mutation += 1;
-                            }
-                            let current = score(&order);
+    let inherited_unlock = crate::license::InheritedLibraryUnlock::capture();
 
-                            if permutations.is_some()
-                                || restart
-                                || horner_cost(current) <= horner_cost(last)
-                            {
-                                last = current;
-                                // Keep the score and order under one lock: independent
-                                // atomics can expose a score assembled from different winners.
-                                let mut winner = best.lock().unwrap();
-                                if horner_cost(current) < horner_cost(winner.0)
-                                    || horner_cost(current) == horner_cost(winner.0)
-                                        && order < winner.1
-                                {
-                                    *winner = (current, order.clone());
+    std::thread::scope(|scope| {
+        for worker in 0..workers {
+            let best = &best;
+            let abort = &abort;
+            let permutations = &permutations;
+            let score = &score;
+            let initial_order = &initial_order;
+            let inherited_unlock = &inherited_unlock;
+            let run = move || {
+                let _unlock = inherited_unlock.activate();
+                let mut rng = MonteCarloRng::new(0, worker);
+                let mut order = initial_order.clone();
+                let mut last = initial;
+                let worker_candidates = (candidates - 1 - worker) / workers + 1;
+                // Keep short searches in one basin. Longer searches also try
+                // reversed, shuffled, and perturbed-best starts, all charged to
+                // the same candidate budget.
+                let chain_length = if worker_candidates >= 128 {
+                    worker_candidates.div_ceil(4)
+                } else {
+                    worker_candidates
+                };
+                let mut mutation = 0;
+                // Striding includes the remainder when the budget is not divisible
+                // by the number of workers.
+                for (step, candidate) in (worker..candidates).step_by(workers).enumerate() {
+                    if abort.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if worker + 1 == workers
+                        && let Some(check) = &settings.abort_check
+                        && check()
+                    {
+                        abort.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let previous = order.clone();
+                    let restart = permutations.is_none() && step > 0 && step % chain_length == 0;
+                    if let Some(permutations) = &permutations {
+                        order = permutations[candidate]
+                            .iter()
+                            .map(|&i| vars[i].clone())
+                            .collect();
+                    } else if restart {
+                        match step / chain_length {
+                            1 => order = vars.iter().rev().cloned().collect(),
+                            2 => {
+                                order = vars.to_vec();
+                                for i in (1..order.len()).rev() {
+                                    order.swap(i, rng.random_range(0..=i));
                                 }
-                            } else {
-                                order = previous;
+                            }
+                            _ => {
+                                order = best.lock().unwrap().1.clone();
+                                for _ in 0..3 {
+                                    mutate_horner_order(&mut order, &mut rng, mutation);
+                                    mutation += 1;
+                                }
                             }
                         }
-                    })
-                };
-                if worker + 1 == workers {
-                    run();
-                } else {
-                    scope.spawn(run);
+                    } else {
+                        mutate_horner_order(&mut order, &mut rng, mutation);
+                        mutation += 1;
+                    }
+                    let current = score(&order);
+
+                    if permutations.is_some()
+                        || restart
+                        || horner_cost(current) <= horner_cost(last)
+                    {
+                        last = current;
+                        // Keep the score and order under one lock: independent
+                        // atomics can expose a score assembled from different winners.
+                        let mut winner = best.lock().unwrap();
+                        if horner_cost(current) < horner_cost(winner.0)
+                            || horner_cost(current) == horner_cost(winner.0) && order < winner.1
+                        {
+                            *winner = (current, order.clone());
+                        }
+                    } else {
+                        order = previous;
+                    }
                 }
+            };
+            if worker + 1 == workers {
+                run();
+            } else {
+                scope.spawn(run);
             }
-        });
+        }
     });
     let (ops, order) = best.into_inner().unwrap();
     if settings.verbose {
