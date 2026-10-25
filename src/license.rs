@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     marker::PhantomData,
     rc::Rc,
     sync::{
@@ -230,8 +230,8 @@ impl LicenseManager {
     ///
     /// This only propagates existing library authorization. Without an active library
     /// unlock, jobs retain the user's normal license or restricted execution limits.
-    /// License revocation and originating propagation scopes remain effective in
-    /// nested jobs. Callbacks within an authorized job share its authorization.
+    /// Nested jobs retain the original license flags, so revocation remains effective.
+    /// Callbacks within an authorized job share its authorization.
     ///
     /// ```
     /// use symbolica::license::LicenseManager;
@@ -268,31 +268,27 @@ impl LicenseManager {
             licenses
                 .borrow()
                 .iter()
-                .filter(|license| license.is_enabled())
+                .filter(|license| license.load(Relaxed))
                 .cloned()
                 .collect::<Vec<_>>()
         });
         #[cfg(any(feature = "python_api", feature = "python_export"))]
         let sources = {
             let mut sources = sources;
-            // An inherited worker already has its provenance. Do not attach to
+            // An inherited worker already has its license flags. Do not attach to
             // Python there: the calling Python thread may be waiting with the GIL.
             if sources.is_empty()
                 && let Some(enabled) = crate::api::python::library_unlock_frame_license()
             {
-                sources.push(LibraryUnlockState::License(enabled));
+                sources.push(enabled);
             }
             sources
         };
-        let owner = InheritedLibraryUnlockOwner((!sources.is_empty()).then(|| {
-            Arc::new(InheritedLibraryUnlockState {
-                active: AtomicBool::new(true),
-                sources,
-            })
-        }));
-        f(InheritedLibraryUnlock {
-            state: owner.0.as_ref(),
-        })
+        let mut sources = sources;
+        // Nested activations can include the same license more than once.
+        sources.sort_unstable_by_key(Arc::as_ptr);
+        sources.dedup_by(|a, b| Arc::ptr_eq(a, b));
+        f(InheritedLibraryUnlock { sources: &sources })
     }
 
     #[inline]
@@ -1229,7 +1225,7 @@ static CHECKED_UNLOCK_LICENSES: LazyLock<Mutex<HashMap<(u32, String), Arc<Atomic
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 thread_local! {
-    static LIBRARY_UNLOCKS: RefCell<Vec<LibraryUnlockState>> = const { RefCell::new(Vec::new()) };
+    static LIBRARY_UNLOCKS: RefCell<Vec<Arc<AtomicBool>>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(any(test, debug_assertions))]
@@ -1556,21 +1552,16 @@ impl LibraryUnlock {
 /// [`LicenseManager::with_inherited_library_unlock`] for scoped propagation.
 #[must_use = "the library is unlocked only while this guard is alive"]
 pub struct LibraryUnlockGuard {
-    state: LibraryUnlockState,
+    enabled: Arc<AtomicBool>,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl LibraryUnlockGuard {
     #[inline]
     fn with_license(enabled: Arc<AtomicBool>) -> Self {
-        Self::with_state(LibraryUnlockState::License(enabled))
-    }
-
-    #[inline]
-    fn with_state(state: LibraryUnlockState) -> Self {
-        LIBRARY_UNLOCKS.with(|licenses| licenses.borrow_mut().push(state.clone()));
+        LIBRARY_UNLOCKS.with(|licenses| licenses.borrow_mut().push(enabled.clone()));
         Self {
-            state,
+            enabled,
             _not_send: PhantomData,
         }
     }
@@ -1580,12 +1571,7 @@ impl Drop for LibraryUnlockGuard {
     #[inline]
     fn drop(&mut self) {
         LIBRARY_UNLOCKS.with(|licenses| {
-            let mut licenses = licenses.borrow_mut();
-            let index = licenses
-                .iter()
-                .rposition(|license| license.ptr_eq(&self.state))
-                .expect("unbalanced library unlock scope");
-            licenses.remove(index);
+            remove_library_unlock(&mut licenses.borrow_mut(), &self.enabled);
         });
     }
 }
@@ -1593,92 +1579,21 @@ impl Drop for LibraryUnlockGuard {
 /// Return whether the current Rust thread is inside an enabled library unlock scope.
 #[inline]
 pub(crate) fn current_thread_is_unlocked() -> bool {
-    LIBRARY_UNLOCKS.with(|licenses| licenses.borrow().iter().any(LibraryUnlockState::is_enabled))
+    LIBRARY_UNLOCKS.with(|licenses| {
+        licenses
+            .borrow()
+            .iter()
+            .any(|license| license.load(Relaxed))
+    })
 }
 
-#[derive(Clone)]
-enum LibraryUnlockState {
-    License(Arc<AtomicBool>),
-    Inherited(Arc<InheritedLibraryUnlockState>),
-}
-
-impl LibraryUnlockState {
-    #[inline]
-    fn is_enabled(&self) -> bool {
-        match self {
-            Self::License(enabled) => enabled.load(Relaxed),
-            Self::Inherited(state) => {
-                if !state.active.load(Relaxed) {
-                    return false;
-                }
-                match state.sources.as_slice() {
-                    [source] => source.is_enabled(),
-                    sources => {
-                        // Captures may share ancestors. Once a source fails, do not
-                        // revisit all its paths through a branching provenance graph.
-                        let mut failed = HashSet::new();
-                        sources
-                            .iter()
-                            .any(|source| source.is_enabled_with_failed(&mut failed))
-                    }
-                }
-            }
-        }
-    }
-
-    fn is_enabled_with_failed(
-        &self,
-        failed: &mut HashSet<*const InheritedLibraryUnlockState>,
-    ) -> bool {
-        match self {
-            Self::License(enabled) => enabled.load(Relaxed),
-            Self::Inherited(state) => {
-                if !state.active.load(Relaxed) {
-                    return false;
-                }
-                let identity = Arc::as_ptr(state);
-                if failed.contains(&identity) {
-                    return false;
-                }
-                if state
-                    .sources
-                    .iter()
-                    .any(|source| source.is_enabled_with_failed(failed))
-                {
-                    return true;
-                }
-                failed.insert(identity);
-                false
-            }
-        }
-    }
-
-    fn ptr_eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::License(a), Self::License(b)) => Arc::ptr_eq(a, b),
-            (Self::Inherited(a), Self::Inherited(b)) => Arc::ptr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-struct InheritedLibraryUnlockState {
-    active: AtomicBool,
-    // Keep the provenance graph, rather than snapshotting authorization to a bool:
-    // an inherited source must expire when any of its ancestor scopes expires.
-    sources: Vec<LibraryUnlockState>,
-}
-
-struct InheritedLibraryUnlockOwner(Option<Arc<InheritedLibraryUnlockState>>);
-
-impl Drop for InheritedLibraryUnlockOwner {
-    fn drop(&mut self) {
-        if let Some(state) = &self.0 {
-            // This flag carries no data publication or memory reclamation; Arcs own
-            // the state, so a relaxed load/store suffices just as for license flags.
-            state.active.store(false, Relaxed);
-        }
-    }
+#[inline]
+fn remove_library_unlock(licenses: &mut Vec<Arc<AtomicBool>>, enabled: &Arc<AtomicBool>) {
+    let index = licenses
+        .iter()
+        .rposition(|license| Arc::ptr_eq(license, enabled))
+        .expect("unbalanced library unlock scope");
+    licenses.remove(index);
 }
 
 /// A borrowed library authorization for synchronous worker jobs.
@@ -1687,10 +1602,10 @@ impl Drop for InheritedLibraryUnlockOwner {
 /// same scope lifetime and license state; they cannot authorize later operations.
 #[derive(Clone, Copy)]
 pub struct InheritedLibraryUnlock<'scope> {
-    state: Option<&'scope Arc<InheritedLibraryUnlockState>>,
+    sources: &'scope [Arc<AtomicBool>],
 }
 
-impl InheritedLibraryUnlock<'_> {
+impl<'scope> InheritedLibraryUnlock<'scope> {
     /// Run a job with the originating library authorization on this thread.
     ///
     /// Activation ends when the job returns or unwinds. The activation guard remains
@@ -1704,10 +1619,33 @@ impl InheritedLibraryUnlock<'_> {
     // Internal parallel iterators keep one activation per folder. Never expose
     // this guard: public callers must use run(), which owns its cleanup.
     #[inline]
-    pub(crate) fn activate(&self) -> Option<LibraryUnlockGuard> {
-        self.state.map(|state| {
-            LibraryUnlockGuard::with_state(LibraryUnlockState::Inherited(Arc::clone(state)))
-        })
+    pub(crate) fn activate(&self) -> InheritedLibraryUnlockGuard<'scope> {
+        LIBRARY_UNLOCKS.with(|licenses| {
+            licenses.borrow_mut().extend(self.sources.iter().cloned());
+        });
+        InheritedLibraryUnlockGuard {
+            sources: self.sources,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+// Borrow the captured flags so internal activations cannot outlive their scope either.
+#[must_use = "the worker is unlocked only while this guard is alive"]
+pub(crate) struct InheritedLibraryUnlockGuard<'scope> {
+    sources: &'scope [Arc<AtomicBool>],
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for InheritedLibraryUnlockGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        LIBRARY_UNLOCKS.with(|licenses| {
+            let mut licenses = licenses.borrow_mut();
+            for source in self.sources {
+                remove_library_unlock(&mut licenses, source);
+            }
+        });
     }
 }
 
@@ -1861,7 +1799,7 @@ mod unlock_tests {
         };
         let _guard = disabled.unlock();
         LicenseManager::with_inherited_library_unlock(|inherited| {
-            assert!(inherited.state.is_none());
+            assert!(inherited.sources.is_empty());
             std::thread::scope(|threads| {
                 assert!(
                     !threads
@@ -1897,31 +1835,25 @@ mod unlock_tests {
         pool.broadcast(|_| assert!(!current_thread_is_unlocked()));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn inherited_unlock_expires_with_scope() {
+    fn inherited_unlock_tracks_background_rejection_in_active_worker() {
         let registration = LibraryUnlock {
-            enabled: Arc::new(AtomicBool::new(true)),
+            enabled: Arc::new(AtomicBool::new(false)),
         };
-        let guard = registration.unlock();
-        // Only this private test can retain the owned state. Even if retained, it
-        // must become inert; the public borrowed capability cannot escape at all.
-        let saved = LicenseManager::with_inherited_library_unlock(|inherited| {
-            let state = LibraryUnlockState::Inherited(inherited.state.unwrap().clone());
-            assert!(state.is_enabled());
-            state
-        });
-        assert!(registration.enabled.load(Relaxed));
-        assert!(!saved.is_enabled());
-        drop(guard);
-        let _stale = LibraryUnlockGuard::with_state(saved);
-        assert!(!current_thread_is_unlocked());
-    }
-
-    #[test]
-    fn inherited_unlock_tracks_revocation_in_active_worker() {
-        let registration = LibraryUnlock {
-            enabled: Arc::new(AtomicBool::new(true)),
-        };
+        let (reject_tx, reject_rx) = std::sync::mpsc::channel();
+        let check = LicenseManager::validate_package_registration_at(
+            "test-library-key".to_owned(),
+            1,
+            0,
+            "library",
+            registration.enabled.clone(),
+            move |_| {
+                reject_rx.recv().unwrap();
+                Err("License revoked".to_owned())
+            },
+        )
+        .unwrap();
         let _guard = registration.unlock();
         LicenseManager::with_inherited_library_unlock(|inherited| {
             std::thread::scope(|threads| {
@@ -1936,7 +1868,8 @@ mod unlock_tests {
                     })
                 });
                 ready_rx.recv().unwrap();
-                registration.enabled.store(false, Relaxed);
+                reject_tx.send(()).unwrap();
+                check.join().unwrap();
                 revoked_tx.send(()).unwrap();
                 worker.join().unwrap();
             });
@@ -1944,7 +1877,7 @@ mod unlock_tests {
     }
 
     #[test]
-    fn nested_inherited_unlock_preserves_parent_scope_and_revocation() {
+    fn nested_inherited_unlock_preserves_license_flags() {
         let registration = LibraryUnlock {
             enabled: Arc::new(AtomicBool::new(true)),
         };
@@ -1955,18 +1888,19 @@ mod unlock_tests {
                     .spawn(|| {
                         outer.run(|| {
                             LicenseManager::with_inherited_library_unlock(|inner| {
-                                inner.run(|| {
-                                    assert!(current_thread_is_unlocked());
-                                    registration.enabled.store(false, Relaxed);
-                                    assert!(!current_thread_is_unlocked());
-                                    registration.enabled.store(true, Relaxed);
-                                    assert!(current_thread_is_unlocked());
-                                    // Simulate ancestor expiry while the descendant is still
-                                    // active, to verify that recapture kept the dependency.
-                                    outer.state.unwrap().active.store(false, Relaxed);
-                                    assert!(inner.state.unwrap().active.load(Relaxed));
-                                    assert!(!current_thread_is_unlocked());
-                                })
+                                std::thread::scope(|children| {
+                                    children
+                                        .spawn(|| {
+                                            inner.run(|| {
+                                                assert!(current_thread_is_unlocked());
+                                                registration.enabled.store(false, Relaxed);
+                                                assert!(!current_thread_is_unlocked());
+                                            });
+                                            assert!(!current_thread_is_unlocked());
+                                        })
+                                        .join()
+                                        .unwrap();
+                                });
                             });
                         })
                     })
@@ -1995,7 +1929,8 @@ mod unlock_tests {
                             assert!(current_thread_is_unlocked());
                             second.enabled.store(false, Relaxed);
                             assert!(!current_thread_is_unlocked());
-                        })
+                        });
+                        LIBRARY_UNLOCKS.with(|licenses| assert!(licenses.borrow().is_empty()));
                     })
                     .join()
                     .unwrap();
@@ -2004,23 +1939,26 @@ mod unlock_tests {
     }
 
     #[test]
-    fn inherited_unlock_handles_revoked_shared_ancestors() {
-        let enabled = Arc::new(AtomicBool::new(true));
-        let mut inherited = LibraryUnlockState::License(enabled.clone());
-        // Thirty propagation levels can share over a billion paths to the same
-        // license. Revocation must visit the shared ancestors without expanding
-        // those paths, and a later check must observe a renewed license.
-        for _ in 0..30 {
-            inherited = LibraryUnlockState::Inherited(Arc::new(InheritedLibraryUnlockState {
-                active: AtomicBool::new(true),
-                sources: vec![inherited.clone(), inherited],
-            }));
+    fn nested_inherited_unlock_deduplicates_licenses() {
+        fn recurse(depth: usize) {
+            LicenseManager::with_inherited_library_unlock(|inherited| {
+                assert_eq!(inherited.sources.len(), 1);
+                inherited.run(|| {
+                    assert!(current_thread_is_unlocked());
+                    if depth > 0 {
+                        recurse(depth - 1);
+                    }
+                });
+            });
         }
-        assert!(inherited.is_enabled());
-        enabled.store(false, Relaxed);
-        assert!(!inherited.is_enabled());
-        enabled.store(true, Relaxed);
-        assert!(inherited.is_enabled());
+        let registration = LibraryUnlock {
+            enabled: Arc::new(AtomicBool::new(true)),
+        };
+        let guard = registration.unlock();
+        recurse(30);
+        assert!(current_thread_is_unlocked());
+        drop(guard);
+        assert!(!current_thread_is_unlocked());
     }
 
     #[test]
@@ -2029,12 +1967,8 @@ mod unlock_tests {
             enabled: Arc::new(AtomicBool::new(true)),
         };
         let guard = registration.unlock();
-        let mut saved = None;
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             LicenseManager::with_inherited_library_unlock(|inherited| {
-                saved = Some(LibraryUnlockState::Inherited(
-                    inherited.state.unwrap().clone(),
-                ));
                 std::thread::scope(|threads| {
                     threads
                         .spawn(|| {
@@ -2054,7 +1988,6 @@ mod unlock_tests {
             });
         }));
         assert!(panic.is_err());
-        assert!(!saved.unwrap().is_enabled());
         assert!(current_thread_is_unlocked());
         drop(guard);
         assert!(!current_thread_is_unlocked());
