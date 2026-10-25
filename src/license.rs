@@ -1712,10 +1712,6 @@ impl InheritedLibraryUnlock<'_> {
 }
 
 #[cfg(test)]
-#[path = "license/unlock_benchmark.rs"]
-mod unlock_benchmark;
-
-#[cfg(test)]
 mod unlock_tests {
     use super::*;
 
