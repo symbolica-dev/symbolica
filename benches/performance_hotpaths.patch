@@ -1,0 +1,694 @@
+diff --git a/src/expand.rs b/src/expand.rs
+index 3c6c1f4f..c3f49ae7 100644
+--- a/src/expand.rs
++++ b/src/expand.rs
+@@ -268,0 +269,22 @@ impl AtomView<'_> {
++                    fn can_merge_coefficient_first(a: AtomView<'_>) -> bool {
++                        match a {
++                            AtomView::Num(n) => matches!(
++                                n.get_coeff_view(),
++                                CoefficientView::Natural(..)
++                                    | CoefficientView::Large(..)
++                                    | CoefficientView::RationalPolynomial(..)
++                            ),
++                            AtomView::Var(_) => true,
++                            AtomView::Fun(f) => f.iter().all(can_merge_coefficient_first),
++                            AtomView::Pow(p) => p.iter().all(can_merge_coefficient_first),
++                            AtomView::Mul(m) => m.iter().all(can_merge_coefficient_first),
++                            AtomView::Add(a) => a.iter().all(can_merge_coefficient_first),
++                        }
++                    }
++
++                    // Preserve the order of inexact arithmetic, including when
++                    // recursive expansion exposes additional numeric factors.
++                    // Field factors must simplify before multiplying integers,
++                    // and dirty functions can introduce inexact coefficients.
++                    let merge_coefficient_first =
++                        !base.needs_normalization() && can_merge_coefficient_first(base);
+@@ -269,0 +292,5 @@ impl AtomView<'_> {
++                    let mut term = workspace.new_atom();
++                    let mut power = workspace.new_atom();
++                    let mut coefficient = workspace.new_atom();
++                    let mut normalized_child = workspace.new_atom();
++                    let mut expanded_child = workspace.new_atom();
+@@ -272,2 +299 @@ impl AtomView<'_> {
+-                        let mut hh = workspace.new_atom();
+-                        let p = hh.to_mul();
++                        let p = term.to_mul();
+@@ -275 +300,0 @@ impl AtomView<'_> {
+-                        let mut hhh = workspace.new_atom();
+@@ -277,3 +302,5 @@ impl AtomView<'_> {
+-                            if *pow != 0 {
+-                                hhh.to_pow(*a, InlineNum::new(*pow as i64, 1).as_view());
+-                                p.extend(hhh.as_view());
++                            if *pow == 1 && !a.needs_normalization() {
++                                p.extend(*a);
++                            } else if *pow != 0 {
++                                power.to_pow(*a, InlineNum::new(*pow as i64, 1).as_view());
++                                p.extend(power.as_view());
+@@ -283,2 +310,13 @@ impl AtomView<'_> {
+-                        let mut normalized_child = workspace.new_atom();
+-                        hh.as_view().normalize(workspace, &mut normalized_child);
++                        // Include the multinomial coefficient before normalization.
++                        // Appending it afterwards would invalidate every product
++                        // and normalize it again when normalizing the final sum.
++                        let coeff_f = Integer::multinom(new_term);
++                        let has_coefficient = coeff_f != Integer::one();
++                        if has_coefficient {
++                            coefficient.to_num(coeff_f);
++                            if merge_coefficient_first {
++                                p.extend(coefficient.as_view());
++                            }
++                        }
++
++                        term.as_view().normalize(workspace, &mut normalized_child);
+@@ -286 +323,0 @@ impl AtomView<'_> {
+-                        let mut expanded_child = workspace.new_atom();
+@@ -301,5 +338 @@ impl AtomView<'_> {
+-                        let coeff_f = Integer::multinom(new_term);
+-                        if coeff_f != Integer::one() {
+-                            let mut coeff_h = workspace.new_atom();
+-                            coeff_h.to_num(coeff_f);
+-
++                        if has_coefficient && !merge_coefficient_first {
+@@ -307 +340 @@ impl AtomView<'_> {
+-                                m.extend(coeff_h.as_view());
++                                m.extend(coefficient.as_view());
+@@ -310,2 +343 @@ impl AtomView<'_> {
+-                                let mut mul_h = workspace.new_atom();
+-                                let mul = mul_h.to_mul();
++                                let mul = term.to_mul();
+@@ -313,2 +345,2 @@ impl AtomView<'_> {
+-                                mul.extend(coeff_h.as_view());
+-                                add.extend(mul_h.as_view());
++                                mul.extend(coefficient.as_view());
++                                add.extend(term.as_view());
+@@ -695,0 +728,146 @@ mod test {
++    #[test]
++    fn multinomial_coefficients_normalize_with_their_terms() {
++        use crate::atom::Atom;
++
++        for input in [
++            "(2*x-3*y+5*z+7)^6",
++            "(x/2-2*y/3+5)^5",
++            "(x+x^2+y)^5",
++            "(f(x)+2*g(y)+3)^4",
++        ] {
++            let expr = parse!(input);
++            let expanded = expr.expand();
++            assert_eq!(expanded, expr.expand_via_poly::<u16, Atom>(None), "{input}");
++            assert!(expanded.as_view().is_expanded(None), "{input}");
++        }
++
++        assert_eq!(
++            parse!("(x^(a+b)+y)^3").expand(),
++            parse!("x^(3*a+3*b)+3*x^(2*a+2*b)*y+3*x^(a+b)*y^2+y^3")
++        );
++        assert_eq!(
++            parse!("(x+y+z)^3").expand_in(symbol!("x")),
++            parse!("x^3+3*x^2*(y+z)+3*x*(y+z)^2+(y+z)^3")
++        );
++        assert_eq!(
++            parse!("(2*x-3*y+5)^-4").expand(),
++            parse!("(2*x-3*y+5)^4").expand().pow(-1)
++        );
++    }
++
++    #[test]
++    fn multinomial_coefficients_preserve_finite_field_simplification() {
++        use crate::{
++            atom::Atom,
++            coefficient::Coefficient,
++            domains::{Ring, finite_field::Zp64},
++        };
++
++        let field = Zp64::new(5);
++        let coefficient = |n: i64| {
++            Atom::num(Coefficient::from_finite_field(
++                field.clone(),
++                field.nth(n.into()),
++            ))
++        };
++        let [x, y, z] = [parse!("x"), parse!("y"), parse!("z")];
++        let base = coefficient(2) * &x + coefficient(3) * &y + coefficient(4) * &z;
++        // Mixed field and integer arithmetic is unsupported, as in the
++        // existing expansion when a multinomial coefficient is introduced.
++        assert_eq!(
++            base.pow(5).expand(),
++            Atom::num(Coefficient::indeterminate())
++        );
++        // However, 2*3 is field one and disappears during normalization.
++        // The integer coefficient must be applied after that simplification.
++        let base = coefficient(2) * &x + coefficient(3) * &y;
++        assert_eq!(
++            base.pow(2).expand(),
++            coefficient(4) * x.pow(2) + 2 * &x * &y + coefficient(4) * y.pow(2)
++        );
++    }
++
++    #[test]
++    fn multinomial_coefficients_preserve_floating_point_order() {
++        use crate::atom::{Atom, AtomView};
++
++        let base = Atom::num(0.1) * parse!("x*2^(1/3)")
++            + Atom::num(0.3) * parse!("y*2^(1/3)")
++            + Atom::num(0.7) * parse!("z*2^(1/3)");
++        let AtomView::Add(a) = base.as_view() else {
++            unreachable!()
++        };
++        let terms: Vec<_> = a.iter().collect();
++        let factorials = [1, 1, 2, 6, 24, 120];
++        let mut expected = Vec::new();
++        for i in 0..=5 {
++            for j in 0..=5 - i {
++                let k = 5 - i - j;
++                // Normalize and expand each monomial before applying its
++                // combinatorial coefficient, retaining the arithmetic order.
++                let term = Atom::mul_many([
++                    terms[0].pow(i as i64),
++                    terms[1].pow(j as i64),
++                    terms[2].pow(k as i64),
++                ])
++                .expand();
++                let coefficient = 120 / (factorials[i] * factorials[j] * factorials[k]);
++                expected.push(term * coefficient);
++            }
++        }
++        assert_eq!(base.pow(5).expand(), Atom::add_many(expected));
++    }
++
++    #[test]
++    fn multinomial_expansion_preserves_dirty_input_grouping() {
++        use crate::atom::{Atom, AtomView};
++
++        fn check_binomial(left: Atom, right: Atom) {
++            let mut base = Atom::new();
++            let sum = base.to_add();
++            sum.extend(left.as_view());
++            sum.extend(right.as_view());
++            let mut power = Atom::new();
++            power.to_pow(base.as_view(), Atom::num(5).as_view());
++
++            let coefficients = [1, 5, 10, 10, 5, 1];
++            let expected = Atom::add_many((0..=5).map(|i| {
++                // The legacy expansion normalizes each powered argument,
++                // including exponent one, before combining the monomial.
++                let term = Atom::mul_many([left.pow(i), right.pow(5 - i)]).expand();
++                term * coefficients[i as usize]
++            }));
++            assert_eq!(power.expand(), expected);
++        }
++
++        let [x, y] = [parse!("dirty_expansion_x"), parse!("dirty_expansion_y")];
++        let mut left = Atom::new();
++        let product = left.to_mul();
++        product.extend(Atom::num(0.1).as_view());
++        product.extend(Atom::num(0.3).as_view());
++        product.extend(x.as_view());
++        let mut right = Atom::new();
++        let product = right.to_mul();
++        product.extend(Atom::num(0.7).as_view());
++        product.extend(Atom::num(0.9).as_view());
++        product.extend(y.as_view());
++        check_binomial(left, right);
++
++        let head = symbol!(
++            "dirty_expansion_float",
++            norm = |input, out| {
++                let AtomView::Fun(f) = input else {
++                    unreachable!()
++                };
++                let arg = f.iter().next().unwrap();
++                let value = Atom::num(0.1) * parse!("2^(1/3)") * arg;
++                out.set_from_view(&value.as_view());
++            }
++        );
++        let mut left = Atom::new();
++        left.to_fun(head).add_arg(x.as_view());
++        let mut right = Atom::new();
++        right.to_fun(head).add_arg(y.as_view());
++        check_binomial(left, right);
++    }
++
+diff --git a/src/id.rs b/src/id.rs
+index 12913f80..f456956a 100644
+--- a/src/id.rs
++++ b/src/id.rs
+@@ -5902,36 +5902,5 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                let wildcard_ranges = if matches!(
+-                    self.pattern[self.processed_iterators],
+-                    Pattern::Wildcard(..)
+-                ) {
+-                    Some((
+-                        self.pattern_length_range(self.processed_iterators, match_stack),
+-                        if self.complete {
+-                            self.pattern[self.processed_iterators + 1..]
+-                                .iter()
+-                                .enumerate()
+-                                .map(|(offset, _)| {
+-                                    self.pattern_length_range(
+-                                        self.processed_iterators + 1 + offset,
+-                                        match_stack,
+-                                    )
+-                                })
+-                                .collect::<Vec<_>>()
+-                        } else {
+-                            Vec::new()
+-                        },
+-                    ))
+-                } else {
+-                    None
+-                };
+-                let it = &mut self.iterators[self.processed_iterators];
+-                match (&self.pattern[self.processed_iterators], it) {
+-                    (Pattern::Wildcard(name, _), PatternIter::Wildcard(w)) => {
+-                        let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
+-                        let (range, future_ranges) = wildcard_ranges.as_ref().unwrap();
+-                        let range = *range;
+-
+-                        if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
+-                            // a previously matched ranged wildcard will constrain the slice matching
+-                            // so it is hard to conclude if there is a structural mismatch
+-                            structural_mismatch = false;
+-                        }
++                let wildcard_range = if let Pattern::Wildcard(name, _) =
++                    &self.pattern[self.processed_iterators]
++                {
++                    let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
++                    let range = self.pattern_length_range(self.processed_iterators, match_stack);
+@@ -5939,2 +5908,5 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                        if self.do_not_match_entire_slice {
+-                            size_left -= 1;
++                    if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
++                        // a previously matched ranged wildcard will constrain the slice matching
++                        // so it is hard to conclude if there is a structural mismatch
++                        structural_mismatch = false;
++                    }
+@@ -5942,5 +5914,2 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                            if size_left < range.0 {
+-                                forward_pass = false;
+-                                continue 'next_match;
+-                            }
+-                        }
++                    if self.do_not_match_entire_slice {
++                        size_left -= 1;
+@@ -5948,4 +5917,5 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                        let mut range = (
+-                            range.0,
+-                            range.1.map(|m| m.min(size_left)).unwrap_or(size_left),
+-                        );
++                        if size_left < range.0 {
++                            forward_pass = false;
++                            continue 'next_match;
++                        }
++                    }
+@@ -5953,12 +5923,4 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                        // bound the wildcard length based on the bounds of upcoming patterns
+-                        if self.complete {
+-                            let mut new_min = size_left;
+-                            let mut new_max = size_left;
+-                            for p_range in future_ranges {
+-                                if new_min > 0 {
+-                                    if let Some(m) = p_range.1 {
+-                                        new_min -= m.min(new_min);
+-                                    } else {
+-                                        new_min = 0;
+-                                    }
+-                                }
++                    let mut range = (
++                        range.0,
++                        range.1.map(|m| m.min(size_left)).unwrap_or(size_left),
++                    );
+@@ -5966,3 +5928,12 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                                if new_max < p_range.0 {
+-                                    forward_pass = false;
+-                                    continue 'next_match;
++                    // Bound the wildcard length before borrowing its iterator, so the
++                    // upcoming ranges can be consumed directly without a temporary Vec.
++                    if self.complete {
++                        let mut new_min = size_left;
++                        let mut new_max = size_left;
++                        for index in self.processed_iterators + 1..self.pattern.len() {
++                            let p_range = self.pattern_length_range(index, match_stack);
++                            if new_min > 0 {
++                                if let Some(m) = p_range.1 {
++                                    new_min -= m.min(new_min);
++                                } else {
++                                    new_min = 0;
+@@ -5969,0 +5941 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
++                            }
+@@ -5971 +5943,3 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                                new_max -= p_range.0;
++                            if new_max < p_range.0 {
++                                forward_pass = false;
++                                continue 'next_match;
+@@ -5974,2 +5948 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                            range.0 = range.0.max(new_min);
+-                            range.1 = range.1.min(new_max);
++                            new_max -= p_range.0;
+@@ -5978,4 +5951,16 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
+-                        if range.0 > range.1 {
+-                            forward_pass = false;
+-                            continue 'next_match;
+-                        }
++                        range.0 = range.0.max(new_min);
++                        range.1 = range.1.min(new_max);
++                    }
++
++                    if range.0 > range.1 {
++                        forward_pass = false;
++                        continue 'next_match;
++                    }
++                    Some(range)
++                } else {
++                    None
++                };
++                let it = &mut self.iterators[self.processed_iterators];
++                match (&self.pattern[self.processed_iterators], it) {
++                    (Pattern::Wildcard(name, _), PatternIter::Wildcard(w)) => {
++                        let range = wildcard_range.unwrap();
+@@ -6696 +6681,4 @@ mod test {
+-        id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
++        id::{
++            AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement,
++            WildcardRestriction,
++        },
+@@ -6733,0 +6722,56 @@ mod test {
++    #[test]
++    fn complete_wildcard_ranges_preserve_bounds_and_match_order() {
++        let input = parse!("f(a,b,c,d,e)");
++        let pattern = parse!("f(x__,y__,z_)").to_pattern();
++        let rhs = parse!("out(left(x__),right(y__),z_)").to_pattern();
++        let condition = symbol!("y__").restrict(WildcardRestriction::Length(2, Some(3)));
++        let expected = vec![
++            parse!("out(left(a,b),right(c,d),e)"),
++            parse!("out(left(a),right(b,c,d),e)"),
++        ];
++
++        let greedy = input
++            .replace(&pattern)
++            .when(&condition)
++            .iter(&rhs)
++            .collect::<Vec<_>>();
++        assert_eq!(greedy, expected);
++
++        let non_greedy = input
++            .replace(&pattern)
++            .when(&condition)
++            .non_greedy_wildcards(vec![symbol!("x__")])
++            .iter(&rhs)
++            .collect::<Vec<_>>();
++        assert_eq!(non_greedy, expected.into_iter().rev().collect::<Vec<_>>());
++
++        let no_match = parse!("f(a,b,c)")
++            .replace(&pattern)
++            .when(&condition)
++            .iter(&rhs)
++            .collect::<Vec<_>>();
++        assert!(no_match.is_empty());
++    }
++
++    #[test]
++    fn complete_wildcard_ranges_follow_repeated_and_optional_bindings() {
++        let repeated = parse!("f(a,b,c,a,b)")
++            .replace(parse!("f(x__,y__,x__)"))
++            .iter(parse!("out(left(x__),right(y__))"))
++            .collect::<Vec<_>>();
++        assert_eq!(repeated, vec![parse!("out(left(a,b),right(c))")]);
++
++        let optional = parse!("f(a,b)")
++            .replace(parse!("f(x__,y_)"))
++            .set_optional(symbol!("y_"))
++            .iter(parse!("out(left(x__),right(y_))"))
++            .collect::<Vec<_>>();
++        assert_eq!(
++            optional,
++            vec![
++                parse!("out(left(a,b),right())"),
++                parse!("out(left(a),right(b))"),
++            ]
++        );
++    }
++
+diff --git a/src/normalize.rs b/src/normalize.rs
+index a740a55c..97a1cd45 100644
+--- a/src/normalize.rs
++++ b/src/normalize.rs
+@@ -1691 +1691,2 @@ impl AtomView<'_> {
+-            let mut arg_buf: SmallVec<[(usize, _); 20]> = SmallVec::new();
++            let mut arg_buf: SmallVec<[(usize, _); 20]> =
++                out_f.to_fun_view().iter().enumerate().collect();
+@@ -1693,7 +1694 @@ impl AtomView<'_> {
+-            for (i, a) in out_f.to_fun_view().iter().enumerate() {
+-                let mut handle = workspace.new_atom();
+-                handle.set_from_view(&a);
+-                arg_buf.push((i, handle));
+-            }
+-
+-            arg_buf.sort_by(|a, b| a.1.as_view().cmp(&b.1.as_view()));
++            arg_buf.sort_by(|a, b| a.1.cmp(&b.1));
+@@ -1700,0 +1696 @@ impl AtomView<'_> {
++            let mut odd_permutation = false;
+@@ -1702,4 +1698,2 @@ impl AtomView<'_> {
+-                if arg_buf
+-                    .windows(2)
+-                    .any(|w| w[0].1.as_view() == w[1].1.as_view())
+-                {
++                if arg_buf.windows(2).any(|w| w[0].1 == w[1].1) {
++                    drop(arg_buf);
+@@ -1710,17 +1704,9 @@ impl AtomView<'_> {
+-                // find the number of swaps needed to sort the arguments
+-                let mut order: SmallVec<[usize; 20]> = (0..arg_buf.len())
+-                    .map(|i| arg_buf.iter().position(|(j, _)| *j == i).unwrap())
+-                    .collect();
+-                let mut swaps = 0;
+-                for i in 0..order.len() {
+-                    let pos = order[i..].iter().position(|&x| x == i).unwrap();
+-                    order.copy_within(i..i + pos, i + 1);
+-                    swaps += pos;
+-                }
+-
+-                if swaps % 2 == 1 {
+-                    let mut handle = workspace.new_atom();
+-                    let out_f = handle.to_fun(id);
+-
+-                    for (_, a) in arg_buf {
+-                        out_f.add_arg(a.as_view());
++                // A cycle of length n contributes n - 1 swaps. Mark each
++                // visited index as fixed to find the parity in linear time.
++                for i in 0..arg_buf.len() {
++                    let mut next = arg_buf[i].0;
++                    while next != i {
++                        let following = arg_buf[next].0;
++                        arg_buf[next].0 = next;
++                        next = following;
++                        odd_permutation = !odd_permutation;
+@@ -1727,0 +1714,3 @@ impl AtomView<'_> {
++                    arg_buf[i].0 = i;
++                }
++            }
+@@ -1729,10 +1718,14 @@ impl AtomView<'_> {
+-                    out_f.set_normalized(true);
+-
+-                    if let Some(f) = State::get_normalization_function(id) {
+-                        let mut fs = workspace.new_atom();
+-                        let mut setter = fs.deref_mut().into();
+-                        f(handle.as_view(), &mut setter);
+-                        if setter.is_set() {
+-                            std::mem::swap(&mut handle, &mut fs);
+-                        }
+-                        debug_assert!(!handle.as_view().needs_normalization());
++            // Borrow the arguments while sorting, then rebuild once instead
++            // of allocating and copying a separate atom for each argument.
++            let mut handle = workspace.new_atom();
++            let sorted_f = handle.to_fun(id);
++            sorted_f.add_args_iter(arg_buf.into_iter().map(|(_, a)| a.into()));
++            sorted_f.set_normalized(true);
++
++            if odd_permutation {
++                if let Some(f) = State::get_normalization_function(id) {
++                    let mut fs = workspace.new_atom();
++                    let mut setter = fs.deref_mut().into();
++                    f(handle.as_view(), &mut setter);
++                    if setter.is_set() {
++                        std::mem::swap(&mut handle, &mut fs);
+@@ -1740,8 +1733 @@ impl AtomView<'_> {
+-
+-                    let m = out.to_mul();
+-                    m.extend(InlineNum::new(-1, 1).as_view());
+-                    m.extend(handle.as_view());
+-                    m.set_has_coefficient(true);
+-                    m.set_normalized(true);
+-
+-                    return;
++                    debug_assert!(!handle.as_view().needs_normalization());
+@@ -1749 +1734,0 @@ impl AtomView<'_> {
+-            }
+@@ -1751,3 +1736,7 @@ impl AtomView<'_> {
+-            let out_f = out.to_fun(id);
+-            for (_, a) in arg_buf {
+-                out_f.add_arg(a.as_view());
++                let m = out.to_mul();
++                m.extend(InlineNum::new(-1, 1).as_view());
++                m.extend(handle.as_view());
++                m.set_has_coefficient(true);
++                m.set_normalized(true);
++
++                return;
+@@ -1756 +1745 @@ impl AtomView<'_> {
+-            out_f.set_normalized(true);
++            std::mem::swap(out, handle.deref_mut());
+@@ -2631,0 +2621,141 @@ mod test {
++    #[test]
++    fn symmetric_argument_permutations() {
++        fn check_permutations(order: &mut [usize], start: usize, check: &mut impl FnMut(&[usize])) {
++            if start == order.len() {
++                check(order);
++                return;
++            }
++            for i in start..order.len() {
++                order.swap(start, i);
++                check_permutations(order, start + 1, check);
++                order.swap(start, i);
++            }
++        }
++
++        let symmetric = crate::symbol!("normalize_borrowed_symmetric"; Symmetric);
++        let antisymmetric = crate::symbol!("normalize_borrowed_antisymmetric"; Antisymmetric);
++        let mut args = [
++            parse!("2/3"),
++            parse!("x"),
++            parse!("x^2"),
++            parse!("x*y"),
++            parse!("x+y"),
++            parse!("nested(x,y^2)"),
++        ];
++        args.sort_by(|a, b| a.as_view().cmp(&b.as_view()));
++
++        Workspace::get_local().with(|ws| {
++            for head in [symmetric, antisymmetric] {
++                for len in 0..=args.len() {
++                    let mut reference = Atom::new();
++                    let f = reference.to_fun(head);
++                    for arg in &args[..len] {
++                        f.add_arg(arg.as_view());
++                    }
++                    f.set_normalized(true);
++                    let negative = -&reference;
++                    let mut order: Vec<_> = (0..len).collect();
++                    check_permutations(&mut order, 0, &mut |order| {
++                        let mut dirty = Atom::new();
++                        let f = dirty.to_fun(head);
++                        for &i in order {
++                            f.add_arg(args[i].as_view());
++                        }
++                        let odd = order
++                            .iter()
++                            .enumerate()
++                            .map(|(i, a)| order[i + 1..].iter().filter(|b| a > *b).count())
++                            .sum::<usize>()
++                            % 2
++                            != 0;
++                        let mut out = Atom::new();
++                        dirty.as_view().normalize(ws, &mut out);
++                        let expected = if head == antisymmetric && odd {
++                            &negative
++                        } else {
++                            &reference
++                        };
++                        assert_eq!(&out, expected, "argument permutation: {order:?}");
++                        assert!(!out.as_view().needs_normalization());
++                    });
++                }
++            }
++        });
++    }
++
++    #[test]
++    fn symmetric_duplicates_and_antisymmetric_wildcards() {
++        let symmetric = crate::symbol!("normalize_borrowed_duplicate_symmetric"; Symmetric);
++        let antisymmetric =
++            crate::symbol!("normalize_borrowed_duplicate_antisymmetric"; Antisymmetric);
++        let x = parse!("x");
++        let y = parse!("y");
++        let wildcard = parse!("arg_");
++
++        Workspace::get_local().with(|ws| {
++            let mut dirty = Atom::new();
++            let f = dirty.to_fun(antisymmetric);
++            for arg in [&y, &x, &y] {
++                f.add_arg(arg.as_view());
++            }
++            let mut out = Atom::new();
++            dirty.as_view().normalize(ws, &mut out);
++            assert_eq!(out, Atom::num(0));
++
++            let f = dirty.to_fun(symmetric);
++            for arg in [&y, &x, &y] {
++                f.add_arg(arg.as_view());
++            }
++            dirty.as_view().normalize(ws, &mut out);
++            let AtomView::Fun(f) = out.as_view() else {
++                panic!("symmetric duplicates must be retained");
++            };
++            let args: Vec<_> = f.iter().collect();
++            assert_eq!(args.len(), 3);
++            assert!(args.windows(2).all(|w| w[0].cmp(&w[1]).is_le()));
++
++            let f = dirty.to_fun(antisymmetric);
++            for arg in [&y, &wildcard, &x, &y] {
++                f.add_arg(arg.as_view());
++            }
++            dirty.as_view().normalize(ws, &mut out);
++            dirty.set_normalized(true);
++            assert_eq!(
++                out, dirty,
++                "wildcards preserve argument order and duplicates"
++            );
++        });
++    }
++
++    #[test]
++    fn antisymmetric_custom_normalization_receives_sorted_arguments() {
++        let head = crate::symbol!("normalize_borrowed_custom_antisymmetric"; Antisymmetric;
++            norm = |input, out| {
++                let AtomView::Fun(f) = input else {
++                    panic!("expected a function");
++                };
++                let args: Vec<_> = f.iter().collect();
++                assert!(args.windows(2).all(|w| w[0].cmp(&w[1]).is_lt()));
++                out.set_from_view(&args[0]);
++            }
++        );
++        let mut args = [
++            parse!("custom_sort_x"),
++            parse!("custom_sort_y"),
++            parse!("custom_sort_z"),
++        ];
++        args.sort_by(|a, b| a.as_view().cmp(&b.as_view()));
++        Workspace::get_local().with(|ws| {
++            for (order, odd) in [([0, 1, 2], false), ([1, 2, 0], false), ([2, 1, 0], true)] {
++                let mut dirty = Atom::new();
++                let f = dirty.to_fun(head);
++                for i in order {
++                    f.add_arg(args[i].as_view());
++                }
++                let mut out = Atom::new();
++                dirty.as_view().normalize(ws, &mut out);
++                assert_eq!(out, if odd { -&args[0] } else { args[0].clone() });
++            }
++        });
++    }
++
+diff --git a/src/state.rs b/src/state.rs
+index cd8c823f..f90cb03f 100644
+--- a/src/state.rs
++++ b/src/state.rs
+@@ -1654,0 +1655 @@ impl From<Atom> for RecycledAtom {
++    #[inline]
+@@ -1679,0 +1681 @@ impl RecycledAtom {
++    #[inline]
+@@ -1708,0 +1711 @@ impl Deref for RecycledAtom {
++    #[inline]
+@@ -1714,0 +1718 @@ impl DerefMut for RecycledAtom {
++    #[inline]
