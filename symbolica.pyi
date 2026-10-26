@@ -2436,6 +2436,9 @@ class Symbol:
     POLYLOG: Expression
     """The built-in polylogarithm function."""
 
+    HPL_AT_SIXTH_ROOT: Expression
+    """The harmonic-polylogarithm constant at a primitive sixth root of unity."""
+
     BESSEL_J: Expression
     """The built-in cylindrical Bessel function of the first kind."""
 
@@ -2471,6 +2474,10 @@ class Expression:
     >>> e = x**2 + 2 - x + 1 / x**4
     >>> print(e)
     """
+
+    @classmethod
+    def hpl_at_sixth_root(_cls, indices: Sequence[int], sign: int = 1) -> Expression:
+        """Construct H(indices; exp(sign*i*pi/3)), with indices in {-1,0,1} and weight at most six."""
 
     @overload
     @classmethod
