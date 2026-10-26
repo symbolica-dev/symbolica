@@ -177,6 +177,7 @@ fn search_horner_order_with_seeds<T: Clone + Ord + Send + Sync>(
             let permutations = &permutations;
             let score = &score;
             let initial_order = &initial_order;
+            let inherited_unlock = &inherited_unlock;
             let run = move || {
                 let _unlock = inherited_unlock.activate();
                 let mut rng = MonteCarloRng::new(0, worker);

@@ -945,7 +945,10 @@ struct RegisteredLibraryUnlock {
 }
 
 impl RegisteredLibraryUnlock {
-    fn ensure_license_checked(&self) -> PyResult<bool> {
+    fn with_active_license<T>(
+        &self,
+        resolve: impl FnOnce(&Arc<AtomicBool>) -> T,
+    ) -> PyResult<Option<T>> {
         let pid = std::process::id();
         if self.checked_pid.load(Acquire) != pid {
             let enabled = crate::license::start_license_check(&self.claims)
@@ -953,7 +956,8 @@ impl RegisteredLibraryUnlock {
             *self.enabled.write().unwrap() = enabled;
             self.checked_pid.store(pid, Release);
         }
-        Ok(self.enabled.read().unwrap().load(Relaxed))
+        let enabled = self.enabled.read().unwrap();
+        Ok(enabled.load(Relaxed).then(|| resolve(&enabled)))
     }
 }
 
@@ -1008,7 +1012,11 @@ fn register_library_unlock_module(
     Ok(())
 }
 
-fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyResult<bool> {
+fn registered_module_license<T>(
+    py: Python,
+    globals: &Bound<'_, PyDict>,
+    resolve: impl FnOnce(&Arc<AtomicBool>) -> T,
+) -> PyResult<Option<T>> {
     {
         let packages = REGISTERED_LIBRARY_UNLOCKS.read().unwrap();
         if let Some(registered) = packages.iter().find(|registered| {
@@ -1017,12 +1025,12 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
                 .iter()
                 .any(|registered_globals| registered_globals.as_ptr() == globals.as_ptr())
         }) {
-            return registered.ensure_license_checked();
+            return registered.with_active_license(resolve);
         }
     }
 
     let Some(module_name) = globals.get_item(intern!(py, "__name__"))? else {
-        return Ok(false);
+        return Ok(None);
     };
     let module_name = module_name.extract::<PyBackedStr>()?;
     let module_name_str: &str = &module_name;
@@ -1036,20 +1044,20 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
         })
     };
     let Some(matching_package) = matching_package else {
-        return Ok(false);
+        return Ok(None);
     };
 
     // Do not trust a frame's mutable `__name__` alone. Require its globals to be the dictionary of
     // the correspondingly named loaded module before caching the pointer-identity fast path.
     if !is_loaded_module_globals(py, module_name_str, globals)? {
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut packages = REGISTERED_LIBRARY_UNLOCKS.write().unwrap();
     let Some(registered) = packages.get_mut(matching_package) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let enabled = registered.ensure_license_checked()?;
+    let license = registered.with_active_license(resolve)?;
     if !registered
         .module_globals
         .iter()
@@ -1057,13 +1065,21 @@ fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyRe
     {
         registered.module_globals.push(globals.clone().unbind());
     }
-    Ok(enabled)
+    Ok(license)
 }
 
-fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
+#[cfg(test)]
+fn is_registered_module_globals(py: Python, globals: &Bound<'_, PyDict>) -> PyResult<bool> {
+    Ok(registered_module_license(py, globals, |_| ())?.is_some())
+}
+
+fn library_unlock_frame_attached<T>(
+    py: Python,
+    resolve: impl Fn(&Arc<AtomicBool>) -> T,
+) -> PyResult<Option<T>> {
     let frame = unsafe { pyo3::ffi::PyEval_GetFrame() };
     if frame.is_null() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let mut frame = unsafe {
@@ -1076,24 +1092,39 @@ fn has_library_unlock_frame_attached(py: Python) -> PyResult<bool> {
         let globals = frame_bound
             .getattr(intern!(py, "f_globals"))?
             .cast_into::<PyDict>()?;
-        if is_registered_module_globals(py, &globals)? {
-            return Ok(true);
+        if let Some(license) = registered_module_license(py, &globals, &resolve)? {
+            return Ok(Some(license));
         }
 
         let back = frame_bound.getattr(intern!(py, "f_back"))?;
         if back.is_none() {
-            return Ok(false);
+            return Ok(None);
         }
         frame = back.unbind();
     }
 }
 
+fn with_library_unlock_frame<T>(resolve: impl Fn(&Arc<AtomicBool>) -> T) -> Option<T> {
+    if REGISTERED_LIBRARY_UNLOCKS.read().unwrap().is_empty() {
+        return None;
+    }
+    // A thread without a Python thread state has no current Python frames. Do not
+    // acquire the GIL here: its Python caller may hold it while waiting for this worker.
+    // SAFETY: this query does not require holding the GIL or attaching the thread.
+    if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        return None;
+    }
+    Python::try_attach(|py| library_unlock_frame_attached(py, resolve).ok().flatten()).flatten()
+}
+
 /// Return whether the current Python call stack contains a library unlock frame.
 pub(crate) fn has_library_unlock_frame() -> bool {
-    if REGISTERED_LIBRARY_UNLOCKS.read().unwrap().is_empty() {
-        return false;
-    }
-    Python::try_attach(|py| has_library_unlock_frame_attached(py).unwrap_or(false)).unwrap_or(false)
+    with_library_unlock_frame(|_| ()).is_some()
+}
+
+/// Capture the live license backing an authorized frame on the current Python call stack.
+pub(crate) fn library_unlock_frame_license() -> Option<Arc<AtomicBool>> {
+    with_library_unlock_frame(Arc::clone)
 }
 
 fn validated_library_unlock_caller_globals<'py>(
@@ -2621,6 +2652,8 @@ mod library_registration_tests {
             enabled.store(true, Relaxed);
             assert!(is_registered_module_globals(py, &globals)?);
             assert!(is_registered_module_globals(py, &module.dict())?);
+            let captured = registered_module_license(py, &globals, Arc::clone)?.unwrap();
+            assert!(Arc::ptr_eq(&captured, &enabled));
             enabled.store(false, Relaxed);
             assert!(!is_registered_module_globals(py, &globals)?);
             assert!(!is_registered_module_globals(py, &module.dict())?);
@@ -2632,7 +2665,9 @@ mod library_registration_tests {
                     .unwrap();
                 // Simulate a fork: the development fixture rechecks as valid.
                 registered.checked_pid.store(0, Release);
-                assert!(registered.ensure_license_checked()?);
+                let rechecked = registered.with_active_license(Arc::clone)?.unwrap();
+                assert!(rechecked.load(Relaxed));
+                assert!(!Arc::ptr_eq(&rechecked, &enabled));
             }
             assert!(is_registered_module_globals(py, &globals)?);
             assert!(is_registered_module_globals(py, &module.dict())?);
@@ -2641,6 +2676,84 @@ mod library_registration_tests {
                 .unwrap()
                 .retain(|r| r.claims.package != package);
             modules.del_item(&submodule)?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn workers_inherit_python_frame_license_and_rejection() {
+        use pyo3::types::PyCFunction;
+
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let mut claims =
+                crate::license::verify_token(crate::license::TEST_UNLOCK_TOKEN).unwrap();
+            claims.package = "symbolica_worker_frame_registration_test".into();
+            let package = claims.package.clone();
+            let globals = PyDict::new(py);
+            let enabled = Arc::new(AtomicBool::new(true));
+            register_library_unlock_module(claims, &globals, enabled.clone())?;
+            assert!(library_unlock_frame_license().is_none());
+
+            let observed = enabled.clone();
+            let exercise = PyCFunction::new_closure(
+                py,
+                Some(c"exercise_inherited_unlock"),
+                None,
+                move |args, _| -> PyResult<()> {
+                    assert!(has_library_unlock_frame());
+                    let captured = library_unlock_frame_license().unwrap();
+                    assert!(Arc::ptr_eq(&captured, &observed));
+                    let unlock = crate::license::InheritedLibraryUnlock::capture();
+                    // Keep the caller attached while its worker runs: inherited
+                    // authorization must not need Python or the caller's GIL.
+                    std::thread::scope(|threads| {
+                        let (completed, completion) = std::sync::mpsc::channel();
+                        let observed = observed.clone();
+                        let worker = threads.spawn(move || {
+                            assert!(!crate::license::current_thread_is_unlocked());
+                            assert!(!has_library_unlock_frame());
+                            {
+                                let _guard = unlock.activate();
+                                assert!(crate::license::current_thread_is_unlocked());
+                                assert!(LicenseManager::is_licensed());
+                                {
+                                    let nested = crate::license::InheritedLibraryUnlock::capture();
+                                    let _nested_guard = nested.activate();
+                                    assert!(crate::license::current_thread_is_unlocked());
+                                }
+                                observed.store(false, Relaxed);
+                                assert!(!crate::license::current_thread_is_unlocked());
+                                {
+                                    let nested = crate::license::InheritedLibraryUnlock::capture();
+                                    let _nested_guard = nested.activate();
+                                    assert!(!crate::license::current_thread_is_unlocked());
+                                }
+                            }
+                            assert!(!crate::license::current_thread_is_unlocked());
+                            completed.send(()).unwrap();
+                        });
+                        let completed = completion.recv_timeout(std::time::Duration::from_secs(5));
+                        // A regression that attaches on the worker must fail
+                        // this test without deadlocking its automatic join.
+                        let joined = args.py().detach(|| worker.join());
+                        assert!(completed.is_ok(), "worker needed the caller's GIL");
+                        joined.unwrap();
+                    });
+                    assert!(!has_library_unlock_frame());
+                    assert!(library_unlock_frame_license().is_none());
+                    Ok(())
+                },
+            )?;
+            globals.set_item("exercise_inherited_unlock", exercise)?;
+            py.run(c"exercise_inherited_unlock()", Some(&globals), None)?;
+            assert!(!enabled.load(Relaxed));
+            assert!(library_unlock_frame_license().is_none());
+            REGISTERED_LIBRARY_UNLOCKS
+                .write()
+                .unwrap()
+                .retain(|r| r.claims.package != package);
             Ok(())
         })
         .unwrap();
