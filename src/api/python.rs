@@ -679,6 +679,7 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_class::<PythonReplacement>()?;
     m.add_class::<PythonFunctionDefinition>()?;
     m.add_class::<PythonEvaluatorInstructions>()?;
+    m.add_class::<PythonEvaluatorConstantFunction>()?;
     m.add_class::<PythonEvaluatorFunction>()?;
     m.add_class::<PythonExpressionEvaluator>()?;
     #[cfg(feature = "native_code_generation")]

@@ -148,6 +148,10 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
         let mut new_instr = vec![];
         for (x, c) in &mut self.instructions {
             match x {
+                // Imported assignments are represented by a one-argument sum.
+                Instr::Add(_, args) | Instr::Mul(_, args) if args.len() == 1 => {
+                    new_instr.push((x.clone(), *c));
+                }
                 Instr::Add(o, a) => {
                     new_instr.push((Instr::Add(*o, vec![a[0], a[1]]), *c));
                     for x in a.iter().skip(2) {
@@ -220,6 +224,9 @@ impl<T: Default + Clone> ExpressionEvaluator<T> {
 
         for (i, _sc) in self.instructions.drain(..) {
             let (o, instr) = match i {
+                Instr::Add(o, args) | Instr::Mul(o, args) if args.len() == 1 => {
+                    (o, VectorInstruction::Assign(get_slot!(slot_map[&args[0]])))
+                }
                 Instr::Add(o, a) => (
                     o,
                     VectorInstruction::Add(get_slot!(slot_map[&a[0]]), get_slot!(slot_map[&a[1]])),

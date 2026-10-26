@@ -1,5 +1,5 @@
 use super::*;
-use crate::evaluate::{FunctionRegistrationOptions, InliningPolicy};
+use crate::evaluate::{ExportedConstantFunction, FunctionRegistrationOptions, InliningPolicy};
 use crate::state::StateMap;
 
 // The final byte versions the state-aware evaluator envelope.
@@ -312,6 +312,18 @@ pub struct PythonEvaluatorInstructions {
     exported: Arc<ExportedInstructions<Complex<Rational>>>,
 }
 
+/// A registered constant or fixed-argument function in an instruction stream's constant slots.
+#[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
+#[pyclass(
+    from_py_object,
+    name = "EvaluatorConstantFunction",
+    module = "symbolica.core"
+)]
+#[derive(Clone)]
+pub struct PythonEvaluatorConstantFunction {
+    constant: ExportedConstantFunction,
+}
+
 /// A non-inlined function evaluator referenced by an instruction stream.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(from_py_object, name = "EvaluatorFunction", module = "symbolica.core")]
@@ -326,6 +338,14 @@ impl From<ExportedInstructions<Complex<Rational>>> for PythonEvaluatorInstructio
     fn from(exported: ExportedInstructions<Complex<Rational>>) -> Self {
         Self {
             exported: Arc::new(exported),
+        }
+    }
+}
+
+impl From<&ExportedConstantFunction> for PythonEvaluatorConstantFunction {
+    fn from(constant: &ExportedConstantFunction) -> Self {
+        Self {
+            constant: constant.clone(),
         }
     }
 }
@@ -521,6 +541,20 @@ impl PythonEvaluatorInstructions {
             .collect()
     }
 
+    /// Symbolic definitions of constant slots held by registered constants or
+    /// fixed-argument functions, such as `pi` or `exp(1)`.
+    /// The exact `constants` contain placeholders at each entry's `index`.
+    /// Evaluate its `function` with its `tags` and exact `arguments` at the target
+    /// precision before using that slot.
+    #[getter]
+    fn constant_functions(&self) -> Vec<PythonEvaluatorConstantFunction> {
+        self.exported
+            .constant_functions
+            .iter()
+            .map(PythonEvaluatorConstantFunction::from)
+            .collect()
+    }
+
     /// Non-inlined function bodies referenced by `fun` instructions in this stream.
     #[getter]
     fn sub_evaluators(&self) -> Vec<PythonEvaluatorFunction> {
@@ -533,13 +567,66 @@ impl PythonEvaluatorInstructions {
 
     fn __repr__(&self) -> String {
         format!(
-            "EvaluatorInstructions(input_count={}, output_count={}, instructions={}, temporary_count={}, constants={}, sub_evaluators={})",
+            "EvaluatorInstructions(input_count={}, output_count={}, instructions={}, temporary_count={}, constants={}, constant_functions={}, sub_evaluators={})",
             self.exported.input_count,
             self.exported.output_count,
             self.exported.instructions.len(),
             self.exported.temporary_count,
             self.exported.constants.len(),
+            self.exported.constant_functions.len(),
             self.exported.sub_evaluators.len()
+        )
+    }
+}
+
+#[cfg_attr(feature = "python_stubgen", gen_stub_pymethods)]
+#[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
+#[pymethods]
+impl PythonEvaluatorConstantFunction {
+    /// The index of the `('const', index)` slot in `EvaluatorInstructions.constants`.
+    #[getter]
+    fn index(&self) -> usize {
+        self.constant.index
+    }
+
+    /// The registered constant or function symbol, as an `Expression`.
+    #[getter]
+    fn function(&self) -> PythonExpression {
+        Atom::var(self.constant.symbol).into()
+    }
+
+    /// The expression tags used to distinguish this function implementation.
+    #[getter]
+    fn tags(&self) -> Vec<PythonExpression> {
+        self.constant
+            .tags
+            .iter()
+            .cloned()
+            .map(PythonExpression::from)
+            .collect()
+    }
+
+    /// The exact numerical arguments, as expressions; empty for a registered constant.
+    #[getter]
+    fn arguments(&self) -> Vec<PythonExpression> {
+        self.constant
+            .fixed_args
+            .iter()
+            .map(|argument| Atom::num(argument.clone()).into())
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EvaluatorConstantFunction(index={}, function={}, tags={:?}, arguments={:?})",
+            self.constant.index,
+            Atom::var(self.constant.symbol),
+            self.constant.tags,
+            self.constant
+                .fixed_args
+                .iter()
+                .map(|argument| Atom::num(argument.clone()))
+                .collect::<Vec<_>>()
         )
     }
 }
@@ -725,6 +812,36 @@ fn reshape_evaluator_inputs<T: Clone>(
 #[cfg_attr(not(feature = "python_stubgen"), remove_gen_stub)]
 #[pymethods]
 impl PythonExpressionEvaluator {
+    /// Create an evaluator from the output of `get_instructions()`.
+    ///
+    /// Retained function bodies and registered constant definitions are preserved.
+    /// External functions must still be registered on their symbols. JIT compilation
+    /// can be enabled afterwards with `jit_compile(True)`.
+    #[classmethod]
+    fn from_instructions(
+        _cls: &Bound<'_, PyType>,
+        instructions: &PythonEvaluatorInstructions,
+    ) -> PyResult<Self> {
+        let eval = ExpressionEvaluator::from_instructions(&instructions.exported)
+            .map_err(exceptions::PyValueError::new_err)?;
+        Ok(Self {
+            rational_constants: eval.get_constants().to_vec(),
+            eval_complex: eval.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+            eval_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
+            eval_arb_prec: None,
+            eval_arb_prec_complex: None,
+            jit_compile: false,
+            #[cfg(feature = "native_code_generation")]
+            jit_settings: JITCompilationSettings::default(),
+        })
+    }
+
     /// Copy the evaluator.
     pub fn __copy__(&self) -> PythonExpressionEvaluator {
         PythonExpressionEvaluator {

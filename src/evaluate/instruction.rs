@@ -1,5 +1,9 @@
 use super::*;
 
+mod import;
+#[cfg(test)]
+mod import_tests;
+
 /// A slot in a list that contains a numerical value.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
@@ -153,6 +157,7 @@ impl std::fmt::Display for Instruction {
 /// Parameters are referenced by [`Slot::Param`], constants by [`Slot::Const`], temporaries by
 /// [`Slot::Temp`], and outputs by [`Slot::Out`]. Calls to functions defined as non-inlined in a
 /// [`FunctionMap`] can be resolved through [`ExportedInstructions::sub_evaluators`].
+/// Restore an evaluator with [`ExpressionEvaluator::from_instructions`].
 #[derive(Debug, Clone)]
 pub struct ExportedInstructions<T> {
     /// The number of values expected in the parameter list.
@@ -426,7 +431,8 @@ impl<T: Clone> ExpressionEvaluator<T> {
     /// - [`ExportedInstructions::sub_evaluators`] contains bodies for non-inlined functions. A
     ///   function instruction without a matching sub-evaluator is an ordinary external call.
     ///
-    /// This function can be used to create an evaluator in a different language.
+    /// This function can be used to create an evaluator in a different language,
+    /// or to restore one with [`Self::from_instructions`].
     pub fn export_instructions(&self) -> ExportedInstructions<T> {
         // Callees precede callers, so each body can reuse already-exported bodies.
         let mut bodies = Vec::with_capacity(self.external_fns.len());
