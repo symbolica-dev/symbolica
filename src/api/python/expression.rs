@@ -4412,6 +4412,12 @@ impl PythonExpression {
     }
 
     /// Reconstruct an expression from a serialized version.
+    ///
+    /// Pickling looks up `_reconstruct_expression` in the `symbolica.symbolica` or `symbolica`
+    /// package, so that package must be importable: a host that registers Symbolica's Python API
+    /// on its own extension module cannot pickle expressions. A pickle holds the atom without the
+    /// symbol state, so it is valid only within the process (and build) that wrote it.
+    /// `copy.copy` and `copy.deepcopy` neither pickle nor import.
     pub fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Py<PyAny>, (Py<PyBytes>,))> {
         let module = py
             .import("symbolica.symbolica")
@@ -4424,6 +4430,19 @@ impl PythonExpression {
 
     /// Copy the expression.
     pub fn __copy__(&self) -> PythonExpression {
+        self.expr.clone().into()
+    }
+
+    /// Copy the expression. Expressions are immutable, so a deep copy is a copy; it neither
+    /// serializes the expression nor imports a module. Like `__copy__`, it returns an
+    /// `Expression` for subclasses too: a subclass that customizes deep copies through
+    /// `__reduce__`, `__reduce_ex__` or `copyreg` must also define `__deepcopy__`.
+    ///
+    /// Parameters
+    /// ----------
+    /// memo : dict
+    ///     Memo dictionary supplied by copy.deepcopy.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> PythonExpression {
         self.expr.clone().into()
     }
 

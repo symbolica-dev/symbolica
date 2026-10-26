@@ -2885,6 +2885,53 @@ mod callback_fingerprint_tests {
     }
 }
 
+#[cfg(test)]
+mod expression_copy_tests {
+    use super::*;
+
+    /// A host that registers Symbolica's API on its own extension module, as a standalone
+    /// Community extension does, copies and deep-copies expressions while every `symbolica` and
+    /// `symbolica.*` import is blocked.
+    #[test]
+    fn copy_and_deepcopy_without_a_symbolica_package() {
+        Python::initialize();
+        Python::attach(|py| {
+            let host = PyModule::new(py, "symbolica_copy_test_host")?;
+            create_symbolica_module(&host)?;
+            py.import("sys")?
+                .getattr("modules")?
+                .set_item("symbolica_copy_test_host", &host)?;
+            py.run(
+                cr#"
+import copy, sys
+
+class BlockSymbolica:
+    def find_spec(self, name, path=None, target=None):
+        if name == "symbolica" or name.startswith("symbolica."):
+            raise ImportError(f"blocked import of {name}", name=name)
+        return None
+
+blocker = BlockSymbolica()
+sys.meta_path.insert(0, blocker)
+try:
+    from symbolica_copy_test_host import E, Expression
+
+    e = E("x^2 + f(y, 3/4)")
+    for clone in (copy.copy(e), copy.deepcopy(e), copy.deepcopy(e, {})):
+        assert type(clone) is Expression and clone == e
+    nested = copy.deepcopy({"k": [e, (e, 1)]})
+    assert nested["k"][0] == e and nested["k"][1][0] == e
+finally:
+    sys.meta_path.remove(blocker)
+"#,
+                None,
+                None,
+            )
+        })
+        .unwrap();
+    }
+}
+
 #[cfg(feature = "python_stubgen")]
 submit! {
 PyFunctionInfo {
