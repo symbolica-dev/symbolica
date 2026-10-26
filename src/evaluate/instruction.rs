@@ -38,9 +38,16 @@ impl Slot {
     }
 }
 
-/// An evaluation instruction.
+/// An evaluation instruction. Function tags remain symbolic expressions.
+/// Binary decoding uses a [`crate::state::StateMap`] to remap their symbol identifiers.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "bincode",
+    derive(bincode_trait_derive::Encode),
+    derive(bincode_trait_derive::Decode),
+    derive(bincode_trait_derive::BorrowDecodeFromDecode),
+    trait_decode(trait = crate::state::HasStateMap)
+)]
 #[derive(Debug, Clone)]
 pub enum Instruction {
     /// `Add(o, [i0,...,i_n])` means `o = i0 + ... + i_n`, where the first
@@ -58,7 +65,7 @@ pub enum Instruction {
     /// A function that has a known evaluator or is external, given a symbol name, tags, and arguments.
     /// `Fun(o, (s, t, a), is_real)` means `o = s(t, a)`.
     /// The `is_real` flag indicates whether the function is expected to yield a real number.
-    Fun(Slot, Box<(Symbol, Vec<String>, Vec<Slot>)>, bool),
+    Fun(Slot, Box<(Symbol, Vec<Atom>, Vec<Slot>)>, bool),
     /// `Assign(o, v)` means `o = v`.
     Assign(Slot, Slot),
     /// `IfElse(cond, label)` means jump to `label` if `cond` is zero.
@@ -104,7 +111,10 @@ impl std::fmt::Display for Instruction {
             }
             Instruction::Fun(o, b, _) => {
                 let (name, tags, args) = &**b;
-                let mut values = tags.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+                let mut values = tags
+                    .iter()
+                    .map(|x| x.to_canonical_string())
+                    .collect::<Vec<_>>();
                 values.extend(args.iter().map(|x| x.to_string()));
                 write!(
                     f,
@@ -136,7 +146,10 @@ impl std::fmt::Display for Instruction {
 
 /// Instructions and data exported from an [`ExpressionEvaluator`].
 ///
-/// This is the portable representation used when an evaluator is translated to another runtime.
+/// This is the structured representation used when an evaluator is translated to another runtime.
+/// Function symbols and tags retain their symbolic identity in the current Symbolica state.
+/// Binary instruction decoding uses a [`crate::state::StateMap`]; serde includes the required
+/// state in each tag's atom export and reports conflicting symbol definitions when importing.
 /// Parameters are referenced by [`Slot::Param`], constants by [`Slot::Const`], temporaries by
 /// [`Slot::Temp`], and outputs by [`Slot::Out`]. Calls to functions defined as non-inlined in a
 /// [`FunctionMap`] can be resolved through [`ExportedInstructions::sub_evaluators`].
@@ -175,8 +188,8 @@ pub struct ExportedConstantFunction {
     pub index: usize,
     /// Registered function or constant symbol.
     pub symbol: Symbol,
-    /// Canonical function tags, in their original order.
-    pub tags: Vec<String>,
+    /// Symbolic function tags, in their original order.
+    pub tags: Vec<Atom>,
     /// Exact numerical arguments; empty for a registered constant such as pi.
     pub fixed_args: Vec<Complex<Rational>>,
 }
@@ -191,7 +204,7 @@ pub struct ExportedSubEvaluator<T> {
     /// The function symbol used by the calling [`Instruction::Fun`].
     pub symbol: Symbol,
     /// The function tags used by the calling [`Instruction::Fun`].
-    pub tags: Vec<String>,
+    pub tags: Vec<Atom>,
     /// The number of parameter values expected by this evaluator.
     pub input_count: usize,
     /// The number of values produced by this evaluator.
@@ -425,11 +438,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
                 );
                 ExportedSubEvaluator {
                     symbol: external.symbol,
-                    tags: external
-                        .tags
-                        .iter()
-                        .map(|tag| tag.to_canonical_string())
-                        .collect(),
+                    tags: external.tags.clone(),
                     input_count: instructions.input_count,
                     output_count: instructions.output_count,
                     instructions,
@@ -455,11 +464,7 @@ impl<T: Clone> ExpressionEvaluator<T> {
                     .map(|index| ExportedConstantFunction {
                         index,
                         symbol: external.symbol,
-                        tags: external
-                            .tags
-                            .iter()
-                            .map(|tag| tag.to_canonical_string())
-                            .collect(),
+                        tags: external.tags.clone(),
                         fixed_args: external.fixed_args.clone(),
                     })
             })
@@ -568,11 +573,7 @@ impl<T: Clone> ProgramView<'_, T> {
                         get_slot!(*o),
                         Box::new((
                             external_fns[*f].symbol,
-                            external_fns[*f]
-                                .tags
-                                .iter()
-                                .map(|x| x.to_canonical_string())
-                                .collect(),
+                            external_fns[*f].tags.clone(),
                             a.iter().map(|x| get_slot!(*x)).collect(),
                         )),
                         *sc == ComplexPhase::Real,
@@ -779,4 +780,86 @@ pub enum ComplexPhase {
     #[default]
     /// No real or imaginary restriction is known.
     Any,
+}
+
+#[cfg(all(test, feature = "bincode"))]
+mod tag_serialization_tests {
+    use super::*;
+    use crate::state::StateMap;
+
+    fn check_remapping<C: bincode::config::Config>(config: C) {
+        let source_x = crate::symbol!("symbolica::instruction_tags::source::x");
+        let source_y = crate::symbol!("symbolica::instruction_tags::source::y");
+        let source_function = crate::symbol!("symbolica::instruction_tags::source::f");
+        // Reverse the variable creation order to exercise normalization after remapping.
+        let target_y = crate::symbol!("symbolica::instruction_tags::target::y");
+        let target_x = crate::symbol!("symbolica::instruction_tags::target::x");
+        let target_function = crate::symbol!("symbolica::instruction_tags::target::f");
+        let function = crate::symbol!("symbolica::instruction_tags::evaluate");
+        let source_tags = vec![
+            crate::parse!("2/3"),
+            source_x.to_atom(),
+            source_function.call((source_x.to_atom() + source_y,)),
+        ];
+        let expected_tags = vec![
+            crate::parse!("2/3"),
+            target_x.to_atom(),
+            target_function.call((target_x.to_atom() + target_y,)),
+        ];
+        assert_ne!(source_tags, expected_tags);
+
+        let state_map = || {
+            let mut map = StateMap::default();
+            map.symbols.insert(source_x.get_id(), target_x);
+            map.symbols.insert(source_y.get_id(), target_y);
+            map.symbols
+                .insert(source_function.get_id(), target_function);
+            map
+        };
+        let instruction = Instruction::Fun(
+            Slot::Out(0),
+            Box::new((function, source_tags.clone(), vec![Slot::Param(0)])),
+            true,
+        );
+        let tree = |tags: Vec<Atom>| -> Expression<i64> {
+            Expression::Fun(
+                0,
+                function,
+                tags.clone(),
+                vec![Expression::Fun(
+                    0,
+                    function,
+                    tags,
+                    vec![Expression::Const(0, Box::new(3))],
+                )],
+            )
+        };
+        let bytes = bincode::encode_to_vec((instruction, tree(source_tags)), config).unwrap();
+        let expected_tree = tree(expected_tags.clone());
+        let check =
+            |((instruction, expression), consumed): ((Instruction, Expression<i64>), usize)| {
+                assert_eq!(consumed, bytes.len());
+                let Instruction::Fun(output, call, is_real) = instruction else {
+                    panic!("Expected a function instruction");
+                };
+                assert_eq!(output, Slot::Out(0));
+                assert_eq!(call.0, function);
+                assert_eq!(call.1, expected_tags);
+                assert_eq!(call.2, [Slot::Param(0)]);
+                assert!(is_real);
+                assert_eq!(expression, expected_tree);
+            };
+        check(bincode::decode_from_slice_with_context(&bytes, config, state_map()).unwrap());
+        check(bincode::borrow_decode_from_slice_with_context(&bytes, config, state_map()).unwrap());
+    }
+
+    #[test]
+    fn binary_instruction_and_expression_tags_follow_the_state_map() {
+        check_remapping(bincode::config::standard());
+        check_remapping(
+            bincode::config::standard()
+                .with_fixed_int_encoding()
+                .with_big_endian(),
+        );
+    }
 }

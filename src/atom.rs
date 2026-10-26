@@ -773,7 +773,7 @@ pub struct Symbol {
 impl serde::Serialize for Symbol {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut data = vec![];
-        self.export(&mut data);
+        self.export(&mut data).map_err(serde::ser::Error::custom)?;
         data.serialize(serializer)
     }
 }
@@ -781,9 +781,16 @@ impl serde::Serialize for Symbol {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Symbol {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut v = <&[u8]>::deserialize(deserializer)?;
-        Symbol::import(&mut v)
-            .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Symbol: {e}")))
+        let data = Vec::<u8>::deserialize(deserializer)?;
+        let mut source = data.as_slice();
+        let symbol = Symbol::import(&mut source)
+            .map_err(|e| serde::de::Error::custom(format!("Failed to deserialize Symbol: {e}")))?;
+        if !source.is_empty() {
+            return Err(serde::de::Error::custom(
+                "Trailing data in serialized Symbol",
+            ));
+        }
+        Ok(symbol)
     }
 }
 
@@ -3156,6 +3163,10 @@ impl AtomView<'_> {
 /// A mathematical expression.
 ///
 /// Most operations are implemented in the [AtomCore] trait.
+///
+/// With the `serde` feature, serialization uses [`AtomCore::export`] to include
+/// the expression and its required state. Deserialization uses [`Atom::import`]
+/// and returns an error if imported symbols conflict with the current state.
 ///
 /// # Examples
 ///

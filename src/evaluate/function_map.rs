@@ -509,6 +509,11 @@ pub(super) struct Expr {
 
 /// Settings for optimizing the evaluation of expressions.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "bincode",
+    derive(bincode_trait_derive::BorrowDecodeFromDecode),
+    trait_decode(trait = crate::state::HasStateMap)
+)]
 #[derive(Clone)]
 pub struct OptimizationSettings {
     pub(crate) horner_iterations: usize,
@@ -526,9 +531,6 @@ pub struct OptimizationSettings {
     pub(crate) verbose: bool,
     pub(crate) direct_translation: bool,
 }
-
-#[cfg(feature = "bincode")]
-bincode::impl_borrow_decode!(OptimizationSettings);
 
 #[cfg(feature = "bincode")]
 impl bincode::Encode for OptimizationSettings {
@@ -553,7 +555,7 @@ impl bincode::Encode for OptimizationSettings {
 }
 
 #[cfg(feature = "bincode")]
-impl<Context> bincode::Decode<Context> for OptimizationSettings {
+impl<Context: crate::state::HasStateMap> bincode::Decode<Context> for OptimizationSettings {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
     ) -> core::result::Result<Self, bincode::error::DecodeError> {
@@ -727,7 +729,12 @@ mod optimization_settings_serialization_tests {
             );
             let bytes = bincode::encode_to_vec((legacy, 0x12345678_u32), config).unwrap();
             let ((decoded, following), consumed): ((OptimizationSettings, u32), _) =
-                bincode::decode_from_slice(&bytes, config).unwrap();
+                bincode::decode_from_slice_with_context(
+                    &bytes,
+                    config,
+                    crate::state::StateMap::default(),
+                )
+                .unwrap();
             assert_eq!(consumed, bytes.len());
             assert_eq!(following, 0x12345678);
             assert_eq!(decoded.horner_iterations, 321);
@@ -744,7 +751,12 @@ mod optimization_settings_serialization_tests {
                 let settings = settings.clone().horner_use_cpe(horner_use_cpe);
                 let bytes = bincode::encode_to_vec((&settings, 0x12345678_u32), config).unwrap();
                 let ((decoded, following), consumed): ((OptimizationSettings, u32), _) =
-                    bincode::decode_from_slice(&bytes, config).unwrap();
+                    bincode::decode_from_slice_with_context(
+                        &bytes,
+                        config,
+                        crate::state::StateMap::default(),
+                    )
+                    .unwrap();
                 assert_eq!(consumed, bytes.len());
                 assert_eq!(following, 0x12345678);
                 assert_eq!(decoded.direct_translation, direct_translation);
@@ -755,7 +767,12 @@ mod optimization_settings_serialization_tests {
             let mut invalid = bincode::encode_to_vec(&settings, config).unwrap();
             *invalid.last_mut().unwrap() = 4;
             assert!(
-                bincode::decode_from_slice::<OptimizationSettings, _>(&invalid, config).is_err()
+                bincode::decode_from_slice_with_context::<_, OptimizationSettings, _>(
+                    &invalid,
+                    config,
+                    crate::state::StateMap::default(),
+                )
+                .is_err()
             );
         }
     }

@@ -11115,7 +11115,7 @@ class FunctionDefinition:
         """
 
 class EvaluatorInstructions:
-    """A portable instruction stream for evaluating an expression."""
+    """A structured instruction stream for evaluating an expression."""
 
     @property
     def input_count(self) -> int:
@@ -11128,9 +11128,10 @@ class EvaluatorInstructions:
     @property
     def instructions(self) -> list[tuple]:
         """
-        Return a portable instruction representation for efficiently evaluating the expression.
+        Return a structured instruction representation for efficiently evaluating the expression.
         This can be used to generate code for the expression evaluation in any programming
         language.
+        Function names and tags remain `Expression` objects.
 
         There are four lists that are used in the evaluation instructions:
         - `param`: the list of input parameters.
@@ -11143,7 +11144,7 @@ class EvaluatorInstructions:
         - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
         - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
         - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
-        - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
+        - `('fun', ('temp', 1), f, [Expression.num(0)], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
         - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
         - `('goto', 10)` which means `goto label 10`.
         - `('label', 3)` which means `label 3`.
@@ -11172,8 +11173,8 @@ class EvaluatorFunction:
         """The function referenced by the calling `fun` instruction."""
 
     @property
-    def tags(self) -> list[str]:
-        """The tags used to distinguish this function implementation."""
+    def tags(self) -> list[Expression]:
+        """The expression tags used to distinguish this function implementation."""
 
     @property
     def evaluator(self) -> EvaluatorInstructions:
@@ -11224,7 +11225,9 @@ class Evaluator:
 
     def save(self) -> bytes:
         """
-        Save the evaluator to a byte string.
+        Save the evaluator to a byte string that can be imported in another thread or machine.
+        The external functions are not exported, so they need to be provided separately when importing.
+        Symbolica's symbolic state is included and restored automatically by `load`.
         """
 
     def export_symjit(self, complex: bool = False) -> bytes:
@@ -11242,9 +11245,10 @@ class Evaluator:
         self,
     ) -> EvaluatorInstructions:
         """
-        Return a portable instruction representation for efficiently evaluating the expression.
+        Return a structured instruction representation for efficiently evaluating the expression.
         This can be used to generate code for the expression evaluation in any programming
         language.
+        Function names and tags remain `Expression` objects.
 
         There are four lists that are used in the evaluation instructions:
         - `param`: the list of input parameters.
@@ -11257,7 +11261,7 @@ class Evaluator:
         - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
         - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
         - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
-        - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
+        - `('fun', ('temp', 1), f, [Expression.num(0)], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
         - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
         - `('goto', 10)` which means `goto label 10`.
         - `('label', 3)` which means `label 3`.

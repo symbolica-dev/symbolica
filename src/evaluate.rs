@@ -391,10 +391,15 @@ mod test {
         #[cfg(feature = "bincode")]
         {
             let bytes = bincode::encode_to_vec(&exact, bincode::config::standard()).unwrap();
-            let (decoded, _) = bincode::decode_from_slice::<
+            let (decoded, _) = bincode::decode_from_slice_with_context::<
+                _,
                 crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
                 _,
-            >(&bytes, bincode::config::standard())
+            >(
+                &bytes,
+                bincode::config::standard(),
+                crate::state::StateMap::default(),
+            )
             .unwrap();
             let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
             assert!((decoded.evaluate_single(&inputs[0]) - expected[0]).abs() < 1e-12);
@@ -620,7 +625,7 @@ mod test {
                 .find(|sub| sub.symbol == symbol!("symbolica::sub_eval::tagged"))
                 .unwrap()
                 .tags,
-            ["1"]
+            [Atom::num(1)]
         );
         assert_eq!(
             execute_exported(&exported, &[2.], exported.output_count),
@@ -675,10 +680,15 @@ mod test {
         #[cfg(feature = "bincode")]
         {
             let bytes = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
-            let (decoded, _) = bincode::decode_from_slice::<
+            let (decoded, _) = bincode::decode_from_slice_with_context::<
+                _,
                 crate::evaluate::ExpressionEvaluator<Complex<Rational>>,
                 _,
-            >(&bytes, bincode::config::standard())
+            >(
+                &bytes,
+                bincode::config::standard(),
+                crate::state::StateMap::default(),
+            )
             .unwrap();
             let mut decoded = decoded.map_coeff(&|c| c.re.to_f64());
             decoded.evaluate(&[2.], &mut out);

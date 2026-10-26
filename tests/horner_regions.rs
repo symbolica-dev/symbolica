@@ -107,7 +107,7 @@ fn tagged_calls_keep_symbolic_tags_and_optimize_only_runtime_arguments() {
             .iter()
             .find(|body| body.symbol == function)
             .unwrap();
-        assert_eq!(body.tags, [tag.to_canonical_string()]);
+        assert_eq!(body.tags, [tag.clone()]);
         for [a, b, x] in [[2., 3., 0.25], [-3., 0.5, -2.], [7., -7., 3.]] {
             let argument = (a + b) * x;
             assert_eq!(

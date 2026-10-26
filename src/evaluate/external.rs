@@ -23,10 +23,7 @@ impl<T> serde::Serialize for ExternalFunctionContainer<T> {
         (
             &self.export_name,
             &self.symbol,
-            self.tags
-                .iter()
-                .map(|x| x.to_canonical_string())
-                .collect::<Vec<_>>(),
+            &self.tags,
             &self.fixed_args,
             &self.constant_index,
             &self.body.as_deref(),
@@ -41,7 +38,7 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
         let (export_name, symbol, tags, fixed_args, constant_index, body): (
             String,
             Symbol,
-            Vec<String>,
+            Vec<Atom>,
             Vec<Complex<Rational>>,
             Option<usize>,
             Option<Box<FunctionBody>>,
@@ -50,7 +47,7 @@ impl<'de, T: EvaluationDomain> serde::Deserialize<'de> for ExternalFunctionConta
         let mut external = Self {
             export_name,
             symbol,
-            tags: tags.iter().map(|s| crate::parse!(s)).collect(),
+            tags,
             fixed_args,
             imp: None,
             stack: Vec::new(),

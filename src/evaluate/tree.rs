@@ -1454,7 +1454,6 @@ impl<'a> AtomView<'a> {
                         continue;
                     }
 
-                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
                     let index = *context
                         .external_indices
                         .entry((sym, tags.clone(), None))
@@ -1638,11 +1637,7 @@ impl<'a> AtomView<'a> {
         let result = Slot::Temp(instr.len());
         instr.push(Instruction::Fun(
             result,
-            Box::new((
-                symbol,
-                tags.iter().map(|tag| tag.to_canonical_string()).collect(),
-                call_args,
-            )),
+            Box::new((symbol, tags, call_args)),
             false,
         ));
         Ok(result)
@@ -1956,11 +1951,7 @@ impl<'a> AtomView<'a> {
             let temp = Slot::Temp(instr.len());
             instr.push(Instruction::Fun(
                 temp,
-                Box::new((
-                    name,
-                    tags.iter().map(|x| x.to_canonical_string()).collect(),
-                    eval_args,
-                )),
+                Box::new((name, tags, eval_args)),
                 false,
             ));
             // Use the same scope-local cache as arithmetic expressions.
@@ -2269,9 +2260,16 @@ impl<'a> AtomView<'a> {
 /// A hash of an expression, used for common subexpression elimination.
 pub type ExpressionHash = u64;
 
-/// A tree representation of an expression.
+/// A tree representation of an expression. Function tags remain symbolic expressions.
+/// Binary decoding uses a [`crate::state::StateMap`] to remap their symbol identifiers.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
+#[cfg_attr(
+    feature = "bincode",
+    derive(bincode_trait_derive::Encode),
+    derive(bincode_trait_derive::Decode),
+    derive(bincode_trait_derive::BorrowDecodeFromDecode),
+    trait_decode(trait = crate::state::HasStateMap)
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression<T> {
     /// A cached hash and a numerical constant.
@@ -2293,7 +2291,7 @@ pub enum Expression<T> {
     /// A cached hash, a built-in function symbol, and its argument.
     BuiltinFun(ExpressionHash, Symbol, Box<Expression<T>>),
     /// A cached hash, an external function symbol, its symbolic tags, and argument trees.
-    Fun(ExpressionHash, Symbol, Vec<String>, Vec<Expression<T>>),
+    Fun(ExpressionHash, Symbol, Vec<Atom>, Vec<Expression<T>>),
     /// A cached hash and a condition, true branch, and false branch.
     /// A zero condition selects the false branch.
     IfElse(
@@ -2832,11 +2830,10 @@ impl Expression<Complex<Rational>> {
                     .collect::<Option<Vec<_>>>();
 
                 if let Some(fixed_args) = fixed_args {
-                    let tags = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
                     let i = register_constant_external_container(
                         external_functions,
                         *symbol,
-                        tags,
+                        tags.clone(),
                         fixed_args,
                         constants,
                     );
@@ -3184,13 +3181,12 @@ impl EvalTree<Complex<Rational>> {
                 stack.push(Complex::default());
                 let res = stack.len() - 1;
 
-                let tag_atoms = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
                 let index = self
                     .external_functions
                     .iter()
                     .position(|x| {
                         x.symbol == *s
-                            && x.tags == tag_atoms
+                            && x.tags == *tags
                             && x.fixed_args.is_empty()
                             && x.constant_index.is_none()
                     })
@@ -3425,7 +3421,9 @@ impl EvalTree<Complex<Rational>> {
         }
 
         let v = match &settings.hot_start {
-            Some(a) => a.clone(),
+            // Imported tags may use different symbol identifiers, so cached hashes
+            // from the originating state cannot be reused.
+            Some(a) => a.iter().cloned().map(|a| a.rehashed(false)).collect(),
             None => {
                 let mut v = HashMap::default();
 
@@ -3519,7 +3517,14 @@ impl EvalTree<Complex<Rational>> {
                 &self.functions[scope - 1].2
             };
             let vars = if scope == 0 && settings.hot_start.is_some() {
-                settings.hot_start.clone().unwrap()
+                settings
+                    .hot_start
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .map(|a| a.rehashed(false))
+                    .collect()
             } else {
                 let mut counts = HashMap::default();
                 for expression in expressions.tree.iter().chain(&expressions.subexpressions) {
@@ -4780,17 +4785,16 @@ impl<'a> AtomView<'a> {
                     let tags = f
                         .iter()
                         .take(eval_info.get_tag_count())
-                        .map(|x| x.to_canonical_string())
+                        .map(|x| x.to_owned())
                         .collect::<Vec<_>>();
-                    let tag_atoms = tags.iter().map(|x| crate::parse!(x)).collect::<Vec<_>>();
 
                     if external_functions
                         .iter()
-                        .all(|x| x.symbol != name || x.tags != tag_atoms)
+                        .all(|x| x.symbol != name || x.tags != tags)
                     {
                         external_functions.push(ExternalFunctionContainer::new(
                             name,
-                            tag_atoms,
+                            tags.clone(),
                             vec![],
                         ));
                     }

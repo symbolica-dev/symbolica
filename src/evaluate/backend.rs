@@ -686,11 +686,11 @@ fn translate_to_symjit(
     Ok(translator)
 }
 
-fn function_export_name(symbol: crate::atom::Symbol, tags: &[String]) -> Option<String> {
+fn function_export_name(symbol: crate::atom::Symbol, tags: &[Atom]) -> Option<String> {
     let mut name = symbol.get_ascii_name()?;
     for tag in tags {
         name.push('_');
-        name.push_str(tag);
+        name.push_str(&tag.to_canonical_string());
     }
     Some(name)
 }

@@ -173,8 +173,8 @@ impl<T: bincode::Encode> bincode::Encode for ExpressionEvaluator<T> {
 }
 
 #[cfg(feature = "bincode")]
-impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Context>
-    for ExpressionEvaluator<T>
+impl<Context: crate::state::HasStateMap, T: bincode::Decode<Context> + EvaluationDomain>
+    bincode::Decode<Context> for ExpressionEvaluator<T>
 {
     fn decode<D: bincode::de::Decoder<Context = Context>>(
         decoder: &mut D,
@@ -192,8 +192,11 @@ impl<Context, T: bincode::Decode<Context> + EvaluationDomain> bincode::Decode<Co
 }
 
 #[cfg(feature = "bincode")]
-impl<'de, Context, T: bincode::BorrowDecode<'de, Context> + EvaluationDomain>
-    bincode::BorrowDecode<'de, Context> for ExpressionEvaluator<T>
+impl<
+    'de,
+    Context: crate::state::HasStateMap,
+    T: bincode::BorrowDecode<'de, Context> + EvaluationDomain,
+> bincode::BorrowDecode<'de, Context> for ExpressionEvaluator<T>
 {
     fn borrow_decode<D: bincode::de::BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -1431,11 +1434,13 @@ mod tests {
         #[cfg(feature = "bincode")]
         {
             let bytes = bincode::encode_to_vec(&complex, bincode::config::standard()).unwrap();
-            let (mut restored, consumed) = bincode::decode_from_slice::<
-                ExpressionEvaluator<Complex<f64>>,
-                _,
-            >(&bytes, bincode::config::standard())
-            .unwrap();
+            let (mut restored, consumed) =
+                bincode::decode_from_slice_with_context::<_, ExpressionEvaluator<Complex<f64>>, _>(
+                    &bytes,
+                    bincode::config::standard(),
+                    crate::state::StateMap::default(),
+                )
+                .unwrap();
             assert_eq!(consumed, bytes.len());
             assert!(restored.external_fns.iter().all(|f| f.stack.is_empty()));
             assert_eq!(
@@ -1568,9 +1573,10 @@ mod tests {
             OptimizationSettings::default(),
         );
         let bytes = bincode::encode_to_vec(&old_evaluator, bincode::config::standard()).unwrap();
-        let error = bincode::decode_from_slice::<ExpressionEvaluator<f64>, _>(
+        let error = bincode::decode_from_slice_with_context::<_, ExpressionEvaluator<f64>, _>(
             &bytes,
             bincode::config::standard(),
+            crate::state::StateMap::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("Rebuild the evaluator"));
@@ -1715,9 +1721,10 @@ mod tests {
         {
             let bytes = bincode::encode_to_vec(&left, bincode::config::standard()).unwrap();
             let (mut decoded, _) =
-                bincode::decode_from_slice::<ExpressionEvaluator<DoubleFloat>, _>(
+                bincode::decode_from_slice_with_context::<_, ExpressionEvaluator<DoubleFloat>, _>(
                     &bytes,
                     bincode::config::standard(),
+                    crate::state::StateMap::default(),
                 )
                 .unwrap();
             assert!(decoded.external_fns.iter().all(|f| f.stack.is_empty()));

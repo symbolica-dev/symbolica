@@ -927,6 +927,30 @@ impl InlineNum {
     }
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for Atom {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut data = Vec::new();
+        self.as_view()
+            .export(&mut data)
+            .map_err(serde::ser::Error::custom)?;
+        serde::Serialize::serialize(&data, serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Atom {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let data = <Vec<u8> as serde::Deserialize>::deserialize(deserializer)?;
+        let mut source = data.as_slice();
+        let atom = Atom::import(&mut source, None).map_err(serde::de::Error::custom)?;
+        if !source.is_empty() {
+            return Err(serde::de::Error::custom("Trailing data in serialized Atom"));
+        }
+        Ok(atom)
+    }
+}
+
 #[cfg(feature = "bincode")]
 impl bincode::Encode for Atom {
     fn encode<E: bincode::enc::Encoder>(

@@ -1,5 +1,45 @@
 use super::*;
 use crate::evaluate::{FunctionRegistrationOptions, InliningPolicy};
+use crate::state::StateMap;
+
+// The final byte versions the state-aware evaluator envelope.
+const SAVED_EVALUATOR_MAGIC: &[u8] = b"\xffSYMEVAL\x01";
+
+fn encode_saved_evaluator<T: bincode::Encode>(evaluator: T) -> PyResult<Vec<u8>> {
+    let mut bytes = SAVED_EVALUATOR_MAGIC.to_vec();
+    bytes.push(u8::from(cfg!(feature = "native_code_generation")));
+    State::export(&mut bytes).map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    bincode::encode_into_std_write(evaluator, &mut bytes, bincode::config::standard())
+        .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    Ok(bytes)
+}
+
+fn decode_saved_evaluator<T: bincode::Decode<StateMap>>(bytes: &[u8]) -> PyResult<T> {
+    let Some((&native_code_generation, mut bytes)) = bytes
+        .strip_prefix(SAVED_EVALUATOR_MAGIC)
+        .and_then(|bytes| bytes.split_first())
+    else {
+        return Err(exceptions::PyIOError::new_err(
+            "Evaluator serialization format changed; recreate and save the evaluator again.",
+        ));
+    };
+    if native_code_generation != u8::from(cfg!(feature = "native_code_generation")) {
+        return Err(exceptions::PyIOError::new_err(
+            "The saved evaluator requires a build with matching native code generation support.",
+        ));
+    }
+    let state_map = State::import(&mut bytes, None)
+        .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    let (evaluator, consumed) =
+        bincode::decode_from_slice_with_context(bytes, bincode::config::standard(), state_map)
+            .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    if consumed != bytes.len() {
+        return Err(exceptions::PyIOError::new_err(
+            "Unexpected trailing data in the saved evaluator.",
+        ));
+    }
+    Ok(evaluator)
+}
 
 /// A function definition and its evaluator registration settings.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
@@ -95,13 +135,22 @@ impl PythonFunctionDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluate::Expression;
     use crate::{parse, symbol};
 
     #[test]
     fn python_function_definition_registers_non_inline_evaluator() {
         let function = symbol!("symbolica::python::function_definition");
+        let tags = vec![
+            parse!("1"),
+            parse!("symbolica::python::tag"),
+            parse!("symbolica::python::tag + 2"),
+        ];
         let definition = PythonFunctionDefinition::new(
-            PolyVariable::try_from(parse!("symbolica::python::function_definition(1)")).unwrap(),
+            PolyVariable::try_from(parse!(
+                "symbolica::python::function_definition(1, symbolica::python::tag, symbolica::python::tag + 2)"
+            ))
+            .unwrap(),
             vec![symbol!("y").into()],
             parse!("y^2").into(),
             "never",
@@ -110,7 +159,9 @@ mod tests {
         let mut function_map = FunctionMap::new();
         definition.register(&mut function_map).unwrap();
 
-        let evaluator = parse!("symbolica::python::function_definition(1, x)")
+        let evaluator = parse!(
+            "symbolica::python::function_definition(1, symbolica::python::tag, symbolica::python::tag + 2, x)"
+        )
             .evaluator(&[parse!("x")])
             .function_map(function_map)
             .build()
@@ -121,20 +172,52 @@ mod tests {
             .export_instructions();
         assert_eq!(exported.sub_evaluators.len(), 1);
         assert_eq!(exported.sub_evaluators[0].symbol, function);
-        assert_eq!(exported.sub_evaluators[0].tags, ["1"]);
+        assert_eq!(exported.sub_evaluators[0].tags, tags);
         assert!(exported.instructions.iter().any(|instruction| {
             matches!(
                 instruction,
                 Instruction::Fun(_, function, _)
                     if function.0 == exported.sub_evaluators[0].symbol
-                        && function.1 == ["1"]
+                        && function.1 == tags
                         && function.2.len() == 1
             )
         }));
         assert_eq!(exported.sub_evaluators[0].input_count, 1);
 
         let wrapped = PythonEvaluatorInstructions::from(evaluator.export_instructions());
-        let body = wrapped.sub_evaluators()[0].evaluator();
+        let functions = wrapped.sub_evaluators();
+        assert_eq!(
+            functions[0]
+                .tags()
+                .into_iter()
+                .map(|tag| tag.expr)
+                .collect::<Vec<_>>(),
+            tags,
+        );
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let instructions = wrapped.instruction_tuples(py)?;
+            let mut function_count = 0;
+            for instruction in instructions {
+                if instruction.get_item(0)?.extract::<String>()? == "fun" {
+                    let instruction_tags = instruction
+                        .get_item(3)?
+                        .extract::<Vec<PythonExpression>>()?;
+                    assert_eq!(
+                        instruction_tags
+                            .into_iter()
+                            .map(|tag| tag.expr)
+                            .collect::<Vec<_>>(),
+                        tags,
+                    );
+                    function_count += 1;
+                }
+            }
+            assert_eq!(function_count, 1);
+            Ok(())
+        })
+        .unwrap();
+        let body = functions[0].evaluator();
         assert!(Arc::ptr_eq(
             &body.exported,
             &wrapped.exported.sub_evaluators[0].instructions,
@@ -146,9 +229,78 @@ mod tests {
         evaluator.evaluate(&[3.], &mut output);
         assert_eq!(output, [9.]);
     }
+
+    #[test]
+    fn python_evaluator_save_load_restores_symbolic_hot_start() {
+        let hot_start = Expression::Fun(
+            0,
+            symbol!("symbolica::python::saved_function"),
+            vec![parse!("symbolica::python::saved_tag + 2")],
+            vec![Expression::Parameter(0, 0)],
+        );
+        let evaluator = parse!("x^2")
+            .evaluator(&[parse!("x")])
+            .direct_translation(true)
+            .horner_iterations(0)
+            .hot_start(Some(vec![hot_start]))
+            .build()
+            .unwrap();
+        let expected = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
+        let original = PythonExpressionEvaluator {
+            rational_constants: evaluator.get_constants().to_vec(),
+            eval_complex: evaluator.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+            eval_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
+            eval_arb_prec: None,
+            eval_arb_prec_complex: None,
+            jit_compile: false,
+            #[cfg(feature = "native_code_generation")]
+            jit_settings: JITCompilationSettings::default(),
+        };
+
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let bytes = original.save(py)?;
+            assert!(bytes.as_bytes().starts_with(SAVED_EVALUATOR_MAGIC));
+            let mut loaded = PythonExpressionEvaluator::load(
+                &py.get_type::<PythonExpressionEvaluator>(),
+                bytes,
+            )?;
+            assert_eq!(
+                bincode::encode_to_vec(
+                    loaded.eval_complex.set_coeff(&loaded.rational_constants),
+                    bincode::config::standard(),
+                )
+                .unwrap(),
+                expected,
+            );
+            let mut output = [Complex::new(0., 0.)];
+            loaded
+                .eval_complex
+                .evaluate(&[Complex::new(3., 0.)], &mut output);
+            assert_eq!(output, [Complex::new(9., 0.)]);
+
+            let legacy = PyBytes::new(py, &expected);
+            let error = PythonExpressionEvaluator::load(
+                &py.get_type::<PythonExpressionEvaluator>(),
+                legacy,
+            )
+            .err()
+            .expect("Unversioned evaluator bytes must not be decoded as state-aware data");
+            assert!(error.is_instance_of::<exceptions::PyIOError>(py));
+            assert!(error.to_string().contains("recreate and save"));
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
-/// A portable instruction stream for evaluating an expression.
+/// A structured instruction stream for evaluating an expression.
 #[cfg_attr(feature = "python_stubgen", gen_stub_pyclass)]
 #[pyclass(
     from_py_object,
@@ -166,7 +318,7 @@ pub struct PythonEvaluatorInstructions {
 #[derive(Clone)]
 pub struct PythonEvaluatorFunction {
     function: Symbol,
-    tags: Vec<String>,
+    tags: Vec<Atom>,
     evaluator: PythonEvaluatorInstructions,
 }
 
@@ -259,7 +411,12 @@ impl PythonEvaluatorInstructions {
                             PythonExpression::from(Atom::var(*name))
                                 .into_pyobject(py)?
                                 .as_any(),
-                            tags.into_pyobject(py)?.as_any(),
+                            tags.iter()
+                                .cloned()
+                                .map(PythonExpression::from)
+                                .collect::<Vec<_>>()
+                                .into_pyobject(py)?
+                                .as_any(),
                             args.iter()
                                 .map(slot_to_object)
                                 .collect::<Vec<_>>()
@@ -397,10 +554,14 @@ impl PythonEvaluatorFunction {
         Atom::var(self.function).into()
     }
 
-    /// The tags used to distinguish this function implementation.
+    /// The expression tags used to distinguish this function implementation.
     #[getter]
-    fn tags(&self) -> Vec<String> {
-        self.tags.clone()
+    fn tags(&self) -> Vec<PythonExpression> {
+        self.tags
+            .iter()
+            .cloned()
+            .map(PythonExpression::from)
+            .collect()
     }
 
     /// The exported instruction body of this sub-evaluator.
@@ -643,12 +804,7 @@ impl PythonExpressionEvaluator {
         #[cfg(not(feature = "native_code_generation"))]
         {
             let bytes: &[u8] = evaluator.extract()?;
-            let eval = bincode::decode_from_slice::<ExpressionEvaluator<Complex<Rational>>, _>(
-                bytes,
-                bincode::config::standard(),
-            )
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?
-            .0;
+            let eval: ExpressionEvaluator<Complex<Rational>> = decode_saved_evaluator(bytes)?;
 
             return Ok(PythonExpressionEvaluator {
                 rational_constants: eval.get_constants().to_vec(),
@@ -671,37 +827,9 @@ impl PythonExpressionEvaluator {
                 Option<JITCompiledEvaluator<f64>>,
                 Option<JITCompiledEvaluator<Complex<f64>>>,
             );
-            type LegacySavedEvaluator = (
-                bool,
-                ExpressionEvaluator<Complex<Rational>>,
-                Option<JITCompiledEvaluator<f64>>,
-                Option<JITCompiledEvaluator<Complex<f64>>>,
-            );
-
             let bytes: &[u8] = evaluator.extract()?;
-            let (jit_compile, jit_settings, eval, jit_real, jit_complex) =
-                match bincode::decode_from_slice::<SavedEvaluator, _>(
-                    bytes,
-                    bincode::config::standard(),
-                ) {
-                    Ok((decoded, _)) => decoded,
-                    Err(new_err) => {
-                        let (jit_compile, eval, jit_real, jit_complex) =
-                            bincode::decode_from_slice::<LegacySavedEvaluator, _>(
-                                bytes,
-                                bincode::config::standard(),
-                            )
-                            .map_err(|_| pyo3::exceptions::PyIOError::new_err(new_err.to_string()))?
-                            .0;
-                        (
-                            jit_compile,
-                            JITCompilationSettings::default(),
-                            eval,
-                            jit_real,
-                            jit_complex,
-                        )
-                    }
-                };
+            let (jit_compile, jit_settings, eval, jit_real, jit_complex): SavedEvaluator =
+                decode_saved_evaluator(bytes)?;
 
             Ok(PythonExpressionEvaluator {
                 rational_constants: eval.get_constants().to_vec(),
@@ -721,33 +849,20 @@ impl PythonExpressionEvaluator {
 
     /// Save the evaluator to a byte string that can be imported in another thread or machine.
     /// The external functions are not exported, so they need to be provided separately when importing.
-    /// Use `load` to import the evaluator.
+    /// Symbolica's symbolic state is included and restored automatically by `load`.
     fn save<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
+        let evaluator = self.eval_complex.set_coeff(&self.rational_constants);
         #[cfg(not(feature = "native_code_generation"))]
-        {
-            return bincode::encode_to_vec(
-                self.eval_complex.set_coeff(&self.rational_constants),
-                bincode::config::standard(),
-            )
-            .map(|a| PyBytes::new(py, &a))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()));
-        }
-
+        let bytes = encode_saved_evaluator(evaluator)?;
         #[cfg(feature = "native_code_generation")]
-        {
-            bincode::encode_to_vec(
-                &(
-                    self.jit_compile,
-                    self.jit_settings.clone(),
-                    self.eval_complex.set_coeff(&self.rational_constants),
-                    &self.jit_real,
-                    &self.jit_complex,
-                ),
-                bincode::config::standard(),
-            )
-            .map(|a| PyBytes::new(py, &a))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
-        }
+        let bytes = encode_saved_evaluator(&(
+            self.jit_compile,
+            &self.jit_settings,
+            evaluator,
+            &self.jit_real,
+            &self.jit_complex,
+        ))?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// Export the serialized SymJIT application used for double or complex evaluation.
@@ -792,9 +907,10 @@ impl PythonExpressionEvaluator {
         }
     }
 
-    /// Return a portable instruction representation for efficiently evaluating the expression.
+    /// Return a structured instruction representation for efficiently evaluating the expression.
     /// This can be used to generate code for the expression evaluation in any programming
     /// language.
+    /// Function names and tags remain `Expression` objects.
     ///
     /// There are four lists that are used in the evaluation instructions:
     /// - `param`: the list of input parameters.
@@ -807,7 +923,7 @@ impl PythonExpressionEvaluator {
     /// - `('mul', ('out', 0), [('temp', 0), ('param', 0)], 1)` which means `out[0] = temp[0] * param[0]`, where the first `1` arguments are real.
     /// - `('pow', ('out', 0), ('param', 0), -1, true)` which means `out[0] = param[0]^-1` and the output is real (`true`).
     /// - `('powf', ('out', 0), ('param', 0), ('param', 1), false)` which means `out[0] = param[0]^param[1]`.
-    /// - `('fun', ('temp', 1), f, ["0"], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
+    /// - `('fun', ('temp', 1), f, [Expression.num(0)], [('param', 0)], true)` which means `temp[1] = f(0, param[0])` and the output is real (`true`).
     /// - `('assign', ('out', 1), ('const', 2))` which means `out[1] = const[2]`.
     /// - `('if_else', ('temp', 0), 5)` which means `if temp[0] == 0 goto label 5` (false branch).
     /// - `('goto', 10)` which means `goto label 10`.

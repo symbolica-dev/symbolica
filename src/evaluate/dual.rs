@@ -1625,9 +1625,13 @@ mod test {
         #[cfg(feature = "bincode")]
         {
             let encoded = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
-            evaluator = bincode::decode_from_slice(&encoded, bincode::config::standard())
-                .unwrap()
-                .0;
+            evaluator = bincode::decode_from_slice_with_context(
+                &encoded,
+                bincode::config::standard(),
+                crate::state::StateMap::default(),
+            )
+            .unwrap()
+            .0;
         }
         let mut out = [0.; 6];
         evaluator.evaluate(&[3., 1., 0., 4., 0., 1.], &mut out);
