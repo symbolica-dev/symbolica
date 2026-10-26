@@ -266,24 +266,61 @@ impl AtomView<'_> {
                     let mut add_h = workspace.new_atom();
                     let add = add_h.to_add();
 
+                    fn can_merge_coefficient_first(a: AtomView<'_>) -> bool {
+                        match a {
+                            AtomView::Num(n) => matches!(
+                                n.get_coeff_view(),
+                                CoefficientView::Natural(..)
+                                    | CoefficientView::Large(..)
+                                    | CoefficientView::RationalPolynomial(..)
+                            ),
+                            AtomView::Var(_) => true,
+                            AtomView::Fun(f) => f.iter().all(can_merge_coefficient_first),
+                            AtomView::Pow(p) => p.iter().all(can_merge_coefficient_first),
+                            AtomView::Mul(m) => m.iter().all(can_merge_coefficient_first),
+                            AtomView::Add(a) => a.iter().all(can_merge_coefficient_first),
+                        }
+                    }
+
+                    // Preserve the order of inexact arithmetic, including when
+                    // recursive expansion exposes additional numeric factors.
+                    // Field factors must simplify before multiplying integers,
+                    // and dirty functions can introduce inexact coefficients.
+                    let merge_coefficient_first =
+                        !base.needs_normalization() && can_merge_coefficient_first(base);
                     let mut ci = CombinationWithReplacementIterator::new(args.len(), num);
+                    let mut term = workspace.new_atom();
+                    let mut power = workspace.new_atom();
+                    let mut coefficient = workspace.new_atom();
+                    let mut normalized_child = workspace.new_atom();
+                    let mut expanded_child = workspace.new_atom();
 
                     while let Some(new_term) = ci.next() {
-                        let mut hh = workspace.new_atom();
-                        let p = hh.to_mul();
+                        let p = term.to_mul();
 
-                        let mut hhh = workspace.new_atom();
                         for (a, pow) in args.iter().zip(new_term) {
-                            if *pow != 0 {
-                                hhh.to_pow(*a, InlineNum::new(*pow as i64, 1).as_view());
-                                p.extend(hhh.as_view());
+                            if *pow == 1 && !a.needs_normalization() {
+                                p.extend(*a);
+                            } else if *pow != 0 {
+                                power.to_pow(*a, InlineNum::new(*pow as i64, 1).as_view());
+                                p.extend(power.as_view());
                             }
                         }
 
-                        let mut normalized_child = workspace.new_atom();
-                        hh.as_view().normalize(workspace, &mut normalized_child);
+                        // Include the multinomial coefficient before normalization.
+                        // Appending it afterwards would invalidate every product
+                        // and normalize it again when normalizing the final sum.
+                        let coeff_f = Integer::multinom(new_term);
+                        let has_coefficient = coeff_f != Integer::one();
+                        if has_coefficient {
+                            coefficient.to_num(coeff_f);
+                            if merge_coefficient_first {
+                                p.extend(coefficient.as_view());
+                            }
+                        }
 
-                        let mut expanded_child = workspace.new_atom();
+                        term.as_view().normalize(workspace, &mut normalized_child);
+
                         let mut child_set = Settable::from(expanded_child.deref_mut());
                         normalized_child.as_view().expand_with_ws_into_settable(
                             workspace,
@@ -298,20 +335,15 @@ impl AtomView<'_> {
                             normalized_child.deref_mut()
                         };
 
-                        let coeff_f = Integer::multinom(new_term);
-                        if coeff_f != Integer::one() {
-                            let mut coeff_h = workspace.new_atom();
-                            coeff_h.to_num(coeff_f);
-
+                        if has_coefficient && !merge_coefficient_first {
                             if let Atom::Mul(m) = child {
-                                m.extend(coeff_h.as_view());
+                                m.extend(coefficient.as_view());
                                 add.extend(child.as_view());
                             } else {
-                                let mut mul_h = workspace.new_atom();
-                                let mul = mul_h.to_mul();
+                                let mul = term.to_mul();
                                 mul.extend(child.as_view());
-                                mul.extend(coeff_h.as_view());
-                                add.extend(mul_h.as_view());
+                                mul.extend(coefficient.as_view());
+                                add.extend(term.as_view());
                             }
                         } else {
                             add.extend(child.as_view());
@@ -691,6 +723,152 @@ mod test {
 
         let expr = parse!("(1+inline_expansion_x)^257");
         assert_eq!(expr.expand(), expr.expand_via_poly::<u16, Atom>(None));
+    }
+
+    #[test]
+    fn multinomial_coefficients_normalize_with_their_terms() {
+        use crate::atom::Atom;
+
+        for input in [
+            "(2*x-3*y+5*z+7)^6",
+            "(x/2-2*y/3+5)^5",
+            "(x+x^2+y)^5",
+            "(f(x)+2*g(y)+3)^4",
+        ] {
+            let expr = parse!(input);
+            let expanded = expr.expand();
+            assert_eq!(expanded, expr.expand_via_poly::<u16, Atom>(None), "{input}");
+            assert!(expanded.as_view().is_expanded(None), "{input}");
+        }
+
+        assert_eq!(
+            parse!("(x^(a+b)+y)^3").expand(),
+            parse!("x^(3*a+3*b)+3*x^(2*a+2*b)*y+3*x^(a+b)*y^2+y^3")
+        );
+        assert_eq!(
+            parse!("(x+y+z)^3").expand_in(symbol!("x")),
+            parse!("x^3+3*x^2*(y+z)+3*x*(y+z)^2+(y+z)^3")
+        );
+        assert_eq!(
+            parse!("(2*x-3*y+5)^-4").expand(),
+            parse!("(2*x-3*y+5)^4").expand().pow(-1)
+        );
+    }
+
+    #[test]
+    fn multinomial_coefficients_preserve_finite_field_simplification() {
+        use crate::{
+            atom::Atom,
+            coefficient::Coefficient,
+            domains::{Ring, finite_field::Zp64},
+        };
+
+        let field = Zp64::new(5);
+        let coefficient = |n: i64| {
+            Atom::num(Coefficient::from_finite_field(
+                field.clone(),
+                field.nth(n.into()),
+            ))
+        };
+        let [x, y, z] = [parse!("x"), parse!("y"), parse!("z")];
+        let base = coefficient(2) * &x + coefficient(3) * &y + coefficient(4) * &z;
+        // Mixed field and integer arithmetic is unsupported, as in the
+        // existing expansion when a multinomial coefficient is introduced.
+        assert_eq!(
+            base.pow(5).expand(),
+            Atom::num(Coefficient::indeterminate())
+        );
+        // However, 2*3 is field one and disappears during normalization.
+        // The integer coefficient must be applied after that simplification.
+        let base = coefficient(2) * &x + coefficient(3) * &y;
+        assert_eq!(
+            base.pow(2).expand(),
+            coefficient(4) * x.pow(2) + 2 * &x * &y + coefficient(4) * y.pow(2)
+        );
+    }
+
+    #[test]
+    fn multinomial_coefficients_preserve_floating_point_order() {
+        use crate::atom::{Atom, AtomView};
+
+        let base = Atom::num(0.1) * parse!("x*2^(1/3)")
+            + Atom::num(0.3) * parse!("y*2^(1/3)")
+            + Atom::num(0.7) * parse!("z*2^(1/3)");
+        let AtomView::Add(a) = base.as_view() else {
+            unreachable!()
+        };
+        let terms: Vec<_> = a.iter().collect();
+        let factorials = [1, 1, 2, 6, 24, 120];
+        let mut expected = Vec::new();
+        for i in 0..=5 {
+            for j in 0..=5 - i {
+                let k = 5 - i - j;
+                // Normalize and expand each monomial before applying its
+                // combinatorial coefficient, retaining the arithmetic order.
+                let term = Atom::mul_many([
+                    terms[0].pow(i as i64),
+                    terms[1].pow(j as i64),
+                    terms[2].pow(k as i64),
+                ])
+                .expand();
+                let coefficient = 120 / (factorials[i] * factorials[j] * factorials[k]);
+                expected.push(term * coefficient);
+            }
+        }
+        assert_eq!(base.pow(5).expand(), Atom::add_many(expected));
+    }
+
+    #[test]
+    fn multinomial_expansion_preserves_dirty_input_grouping() {
+        use crate::atom::{Atom, AtomView};
+
+        fn check_binomial(left: Atom, right: Atom) {
+            let mut base = Atom::new();
+            let sum = base.to_add();
+            sum.extend(left.as_view());
+            sum.extend(right.as_view());
+            let mut power = Atom::new();
+            power.to_pow(base.as_view(), Atom::num(5).as_view());
+
+            let coefficients = [1, 5, 10, 10, 5, 1];
+            let expected = Atom::add_many((0..=5).map(|i| {
+                // The legacy expansion normalizes each powered argument,
+                // including exponent one, before combining the monomial.
+                let term = Atom::mul_many([left.pow(i), right.pow(5 - i)]).expand();
+                term * coefficients[i as usize]
+            }));
+            assert_eq!(power.expand(), expected);
+        }
+
+        let [x, y] = [parse!("dirty_expansion_x"), parse!("dirty_expansion_y")];
+        let mut left = Atom::new();
+        let product = left.to_mul();
+        product.extend(Atom::num(0.1).as_view());
+        product.extend(Atom::num(0.3).as_view());
+        product.extend(x.as_view());
+        let mut right = Atom::new();
+        let product = right.to_mul();
+        product.extend(Atom::num(0.7).as_view());
+        product.extend(Atom::num(0.9).as_view());
+        product.extend(y.as_view());
+        check_binomial(left, right);
+
+        let head = symbol!(
+            "dirty_expansion_float",
+            norm = |input, out| {
+                let AtomView::Fun(f) = input else {
+                    unreachable!()
+                };
+                let arg = f.iter().next().unwrap();
+                let value = Atom::num(0.1) * parse!("2^(1/3)") * arg;
+                out.set_from_view(&value.as_view());
+            }
+        );
+        let mut left = Atom::new();
+        left.to_fun(head).add_arg(x.as_view());
+        let mut right = Atom::new();
+        right.to_fun(head).add_arg(y.as_view());
+        check_binomial(left, right);
     }
 
     #[test]

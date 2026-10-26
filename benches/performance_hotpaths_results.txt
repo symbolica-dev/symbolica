@@ -1,0 +1,115 @@
+Performance hot paths: normalization, expansion, and replacement
+Experiment date: 2026-10-25
+
+Baseline and scope
+
+The baseline is clean upstream main at 1a1829b1. Both variants use the same
+benchmark harness and resolved Cargo.lock. The optimized variant adds only the
+four source changes in benches/performance_hotpaths.patch. Earlier measurements
+on a development checkout are excluded from these results.
+
+The reproduction script copies the checkout into a temporary directory, reverses
+the patch for baseline, then reapplies it for optimized. Keep the patch in sync
+with the source. The script preserves the working checkout and retains its
+binaries, build logs, and raw measurements for inspection.
+
+Changes under test
+
+Symmetric and antisymmetric normalization sort borrowed arguments and rebuild
+the function once, removing per-argument atom copies. Antisymmetric permutation
+parity uses a linear cycle walk. Duplicate handling, wildcard behavior, and
+custom normalization callbacks are preserved.
+
+Multinomial expansion reuses temporary atoms, skips exponent-one wrappers for
+normalized arguments, and combines exact multinomial coefficients before product
+normalization. Floating-point, finite-field, other unsupported coefficient
+domains, and dirty inputs retain the previous coefficient order. Dirty arguments
+also retain exponent-one normalization, including custom function callbacks.
+
+Replacement computes upcoming wildcard-length bounds without an intermediate
+Vec. Restrictions, greedy/non-greedy match order, repeated and optional bindings,
+and upstream's partial-match bounds check retain their existing behavior.
+
+Four inline hints on RecycledAtom::from, wrap, deref, and deref_mut expose these
+small wrappers across codegen units. They address additional out-of-line wrapper
+calls observed during development with the non-LTO bench profile.
+
+Method
+
+Harness: examples/performance_hotpaths.rs (18 cases).
+Host: AMD EPYC 9754 128-Core Processor, x86_64.
+Compiler: rustc 1.98.0 (88d9e12ae 2026-08-18), cargo 1.98.0. Default features.
+Native dependencies: nix-shell -p gcc gnumake m4 python313 pkg-config.
+Builds and tests: 8 jobs, pinned to CPUs 32-39.
+Timings: one benchmark process at a time, pinned to CPU 126; SMT sibling 382.
+
+The measured bench profile uses opt-level 3, 16 codegen units, LTO off,
+incremental compilation, debug assertions off, and CARGO_PROFILE_BENCH_DEBUG=0.
+Release with LTO is supported by the script but was not measured for this PR.
+
+Each case runs baseline and optimized consecutively, alternating their order by
+case and pass. Each invocation warms up once, then reports the median of seven
+samples lasting at least 100 ms each. Each sample divides elapsed wall time by
+completed operations. Results use the median of three pass medians.
+Time change = 100 * (optimized / baseline - 1); speedup = baseline / optimized.
+
+Normalization clones a prepared FunctionBuilder and finishes it. Expansion runs
+expand/expand_in on prepared inputs. Replacement runs on a prepared 256-function
+input. Output construction and destruction are included. Output byte counts,
+expected replacements, polynomial expansion cross-checks, and regression tests
+check correctness. Plain normalization, product expansion, and no-match
+replacement are controls. These microbenchmarks do not establish application
+speedups or measure allocations directly.
+
+Reproduction
+
+From the optimized checkout, with Rust and native dependencies available:
+
+  env -u HOTPATH_CASE -u HOTPATH_ITERATIONS HOTPATH_CPU=126 HOTPATH_PROFILE=bench HOTPATH_PASSES=3 HOTPATH_SAMPLES=7 HOTPATH_MS=100 bash benches/performance_hotpaths.sh
+
+Choose an idle physical core appropriate to the host and check its
+thread_siblings_list in sysfs. The script does not reserve a CPU. Set
+HOTPATH_PROFILE=release to compare the repository's LTO release profile.
+
+Validation
+
+1042 library unit tests and 3 pattern_matching integration tests passed;
+1 library test remained ignored. Regression coverage includes argument
+permutations, antisymmetric duplicates/wildcards and callbacks, exact multinomials,
+finite-field simplification, floating-point order, dirty inputs, and wildcard
+restrictions and match order.
+
+Command: CARGO_PROFILE_BENCH_DEBUG=0 cargo test --profile bench --lib --test pattern_matching -j 8.
+The patch reverses byte-for-byte to the four upstream source files and reapplies
+byte-for-byte to the optimized sources. Rustfmt and diff whitespace checks pass.
+
+Results: bench profile, lower is better
+
+Case                                Baseline us  Optimized us  Time change
+normalize/symmetric-8                     1.386         0.908       -34.5%
+normalize/symmetric-32                    6.924         4.088       -41.0%
+normalize/symmetric-128                  38.935        20.228       -48.0%
+normalize/antisymmetric-8                 2.222         1.591       -28.4%
+normalize/antisymmetric-64               37.606        24.164       -35.7%
+normalize/antisymmetric-256             253.972       151.480       -40.4%
+normalize/antisymmetric-1024           1640.880       799.335       -51.3%
+normalize/plain-128                       0.835         0.607       -27.4%
+expand/polynomial-7                     137.250        90.938       -33.7%
+expand/polynomial-12                    590.003       400.768       -32.1%
+expand/coefficients                     887.547       607.785       -31.5%
+expand/functions                         68.930        46.812       -32.1%
+expand/product                           11.654        10.394       -10.8%
+expand/wide-power                        38.441        25.550       -33.5%
+expand/partial                           15.191        11.501       -24.3%
+replace/single-wildcards                196.514       162.636       -17.2%
+replace/sequence-wildcards              169.702       154.178        -9.1%
+replace/no-match                         33.314        31.316        -6.0%
+
+Raw pass medians and ranges: benches/performance_hotpaths_samples.csv.
+Summary data: benches/performance_hotpaths_results.csv.
+One-second CPU observations: benches/performance_hotpaths_cpu.csv.
+
+The SMT sibling had median/max observed utilization of 1.0%/9.9%;
+0 of 77 observations exceeded 10%. This shared-host measurement
+does not establish complete isolation. Results apply to these workloads and
+this compiler/profile; small changes in controls should be interpreted cautiously.

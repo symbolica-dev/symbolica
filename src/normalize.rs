@@ -1688,72 +1688,61 @@ impl AtomView<'_> {
             id.is_antisymmetric() && !out_f.to_fun_view().iter().any(|a| a.contains_wildcard());
 
         if id.is_symmetric() || sort_antisymmetric {
-            let mut arg_buf: SmallVec<[(usize, _); 20]> = SmallVec::new();
+            let mut arg_buf: SmallVec<[(usize, _); 20]> =
+                out_f.to_fun_view().iter().enumerate().collect();
 
-            for (i, a) in out_f.to_fun_view().iter().enumerate() {
-                let mut handle = workspace.new_atom();
-                handle.set_from_view(&a);
-                arg_buf.push((i, handle));
-            }
+            arg_buf.sort_by(|a, b| a.1.cmp(&b.1));
 
-            arg_buf.sort_by(|a, b| a.1.as_view().cmp(&b.1.as_view()));
-
+            let mut odd_permutation = false;
             if id.is_antisymmetric() {
-                if arg_buf
-                    .windows(2)
-                    .any(|w| w[0].1.as_view() == w[1].1.as_view())
-                {
+                if arg_buf.windows(2).any(|w| w[0].1 == w[1].1) {
+                    drop(arg_buf);
                     out.to_num(Coefficient::zero());
                     return;
                 }
 
-                // find the number of swaps needed to sort the arguments
-                let mut order: SmallVec<[usize; 20]> = (0..arg_buf.len())
-                    .map(|i| arg_buf.iter().position(|(j, _)| *j == i).unwrap())
-                    .collect();
-                let mut swaps = 0;
-                for i in 0..order.len() {
-                    let pos = order[i..].iter().position(|&x| x == i).unwrap();
-                    order.copy_within(i..i + pos, i + 1);
-                    swaps += pos;
-                }
-
-                if swaps % 2 == 1 {
-                    let mut handle = workspace.new_atom();
-                    let out_f = handle.to_fun(id);
-
-                    for (_, a) in arg_buf {
-                        out_f.add_arg(a.as_view());
+                // A cycle of length n contributes n - 1 swaps. Mark each
+                // visited index as fixed to find the parity in linear time.
+                for i in 0..arg_buf.len() {
+                    let mut next = arg_buf[i].0;
+                    while next != i {
+                        let following = arg_buf[next].0;
+                        arg_buf[next].0 = next;
+                        next = following;
+                        odd_permutation = !odd_permutation;
                     }
-
-                    out_f.set_normalized(true);
-
-                    if let Some(f) = State::get_normalization_function(id) {
-                        let mut fs = workspace.new_atom();
-                        let mut setter = fs.deref_mut().into();
-                        f(handle.as_view(), &mut setter);
-                        if setter.is_set() {
-                            std::mem::swap(&mut handle, &mut fs);
-                        }
-                        debug_assert!(!handle.as_view().needs_normalization());
-                    }
-
-                    let m = out.to_mul();
-                    m.extend(InlineNum::new(-1, 1).as_view());
-                    m.extend(handle.as_view());
-                    m.set_has_coefficient(true);
-                    m.set_normalized(true);
-
-                    return;
+                    arg_buf[i].0 = i;
                 }
             }
 
-            let out_f = out.to_fun(id);
-            for (_, a) in arg_buf {
-                out_f.add_arg(a.as_view());
+            // Borrow the arguments while sorting, then rebuild once instead
+            // of allocating and copying a separate atom for each argument.
+            let mut handle = workspace.new_atom();
+            let sorted_f = handle.to_fun(id);
+            sorted_f.add_args_iter(arg_buf.into_iter().map(|(_, a)| a.into()));
+            sorted_f.set_normalized(true);
+
+            if odd_permutation {
+                if let Some(f) = State::get_normalization_function(id) {
+                    let mut fs = workspace.new_atom();
+                    let mut setter = fs.deref_mut().into();
+                    f(handle.as_view(), &mut setter);
+                    if setter.is_set() {
+                        std::mem::swap(&mut handle, &mut fs);
+                    }
+                    debug_assert!(!handle.as_view().needs_normalization());
+                }
+
+                let m = out.to_mul();
+                m.extend(InlineNum::new(-1, 1).as_view());
+                m.extend(handle.as_view());
+                m.set_has_coefficient(true);
+                m.set_normalized(true);
+
+                return;
             }
 
-            out_f.set_normalized(true);
+            std::mem::swap(out, handle.deref_mut());
         } else if id.is_cyclesymmetric() {
             let mut args: SmallVec<[_; 20]> = SmallVec::new();
             for a in out_f.to_fun_view().iter() {
@@ -2627,6 +2616,147 @@ mod test {
         let res = parse!("fsl1(v2+2*v3,v1+3*v2-v3)");
         let refr = parse!("fsl1(v1,v2)+2*fsl1(v1,v3)+3*fsl1(v2,v2)+5*fsl1(v2,v3)-2*fsl1(v3,v3)");
         assert_eq!(res, refr);
+    }
+
+    #[test]
+    fn symmetric_argument_permutations() {
+        fn check_permutations(order: &mut [usize], start: usize, check: &mut impl FnMut(&[usize])) {
+            if start == order.len() {
+                check(order);
+                return;
+            }
+            for i in start..order.len() {
+                order.swap(start, i);
+                check_permutations(order, start + 1, check);
+                order.swap(start, i);
+            }
+        }
+
+        let symmetric = crate::symbol!("normalize_borrowed_symmetric"; Symmetric);
+        let antisymmetric = crate::symbol!("normalize_borrowed_antisymmetric"; Antisymmetric);
+        let mut args = [
+            parse!("2/3"),
+            parse!("x"),
+            parse!("x^2"),
+            parse!("x*y"),
+            parse!("x+y"),
+            parse!("nested(x,y^2)"),
+        ];
+        args.sort_by(|a, b| a.as_view().cmp(&b.as_view()));
+
+        Workspace::get_local().with(|ws| {
+            for head in [symmetric, antisymmetric] {
+                for len in 0..=args.len() {
+                    let mut reference = Atom::new();
+                    let f = reference.to_fun(head);
+                    for arg in &args[..len] {
+                        f.add_arg(arg.as_view());
+                    }
+                    f.set_normalized(true);
+                    let negative = -&reference;
+                    let mut order: Vec<_> = (0..len).collect();
+                    check_permutations(&mut order, 0, &mut |order| {
+                        let mut dirty = Atom::new();
+                        let f = dirty.to_fun(head);
+                        for &i in order {
+                            f.add_arg(args[i].as_view());
+                        }
+                        let odd = order
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| order[i + 1..].iter().filter(|b| a > *b).count())
+                            .sum::<usize>()
+                            % 2
+                            != 0;
+                        let mut out = Atom::new();
+                        dirty.as_view().normalize(ws, &mut out);
+                        let expected = if head == antisymmetric && odd {
+                            &negative
+                        } else {
+                            &reference
+                        };
+                        assert_eq!(&out, expected, "argument permutation: {order:?}");
+                        assert!(!out.as_view().needs_normalization());
+                    });
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn symmetric_duplicates_and_antisymmetric_wildcards() {
+        let symmetric = crate::symbol!("normalize_borrowed_duplicate_symmetric"; Symmetric);
+        let antisymmetric =
+            crate::symbol!("normalize_borrowed_duplicate_antisymmetric"; Antisymmetric);
+        let x = parse!("x");
+        let y = parse!("y");
+        let wildcard = parse!("arg_");
+
+        Workspace::get_local().with(|ws| {
+            let mut dirty = Atom::new();
+            let f = dirty.to_fun(antisymmetric);
+            for arg in [&y, &x, &y] {
+                f.add_arg(arg.as_view());
+            }
+            let mut out = Atom::new();
+            dirty.as_view().normalize(ws, &mut out);
+            assert_eq!(out, Atom::num(0));
+
+            let f = dirty.to_fun(symmetric);
+            for arg in [&y, &x, &y] {
+                f.add_arg(arg.as_view());
+            }
+            dirty.as_view().normalize(ws, &mut out);
+            let AtomView::Fun(f) = out.as_view() else {
+                panic!("symmetric duplicates must be retained");
+            };
+            let args: Vec<_> = f.iter().collect();
+            assert_eq!(args.len(), 3);
+            assert!(args.windows(2).all(|w| w[0].cmp(&w[1]).is_le()));
+
+            let f = dirty.to_fun(antisymmetric);
+            for arg in [&y, &wildcard, &x, &y] {
+                f.add_arg(arg.as_view());
+            }
+            dirty.as_view().normalize(ws, &mut out);
+            dirty.set_normalized(true);
+            assert_eq!(
+                out, dirty,
+                "wildcards preserve argument order and duplicates"
+            );
+        });
+    }
+
+    #[test]
+    fn antisymmetric_custom_normalization_receives_sorted_arguments() {
+        let head = crate::symbol!("normalize_borrowed_custom_antisymmetric"; Antisymmetric;
+            norm = |input, out| {
+                let AtomView::Fun(f) = input else {
+                    panic!("expected a function");
+                };
+                let args: Vec<_> = f.iter().collect();
+                assert!(args.windows(2).all(|w| w[0].cmp(&w[1]).is_lt()));
+                out.set_from_view(&args[0]);
+            }
+        );
+        let mut args = [
+            parse!("custom_sort_x"),
+            parse!("custom_sort_y"),
+            parse!("custom_sort_z"),
+        ];
+        args.sort_by(|a, b| a.as_view().cmp(&b.as_view()));
+        Workspace::get_local().with(|ws| {
+            for (order, odd) in [([0, 1, 2], false), ([1, 2, 0], false), ([2, 1, 0], true)] {
+                let mut dirty = Atom::new();
+                let f = dirty.to_fun(head);
+                for i in order {
+                    f.add_arg(args[i].as_view());
+                }
+                let mut out = Atom::new();
+                dirty.as_view().normalize(ws, &mut out);
+                assert_eq!(out, if odd { -&args[0] } else { args[0].clone() });
+            }
+        });
     }
 
     #[test]

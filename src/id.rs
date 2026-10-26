@@ -5899,86 +5899,71 @@ impl<'a, 'b> SubSliceIterator<'a, 'b> {
             }
 
             if forward_pass {
-                let wildcard_ranges = if matches!(
-                    self.pattern[self.processed_iterators],
-                    Pattern::Wildcard(..)
-                ) {
-                    Some((
-                        self.pattern_length_range(self.processed_iterators, match_stack),
-                        if self.complete {
-                            self.pattern[self.processed_iterators + 1..]
-                                .iter()
-                                .enumerate()
-                                .map(|(offset, _)| {
-                                    self.pattern_length_range(
-                                        self.processed_iterators + 1 + offset,
-                                        match_stack,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        } else {
-                            Vec::new()
-                        },
-                    ))
+                let wildcard_range = if let Pattern::Wildcard(name, _) =
+                    &self.pattern[self.processed_iterators]
+                {
+                    let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
+                    let range = self.pattern_length_range(self.processed_iterators, match_stack);
+
+                    if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
+                        // a previously matched ranged wildcard will constrain the slice matching
+                        // so it is hard to conclude if there is a structural mismatch
+                        structural_mismatch = false;
+                    }
+
+                    if self.do_not_match_entire_slice {
+                        size_left -= 1;
+
+                        if size_left < range.0 {
+                            forward_pass = false;
+                            continue 'next_match;
+                        }
+                    }
+
+                    let mut range = (
+                        range.0,
+                        range.1.map(|m| m.min(size_left)).unwrap_or(size_left),
+                    );
+
+                    // Bound the wildcard length before borrowing its iterator, so the
+                    // upcoming ranges can be consumed directly without a temporary Vec.
+                    if self.complete {
+                        let mut new_min = size_left;
+                        let mut new_max = size_left;
+                        for index in self.processed_iterators + 1..self.pattern.len() {
+                            let p_range = self.pattern_length_range(index, match_stack);
+                            if new_min > 0 {
+                                if let Some(m) = p_range.1 {
+                                    new_min -= m.min(new_min);
+                                } else {
+                                    new_min = 0;
+                                }
+                            }
+
+                            if new_max < p_range.0 {
+                                forward_pass = false;
+                                continue 'next_match;
+                            }
+
+                            new_max -= p_range.0;
+                        }
+
+                        range.0 = range.0.max(new_min);
+                        range.1 = range.1.min(new_max);
+                    }
+
+                    if range.0 > range.1 {
+                        forward_pass = false;
+                        continue 'next_match;
+                    }
+                    Some(range)
                 } else {
                     None
                 };
                 let it = &mut self.iterators[self.processed_iterators];
                 match (&self.pattern[self.processed_iterators], it) {
                     (Pattern::Wildcard(name, _), PatternIter::Wildcard(w)) => {
-                        let mut size_left = self.used_flag.iter().filter(|x| !*x).count();
-                        let (range, future_ranges) = wildcard_ranges.as_ref().unwrap();
-                        let range = *range;
-
-                        if name.get_wildcard_level() > 1 && match_stack.stack.get(*name).is_some() {
-                            // a previously matched ranged wildcard will constrain the slice matching
-                            // so it is hard to conclude if there is a structural mismatch
-                            structural_mismatch = false;
-                        }
-
-                        if self.do_not_match_entire_slice {
-                            size_left -= 1;
-
-                            if size_left < range.0 {
-                                forward_pass = false;
-                                continue 'next_match;
-                            }
-                        }
-
-                        let mut range = (
-                            range.0,
-                            range.1.map(|m| m.min(size_left)).unwrap_or(size_left),
-                        );
-
-                        // bound the wildcard length based on the bounds of upcoming patterns
-                        if self.complete {
-                            let mut new_min = size_left;
-                            let mut new_max = size_left;
-                            for p_range in future_ranges {
-                                if new_min > 0 {
-                                    if let Some(m) = p_range.1 {
-                                        new_min -= m.min(new_min);
-                                    } else {
-                                        new_min = 0;
-                                    }
-                                }
-
-                                if new_max < p_range.0 {
-                                    forward_pass = false;
-                                    continue 'next_match;
-                                }
-
-                                new_max -= p_range.0;
-                            }
-
-                            range.0 = range.0.max(new_min);
-                            range.1 = range.1.min(new_max);
-                        }
-
-                        if range.0 > range.1 {
-                            forward_pass = false;
-                            continue 'next_match;
-                        }
+                        let range = wildcard_range.unwrap();
 
                         let greedy = !match_stack.settings.non_greedy_wildcards.contains(name);
 
@@ -6693,7 +6678,10 @@ mod test {
     };
     use crate::{
         atom::{Atom, AtomCore, AtomType},
-        id::{AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement},
+        id::{
+            AtomTreeIterator, Condition, ConditionResult, Match, MatchSettings, Replacement,
+            WildcardRestriction,
+        },
         parse,
         printer::PrintOptions,
         symbol,
@@ -6729,6 +6717,62 @@ mod test {
         let mut it = pat.iter(parse!("g(x_,y_)"));
         assert_eq!(it.next(), Some(parse!("g(1,2)")));
         assert_eq!(it.next(), Some(parse!("g(2,1)")));
+    }
+
+    #[test]
+    fn complete_wildcard_ranges_preserve_bounds_and_match_order() {
+        let input = parse!("f(a,b,c,d,e)");
+        let pattern = parse!("f(x__,y__,z_)").to_pattern();
+        let rhs = parse!("out(left(x__),right(y__),z_)").to_pattern();
+        let condition = symbol!("y__").restrict(WildcardRestriction::Length(2, Some(3)));
+        let expected = vec![
+            parse!("out(left(a,b),right(c,d),e)"),
+            parse!("out(left(a),right(b,c,d),e)"),
+        ];
+
+        let greedy = input
+            .replace(&pattern)
+            .when(&condition)
+            .iter(&rhs)
+            .collect::<Vec<_>>();
+        assert_eq!(greedy, expected);
+
+        let non_greedy = input
+            .replace(&pattern)
+            .when(&condition)
+            .non_greedy_wildcards(vec![symbol!("x__")])
+            .iter(&rhs)
+            .collect::<Vec<_>>();
+        assert_eq!(non_greedy, expected.into_iter().rev().collect::<Vec<_>>());
+
+        let no_match = parse!("f(a,b,c)")
+            .replace(&pattern)
+            .when(&condition)
+            .iter(&rhs)
+            .collect::<Vec<_>>();
+        assert!(no_match.is_empty());
+    }
+
+    #[test]
+    fn complete_wildcard_ranges_follow_repeated_and_optional_bindings() {
+        let repeated = parse!("f(a,b,c,a,b)")
+            .replace(parse!("f(x__,y__,x__)"))
+            .iter(parse!("out(left(x__),right(y__))"))
+            .collect::<Vec<_>>();
+        assert_eq!(repeated, vec![parse!("out(left(a,b),right(c))")]);
+
+        let optional = parse!("f(a,b)")
+            .replace(parse!("f(x__,y_)"))
+            .set_optional(symbol!("y_"))
+            .iter(parse!("out(left(x__),right(y_))"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            optional,
+            vec![
+                parse!("out(left(a,b),right())"),
+                parse!("out(left(a),right(b))"),
+            ]
+        );
     }
 
     #[test]
