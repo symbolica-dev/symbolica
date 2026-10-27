@@ -1262,12 +1262,19 @@ impl<'a> AtomView<'a> {
             max_terms: None,
             ..options.clone()
         };
+        // Explicit paging/expansion requests may reveal more detail than the
+        // compact initial preview. Scale both budgets together, retaining a
+        // fixed ceiling even for many independently expanded subexpressions.
+        let requested = expansions
+            .iter()
+            .fold(limit, |total, (_, count)| total.saturating_add(*count));
+        let budget_pages = requested.div_ceil(DEFAULT_PAGE_SIZE).clamp(1, 16);
         let mut renderer = Renderer {
             opts: &opts,
             state,
             cursors,
-            nodes: MAX_NODES,
-            bytes: MAX_TEXT_BYTES,
+            nodes: MAX_NODES * budget_pages,
+            bytes: MAX_TEXT_BYTES * budget_pages,
             budget_exhausted: false,
             nested_limit,
             depth_limit: depth_limit.min(MAX_DEPTH),
@@ -1693,6 +1700,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn larger_pages_reveal_factors_past_the_compact_render_budget() {
+        let factors = (0..34)
+            .map(|i| {
+                let arguments = (0..60)
+                    .map(|j| format!("x{j}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("f{i}({arguments})")
+            })
+            .collect::<Vec<_>>()
+            .join("*");
+        let expression = crate::parse!(&factors);
+        let atom = expression.as_view();
+        let compact = atom.render_mathml_page(&PrintOptions::new(), 0, 25);
+        assert!(compact.end < compact.total);
+        let expanded = atom.render_mathml_page(&PrintOptions::new(), 0, 50);
+        assert!(expanded.end > compact.end);
+        let complete = atom.render_mathml_page(&PrintOptions::new(), 0, 100);
+        assert_eq!(complete.end, complete.total);
+        assert_eq!(complete.total, 34);
+        assert!(complete.html.len() < 256 * 1024);
     }
 
     #[test]
