@@ -2929,7 +2929,7 @@ mod test {
     #[test]
     fn custom_print() {
         let _ = symbol!(
-            "mu",
+            "printer_custom_print::mu",
             print = |a, opt, _state| {
                 if !opt.mode.is_latex() {
                     return None; // use default printer
@@ -2955,7 +2955,9 @@ mod test {
             }
         );
 
-        let e = crate::parse!("mu^2 + mu(1) + mu(1,2)");
+        let e = crate::parse!(
+            "printer_custom_print::mu^2 + printer_custom_print::mu(1) + printer_custom_print::mu(1,2)"
+        );
         let s = format!("{}", e.printer(PrintOptions::latex()));
         assert_eq!(s, "\\mu_{1}+\\mu_{1,2}+\\mu^{2}");
     }
