@@ -673,6 +673,16 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         a.exact_div_owned(b)
     }
 
+    fn format_mathml<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &PrintOptions,
+        state: PrintState,
+        f: &mut W,
+    ) -> Result<bool, std::fmt::Error> {
+        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+    }
+
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,
@@ -1585,6 +1595,10 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> SelfRing for MultivariatePolynomial
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
+        if opts.mode.is_mathml() {
+            return crate::printer::mathml::polynomial(self, opts, state, f);
+        }
+
         let print_ring = opts.print_ring && !self.ring().has_independent_elements();
 
         if self.is_constant() {

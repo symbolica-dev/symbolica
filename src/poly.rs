@@ -909,7 +909,15 @@ impl PolyVariable {
 
     fn format_string(&self, opts: &PrintOptions, state: PrintState) -> String {
         match self {
+            PolyVariable::Symbol(v) if opts.mode.is_mathml() => {
+                let mut text = String::new();
+                v.format(opts, state, &mut text).unwrap();
+                text
+            }
             PolyVariable::Symbol(v) => v.get_stripped_name().to_string(),
+            PolyVariable::Temporary(t) if opts.mode.is_mathml() => {
+                format!("<msub><mi>T</mi><mn>{t}</mn></msub>")
+            }
             PolyVariable::Temporary(t) => format!("_TMP_{}", *t),
             PolyVariable::Function(_, a) | PolyVariable::Power(a) => a.format_string(opts, state),
         }

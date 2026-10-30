@@ -2108,6 +2108,10 @@ impl Symbol {
             return Ok(());
         }
 
+        if opts.mode.is_mathml() {
+            return f.write_str(&crate::printer::mathml::symbol_html(*self, opts));
+        }
+
         if opts.mode.is_latex() {
             match self.get_id() {
                 Symbol::E_ID => f.write_char('e'),

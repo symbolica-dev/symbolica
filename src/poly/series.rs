@@ -658,6 +658,13 @@ impl<F: Ring> Series<F> {
         self.ramification
     }
 
+    pub(crate) fn terms_for_display(&self) -> impl Iterator<Item = (Rational, &F::Element)> {
+        self.coefficients
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (self.get_exponent(i), c))
+    }
+
     /// Get a copy of the variable/
     pub fn get_variable(&self) -> Arc<PolyVariable> {
         self.variable.clone()
@@ -867,6 +874,10 @@ impl<F: Ring> SelfRing for Series<F> {
         mut state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
+        if opts.mode.is_mathml() {
+            return crate::printer::mathml::series(self, opts, state, f);
+        }
+
         fn format_exponent<W: std::fmt::Write>(
             exponent: &Rational,
             opts: &PrintOptions,

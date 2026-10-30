@@ -76,6 +76,7 @@ mathematica_api = ["wolfram-library-link"]
 binary_size = []
 # create a Python module
 python_api = [
+    "dep:xmlparser",
     "pyo3/extension-module",
     "numpy",
     "bincode",
@@ -86,6 +87,7 @@ python_api = [
 ]
 # export the Python API
 python_export = [
+    "dep:xmlparser",
     "pyo3",
     "numpy",
     "bincode",
@@ -150,6 +152,7 @@ tinyjson = "2.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 wide = "1.4"
+xmlparser = { version = "0.13.6", optional = true }
 wolfram-library-link = { version = "0.2.9", optional = true }
 bincode-trait-derive = { version = "0.1.0", optional = true }
 pyo3-log = { version = "0.13", optional = true }

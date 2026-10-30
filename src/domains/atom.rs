@@ -301,6 +301,16 @@ impl Ring for AtomField {
         0.into()
     }
 
+    fn format_mathml<W: std::fmt::Write>(
+        &self,
+        element: &Self::Element,
+        opts: &crate::printer::PrintOptions,
+        state: crate::printer::PrintState,
+        f: &mut W,
+    ) -> Result<bool, std::fmt::Error> {
+        crate::printer::mathml::atom_coefficient(element.as_view(), opts, state, f)
+    }
+
     fn format<W: std::fmt::Write>(
         &self,
         element: &Self::Element,

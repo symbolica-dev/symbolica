@@ -635,20 +635,32 @@ impl PythonMatrix {
             .format_string(&*PLAIN_PRINT_OPTIONS, PrintState::new()))
     }
 
-    /// Convert the matrix into an HTML representation.
+    /// Render bounded native MathML cells in a matrix layout.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        let formatted = self.matrix.format_string(
-            &PrintOptions::new()
-                .max_line_length(Some(80))
-                .multiplication_operator('·')
-                .num_exp_as_superscript(true)
-                .max_terms(Some(100))
-                .color_mode(ColorMode::Always)
-                .pretty_matrix(true),
-            PrintState::new(),
-        );
+        display::matrix::static_html(self)
+    }
 
-        Ok(crate::printer::AnsiHtmlFormatter::new(&formatted).to_string())
+    /// Create a pager for complete matrix rows and individual entry terms.
+    #[pyo3(signature = (page_size=25))]
+    #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
+    pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
+        display::matrix::viewer(py, self.clone(), page_size)
+    }
+
+    /// Prefer the shared MathML pager in notebooks.
+    #[pyo3(signature = (include=None, exclude=None))]
+    pub fn _repr_mimebundle_(
+        &self,
+        py: Python<'_>,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        display::matrix::formatted(self.clone())?._repr_mimebundle_(py, include, exclude)
+    }
+
+    /// Display a matrix with the shared pager in marimo.
+    pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        display::matrix::formatted(self.clone())?._display_(py)
     }
 
     /// Convert the matrix into a LaTeX representation.

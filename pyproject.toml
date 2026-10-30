@@ -17,6 +17,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
+[project.optional-dependencies]
+notebook = ["anywidget>=0.9,<1"]
+
 [project.urls]
 homepage = "https://symbolica.io"
 repository = "https://github.com/symbolica-dev/symbolica"
