@@ -9,7 +9,9 @@ use rand::Rng;
 use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
-use super::{Constructible, FixedPrecision, Float, FloatLike, Real, RealLike, SingleFloat};
+use super::{
+    Constructible, FixedPrecision, Float, FloatLike, Magnitude, Real, RealLike, SingleFloat,
+};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A 106-bit precision floating point number represented by the compensated sum of two `f64` values.
@@ -118,7 +120,7 @@ impl DoubleFloat {
         if exp >= 0 {
             Self::binary_exp(base, exp as u64)
         } else {
-            Self::binary_exp(base, exp.unsigned_abs()).recip()
+            Self::binary_exp(ComplexField::recip(base), exp.unsigned_abs())
         }
     }
 
@@ -198,15 +200,24 @@ impl FloatLike for DoubleFloat {
 
     #[inline]
     fn pow(&self, e: u64) -> Self {
-        debug_assert!(e <= i32::MAX as u64);
-
         // `Df64::powi` is implemented as `exp(e * log(self))` and does not handle base <= 0
         if e == 0 {
             return 1f64.into();
         }
 
-        if !self.0.hi().is_finite() {
-            return self.0.hi().powi(e as i32).into();
+        if self.is_nan() {
+            return f64::NAN.into();
+        }
+        // Preserve the full exponent's parity and signed-zero conventions;
+        // narrowing to i32 changes large positive exponents into negative ones.
+        if self.0.hi().is_infinite() || self.is_fully_zero() {
+            let magnitude = self.0.hi().abs();
+            return if self.0.hi().is_sign_negative() && e & 1 != 0 {
+                -magnitude
+            } else {
+                magnitude
+            }
+            .into();
         }
 
         Self::binary_exp(self.0, e).into()
@@ -416,6 +427,34 @@ impl SingleFloat for DoubleFloat {
 }
 
 impl RealLike for DoubleFloat {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
+    fn absolute_magnitude(&self) -> Magnitude {
+        let hi = self.0.hi();
+        let lo = self.0.lo();
+        if !hi.is_finite() || !lo.is_finite() {
+            return Magnitude::from_f64(hi + lo);
+        }
+        if hi == 0. {
+            return Magnitude::from_f64(lo);
+        }
+
+        let upper = Magnitude::from_f64(hi);
+        // A normalized low limb is at most half an ulp of the high limb.
+        // Therefore the 32-bit upward rounding of |hi| already covers it,
+        // except when |hi| itself lies exactly on a magnitude boundary.
+        // Retaining the low limb's sign makes the predecessor a lower bound.
+        let outward_low = if hi.is_sign_negative() { -lo } else { lo };
+        if outward_low > 0. && upper.to_f64() == Some(hi.abs()) {
+            upper + Magnitude::ONE.scale_pow2(upper.exponent() as i64 - 31)
+        } else {
+            upper
+        }
+    }
+
     fn to_usize_clamped(&self) -> usize {
         if !self.0.is_finite() {
             return if self.0.hi().is_sign_negative() {
@@ -762,5 +801,157 @@ impl Hash for DoubleFloat {
         } else {
             self.0.lo().to_bits()
         });
+    }
+}
+
+#[cfg(test)]
+mod pow_tests {
+    use super::*;
+
+    #[test]
+    fn integer_powf_inverts_before_forming_an_overflowing_positive_power() {
+        for (base, expected) in [
+            (2.0f64.powi(500), 2.0f64.powi(-1000)),
+            (2.0f64.powi(520), f64::from_bits(1u64 << 34)),
+        ] {
+            let actual = DoubleFloat::from(base).powf(&DoubleFloat::from(-2.));
+            assert_eq!(actual, DoubleFloat::from(expected));
+            assert!(actual > DoubleFloat::from(0.));
+        }
+        for exponent in -8..=8 {
+            assert_eq!(
+                DoubleFloat::from(-2.).powf(&DoubleFloat::from(exponent as f64)),
+                DoubleFloat::from((-2.0f64).powi(exponent))
+            );
+        }
+        assert_eq!(
+            DoubleFloat::from(-1.).powf(&DoubleFloat::from(i64::MIN as f64)),
+            DoubleFloat::from(1.)
+        );
+    }
+
+    #[test]
+    fn unsigned_powers_preserve_full_width_parity_and_special_values() {
+        for base in [
+            0.0f64,
+            -0.0,
+            1.,
+            -1.,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            for exponent in [
+                0,
+                1,
+                2,
+                i32::MAX as u64 + 1,
+                u32::MAX as u64 + 1,
+                1u64 << 63,
+                u64::MAX,
+            ] {
+                let result = DoubleFloat::from(base).pow(exponent);
+                let expected = if exponent == 0 {
+                    1.
+                } else if base.is_nan() {
+                    f64::NAN
+                } else if base.is_sign_negative() && exponent & 1 != 0 {
+                    -base.abs()
+                } else {
+                    base.abs()
+                };
+                if expected.is_nan() {
+                    assert!(result.is_nan());
+                } else {
+                    assert_eq!(
+                        result.into_inner().hi().to_bits(),
+                        expected.to_bits(),
+                        "{base}^{exponent}"
+                    );
+                    assert_eq!(result.into_inner().lo(), 0.);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsigned_powers_keep_finite_negative_bases_and_compensated_parts() {
+        for exponent in 0..=16 {
+            assert_eq!(
+                DoubleFloat::from(-2.).pow(exponent),
+                DoubleFloat::from((-2.0f64).powi(exponent as i32))
+            );
+        }
+        let delta = DoubleFloat::from(2.0f64.powi(-40));
+        let x = DoubleFloat::from_compensated_sum(-1., 2.0f64.powi(-40));
+        let square = x.pow(2);
+        assert_eq!(square, x * x);
+        assert_ne!(square, 1.0.into());
+        assert_eq!(
+            (square - DoubleFloat::from(1.)) / delta,
+            DoubleFloat::from(-2.) + delta
+        );
+    }
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::*;
+
+    fn as_float(magnitude: Magnitude) -> Float {
+        let significand = Float::with_val(160, magnitude.significand());
+        let exponent = magnitude.exponent() as i64 - 31;
+        let scale = Float::with_val(160, 2).pow(exponent.unsigned_abs());
+        if exponent >= 0 {
+            significand * scale
+        } else {
+            significand / scale
+        }
+    }
+
+    #[test]
+    fn absolute_magnitude_is_tight_for_signed_low_limbs() {
+        let tiny = 2f64.powi(-54);
+        for (hi, lo) in [
+            (1., tiny),
+            (1., -tiny),
+            (-1., tiny),
+            (-1., -tiny),
+            (1. + 2f64.powi(-31), tiny),
+            (1. + 2f64.powi(-31), -tiny),
+            (1. + 2f64.powi(-32), tiny),
+            (1. + 2f64.powi(-32), -tiny),
+            (f64::MAX, 2f64.powi(969)),
+            (f64::MAX, -2f64.powi(969)),
+            (-f64::MAX, 2f64.powi(969)),
+            (-f64::MAX, -2f64.powi(969)),
+            (f64::MIN_POSITIVE, f64::from_bits(1)),
+            (f64::from_bits(1), 0.),
+            (-f64::from_bits(1), 0.),
+        ] {
+            let value = DoubleFloat::from_compensated_sum(hi, lo);
+            let exact = Float::from(value).norm();
+            let upper = value.absolute_magnitude();
+            assert!(upper.is_finite(), "{hi:?}, {lo:?}");
+            assert!(as_float(upper) >= exact, "upper: {hi:?}, {lo:?}");
+            assert!(as_float(upper.next_down()) < exact, "lower: {hi:?}, {lo:?}");
+        }
+        let below = DoubleFloat::from_compensated_sum(1., -tiny);
+        assert_eq!(below.absolute_magnitude(), Magnitude::ONE);
+    }
+
+    #[test]
+    fn absolute_magnitude_handles_zero_and_nonfinite_components() {
+        for zero in [0., -0.] {
+            assert!(DoubleFloat::from(zero).absolute_magnitude().is_zero());
+        }
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                DoubleFloat::from(infinite)
+                    .absolute_magnitude()
+                    .is_infinite()
+            );
+        }
+        assert!(DoubleFloat::from(f64::NAN).absolute_magnitude().is_nan());
     }
 }

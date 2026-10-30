@@ -10,7 +10,9 @@ use crate::{
     printer::{self, PrintMode},
 };
 
-use super::{Complex, DoubleFloat, F64, Float, FloatLike, RealBall, SingleFloat};
+use super::{
+    Complex, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike, RealBall, SingleFloat,
+};
 use crate::domains::{
     EuclideanDomain, Field, InternalOrdering, Ring, RingPrinter, SampleableRing, SelfRing,
 };
@@ -243,12 +245,12 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
 
     #[inline(always)]
     fn is_zero(&self, a: &Self::Element) -> bool {
-        a.is_zero()
+        a.is_exact_zero()
     }
 
     #[inline(always)]
     fn is_one(&self, a: &Self::Element) -> bool {
-        a.is_one()
+        a.is_one() && !a.has_error()
     }
 
     #[inline(always)]
@@ -672,6 +674,113 @@ impl SelfRing for Complex<Float> {
     }
 }
 
+impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        self.re.is_exact_zero() && self.im.is_exact_zero()
+    }
+
+    #[inline(always)]
+    fn is_one(&self) -> bool {
+        SingleFloat::is_one(&self.re) && !self.re.has_error() && self.im.is_exact_zero()
+    }
+
+    #[inline(always)]
+    fn format<W: std::fmt::Write>(
+        &self,
+        opts: &crate::printer::PrintOptions,
+        mut state: crate::printer::PrintState,
+        f: &mut W,
+    ) -> Result<bool, fmt::Error> {
+        if opts.lossless_floats && opts.mode.is_symbolica() {
+            if state.in_sum {
+                f.write_char('+')?;
+            }
+            f.write_str("0f[")?;
+            self.re.write_lossless_component(f)?;
+            f.write_char(';')?;
+            self.im.write_lossless_component(f)?;
+            f.write_char(']')?;
+            return Ok(false);
+        }
+        let re_zero = self.re.is_exact_zero();
+        let im_zero = self.im.is_exact_zero();
+        let add_paren =
+            (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
+                || (state.in_exp || state.in_exp_base) && !im_zero;
+        if add_paren {
+            f.write_char('(')?;
+            state.in_sum = false;
+        }
+
+        if !re_zero || im_zero {
+            if self.re.get_num().is_fully_zero() {
+                if self.re.get_num().is_sign_negative() {
+                    f.write_str("-0.")?;
+                } else if state.in_sum {
+                    f.write_str("+0.")?;
+                } else {
+                    f.write_str("0.")?;
+                }
+            } else {
+                self.re.get_num().format(opts, state, f)?;
+            }
+
+            if opts.print_precision {
+                if let Some(p) = self.re.get_precision() {
+                    f.write_fmt(format_args!("`{p:.2}"))?;
+                } else if self.re.get_error_magnitude().is_zero() {
+                    f.write_str("`")?;
+                } else {
+                    f.write_fmt(format_args!("``{:.2}", self.re.get_accuracy()))?;
+                }
+            }
+        }
+
+        if !re_zero && !im_zero {
+            state.in_sum = true;
+        }
+
+        if !im_zero {
+            if self.im.get_num().is_fully_zero() {
+                if self.im.get_num().is_sign_negative() {
+                    f.write_str("-0.")?;
+                } else if state.in_sum {
+                    f.write_str("+0.")?;
+                } else {
+                    f.write_str("0.")?;
+                }
+            } else {
+                self.im.get_num().format(opts, state, f)?;
+            }
+
+            if opts.print_precision {
+                if let Some(p) = self.im.get_precision() {
+                    f.write_fmt(format_args!("`{p:.2}"))?;
+                } else if self.im.get_error_magnitude().is_zero() {
+                    f.write_str("`")?;
+                } else {
+                    f.write_fmt(format_args!("``{:.2}", self.im.get_accuracy()))?;
+                }
+            }
+
+            if opts.mode.is_symbolica() && opts.color_builtin_symbols {
+                f.write_str("\u{1b}\u{5b}\u{33}\u{35}\u{6d}\u{1d456}\u{1b}\u{5b}\u{30}\u{6d}")?;
+            } else if opts.mode.is_mathematica() {
+                f.write_char('I')?;
+            } else {
+                f.write_char('𝑖')?;
+            }
+        }
+
+        if add_paren {
+            f.write_char(')')?;
+        }
+
+        Ok(false)
+    }
+}
+
 impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
     #[inline(always)]
     fn rem(&self, a: &Self::Element, _: &Self::Element) -> Self::Element {
@@ -711,6 +820,28 @@ mod tests {
     use std::cmp::Ordering;
 
     use super::*;
+
+    #[test]
+    fn tracked_field_identities_require_exact_values() {
+        let zero = ErrorPropagatingFloat::<Float>::exact_zero(100);
+        let field = FloatField::from_rep(zero.clone());
+        let uncertain_zero = ErrorPropagatingFloat::new_with_absolute_error(Float::new(100), 1e-10);
+        let uncertain_unit =
+            ErrorPropagatingFloat::new_with_absolute_error(Float::with_val(100, 1), 1e-10);
+        assert!(field.is_zero(&zero));
+        assert!(field.is_one(&field.one()));
+        assert!(!field.is_zero(&uncertain_zero));
+        assert!(!field.is_one(&uncertain_unit));
+        assert!(field.try_inv(&uncertain_zero).is_none());
+
+        let uncertain_complex_zero = Complex::new(zero.clone(), uncertain_zero.clone());
+        let uncertain_complex_unit = Complex::new(uncertain_unit, zero.clone());
+        let uncertain_imaginary_unit = Complex::new(field.one(), uncertain_zero);
+        assert!(!SelfRing::is_zero(&uncertain_complex_zero));
+        assert!(!SelfRing::is_one(&uncertain_complex_unit));
+        assert!(!SelfRing::is_one(&uncertain_imaginary_unit));
+        assert!(SelfRing::is_one(&Complex::new(field.one(), zero)));
+    }
 
     #[test]
     fn real_float_embeddings_compare_finite_values() {

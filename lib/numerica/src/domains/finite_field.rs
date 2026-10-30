@@ -3,6 +3,8 @@
 mod geometric_sequence_kernels;
 mod montgomery;
 mod polynomial_kernels;
+#[cfg(target_arch = "x86_64")]
+mod remainder_kernels;
 
 use crate::domains::integer::Complete;
 use rand::Rng;
@@ -19,7 +21,9 @@ use crate::kernels::RingKernels;
 use crate::printer::{PrintOptions, PrintState};
 
 use super::integer::Z;
-use super::{EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing};
+use super::{
+    EuclideanDomain, Field, InternalOrdering, Ring, SampleableRing, UniformlySampleableRing,
+};
 
 const HENSEL_LIFTING_MASK: [u8; 128] = [
     255, 85, 51, 73, 199, 93, 59, 17, 15, 229, 195, 89, 215, 237, 203, 33, 31, 117, 83, 105, 231,
@@ -35,6 +39,41 @@ const HENSEL_LIFTING_MASK: [u8; 128] = [
 pub type Zp = FiniteField<u32>;
 /// A 64-bit integer finite field.
 pub type Zp64 = FiniteField<u64>;
+
+/// Distribution over canonical representatives of a finite field.
+///
+/// Convert inclusive ranges (`start..=end`) or half-open ranges (`start..end`)
+/// with `.into()`. Half-open ranges exclude `end`.
+///
+/// ```
+/// use numerica::domains::{SampleableRing, finite_field::{FiniteFieldCore, Zp}};
+/// let field = Zp::new(17);
+/// let value = field.sample(&mut rand::rng(), &(3..7).into());
+/// assert!((3..7).contains(&field.from_element(&value)));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FiniteFieldSamplingPolicy {
+    /// Uniformly sample the entire field, including zero.
+    #[default]
+    Full,
+    /// Uniformly sample the intersection of this range with `[0, p)`.
+    ///
+    /// Sampling panics if the intersection is empty.
+    Range(std::ops::RangeInclusive<Integer>),
+}
+
+impl<T: Into<Integer>> From<std::ops::RangeInclusive<T>> for FiniteFieldSamplingPolicy {
+    fn from(range: std::ops::RangeInclusive<T>) -> Self {
+        let (lower, upper) = range.into_inner();
+        Self::Range(lower.into()..=upper.into())
+    }
+}
+
+impl<T: Into<Integer>> From<std::ops::Range<T>> for FiniteFieldSamplingPolicy {
+    fn from(range: std::ops::Range<T>) -> Self {
+        Self::Range(range.start.into()..=range.end.into() - Integer::one())
+    }
+}
 
 pub trait ToFiniteField<UField: FiniteFieldWorkspace>
 where
@@ -171,11 +210,20 @@ pub struct FiniteField<UField> {
     is_prime: bool,
 }
 
+impl<UField: FiniteFieldWorkspace> UniformlySampleableRing for FiniteField<UField>
+where
+    Self: Ring,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        FiniteFieldSamplingPolicy::Full
+    }
+}
+
 impl<UField: FiniteFieldWorkspace> SampleableRing for FiniteField<UField>
 where
     Self: Ring,
 {
-    type SamplingPolicy = std::ops::RangeInclusive<i64>;
+    type SamplingPolicy = FiniteFieldSamplingPolicy;
 
     #[inline]
     fn sample<R: rand::RngCore + ?Sized>(
@@ -183,14 +231,23 @@ where
         rng: &mut R,
         policy: &Self::SamplingPolicy,
     ) -> Self::Element {
-        let characteristic = self.characteristic().to_i64().unwrap_or(i64::MAX);
-        let lower = (*policy.start()).max(0);
-        let upper = (*policy.end()).min(characteristic.saturating_sub(1));
+        let max = self.characteristic() - Integer::one();
+        let (lower, upper) = match policy {
+            FiniteFieldSamplingPolicy::Full => (Integer::zero(), max),
+            FiniteFieldSamplingPolicy::Range(range) => (
+                range.start().clone().max(Integer::zero()),
+                range.end().clone().min(max),
+            ),
+        };
         assert!(
             lower <= upper,
             "sampling policy has no field representatives"
         );
-        self.nth(rng.random_range(lower..=upper).into())
+        if let (Some(lower), Some(upper)) = (lower.to_u64(), upper.to_u64()) {
+            self.nth(rng.random_range(lower..=upper).into())
+        } else {
+            self.nth(Z.sample(rng, &(lower..=upper)))
+        }
     }
 }
 
@@ -476,6 +533,43 @@ impl RingOps<&FiniteFieldElement<u32>> for Zp {
 }
 
 impl Ring for Zp {
+    #[inline]
+    fn add_mul_assign_many<'a, I>(&self, accumulator: &mut Self::Element, products: I)
+    where
+        Self::Element: 'a,
+        I: IntoIterator<Item = (&'a Self::Element, &'a Self::Element)>,
+    {
+        let products = products.into_iter();
+        // Each raw product is below 2^64. With at most 2^30 products, the
+        // corrected sum fits u128 and its quotient by 2^32 fits u64. Short or
+        // unbounded chains retain the scalar implementation.
+        if !products
+            .size_hint()
+            .1
+            .is_some_and(|count| (4..=(1usize << 30)).contains(&count))
+        {
+            for (left, right) in products {
+                self.add_mul_assign(accumulator, left, right);
+            }
+            return;
+        }
+
+        // Products have scale R^2, whereas the initial accumulator has scale R.
+        let mut sum = u128::from(accumulator.0) << u32::BITS;
+        for (left, right) in products {
+            sum += u128::from(u64::from(left.0) * u64::from(right.0));
+        }
+        if sum < (u128::from(self.p) << u32::BITS) {
+            *accumulator = self.reduce_montgomery_product_sum(sum as u64);
+        } else {
+            // Cancel the low word, then reduce the remaining wide Montgomery
+            // quotient once. The bound above includes this correction term.
+            let correction = (sum as u32).wrapping_mul(self.m);
+            let reduced = (sum + u128::from(correction) * u128::from(self.p)) >> u32::BITS;
+            *accumulator = FiniteFieldElement((reduced as u64 % u64::from(self.p)) as u32);
+        }
+    }
+
     #[inline]
     fn zero(&self) -> Self::Element {
         FiniteFieldElement(0)
@@ -2444,9 +2538,17 @@ impl FiniteField<Integer> {
     }
 
     #[inline(always)]
-    fn montgomery_reduce_integer(&self, t: Integer) -> Integer {
-        let m = ((&t & &self.r_mask) * &self.m) & &self.r_mask;
-        let mut u = (t + m * &self.p) >> self.r_bits;
+    fn montgomery_reduce_integer(&self, mut t: Integer) -> Integer {
+        let mut m = &t & &self.r_mask;
+        m *= &self.m;
+        m &= &self.r_mask;
+        // Reuse the product's allocation and avoid materializing m * p.
+        Z.add_mul_assign(&mut t, &m, &self.p);
+        let mut u = match t {
+            // Integer's borrowed shift allocates; the owned backend shift reuses t.
+            Integer::Large(t) => Integer::from(t >> self.r_bits),
+            t => t >> self.r_bits,
+        };
         if u >= self.p {
             u -= &self.p;
         }
@@ -2536,15 +2638,22 @@ impl RingOps<FiniteFieldElement<Integer>> for FiniteField<Integer> {
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a = self.add(a.clone(), b);
+        a.0 += b.0;
+        if a.0 >= self.p {
+            a.0 -= &self.p;
+        }
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a = self.sub(a.clone(), b);
+        a.0 -= b.0;
+        if a.0.is_negative() {
+            a.0 += &self.p;
+        }
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: Self::Element) {
-        *a = self.mul(a.clone(), b);
+        a.0 *= b.0;
+        a.0 = self.montgomery_reduce_integer(std::mem::replace(&mut a.0, Integer::zero()));
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: Self::Element, c: Self::Element) {
@@ -2586,15 +2695,22 @@ impl RingOps<&FiniteFieldElement<Integer>> for FiniteField<Integer> {
     }
 
     fn add_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        *a = self.add(&*a, b);
+        a.0 += &b.0;
+        if a.0 >= self.p {
+            a.0 -= &self.p;
+        }
     }
 
     fn sub_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        *a = self.sub(&*a, b);
+        a.0 -= &b.0;
+        if a.0.is_negative() {
+            a.0 += &self.p;
+        }
     }
 
     fn mul_assign(&self, a: &mut Self::Element, b: &Self::Element) {
-        *a = self.mul(&*a, b);
+        a.0 *= &b.0;
+        a.0 = self.montgomery_reduce_integer(std::mem::replace(&mut a.0, Integer::zero()));
     }
 
     fn add_mul_assign(&self, a: &mut Self::Element, b: &Self::Element, c: &Self::Element) {
@@ -3891,9 +4007,10 @@ mod test {
 
     use super::{FiniteFieldCore, FiniteFieldElement, Zp};
     use crate::domains::{
-        Field, Ring, RingOps, SampleableRing,
+        Field, Ring, RingOps, SampleableRing, UniformlySampleableRing,
         finite_field::{
-            FiniteField, PrimitiveRootIterator, Zp64, Zp64DiscreteLogContext, ZpDiscreteLogContext,
+            FiniteField, PrimitiveRootIterator, Z2, Zp64, Zp64DiscreteLogContext,
+            ZpDiscreteLogContext,
         },
         integer::{Integer, MultiPrecisionInteger},
     };
@@ -3908,13 +4025,193 @@ mod test {
         let mut seen = [false; 3];
 
         for _ in 0..1000 {
-            let sample = field.sample(&mut rng, &(1..=49_999));
+            let sample = field.sample(&mut rng, &(1..=49_999).into());
             let value = field.to_integer(&sample).to_i64().unwrap() as usize;
             assert_ne!(value, 0);
             seen[value] = true;
         }
 
         assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn sampling_policy_default_covers_the_whole_field() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(2);
+        let mut seen = [false; 3];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample(&mut rng, &Default::default()));
+            seen[value as usize] = true;
+        }
+        assert_eq!(seen, [true; 3]);
+    }
+
+    #[test]
+    fn sampling_nonzero_covers_all_nonzero_representatives() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut seen = [false; 3];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample_uniform_nonzero(&mut rng));
+            assert_ne!(value, 0);
+            seen[value as usize] = true;
+            assert!(Z2.is_one(&Z2.sample_uniform_nonzero(&mut rng)));
+        }
+        assert_eq!(seen, [false, true, true]);
+    }
+
+    #[test]
+    fn sampling_policy_half_open_ranges_exclude_the_upper_bound() {
+        let field = Zp::new(17);
+        let mut rng = StdRng::seed_from_u64(8);
+        let policy = (3..7).into();
+        let mut seen = [false; 4];
+        for _ in 0..100 {
+            let value = field.from_element(&field.sample(&mut rng, &policy));
+            assert!((3..7).contains(&value));
+            seen[(value - 3) as usize] = true;
+        }
+        assert_eq!(seen, [true; 4]);
+        assert!(field.is_zero(&field.sample(&mut rng, &(i64::MIN..1).into())));
+        assert_eq!(
+            field.from_element(&field.sample(&mut rng, &(16..u64::MAX).into())),
+            16
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_rejects_empty_half_open_ranges() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(9), &(0u64..0).into());
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_half_open_minimum_bound_does_not_overflow() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(10), &(i64::MIN..i64::MIN).into());
+    }
+
+    #[test]
+    fn sampling_policy_supports_full_u64_representatives() {
+        let prime = 18_446_744_073_709_551_557;
+        let field = Zp64::new(prime);
+        let mut rng = StdRng::seed_from_u64(4);
+        for nonzero in [false, true] {
+            let mut seen_above_i64 = false;
+            for _ in 0..100 {
+                let sample = if nonzero {
+                    field.sample_uniform_nonzero(&mut rng)
+                } else {
+                    field.sample_uniform(&mut rng)
+                };
+                let value = field.from_element(&sample);
+                assert!(value < prime);
+                if nonzero {
+                    assert_ne!(value, 0);
+                }
+                seen_above_i64 |= value > i64::MAX as u64;
+            }
+            assert!(seen_above_i64);
+        }
+        for policy in [(prime - 1..=u64::MAX).into(), (prime - 1..prime).into()] {
+            assert_eq!(
+                field.from_element(&field.sample(&mut rng, &policy)),
+                prime - 1
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_policy_supports_arbitrary_precision_representatives() {
+        let prime = Integer::from(MultiPrecisionInteger::from(1) << 521u32) - Integer::one();
+        let field = FiniteField::<Integer>::new(prime.clone());
+        let mut rng = StdRng::seed_from_u64(5);
+        for nonzero in [false, true] {
+            let mut seen_above_u64 = false;
+            for _ in 0..100 {
+                let sample = if nonzero {
+                    field.sample_uniform_nonzero(&mut rng)
+                } else {
+                    field.sample_uniform(&mut rng)
+                };
+                let value = field.from_element(&sample);
+                assert!(value >= Integer::zero() && value < prime);
+                if nonzero {
+                    assert!(!value.is_zero());
+                }
+                seen_above_u64 |= value > Integer::from(u64::MAX);
+            }
+            assert!(seen_above_u64);
+        }
+        let last = &prime - Integer::one();
+        for policy in [
+            (last.clone()..=prime.clone()).into(),
+            (last.clone()..prime).into(),
+        ] {
+            assert_eq!(field.from_element(&field.sample(&mut rng, &policy)), last);
+        }
+    }
+
+    #[test]
+    fn sampling_policy_clips_negative_bounds() {
+        let field = Zp::new(3);
+        let mut rng = StdRng::seed_from_u64(6);
+        assert!(field.is_zero(&field.sample(&mut rng, &(-10..=0).into())));
+    }
+
+    #[test]
+    #[should_panic(expected = "sampling policy has no field representatives")]
+    fn sampling_policy_rejects_empty_intersections() {
+        Zp::new(3).sample(&mut StdRng::seed_from_u64(7), &(3..=10).into());
+    }
+
+    #[test]
+    fn zp_batched_add_products_matches_scalar_at_bounds() {
+        for prime in [3, 17, 65_000_011, 2_147_483_659, 4_294_967_291] {
+            let field = Zp::new(prime);
+            for length in [0, 1, 2, 3, 4, 5, 31, 257] {
+                for pattern in 0..3 {
+                    let products: Vec<_> = (0..length)
+                        .map(|i| {
+                            let (left, right) = match pattern {
+                                0 => (prime - 1, prime - 1),
+                                1 => (i as u32 % prime, (prime - 1) - i as u32 % prime),
+                                _ => (0, prime - 1),
+                            };
+                            (FiniteFieldElement(left), FiniteFieldElement(right))
+                        })
+                        .collect();
+                    for initial in [0, 1, prime - 1] {
+                        let initial = FiniteFieldElement(initial);
+                        let mut expected = initial;
+                        for (left, right) in &products {
+                            field.add_mul_assign(&mut expected, left, right);
+                        }
+                        let mut actual = initial;
+                        field.add_mul_assign_many(
+                            &mut actual,
+                            products.iter().map(|(left, right)| (left, right)),
+                        );
+                        assert_eq!(actual, expected, "prime {prime}, length {length}");
+
+                        let mut actual = initial;
+                        let mut iterator = products.iter().map(|(left, right)| (left, right));
+                        field.add_mul_assign_many(
+                            &mut actual,
+                            std::iter::from_fn(|| iterator.next()),
+                        );
+                        assert_eq!(actual, expected);
+
+                        let mut actual = initial;
+                        field.add_mul_assign_many(
+                            &mut actual,
+                            products.iter().filter(|_| false).map(|(a, b)| (a, b)),
+                        );
+                        assert_eq!(actual, initial);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -4200,6 +4497,142 @@ mod test {
             .unwrap();
         assert_eq!(field.from_element(&sum), 8);
         assert_eq!(current.map(|value| field.from_element(&value)), [6, 1]);
+    }
+
+    #[test]
+    fn dense_univariate_remainder_matches_known_quotient() {
+        let mut state = 0x9234_5678_9abc_def0u64;
+        for prime in [3, 17, 65_537, 2_147_483_659, 4_294_967_291] {
+            let field = Zp::new(prime);
+            let kernels = field.kernels();
+            let kernel = kernels.polynomial().unwrap();
+            for divisor_len in [1, 16, 32, 33, 34, 35, 36, 37, 64, 65, 130] {
+                for (quotient_len, monic) in [1, 2, 3, 8, 34]
+                    .into_iter()
+                    .flat_map(|len| [false, true].map(move |monic| (len, monic)))
+                {
+                    let mut next = || {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1);
+                        FiniteFieldElement::from_inner((state >> 32) as u32 % prime)
+                    };
+                    let mut divisor = (0..divisor_len).map(|_| next()).collect::<Vec<_>>();
+                    // Exercise monic divisors and residues near the word boundary.
+                    divisor[divisor_len - 1] = if monic {
+                        field.one()
+                    } else {
+                        FiniteFieldElement::from_inner(prime - 1)
+                    };
+                    let mut quotient = (0..quotient_len).map(|_| next()).collect::<Vec<_>>();
+                    quotient[quotient_len - 1] = field.one();
+                    let mut remainder = (0..divisor_len - 1).map(|_| next()).collect::<Vec<_>>();
+                    if quotient_len == 1 {
+                        remainder.fill(field.zero());
+                    }
+                    while remainder.last().is_some_and(|value| field.is_zero(value)) {
+                        remainder.pop();
+                    }
+                    let mut dividend = vec![field.zero(); divisor_len + quotient_len - 1];
+                    for (i, left) in divisor.iter().enumerate() {
+                        for (j, right) in quotient.iter().enumerate() {
+                            field.add_mul_assign(&mut dividend[i + j], left, right);
+                        }
+                    }
+                    for (output, value) in dividend.iter_mut().zip(&remainder) {
+                        field.add_assign(output, value);
+                    }
+                    let before = dividend.clone();
+                    let handled = kernel.try_dense_univariate_remainder(&mut dividend, &divisor);
+                    #[cfg(target_arch = "x86_64")]
+                    if divisor_len >= 33 && std::is_x86_feature_detected!("avx2") {
+                        assert!(handled);
+                    }
+                    if handled {
+                        assert_eq!(
+                            dividend, remainder,
+                            "prime={prime}, divisor={divisor_len}, quotient={quotient_len}, monic={monic}"
+                        );
+                    } else {
+                        assert_eq!(dividend, before);
+                    }
+                }
+            }
+
+            let mut dividend = vec![field.one(); 66];
+            let before = dividend.clone();
+            assert!(!kernel.try_dense_univariate_remainder(&mut dividend, &[]));
+            assert!(!kernel.try_dense_univariate_remainder(&mut dividend, &vec![field.zero(); 33]));
+            assert!(!kernel.try_dense_univariate_remainder(&mut dividend, &vec![field.one(); 67]));
+            assert_eq!(dividend, before);
+        }
+    }
+
+    #[test]
+    fn geometric_sequences_match_scalar_across_vector_boundaries() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for prime in [3, 17, 65_537, 2_147_483_659, 4_294_967_291] {
+            let field = Zp::new(prime);
+            for len in [
+                0, 1, 3, 4, 7, 15, 16, 17, 19, 31, 32, 33, 63, 64, 65, 127, 257,
+            ] {
+                let mut next = || {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    FiniteFieldElement::from_inner((state >> 32) as u32 % prime)
+                };
+                let mut current = (0..len)
+                    .map(|index| match index % 7 {
+                        0 => field.zero(),
+                        1 => FiniteFieldElement::from_inner(prime - 1),
+                        _ => next(),
+                    })
+                    .collect::<Vec<_>>();
+                let ratios = (0..len)
+                    .map(|index| match index % 5 {
+                        0 => FiniteFieldElement::from_inner(prime - 1),
+                        1 => field.zero(),
+                        _ => next(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut expected = current.clone();
+                for _ in 0..8 {
+                    let sum = expected.iter().fold(field.zero(), |sum, coefficient| {
+                        field.add(&sum, coefficient)
+                    });
+                    for (coefficient, ratio) in expected.iter_mut().zip(&ratios) {
+                        field.mul_assign(coefficient, ratio);
+                    }
+                    let actual = field
+                        .kernels()
+                        .geometric_sequences()
+                        .unwrap()
+                        .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                            current: &mut current,
+                            ratios: &ratios,
+                        })
+                        .unwrap();
+                    assert_eq!(actual, sum, "prime={prime}, len={len}");
+                    assert_eq!(current, expected, "prime={prime}, len={len}");
+                }
+                if len >= 16 {
+                    let before = current.clone();
+                    assert!(
+                        field
+                            .kernels()
+                            .geometric_sequences()
+                            .unwrap()
+                            .try_sum_and_advance_geometric_sequences(GeometricSequenceStepRequest {
+                                current: &mut current,
+                                ratios: &ratios[..len - 1]
+                            })
+                            .is_none()
+                    );
+                    assert_eq!(current, before);
+                }
+            }
+        }
     }
 
     #[test]
@@ -4620,6 +5053,90 @@ mod test {
     fn is_prime_field_rejects_large_composites() {
         let r = FiniteField::<Integer>::new(Integer::from_str("179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137219").unwrap());
         assert!(!r.is_prime_field(40));
+    }
+
+    #[test]
+    fn integer_field_assignment_matches_modular_arithmetic() {
+        for bits in [5u32, 32, 63, 64, 65, 96, 127, 128, 129, 256, 512] {
+            let modulus = Integer::from((MultiPrecisionInteger::from(1) << bits) - 17i64);
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let values = [Integer::zero(), Integer::one(), &modulus / 2, &modulus - 1];
+            for left in &values {
+                for right in &values {
+                    let a = field.to_element(left.clone());
+                    let b = field.to_element(right.clone());
+                    for owned in [false, true] {
+                        let mut sum = a.clone();
+                        let mut difference = a.clone();
+                        let mut product = a.clone();
+                        if owned {
+                            field.add_assign(&mut sum, b.clone());
+                            field.sub_assign(&mut difference, b.clone());
+                            field.mul_assign(&mut product, b.clone());
+                        } else {
+                            field.add_assign(&mut sum, &b);
+                            field.sub_assign(&mut difference, &b);
+                            field.mul_assign(&mut product, &b);
+                        }
+                        assert_eq!(field.from_element(&sum), (left + right) % &modulus);
+                        assert_eq!(field.from_element(&difference), (left - right) % &modulus);
+                        assert_eq!(field.from_element(&product), (left * right) % &modulus);
+                        for initial in &values {
+                            let mut sum = field.to_element(initial.clone());
+                            let mut difference = sum.clone();
+                            if owned {
+                                field.add_mul_assign(&mut sum, a.clone(), b.clone());
+                                field.sub_mul_assign(&mut difference, a.clone(), b.clone());
+                            } else {
+                                field.add_mul_assign(&mut sum, &a, &b);
+                                field.sub_mul_assign(&mut difference, &a, &b);
+                            }
+                            assert_eq!(
+                                field.from_element(&sum),
+                                (initial + left * right) % &modulus,
+                            );
+                            assert_eq!(
+                                field.from_element(&difference),
+                                (initial - left * right) % &modulus,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_montgomery_reduction_matches_modular_reference_at_bounds() {
+        for bits in [5u32, 32, 63, 64, 65, 96, 127, 128, 129, 192, 256, 512, 4096] {
+            let modulus = Integer::from((MultiPrecisionInteger::from(1) << bits) - 17i64);
+            let field = FiniteField::<Integer>::new_non_prime(modulus.clone());
+            let radix = Integer::from(MultiPrecisionInteger::from(1) << field.r_bits);
+            let inverse = radix.mod_inverse(&modulus);
+            // The bulk convolution kernel also supplies sums larger than p^2,
+            // up to the Montgomery reduction bound p * R.
+            for value in [
+                Integer::zero(),
+                Integer::one(),
+                &modulus - 1,
+                modulus.clone(),
+                &modulus * &modulus - 1,
+                &modulus * &radix - 1,
+            ] {
+                let expected = (&value * &inverse) % &modulus;
+                let reduced = field.montgomery_reduce_integer(value);
+                assert_eq!(reduced, expected, "bits={bits}");
+                assert!(!reduced.is_negative() && reduced < modulus);
+            }
+            for value in [Integer::from(-1), Integer::zero(), &modulus - 1] {
+                let element = field.to_element(value.clone());
+                assert_eq!(field.from_element(&element), &value % &modulus);
+                assert_eq!(
+                    field.from_element(&field.mul(&element, &element)),
+                    (&value * &value) % &modulus,
+                );
+            }
+        }
     }
 
     #[test]

@@ -7,15 +7,15 @@ use std::{
 
 use rand::Rng;
 
-use super::{Complex, Float, FloatLike, Real, RealLike, RoundingDirection, SingleFloat};
+use super::{Complex, Float, FloatLike, Magnitude, Real, RealLike, RoundingDirection, SingleFloat};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A closed real interval represented by a center and a nonnegative radius.
 ///
 /// The ball represents all numbers in `[center - radius, center + radius]`.
-/// Addition, subtraction, multiplication, division, and inversion use directed
-/// rounding and return certified enclosures. Other operations are not
-/// currently certifying.
+/// Addition, subtraction, multiplication, division, inversion, and the square
+/// root of finite nonnegative balls use directed rounding and return certified
+/// enclosures. Other operations are not currently certifying.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -580,6 +580,25 @@ impl SingleFloat for RealBall {
 }
 
 impl RealLike for RealBall {
+    /// Bound the absolute value of every point in the ball, including its radius.
+    fn absolute_magnitude(&self) -> Magnitude {
+        self.center.absolute_magnitude() + self.radius.absolute_magnitude()
+    }
+
+    /// Bound the distance of the whole ball from zero from below.
+    fn absolute_magnitude_lower(&self) -> Magnitude {
+        let zero = self.center.zero();
+        let lower = self.lower_bound();
+        if lower > zero {
+            return lower.absolute_magnitude().next_down();
+        }
+        let upper = self.upper_bound();
+        if upper < zero {
+            return upper.absolute_magnitude().next_down();
+        }
+        Magnitude::ZERO
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.center.to_usize_clamped()
     }
@@ -590,6 +609,54 @@ impl RealLike for RealBall {
 
     fn round_to_nearest_integer(&self) -> Integer {
         self.center.round_to_nearest_integer()
+    }
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::{Float, Magnitude, RealBall, RealLike};
+
+    #[test]
+    fn absolute_magnitude_includes_radius_and_preserves_extended_range() {
+        let tiny = Float::parse("1e-1000", Some(160)).unwrap();
+        let large = Float::parse("1e1000", Some(160)).unwrap();
+        for value in [tiny, large] {
+            let expected = value.absolute_magnitude();
+            let zero = Float::with_val(160, 0);
+            assert_eq!(
+                RealBall::new(zero, value.clone()).absolute_magnitude(),
+                expected
+            );
+            assert_eq!(RealBall::exact(-value).absolute_magnitude(), expected);
+        }
+        let ball = RealBall::new(Float::with_val(160, -3), Float::with_val(160, 4));
+        assert_eq!(ball.absolute_magnitude(), Magnitude::from_f64(7.0));
+        assert_eq!(
+            RealBall::exact(Float::with_val(160, 0)).absolute_magnitude(),
+            Magnitude::ZERO
+        );
+    }
+
+    #[test]
+    fn absolute_magnitude_lower_bounds_the_closest_point_to_zero() {
+        for center in [-1, 0, 1] {
+            let ball = RealBall::new(Float::with_val(160, center), Float::with_val(160, 1));
+            assert_eq!(ball.absolute_magnitude_lower(), Magnitude::ZERO);
+        }
+        for center in [-3, 3] {
+            let ball = RealBall::new(Float::with_val(160, center), Float::with_val(160, 1));
+            let lower = ball.absolute_magnitude_lower();
+            assert!(lower > Magnitude::ZERO);
+            assert!(lower <= Magnitude::from_f64(2.0));
+            assert!(lower < ball.absolute_magnitude().next_down());
+        }
+        let tiny = Float::parse("1e-1000", Some(160)).unwrap();
+        let ball = RealBall::exact(tiny.clone());
+        assert_eq!(
+            ball.absolute_magnitude_lower(),
+            tiny.absolute_magnitude().next_down()
+        );
+        assert!(ball.absolute_magnitude_lower() > Magnitude::ZERO);
     }
 }
 
@@ -638,10 +705,40 @@ impl Real for RealBall {
     }
 
     fn sqrt(&self) -> Self {
-        if self.lower_bound() < self.center.zero() {
-            return Self::invalid(self.get_precision());
+        let prec = self.get_precision();
+        let lower = self.lower_bound();
+        let upper = self.upper_bound();
+        if !lower.is_finite() || !upper.is_finite() || lower < self.center.zero() {
+            return Self::invalid(prec);
         }
-        self.monotone_increasing(Float::sqrt)
+        // For any positive guess g and exact a >= 0, sqrt(a) lies between
+        // g and a/g. Thus the rounded native sqrt need only supply a guess;
+        // directed division makes each selected endpoint an enclosure.
+        let bound = |value: &Float, rounding| {
+            if value.is_zero() {
+                return Some(value.clone());
+            }
+            let guess = value.sqrt();
+            if !guess.is_finite() || guess <= guess.zero() {
+                return None;
+            }
+            let quotient = value.div_round(&guess, prec, rounding);
+            if !quotient.is_finite() {
+                return None;
+            }
+            Some(match rounding {
+                RoundingDirection::Down if quotient < guess => quotient,
+                RoundingDirection::Up if quotient > guess => quotient,
+                _ => guess,
+            })
+        };
+        match (
+            bound(&lower, RoundingDirection::Down),
+            bound(&upper, RoundingDirection::Up),
+        ) {
+            (Some(lower), Some(upper)) => Self::from_outward_bounds(lower, upper, prec),
+            _ => Self::invalid(prec),
+        }
     }
 
     fn log(&self) -> Self {
@@ -1015,5 +1112,55 @@ mod tests {
         assert!(left.re.is_strictly_positive());
         assert!(!left.re.is_strictly_negative());
         assert!(left.is_disjoint(&right));
+    }
+}
+
+#[cfg(test)]
+mod sqrt_tests {
+    use crate::domains::{
+        float::{Float, Real, RealBall, SingleFloat},
+        rational::Rational,
+    };
+
+    fn assert_sqrt_enclosure(ball: &RealBall, lower: &Rational, upper: &Rational) {
+        let result = ball.sqrt();
+        assert!(result.is_finite(), "{ball} => {result}");
+        let lo = result.lower_bound().to_rational();
+        let hi = result.upper_bound().to_rational();
+        // Exact rational squares test both irrational root bounds without using
+        // an approximate higher-precision square root as the reference.
+        assert!(lo <= 0 || &lo * &lo <= *lower, "{lo}^2 exceeds {lower}");
+        assert!(hi >= 0 && &hi * &hi >= *upper, "{hi}^2 is below {upper}");
+        // Also enclose the represented interval, which may be wider than the
+        // original rational constructor bounds.
+        let represented_lower = ball.lower_bound().to_rational();
+        let represented_upper = ball.upper_bound().to_rational();
+        assert!(lo <= 0 || &lo * &lo <= represented_lower);
+        assert!(hi >= 0 && &hi * &hi >= represented_upper);
+    }
+
+    #[test]
+    fn exact_irrational_root_has_a_certified_nonzero_radius() {
+        for precision in [8, 24, 96, 256] {
+            let input = RealBall::exact(Float::with_val(precision, 2));
+            assert_sqrt_enclosure(&input, &2.into(), &2.into());
+            assert!(!input.sqrt().radius.is_zero());
+        }
+    }
+
+    #[test]
+    fn negative_or_nonfinite_domains_report_invalid_instead_of_fabricating_bounds() {
+        for (center, radius) in [
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (f64::INFINITY, 0.0),
+            (f64::NEG_INFINITY, 0.0),
+            (f64::NAN, 0.0),
+            (1.0, f64::INFINITY),
+            (1.0, f64::NAN),
+        ] {
+            let input = RealBall::new(Float::with_val(96, center), Float::with_val(96, radius));
+            assert!(!input.sqrt().is_finite());
+        }
     }
 }

@@ -14,11 +14,13 @@ mod double;
 mod error;
 mod field;
 mod interval;
+mod magnitude;
 mod multiprecision;
 mod native;
 #[cfg(feature = "python")]
 mod python;
 mod rational;
+mod serialization;
 mod simd;
 
 #[cfg(test)]
@@ -32,6 +34,7 @@ pub use double::DoubleFloat;
 pub use error::ErrorPropagatingFloat;
 pub use field::{FloatComparisonError, FloatField};
 pub use interval::{ComplexBall, RealBall};
+pub use magnitude::Magnitude;
 pub use multiprecision::Float;
 pub use native::F64;
 #[cfg(feature = "python")]
@@ -84,6 +87,17 @@ pub trait FloatLike:
     #[inline]
     fn needs_rescaling(&self) -> bool {
         false
+    }
+
+    /// Whether this value carries an explicit nonzero uncertainty estimate.
+    /// Ordinary floating point values do not store such an estimate.
+    fn has_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this value is zero without any explicitly tracked uncertainty.
+    fn is_exact_zero(&self) -> bool {
+        self.is_fully_zero() && !self.has_error()
     }
 
     /// Set this value from another value. May reuse memory.
@@ -140,7 +154,45 @@ pub trait SingleFloat: FloatLike {
 pub trait RealLike: SingleFloat {
     fn to_usize_clamped(&self) -> usize;
     fn to_f64(&self) -> f64;
+
+    /// Estimate the absolute value as a nonnegative, upward-rounded magnitude.
+    ///
+    /// The default bounds the result of conversion to `f64`. Custom types with
+    /// greater precision or a wider exponent range must override it to avoid
+    /// losing low bits or underflowing to zero during that conversion. Built-in
+    /// `Float` reads its backend representation directly; `RealBall` bounds the
+    /// absolute value of every point in the ball, including its radius.
+    #[inline]
+    fn absolute_magnitude(&self) -> Magnitude {
+        Magnitude::from_f64(self.to_f64())
+    }
+
+    /// Bound the absolute value from below for use in denominators.
+    ///
+    /// The default assumes `absolute_magnitude` rounds a point value upward
+    /// once. Types returning a looser upper bound must override this method.
+    /// For intervals, this bounds the absolute value of the closest point to zero.
+    #[inline]
+    fn absolute_magnitude_lower(&self) -> Magnitude {
+        self.absolute_magnitude().next_down()
+    }
+
+    /// Absolute rounding floor for operations that produce a nonzero value.
+    /// Domains with subnormal numbers override this with half their smallest
+    /// positive spacing; relative epsilon alone is insufficient near underflow.
+    #[inline]
+    fn minimum_roundoff(&self) -> Magnitude {
+        Magnitude::ZERO
+    }
+
     fn round_to_nearest_integer(&self) -> Integer;
+
+    /// Construct zero with a binary precision hint, where supported.
+    fn zero_with_prec_hint(prec: u32) -> Self {
+        let mut zero = Self::new_zero();
+        zero.set_precision(prec);
+        zero
+    }
 }
 
 /// A float that can be constructed without any parameters, such as `f64` (excluding multi-precision floats).
@@ -230,6 +282,15 @@ pub trait Real: FloatLike {
         // cancellation-induced precision loss in dynamically sized floats.
         let two = self.from_usize(2);
         (self.clone() / (self.one() + self).sqrt() / &two).asinh() * two
+    }
+
+    /// Optional component-uncertainty handling for the principal complex square
+    /// root near its branch cut. Return replacement real and imaginary components,
+    /// or `None` to use the ordinary complex formula. Scalar domains without
+    /// explicit uncertainty need not override this hook.
+    #[inline]
+    fn sqrt_complex_branch_cut(&self, _imaginary: &Self) -> Option<(Self, Self)> {
+        None
     }
 
     fn sqrt(&self) -> Self;

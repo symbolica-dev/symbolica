@@ -132,6 +132,11 @@ impl SingleFloat for f64 {
 }
 
 impl RealLike for f64 {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
     fn to_usize_clamped(&self) -> usize {
         *self as usize
     }
@@ -330,7 +335,7 @@ impl From<Rational> for f64 {
 #[repr(transparent)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct F64(pub f64);
 
 impl F64 {
@@ -600,6 +605,11 @@ impl SingleFloat for F64 {
 }
 
 impl RealLike for F64 {
+    #[inline]
+    fn minimum_roundoff(&self) -> super::Magnitude {
+        super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
+    }
+
     fn to_usize_clamped(&self) -> usize {
         self.0.to_usize_clamped()
     }

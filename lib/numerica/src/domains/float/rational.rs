@@ -2,8 +2,8 @@ use std::fmt::LowerExp;
 
 use rand::Rng;
 
-use super::Float;
 use super::{Constructible, FloatLike, RealLike, SingleFloat};
+use super::{Float, Magnitude, RoundingDirection};
 use crate::domains::{integer::Integer, rational::Rational};
 
 impl TryFrom<Float> for Rational {
@@ -146,6 +146,17 @@ impl SingleFloat for Rational {
 }
 
 impl RealLike for Rational {
+    fn absolute_magnitude(&self) -> Magnitude {
+        // Rounding away from zero before reducing the significand preserves a
+        // conservative bound even when the rational is outside binary64 range.
+        let direction = if self.is_negative() {
+            RoundingDirection::Down
+        } else {
+            RoundingDirection::Up
+        };
+        Float::from_rational_round(self, 32, direction).absolute_magnitude()
+    }
+
     fn to_usize_clamped(&self) -> usize {
         f64::from(self).to_usize_clamped()
     }
@@ -157,5 +168,32 @@ impl RealLike for Rational {
     #[inline(always)]
     fn round_to_nearest_integer(&self) -> Integer {
         self.round_to_nearest_integer()
+    }
+}
+
+#[cfg(test)]
+mod magnitude_tests {
+    use super::{Integer, Magnitude, Rational, RealLike};
+
+    #[test]
+    fn absolute_magnitude_preserves_rational_range_and_discarded_bits() {
+        let large: Rational = Integer::from(2).pow(4000).into();
+        let small = large.inv();
+        assert_eq!(large.absolute_magnitude(), Magnitude::ONE.scale_pow2(4000));
+        assert_eq!(small.absolute_magnitude(), Magnitude::ONE.scale_pow2(-4000));
+        assert_eq!(small.absolute_magnitude(), small.neg().absolute_magnitude());
+
+        let tiny: Rational = (Integer::one(), Integer::from(2).pow(100)).into();
+        let just_above_one = Rational::one() + tiny;
+        assert_eq!(just_above_one.to_f64(), 1.0);
+        assert_eq!(
+            just_above_one.absolute_magnitude(),
+            Magnitude::from_parts((1 << 31) + 1, 0)
+        );
+        assert_eq!(
+            just_above_one.neg().absolute_magnitude(),
+            just_above_one.absolute_magnitude()
+        );
+        assert_eq!(Rational::zero().absolute_magnitude(), Magnitude::ZERO);
     }
 }
