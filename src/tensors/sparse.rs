@@ -1639,7 +1639,7 @@ impl<F: Field> SparseRowReducer<F> {
                 let end = ret.u.row_ptrs[ret.u.nrows as usize];
                 if end - start == 1
                     && ret.u.col_idcs[start as usize] + 1 == ret.u.ncols
-                    && ret.u.field.is_zero(&ret.u.values[start as usize])
+                    && !ret.u.field.is_zero(&ret.u.values[start as usize])
                 {
                     //row has only one entry and it's on the last column
                     return None;
@@ -1677,7 +1677,7 @@ impl<F: Field> SparseRowReducer<F> {
                 let end = ret.u.row_ptrs[ret.u.nrows as usize];
                 if end - start == 1
                     && ret.u.col_idcs[start as usize] + 1 == ret.u.ncols
-                    && ret.u.field.is_zero(&ret.u.values[start as usize])
+                    && !ret.u.field.is_zero(&ret.u.values[start as usize])
                 {
                     //row has only one entry and it's on the last column
                     return None;
@@ -2859,6 +2859,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sparse_solvers_reject_inconsistent_systems() {
+        for (rows, rhs) in [
+            (vec![vec![0]], vec![1]),
+            (vec![vec![1], vec![1]], vec![1, 2]),
+            (vec![vec![1, 0], vec![1, 0]], vec![1, 2]),
+        ] {
+            let matrix = Matrix::from_nested_vec(
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(Into::into).collect())
+                    .collect(),
+                Q,
+            )
+            .unwrap()
+            .to_sparse();
+            let rhs = SparseVector::from_pairs(
+                rhs.len() as u32,
+                rhs.into_iter()
+                    .enumerate()
+                    .map(|(row, value)| (row as u32, value.into()))
+                    .collect(),
+                Q,
+            );
+            assert!(matches!(
+                matrix.clone().solve(rhs.clone()),
+                Err(SparseMatrixError::Inconsistent)
+            ));
+            assert!(matches!(
+                matrix.solve_parallel(rhs),
+                Err(SparseMatrixError::Inconsistent)
+            ));
+        }
+    }
+
+    #[test]
+    fn checked_sparse_reducers_reject_inconsistent_augmented_rows() {
+        for rows in [vec![vec![0, 1]], vec![vec![1, 0, 1], vec![1, 0, 2]]] {
+            let augmented = Matrix::from_nested_vec(
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(Into::into).collect())
+                    .collect(),
+                Q,
+            )
+            .unwrap()
+            .to_sparse();
+            for mode in [LuLMode::None, LuLMode::Pattern, LuLMode::Full] {
+                assert!(SparseRowReducer::from_matrix_checked(&augmented, mode).is_none());
+                assert!(
+                    SparseRowReducer::from_matrix_checked_with_back_subs(&augmented, mode)
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_sparse_reducers_accept_consistent_zero_and_dependent_rows() {
+        for rows in [
+            vec![vec![0, 0]],
+            vec![vec![1, 0, 1], vec![1, 0, 1]],
+            vec![vec![1, 0, 0], vec![0, 1, 2]],
+        ] {
+            let augmented = Matrix::from_nested_vec(
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(Into::into).collect())
+                    .collect(),
+                Q,
+            )
+            .unwrap()
+            .to_sparse();
+            for mode in [LuLMode::None, LuLMode::Pattern, LuLMode::Full] {
+                assert!(SparseRowReducer::from_matrix_checked(&augmented, mode).is_some());
+                assert!(
+                    SparseRowReducer::from_matrix_checked_with_back_subs(&augmented, mode)
+                        .is_some()
+                );
+            }
+        }
+        let zero_matrix = SparseMatrix::new(1, 1, Q);
+        let zero_rhs = SparseVector::new(1, Q);
+        assert!(matches!(
+            zero_matrix.clone().solve(zero_rhs.clone()),
+            Err(SparseMatrixError::Underdetermined { rank: 0, .. })
+        ));
+        assert!(matches!(
+            zero_matrix.solve_parallel(zero_rhs),
+            Err(SparseMatrixError::Underdetermined { rank: 0, .. })
+        ));
+    }
     #[test]
     fn solve() {
         // sparse 5x5 matrix triplets

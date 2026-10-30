@@ -133,9 +133,27 @@ pub trait GeometricSequenceKernels<E> {
 
 /// Optional coefficient-domain kernels for polynomial multiplication and exact division.
 ///
-/// A ring returns this capability through [`crate::domains::Ring::kernels`]. Returning `None` from
-/// an operation requests the generic polynomial implementation.
+/// A ring returns this capability through [`crate::domains::Ring::kernels`]. Declining an
+/// operation requests the generic polynomial implementation.
 pub trait PolynomialKernels<E> {
+    /// Replace a dense univariate dividend by its remainder modulo `divisor`.
+    ///
+    /// Coefficients are ordered from constant to leading coefficient. A successful
+    /// operation removes trailing zero coefficients, including all coefficients
+    /// for a zero remainder. The divisor must have a nonzero leading coefficient.
+    /// Return `false` without changing the dividend when declining the operation
+    /// or when the divisor is empty or has a zero leading coefficient.
+    fn try_dense_univariate_remainder(&self, _dividend: &mut Vec<E>, _divisor: &[E]) -> bool {
+        false
+    }
+
+    /// Prefer Brown's subresultant sequence to Lazard-Ducos for a univariate resultant.
+    /// Coefficients are dense and ordered from constant to leading coefficient.
+    /// This changes only the algorithm; both paths compute the exact resultant.
+    fn prefer_brown_resultant(&self, _left: &[E], _right: &[E]) -> bool {
+        false
+    }
+
     /// Multiply coefficients whose exponents have already been mapped to additive dense indices.
     ///
     /// On success, the result contains only nonzero `(dense_index, coefficient)` pairs in strictly

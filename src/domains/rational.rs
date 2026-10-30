@@ -13,7 +13,7 @@ use crate::{
 
 use super::{
     EuclideanDomain, Field, InternalOrdering, OrderedRing, Ring, SampleableRing, SelfRing,
-    UpgradeToField,
+    UniformlySampleableRing, UpgradeToField,
     finite_field::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
@@ -630,6 +630,15 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
 
     fn has_independent_elements(&self) -> bool {
         self.ring.has_independent_elements()
+    }
+}
+
+impl<R> UniformlySampleableRing for FractionField<R>
+where
+    R: Field + FractionNormalization + UniformlySampleableRing,
+{
+    fn uniform_sampling_policy(&self) -> Self::SamplingPolicy {
+        self.ring.uniform_sampling_policy()
     }
 }
 
