@@ -985,3 +985,35 @@ fn univariate_divisibility_clears_number_field_denominators() {
         )
     );
 }
+
+#[test]
+fn polynomial_power_variable_print() {
+    let reciprocal = MultivariatePolynomial::<_, u16>::new(
+        &Q,
+        None,
+        Arc::new(vec![PolyVariable::Power(parse!("x^-1"))]),
+    )
+    .monomial(1.into(), vec![1]);
+    assert_eq!(reciprocal.to_string(), "1/x");
+
+    let radical = parse!("sqrt(2)");
+    let mut modulus = MultivariatePolynomial::<_, u16>::new(
+        &Q,
+        None,
+        Arc::new(vec![PolyVariable::Power(radical)]),
+    );
+    let linear = modulus.monomial(1.into(), vec![1]);
+    assert_eq!(linear.to_string(), "2^(1/2)");
+    let mixed = &linear + &modulus.monomial(1.into(), vec![2]);
+    let mixed_text = mixed.to_string();
+    assert!(mixed_text.contains("(2^(1/2))^2"), "{mixed_text}");
+    assert!(
+        mixed_text.contains("2^(1/2)+") || mixed_text.ends_with("+2^(1/2)"),
+        "{mixed_text}"
+    );
+    modulus.append_monomial((-2).into(), &[0]);
+    modulus.append_monomial(1.into(), &[2]);
+    let field = AlgebraicExtension::new(modulus);
+    let text = field.to_string();
+    assert!(text.contains("(2^(1/2))^2"), "{text}");
+}

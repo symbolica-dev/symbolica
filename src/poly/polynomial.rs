@@ -1633,17 +1633,30 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> SelfRing for MultivariatePolynomial
         }
         let in_product = state.in_product;
 
-        let var_map: Vec<String> = self
+        // Cache both forms: only variables raised to a further power need
+        // the grouping required for a power base.
+        let var_map: Vec<(String, String)> = self
             .variables()
             .as_ref()
             .iter()
             .map(|v| {
-                v.format_string(
-                    opts,
-                    PrintState {
-                        in_exp: true,
-                        ..state
-                    },
+                (
+                    v.format_string(
+                        opts,
+                        PrintState {
+                            in_exp: false,
+                            in_exp_base: false,
+                            ..state
+                        },
+                    ),
+                    v.format_string(
+                        opts,
+                        PrintState {
+                            in_exp: false,
+                            in_exp_base: true,
+                            ..state
+                        },
+                    ),
                 )
             })
             .collect();
@@ -1667,9 +1680,10 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> SelfRing for MultivariatePolynomial
                     f.write_char(opts.multiplication_operator)?;
                 }
 
-                f.write_str(var_id)?;
+                let powered = e.to_i32() != 1;
+                f.write_str(if powered { &var_id.1 } else { &var_id.0 })?;
 
-                if e.to_i32() != 1 {
+                if powered {
                     if opts.mode.is_latex() {
                         write!(f, "^{{{e}}}")?;
                     } else if opts.double_star_for_exponentiation {
