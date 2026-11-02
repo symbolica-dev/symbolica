@@ -36,6 +36,69 @@ pub(super) struct ProgramView<'a, T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// The symbols this evaluator references: built-in functions of its
+    /// instructions and function bodies, its external and registered constant
+    /// functions with the symbols in their tags, and those of its hot start.
+    pub(crate) fn referenced_symbols(&self) -> ahash::HashSet<Symbol> {
+        fn instructions(code: &[(Instr, ComplexPhase)], symbols: &mut ahash::HashSet<Symbol>) {
+            for (instruction, _) in code {
+                if let Instr::BuiltinFun(_, symbol, _) = instruction {
+                    symbols.insert(*symbol);
+                }
+            }
+        }
+        fn tree<C>(expression: &Expression<C>, symbols: &mut ahash::HashSet<Symbol>) {
+            match expression {
+                Expression::Const(..)
+                | Expression::Parameter(..)
+                | Expression::ReadArg(..)
+                | Expression::SubExpression(..) => {}
+                Expression::Eval(_, _, arguments)
+                | Expression::Add(_, arguments)
+                | Expression::Mul(_, arguments) => {
+                    arguments.iter().for_each(|argument| tree(argument, symbols))
+                }
+                Expression::Pow(_, base) => tree(&base.0, symbols),
+                Expression::Powf(_, pair) => {
+                    tree(&pair.0, symbols);
+                    tree(&pair.1, symbols);
+                }
+                Expression::BuiltinFun(_, symbol, argument) => {
+                    symbols.insert(*symbol);
+                    tree(argument, symbols);
+                }
+                Expression::Fun(_, symbol, tags, arguments) => {
+                    symbols.insert(*symbol);
+                    for tag in tags {
+                        symbols.extend(tag.get_all_symbols(true));
+                    }
+                    arguments.iter().for_each(|argument| tree(argument, symbols));
+                }
+                Expression::IfElse(_, branches) => {
+                    tree(&branches.0, symbols);
+                    tree(&branches.1, symbols);
+                    tree(&branches.2, symbols);
+                }
+            }
+        }
+
+        let mut symbols = ahash::HashSet::default();
+        instructions(&self.instructions, &mut symbols);
+        for function in &self.external_fns {
+            symbols.insert(function.symbol);
+            for tag in &function.tags {
+                symbols.extend(tag.get_all_symbols(true));
+            }
+            if let Some(body) = &function.body {
+                instructions(&body.instructions, &mut symbols);
+            }
+        }
+        for expression in self.settings.hot_start.iter().flatten() {
+            tree(expression, &mut symbols);
+        }
+        symbols
+    }
+
     pub(super) fn program(&self) -> ProgramView<'_, T> {
         ProgramView {
             instructions: &self.instructions,
