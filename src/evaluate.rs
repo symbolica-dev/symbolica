@@ -798,6 +798,81 @@ mod test {
     }
 
     #[test]
+    fn completed_shared_conditionals_keep_captures_and_mixed_dual_components() {
+        let params = [parse!("c"), parse!("x"), parse!("y")];
+        let build = |policy| {
+            parse!("conditional_cache::f(c,x)+conditional_cache::f(c,x+1)")
+                .evaluator(&params)
+                .add_function_with_options(
+                    symbol!("conditional_cache::f"),
+                    vec![symbol!("b"), symbol!("z")],
+                    parse!("(if(b,1/z,z+y)+z)*(if(b,1/z,z+y)+y)"),
+                    FunctionRegistrationOptions::new().inlining(policy),
+                )
+                .unwrap()
+                .horner_iterations(0)
+                .build()
+                .unwrap()
+        };
+        let exact = build(InliningPolicy::Never);
+        let exported = exact.export_instructions();
+        assert_eq!(exported.sub_evaluators.len(), 1);
+        let helper = &exported.sub_evaluators[0];
+        assert_eq!(helper.input_count, 3); // b, z, captured y
+        assert_eq!(
+            helper
+                .instructions
+                .instructions
+                .iter()
+                .filter(|i| matches!(i, Instruction::IfElse(..)))
+                .count(),
+            1
+        );
+        let dual = Dualizer::new(
+            HyperDual::<Complex<Rational>>::new(vec![
+                vec![0, 0],
+                vec![1, 0],
+                vec![0, 1],
+                vec![2, 0],
+                vec![1, 1],
+            ]),
+            vec![],
+        );
+        let mut shared = exact
+            .vectorize(&dual)
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        let mut inline = build(InliningPolicy::Always)
+            .vectorize(&dual)
+            .unwrap()
+            .map_coeff(&|c| c.re.to_f64());
+        let mut batch = shared.clone().into_batch_evaluator();
+        let mut inputs = Vec::new();
+        let mut expected = Vec::new();
+        for (c, x, y) in [(0., 0., 2.), (1., 2., 3.), (0., -1., 4.), (1., -3., -2.)] {
+            let row = [c, 0., 0., 0., 0., x, 1., 0., 0., 0., y, 0., 1., 0., 0.];
+            let mut output = [0.; 5];
+            let mut reference = [0.; 5];
+            shared.evaluate(&row, &mut output);
+            inline.evaluate(&row, &mut reference);
+            for (actual, reference) in output.iter().zip(reference) {
+                assert!(actual.is_finite() && (actual - reference).abs() < 1e-11);
+            }
+            inputs.extend(row);
+            expected.extend(reference);
+        }
+        for rows in [4, 0, 1, 3, 4] {
+            let mut output = vec![f64::NAN; rows * 5];
+            batch
+                .evaluate_batch(&inputs[..rows * 15], &mut output, rows)
+                .unwrap();
+            for (actual, reference) in output.iter().zip(&expected) {
+                assert!(actual.is_finite() && (actual - reference).abs() < 1e-11);
+            }
+        }
+    }
+
+    #[test]
     fn non_inlined_function_reuses_temporary_stack_slots() {
         // Keep this regression on libtest's default stack even when a local Cargo
         // configuration raises RUST_MIN_STACK.

@@ -1513,6 +1513,67 @@ mod test {
     }
 
     #[test]
+    fn nested_shared_branches_preserve_all_vector_components() {
+        let build = |inlining, shape| {
+            parse!("dual_nested::f(x)+dual_nested::f(x+1)")
+                .evaluator(&[parse!("x"), parse!("c"), parse!("d")])
+                .add_function_with_options(
+                    symbol!("dual_nested::f"),
+                    vec![symbol!("z")],
+                    parse!("if(c,if(d,z+1,z+2)+z^2,z^2+3)"),
+                    FunctionRegistrationOptions::new().inlining(inlining),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .vectorize(&Dualizer::new(HyperDual::<f64>::new(shape), vec![]))
+                .unwrap()
+        };
+        for shape in [
+            vec![vec![0]],
+            vec![vec![0], vec![1]],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+        ] {
+            let dim = shape.len();
+            let exact = build(InliningPolicy::Never, shape.clone());
+            let mut shared = exact
+                .clone()
+                .map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+            let mut inline = build(InliningPolicy::Always, shape)
+                .map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+            let zero = Complex::new(0., 0.);
+            let mut parameters = vec![zero; 3 * dim];
+            parameters[0] = Complex::new(0.3, 0.7);
+            // Repeated outer-false calls used to read stale stack slots. Inner
+            // joins must close their branch once, regardless of vector size.
+            for seeded in [false, true] {
+                if seeded && dim > 1 {
+                    parameters[1] = Complex::new(0., 1.);
+                    if dim > 2 {
+                        parameters[2] = Complex::new(1., 2.);
+                        parameters[3] = Complex::new(2., -1.);
+                    }
+                }
+                for (c, d) in [(0., 0.), (0., 1.), (1., 0.), (1., 1.), (0., 0.)] {
+                    parameters[dim] = Complex::new(c, 0.);
+                    parameters[2 * dim] = Complex::new(d, 0.);
+                    let mut actual = vec![zero; dim];
+                    let mut expected = vec![zero; dim];
+                    shared.evaluate(&parameters, &mut actual);
+                    inline.evaluate(&parameters, &mut expected);
+                    for (actual, expected) in actual.into_iter().zip(expected) {
+                        assert!(
+                            (actual.re - expected.re).abs() < 1e-12
+                                && (actual.im - expected.im).abs() < 1e-12,
+                            "dim={dim}, seeded={seeded}, c={c}, d={d}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shared_functions_preserve_captures_branches_and_higher_derivatives() {
         let build = |inlining| {
             let mut functions = FunctionMap::new();
