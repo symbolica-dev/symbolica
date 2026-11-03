@@ -4,6 +4,9 @@ on: [pull_request, push]
 
 jobs:
   coverage:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
