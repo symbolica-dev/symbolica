@@ -4177,6 +4177,41 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .unwrap_or_else(|| self * self)
     }
 
+    /// Give every non-constant factor a positive leading coefficient and move
+    /// the signs into the constant factor. The stages of the factorization
+    /// (random evaluation points and splitting choices of the univariate and
+    /// lifting steps) only determine the factors up to a unit, so without this
+    /// the same input can factor as `(a-b)*(a+b)` in one call and
+    /// `(b-a)*(-a-b)` in the next.
+    fn normalize_factor_signs(mut factors: Vec<(Self, usize)>) -> Vec<(Self, usize)> {
+        let mut negative = false;
+        for (factor, multiplicity) in &mut factors {
+            if !factor.is_constant() && factor.lcoeff().is_negative() {
+                *factor = -factor.clone();
+                negative ^= *multiplicity % 2 == 1;
+            }
+        }
+        if !negative {
+            return factors;
+        }
+
+        if let Some(index) = factors
+            .iter()
+            .position(|(factor, multiplicity)| factor.is_constant() && *multiplicity == 1)
+        {
+            let constant = -factors[index].0.clone();
+            if constant.is_one() {
+                factors.remove(index);
+            } else {
+                factors[index].0 = constant;
+            }
+        } else {
+            let minus_one = -factors[0].0.one();
+            factors.insert(0, (minus_one, 1));
+        }
+        factors
+    }
+
     /// Add a factor to a factorization, combining its multiplicity with an
     /// identical factor that was already recovered.
     fn append_integer_factor(factors: &mut Vec<(Self, usize)>, factor: Self, multiplicity: usize) {
@@ -4806,10 +4841,10 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
 
     fn factor(&self) -> Vec<(Self, usize)> {
         if let Some(factors) = self.factor_in_active_variable() {
-            return factors;
+            return Self::normalize_factor_signs(factors);
         }
         if let Some(factors) = self.factor_quadratic_before_square_free() {
-            return factors;
+            return Self::normalize_factor_signs(factors);
         }
 
         let sf = self.square_free_factorization();
@@ -4944,7 +4979,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
             }
         }
 
-        factors
+        Self::normalize_factor_signs(factors)
     }
 
     fn is_irreducible(&self) -> bool {
@@ -17958,5 +17993,41 @@ mod test {
         factors.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
 
         assert_eq!(factors, vec![(f1, 1), (f2, 1)])
+    }
+
+    #[test]
+    fn integer_factor_signs_do_not_depend_on_random_choices() {
+        // Two active variables of a ten-variable ring: the bivariate stage
+        // used to return (t^2-2*y)*(t^2+2*y) or (-t^2-2*y)*(-t^2+2*y)
+        // depending on its random choices. The order of the factors is not
+        // part of the result.
+        let variables: Vec<_> = (0..10)
+            .map(|i| symbol!(format!("factor_sign_v{i}")).into())
+            .collect();
+        let target = parse!("factor_sign_v5*(factor_sign_v6^4-4*factor_sign_v7^2)")
+            .to_polynomial::<_, u32>(&Z, Some(Arc::new(variables)));
+        let sorted = |mut factors: Vec<(MultivariatePolynomial<IntegerRing, u32>, usize)>| {
+            factors.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
+            factors
+        };
+        let reference = sorted(target.factor());
+        assert_eq!(reference.len(), 3);
+        let mut product = target.one();
+        for (factor, multiplicity) in &reference {
+            assert!(!factor.lcoeff().is_negative(), "{factor}");
+            for _ in 0..*multiplicity {
+                product = &product * factor;
+            }
+        }
+        assert_eq!(product, target);
+        for _ in 0..64 {
+            assert_eq!(sorted(target.factor()), reference);
+        }
+
+        let mut factors = sorted((-target.clone()).factor());
+        let minus_one = target.constant((-1).into());
+        let index = factors.iter().position(|(f, _)| f == &minus_one).unwrap();
+        assert_eq!(factors.remove(index).1, 1);
+        assert_eq!(factors, reference);
     }
 }
