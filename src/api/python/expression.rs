@@ -4399,31 +4399,37 @@ impl PythonExpression {
         Atom::new().into()
     }
 
-    /// Get a serialized version of the expression.
-    pub fn __getstate__(&self) -> PyResult<Vec<u8>> {
-        // Zero is not an atom tag, so it distinguishes versioned pickle data
-        // from the unversioned raw expressions written by older releases.
-        let mut state = vec![0];
-        self.expr
-            .as_view()
-            .write(&mut state)
-            .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(state)
+    /// Get a serialized version of the expression and its required state.
+    pub fn __getstate__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.save(py, None, 9)?
+            .cast_into::<PyBytes>()
+            .map_err(Into::into)
     }
 
-    /// Reconstruct an expression from a serialized version.
+    /// Pickle the expression and its required state. Unpickling merges the state
+    /// into the current session and raises ValueError on a symbol conflict.
+    /// Older pickles without state are not supported.
+    ///
+    /// Pickling requires the module exposing Expression to be importable.
     pub fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<(Py<PyAny>, (Py<PyBytes>,))> {
-        let module = py
-            .import("symbolica.symbolica")
-            .or_else(|_| py.import("symbolica"))?;
-        let reconstruct = module.getattr("_reconstruct_expression")?.unbind();
-        let state = PyBytes::new(py, &self.__getstate__()?).unbind();
+        let reconstruct = py.get_type::<Self>().getattr("load")?.unbind();
+        let state = self.__getstate__(py)?.unbind();
 
         Ok((reconstruct, (state,)))
     }
 
     /// Copy the expression.
     pub fn __copy__(&self) -> PythonExpression {
+        self.expr.clone().into()
+    }
+
+    /// Copy the expression (equivalent to `__copy__`).
+    ///
+    /// Parameters
+    /// ----------
+    /// memo : dict
+    ///     Memo dictionary supplied by copy.deepcopy.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> PythonExpression {
         self.expr.clone().into()
     }
 
@@ -4995,7 +5001,8 @@ impl PythonExpression {
         condition::expression_hash(self.expr.as_view(), py)
     }
 
-    /// Save the expression and its state to a binary file.
+    /// Save the expression and its state to a binary file, or return bytes if
+    /// no filename is supplied. Pickling uses the same format.
     /// The data is compressed and the compression level can be set between 0 and 11.
     ///
     /// The data can be loaded using `Expression.load`.
@@ -5007,23 +5014,43 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// filename: str
-    ///     The file path to load from or save to.
+    /// filename: str | None
+    ///     The file path to save to. Omit it to return the serialized bytes.
     /// compression_level: int
     ///     The compression level for serialized output.
-    #[pyo3(signature = (filename, compression_level=9))]
-    pub fn save(&self, filename: &str, compression_level: u32) -> PyResult<()> {
-        let f = File::create(filename)
-            .map_err(|e| exceptions::PyIOError::new_err(format!("Could not create file: {e}")))?;
-        let mut writer = CompressorWriter::new(BufWriter::new(f), 4096, compression_level, 22);
+    #[pyo3(signature = (filename=None, compression_level=9))]
+    #[gen_stub(override_return_type(type_repr = "bytes | None"))]
+    pub fn save<'py>(
+        &self,
+        py: Python<'py>,
+        filename: Option<&str>,
+        compression_level: u32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut bytes = Vec::new();
+        {
+            let output: Box<dyn std::io::Write> = if let Some(filename) = filename {
+                let f = File::create(filename).map_err(|e| {
+                    exceptions::PyIOError::new_err(format!("Could not create file: {e}"))
+                })?;
+                Box::new(BufWriter::new(f))
+            } else {
+                Box::new(&mut bytes)
+            };
+            let mut writer = CompressorWriter::new(output, 4096, compression_level, 22);
 
-        self.expr
-            .as_view()
-            .export(&mut writer)
-            .map_err(|e| exceptions::PyIOError::new_err(format!("Could not write file: {e}")))
+            self.expr.as_view().export(&mut writer).map_err(|e| {
+                exceptions::PyIOError::new_err(format!("Could not write data: {e}"))
+            })?;
+        }
+        if filename.is_some() {
+            Ok(py.None().into_bound(py))
+        } else {
+            Ok(PyBytes::new(py, &bytes).into_any())
+        }
     }
 
-    /// Load an expression and its state from a file. The state will be merged
+    /// Load an expression and its state from a file or bytes returned by save().
+    /// The state will be merged
     /// with the current one. If a symbol has conflicting attributes, the conflict
     /// can be resolved using the renaming function `conflict_fn`.
     ///
@@ -5053,21 +5080,28 @@ impl PythonExpression {
     ///
     /// Parameters
     /// ----------
-    /// filename: str
-    ///     The file path to load from or save to.
+    /// filename: str | bytes
+    ///     The file path to load from, or the serialized bytes.
     /// conflict_fn: Callable[[str], str] | None
     ///     A callback that resolves symbol conflicts during loading.
     #[pyo3(signature = (filename, conflict_fn=None))]
     #[classmethod]
     pub fn load(
         _cls: &Bound<'_, PyType>,
-        filename: &str,
+        #[gen_stub(override_type(type_repr = "str | bytes"))] filename: &Bound<'_, PyAny>,
         #[gen_stub(override_type(type_repr = "typing.Optional[typing.Callable[[str], str]]"))]
         conflict_fn: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        let f = File::open(filename)
-            .map_err(|e| exceptions::PyIOError::new_err(format!("Could not read file: {e}")))?;
-        let mut reader = brotli::Decompressor::new(BufReader::new(f), 4096);
+        let is_bytes = filename.is_instance_of::<PyBytes>();
+        let input: Box<dyn std::io::Read> = if is_bytes {
+            Box::new(filename.cast::<PyBytes>()?.as_bytes())
+        } else {
+            let filename = filename.extract::<String>()?;
+            let f = File::open(filename)
+                .map_err(|e| exceptions::PyIOError::new_err(format!("Could not read file: {e}")))?;
+            Box::new(BufReader::new(f))
+        };
+        let mut reader = brotli::Decompressor::new(input, 4096);
 
         Atom::import(
             &mut reader,
@@ -5082,7 +5116,13 @@ impl PythonExpression {
             },
         )
         .map(|a| a.into())
-        .map_err(|e| exceptions::PyIOError::new_err(format!("Could not read file: {e}")))
+        .map_err(|e| {
+            if is_bytes {
+                exceptions::PyValueError::new_err(e.to_string())
+            } else {
+                exceptions::PyIOError::new_err(format!("Could not read file: {e}"))
+            }
+        })
     }
 
     /// Get the type of the atom.

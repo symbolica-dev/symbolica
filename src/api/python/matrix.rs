@@ -614,6 +614,11 @@ impl PythonMatrix {
         }
     }
 
+    /// Deep copy the matrix without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Convert the matrix into a portable string.
     pub fn __repr__(&self) -> PyResult<String> {
         Ok(self

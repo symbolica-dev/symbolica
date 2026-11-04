@@ -670,6 +670,11 @@ pub fn create_symbolica_module<'a, 'b>(
     display::register(m)?;
     m.add_class::<PythonSymbol>()?;
     m.add_class::<PythonExpression>()?;
+    // Pickle resolves Expression through the module that actually exposes it,
+    // including hosts that embed the API under their own module name.
+    m.py()
+        .get_type::<PythonExpression>()
+        .setattr("__module__", m.name()?)?;
     m.add_class::<PythonIntegrationStep>()?;
     m.add_class::<PythonHeldExpression>()?;
     m.add_class::<PythonTransformer>()?;
@@ -739,7 +744,6 @@ pub fn create_symbolica_module<'a, 'b>(
     m.add_function(wrap_pyfunction!(expression_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(transformer_shorthand, m)?)?;
     m.add_function(wrap_pyfunction!(poly_shorthand, m)?)?;
-    m.add_function(wrap_pyfunction!(_reconstruct_expression, m)?)?;
 
     m.add_function(wrap_pyfunction!(get_version, m)?)?;
     m.add_function(wrap_pyfunction!(is_licensed, m)?)?;
@@ -2291,6 +2295,67 @@ impl PythonEvalSpec {
     }
 }
 
+#[cfg(test)]
+mod expression_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copy_and_pickle_without_a_symbolica_package() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let host = PyModule::new(py, "symbolica_copy_test_host")?;
+            create_symbolica_module(&host)?;
+            let globals = PyDict::new(py);
+            globals.set_item("api", &host)?;
+            py.run(
+                c"
+import builtins
+import copy
+import pickle
+import sys
+
+original_import = builtins.__import__
+def block_symbolica(name, *args, **kwargs):
+    if name == 'symbolica' or name.startswith('symbolica.'):
+        raise ImportError('blocked import of ' + name)
+    return original_import(name, *args, **kwargs)
+
+expr = api.E('pickle_copy::x^2 + pickle_copy::f(pickle_copy::y, 3/4)')
+native_objects = [
+    expr.to_polynomial(),
+    expr.to_rational_polynomial(),
+    api.Matrix.eye([expr]),
+    api.Graph(),
+    api.RandomNumberGenerator(17, 0),
+    api.NumericalIntegrator.continuous(1),
+    api.E('3').evaluator([], jit_compile=False),
+]
+assert api.Expression.__module__ == api.__name__
+sys.modules[api.__name__] = api
+builtins.__import__ = block_symbolica
+try:
+    for clone in (copy.copy(expr), copy.deepcopy(expr), copy.deepcopy(expr, {})):
+        assert type(clone) is api.Expression and clone == expr
+    nested = copy.deepcopy({'k': [expr, (expr, 1)]})
+    assert nested['k'][0] == expr and nested['k'][1][0] == expr
+    for original in native_objects:
+        for cloned in (copy.copy(original), copy.deepcopy(original)):
+            assert type(cloned) is type(original) and cloned is not original
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        restored = pickle.loads(pickle.dumps([expr, expr], protocol=protocol))
+        assert restored[0] == expr and restored[0] is restored[1]
+finally:
+    builtins.__import__ = original_import
+    del sys.modules[api.__name__]
+",
+                Some(&globals),
+                None,
+            )
+        })
+        .unwrap();
+    }
+}
+
 #[cfg(feature = "python_stubgen")]
 submit! {
 PyFunctionInfo {
@@ -3238,29 +3303,6 @@ fn expression_shorthand(
         mode,
         default_namespace,
     )
-}
-
-#[pyfunction]
-fn _reconstruct_expression(state: Vec<u8>) -> PyResult<PythonExpression> {
-    let Some((&marker, payload)) = state.split_first() else {
-        return Err(exceptions::PyValueError::new_err(
-            "Cannot reconstruct an expression from empty pickle data",
-        ));
-    };
-    let mut legacy = Vec::new();
-    let mut source = if marker == 0 {
-        payload
-    } else {
-        // Older pickles contain raw format-5 atom bytes. Use the regular
-        // migration path so their numbers, powers, and ordering become canonical.
-        legacy.push(5);
-        legacy.extend_from_slice(&(state.len() as u64).to_le_bytes());
-        legacy.extend_from_slice(&state);
-        legacy.as_slice()
-    };
-    Atom::import_with_map(&mut source, &crate::state::StateMap::default())
-        .map(Into::into)
-        .map_err(|error| exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// Create a new transformer that maps an expression.

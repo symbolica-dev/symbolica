@@ -207,6 +207,11 @@ impl PythonRandomNumberGenerator {
         self.clone()
     }
 
+    /// Deep copy the random number generator without serializing it.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Generate the next random unsigned 64-bit number in the sequence.
     fn next(&mut self) -> u64 {
         self.state.next_u64()
@@ -388,6 +393,11 @@ impl PythonNumericalIntegrator {
         Self {
             grid: self.grid.clone_without_samples(),
         }
+    }
+
+    /// Deep copy the integration grid, including unprocessed samples without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
     }
 
     /// Probe the weight of a region in the grid.

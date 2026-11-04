@@ -182,6 +182,11 @@ mermaid.run({{ querySelector: "#{id_attr}" }}).catch(() => {{}});
         }
     }
 
+    /// Deep copy the graph without serializing it.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Get the number of nodes.
     fn __len__(&self) -> usize {
         self.graph.nodes().len()

@@ -2858,17 +2858,31 @@ class Expression:
 
     def __getstate__(self) -> bytes:
         """
-        Get a serialized version of the expression.
+        Get a serialized version of the expression and its required state.
         """
 
     def __reduce__(self) -> tuple[Callable[[bytes], Expression], tuple[bytes]]:
         """
-        Reconstruct an expression from a serialized version.
+        Pickle the expression and its required state. Unpickling merges the state
+        into the current session and raises ValueError on a symbol conflict.
+        Older pickles without state are not supported.
+
+        Pickling requires the module exposing Expression to be importable.
         """
 
     def __copy__(self) -> Expression:
         """
         Copy the expression.
+        """
+
+    def __deepcopy__(self, memo: Any) -> Expression:
+        """
+        Copy the expression (equivalent to `__copy__`).
+
+        Parameters
+        ----------
+        memo : dict
+            Memo dictionary supplied by copy.deepcopy.
         """
 
     def __str__(self) -> str:
@@ -2885,10 +2899,11 @@ class Expression:
 
     @classmethod
     def load(
-        _cls, filename: str, conflict_fn: Callable[[str], str] | None = None
+        _cls, filename: str | bytes, conflict_fn: Callable[[str], str] | None = None
     ) -> Expression:
         """
-        Load an expression and its state from a file. The state will be merged
+        Load an expression and its state from a file or bytes returned by save().
+        The state will be merged
         with the current one. If a symbol has conflicting attributes, the conflict
         can be resolved using the renaming function `conflict_fn`.
 
@@ -2918,15 +2933,17 @@ class Expression:
 
         Parameters
         ----------
-        filename: str
-            The file path to load from or save to.
+        filename: str | bytes
+            The file path to load from, or the serialized bytes.
         conflict_fn: Callable[[str], str] | None
             A callback that resolves symbol conflicts during loading.
         """
 
-    def save(self, filename: str, compression_level: int = 9):
+    @overload
+    def save(self, filename: None = None, compression_level: int = 9) -> bytes:
         """
-        Save the expression and its state to a binary file.
+        Save the expression and its state to a binary file, or return bytes if
+        no filename is supplied. Pickling uses the same format.
         The data is compressed and the compression level can be set between 0 and 11.
 
         The data can be loaded using `Expression.load`.
@@ -2938,11 +2955,14 @@ class Expression:
 
         Parameters
         ----------
-        filename: str
-            The file path to load from or save to.
+        filename: str | None
+            The file path to save to. Omit it to return the serialized bytes.
         compression_level: int
             The compression level for serialized output.
         """
+
+    @overload
+    def save(self, filename: str, compression_level: int = 9) -> None: ...
 
     def get_byte_size(self) -> int:
         """
@@ -8037,6 +8057,11 @@ class Polynomial:
         Copy the polynomial.
         """
 
+    def __deepcopy__(self, memo: Any) -> Polynomial:
+        """
+        Deep copy this object.
+        """
+
     def __str__(self) -> str:
         """
         Print the polynomial in a human-readable format.
@@ -8979,6 +9004,11 @@ class NumberFieldPolynomial:
         Copy the polynomial.
         """
 
+    def __deepcopy__(self, memo: Any) -> NumberFieldPolynomial:
+        """
+        Deep copy this object.
+        """
+
     def __str__(self) -> str:
         """
         Print the polynomial in a human-readable format.
@@ -9648,6 +9678,11 @@ class FiniteFieldPolynomial:
     def __copy__(self) -> FiniteFieldPolynomial:
         """
         Copy the polynomial.
+        """
+
+    def __deepcopy__(self, memo: Any) -> FiniteFieldPolynomial:
+        """
+        Deep copy this object.
         """
 
     def __str__(self) -> str:
@@ -10344,6 +10379,11 @@ class RationalPolynomial:
         Copy the rational polynomial.
         """
 
+    def __deepcopy__(self, memo: Any) -> RationalPolynomial:
+        """
+        Deep copy this object.
+        """
+
     def __str__(self) -> str:
         """
         Print the rational polynomial in a human-readable format.
@@ -10658,6 +10698,11 @@ class FiniteFieldRationalPolynomial:
     def __copy__(self) -> FiniteFieldRationalPolynomial:
         """
         Copy the rational polynomial.
+        """
+
+    def __deepcopy__(self, memo: Any) -> FiniteFieldRationalPolynomial:
+        """
+        Deep copy this object.
         """
 
     def __str__(self) -> str:
@@ -11097,6 +11142,11 @@ class Matrix:
         Copy the matrix.
         """
 
+    def __deepcopy__(self, memo: Any) -> Matrix:
+        """
+        Deep copy this object.
+        """
+
     def __getitem__(self, key: tuple[int, int]) -> RationalPolynomial:
         """
         Get the entry at position `key` in the matrix.
@@ -11377,6 +11427,11 @@ class Evaluator:
     def __copy__(self) -> Evaluator:
         """
         Copy the evaluator.
+        """
+
+    def __deepcopy__(self, memo: Any) -> Evaluator:
+        """
+        Deep copy this object.
         """
 
     @classmethod
@@ -12200,6 +12255,11 @@ class NumericalIntegrator:
         Copy the grid without any unprocessed samples.
         """
 
+    def __deepcopy__(self, memo: Any) -> NumericalIntegrator:
+        """
+        Deep copy the integration grid, including unprocessed samples.
+        """
+
     @classmethod
     def continuous(
         _cls,
@@ -12583,6 +12643,11 @@ class RandomNumberGenerator:
         Copy the random number generator, so that the copy will generate the same sequence of random numbers.
         """
 
+    def __deepcopy__(self, memo: Any) -> RandomNumberGenerator:
+        """
+        Deep copy this object.
+        """
+
     def next(self) -> int:
         """
         Generate the next random unsigned 64-bit integer in the sequence.
@@ -12669,6 +12734,11 @@ class Graph:
     def __copy__(self) -> Graph:
         """
         Copy the graph.
+        """
+
+    def __deepcopy__(self, memo: Any) -> Graph:
+        """
+        Deep copy this object.
         """
 
     def __len__(self) -> int:

@@ -335,6 +335,11 @@ impl PythonPolynomial {
         }
     }
 
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Convert the polynomial into a human-readable string, with tunable settings.
     ///
     /// Examples
@@ -2085,6 +2090,11 @@ impl PythonFiniteFieldPolynomial {
         }
     }
 
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Convert the polynomial into a human-readable string, with tunable settings.
     ///
     /// Examples
@@ -3381,6 +3391,11 @@ impl PythonPrimeTwoPolynomial {
         }
     }
 
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Convert the polynomial into a human-readable string, with tunable settings.
     ///
     /// Examples
@@ -4335,6 +4350,11 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
         Self {
             poly: self.poly.clone(),
         }
+    }
+
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
     }
 
     /// Convert the polynomial into a human-readable string, with tunable settings.
@@ -5377,6 +5397,11 @@ impl PythonGaloisFieldPolynomial {
         }
     }
 
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Convert the polynomial into a human-readable string, with tunable settings.
     ///
     /// Examples
@@ -6379,6 +6404,11 @@ impl PythonNumberFieldPolynomial {
         Self {
             poly: self.poly.clone(),
         }
+    }
+
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
     }
 
     /// Convert the polynomial into a human-readable string, with tunable settings.
@@ -7438,6 +7468,11 @@ impl PythonRationalPolynomial {
         }
     }
 
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Compare two polynomials.
     fn __richcmp__(&self, o: Py<PyAny>, op: CompareOp, py: Python) -> PyResult<bool> {
         let Ok(other) = o.extract::<PolynomialOrInteger<PythonRationalPolynomial>>(py) else {
@@ -7907,6 +7942,11 @@ impl PythonFiniteFieldRationalPolynomial {
         Self {
             poly: self.poly.clone(),
         }
+    }
+
+    /// Deep copy the polynomial without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
     }
 
     /// Compare two polynomials.

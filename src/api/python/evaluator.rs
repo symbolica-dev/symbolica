@@ -862,6 +862,11 @@ impl PythonExpressionEvaluator {
         }
     }
 
+    /// Deep copy the evaluator without serializing it.
+    pub fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
     /// Set whether to use JIT compilation, optionally updating the JIT settings.
     #[pyo3(signature = (jit_compile, direct_translation = None, optimization_level = None, options = None))]
     fn jit_compile(
