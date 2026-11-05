@@ -1165,25 +1165,27 @@ mod test {
             "0.125*(1/(relative_zero_control_x*(relative_zero_control_x-1))-1/(relative_zero_control_x-1)+1/relative_zero_control_x)"
         )
         .expand();
+        let exact = crate::atom::ZeroTestSettings::new()
+            .treat_floats_as_exact(true)
+            .numerical_samples(0);
         for remainder in [
             parse!("relative_zero_control_x^12"),
             parse!("relative_zero_control_a"),
             parse!("relative_zero_control_f(0)"),
         ] {
             let input = &zero + &remainder;
-            let result = input.series(x, 0, SeriesDepth::relative(1)).unwrap();
-            assert_eq!(result.to_atom(), remainder);
+            let result = input
+                .series(x, 0, SeriesDepth::relative(1))
+                .unwrap()
+                .to_atom();
+            // A floating-point unit coefficient can retain its precision.
+            assert!(
+                result.check_equal_with(&remainder, &exact).is_true(),
+                "expected {remainder}, got {result}"
+            );
         }
         let tiny = &zero + parse!("1e-1000");
-        assert!(
-            !tiny
-                .check_zero_with(
-                    &crate::atom::ZeroTestSettings::new()
-                        .treat_floats_as_exact(true)
-                        .numerical_samples(0),
-                )
-                .is_true()
-        );
+        assert!(!tiny.check_zero_with(&exact).is_true());
     }
 
     #[test]
