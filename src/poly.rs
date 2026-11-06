@@ -1218,7 +1218,7 @@ impl AtomView<'_> {
                     match exp {
                         AtomView::Num(n) => match n.get_coeff_view() {
                             CoefficientView::Natural(n, d, ni, _di) => {
-                                if d == 1 && ni == 0 && n >= 0 && n <= u32::MAX as i64 {
+                                if d == 1 && ni == 0 && n >= 0 && n <= i32::MAX as i64 {
                                     Ok(())
                                 } else {
                                     Err("Exponent negative or a fraction")
@@ -1229,7 +1229,7 @@ impl AtomView<'_> {
                                 if ri.is_zero()
                                     && r.is_integer()
                                     && !r.is_negative()
-                                    && r.numerator_ref() <= &u32::MAX
+                                    && r.numerator_ref() <= &i32::MAX
                                 {
                                     Ok(())
                                 } else {
