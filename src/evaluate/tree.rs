@@ -8,6 +8,66 @@ use crate::{
 
 use super::*;
 
+/// Expressions visible in the current direct-linearization scope.
+///
+/// The two arms of a conditional inherit the entries of their parent scope,
+/// but entries created inside one arm must never be visible in its sibling or
+/// in the parent. Instead of copying the parent map for each arm, insertions
+/// made inside an arm are journaled and undone when the arm ends.
+#[derive(Default)]
+struct ScopedSubexpressions<'a> {
+    entries: HashMap<CompactAtomView<'a>, Slot>,
+    /// Inserted keys with their previous slots, recorded inside an arm only.
+    changes: Vec<(CompactAtomView<'a>, Option<Slot>)>,
+    depth: usize,
+}
+
+impl<'a> ScopedSubexpressions<'a> {
+    #[inline]
+    fn get(&self, expression: &[u8]) -> Option<&Slot> {
+        self.entries.get(expression)
+    }
+
+    fn insert(&mut self, expression: CompactAtomView<'a>, slot: Slot) {
+        let previous = self.entries.insert(expression, slot);
+        if self.depth != 0 {
+            self.changes.push((expression, previous));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Only used to discard the temporaries of a condition that resolved to a
+    /// constant: they were all created since that condition started, so the
+    /// journal still restores the enclosing arm's parent entries correctly.
+    fn retain(&mut self, keep: impl FnMut(&CompactAtomView<'a>, &mut Slot) -> bool) {
+        self.entries.retain(keep);
+    }
+
+    /// Open the scope of one conditional arm.
+    fn checkpoint(&mut self) -> usize {
+        self.depth += 1;
+        self.changes.len()
+    }
+
+    /// Close the arm opened by `checkpoint`, undoing its insertions in reverse order.
+    fn restore(&mut self, checkpoint: usize) {
+        for (expression, previous) in self.changes.drain(checkpoint..).rev() {
+            match previous {
+                Some(previous) => {
+                    self.entries.insert(expression, previous);
+                }
+                None => {
+                    self.entries.remove(&expression);
+                }
+            }
+        }
+        self.depth -= 1;
+    }
+}
+
 /// Keep multiplication count as the primary objective, then minimize additions.
 fn horner_cost(ops: OperationCount) -> (usize, usize) {
     (ops.multiplications, ops.additions)
@@ -1421,7 +1481,7 @@ impl<'a> AtomView<'a> {
 
         // we can only safely remove entries that don't depend on any of the function arguments
         // Stored keys only compare and hash bytes; no typed dispatch is needed.
-        let mut subexpression: HashMap<CompactAtomView, Slot> = HashMap::default();
+        let mut subexpression = ScopedSubexpressions::default();
 
         let mut result_indices = vec![];
         let args = params
@@ -1712,7 +1772,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
+        subexpressions: &mut ScopedSubexpressions<'a>,
     ) -> Result<Slot, EvaluationError> {
         if !context.expanding_functions.insert(function.id) {
             return Err(EvaluationError::EvaluatorConstructionFailed {
@@ -1739,7 +1799,7 @@ impl<'a> AtomView<'a> {
         }
         // Aliases inherit the caller's bindings and cache. Ordinary functions, including
         // zero-argument functions, get their own scope and expression cache.
-        let mut body_subexpressions = HashMap::default();
+        let mut body_subexpressions = ScopedSubexpressions::default();
         let result = function.body.as_view().linearize_impl(
             fn_map,
             context,
@@ -1771,7 +1831,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
+        subexpressions: &mut ScopedSubexpressions<'a>,
     ) -> Result<Slot, EvaluationError> {
         if matches!(*self, AtomView::Var(_) | AtomView::Fun(_)) {
             if let Some(slot) = params.get(self.get_data()) {
@@ -1933,7 +1993,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
+        subexpressions: &mut ScopedSubexpressions<'a>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Fun(f) = self else {
             unreachable!()
@@ -2080,7 +2140,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
+        subexpressions: &mut ScopedSubexpressions<'a>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Pow(p) = self else {
             unreachable!()
@@ -2157,7 +2217,7 @@ impl<'a> AtomView<'a> {
         params: &HashMap<CompactAtomView<'a>, Slot>,
         settings: &OptimizationSettings,
         instr: &mut Vec<Instruction>,
-        subexpressions: &mut HashMap<CompactAtomView<'a>, Slot>,
+        subexpressions: &mut ScopedSubexpressions<'a>,
     ) -> Result<Slot, EvaluationError> {
         let AtomView::Fun(f) = self else {
             unreachable!()
@@ -2279,30 +2339,22 @@ impl<'a> AtomView<'a> {
         let if_instr_pos = instr.len();
         instr.push(Instruction::IfElse(cond, 0));
 
-        let mut sub_expr_pos_child = subexpressions.clone(); // TODO: prevent clone?
-        let then_branch = then_branch.linearize_impl(
-            fn_map,
-            context,
-            params,
-            settings,
-            instr,
-            &mut sub_expr_pos_child,
-        )?;
+        let checkpoint = subexpressions.checkpoint();
+        let then_branch =
+            then_branch.linearize_impl(fn_map, context, params, settings, instr, subexpressions);
+        subexpressions.restore(checkpoint);
+        let then_branch = then_branch?;
 
         let label_end_pos = instr.len();
         instr.push(Instruction::Goto(0));
         instr[if_instr_pos] = Instruction::IfElse(cond, instr.len());
         instr.push(Instruction::Label(instr.len()));
 
-        sub_expr_pos_child.clone_from(subexpressions);
-        let else_branch = else_branch.linearize_impl(
-            fn_map,
-            context,
-            params,
-            settings,
-            instr,
-            &mut sub_expr_pos_child,
-        )?;
+        let checkpoint = subexpressions.checkpoint();
+        let else_branch =
+            else_branch.linearize_impl(fn_map, context, params, settings, instr, subexpressions);
+        subexpressions.restore(checkpoint);
+        let else_branch = else_branch?;
 
         instr[label_end_pos] = Instruction::Goto(instr.len());
         instr.push(Instruction::Label(instr.len()));
@@ -2310,7 +2362,7 @@ impl<'a> AtomView<'a> {
         let temp = Slot::Temp(instr.len());
         instr.push(Instruction::Join(temp, cond, then_branch, else_branch));
         // The completed result now dominates this scope. Branch-local
-        // values remain in their cloned caches, never in the parent.
+        // values were undone when their arm ended, never kept in the parent.
         subexpressions.insert((*self).into(), temp);
         Ok(temp)
     }
@@ -5450,6 +5502,112 @@ mod post_cpe_cse_tests {
             let extra = if point[3] == 0. { point[4] } else { 0. };
             let expected = 2. * (point[0] + point[1] + point[2]).sin() + extra;
             assert!((evaluator.evaluate_single(&point) - expected).abs() < 1e-14);
+        }
+    }
+}
+
+#[cfg(test)]
+mod scoped_cache_tests {
+    use super::*;
+
+    fn key(atom: &Atom) -> CompactAtomView<'_> {
+        atom.as_view().into()
+    }
+
+    #[test]
+    fn journal_restores_nested_overwrites_and_removed_temporaries() {
+        let parent = crate::parse!("scoped_cache::parent");
+        let child = crate::parse!("scoped_cache::child");
+        let temporary = crate::parse!("scoped_cache::temporary");
+        let mut cache = ScopedSubexpressions::default();
+        cache.insert(key(&parent), Slot::Param(0));
+        let outer = cache.checkpoint();
+        cache.insert(key(&parent), Slot::Temp(1));
+        cache.insert(key(&child), Slot::Temp(2));
+        let inner = cache.checkpoint();
+        cache.insert(key(&child), Slot::Temp(3));
+        cache.insert(key(&temporary), Slot::Temp(4));
+        cache.retain(|_, slot| *slot != Slot::Temp(4));
+        cache.restore(inner);
+        assert_eq!(cache.get(key(&parent).get_data()), Some(&Slot::Temp(1)));
+        assert_eq!(cache.get(key(&child).get_data()), Some(&Slot::Temp(2)));
+        assert_eq!(cache.get(key(&temporary).get_data()), None);
+        cache.restore(outer);
+        assert_eq!(cache.get(key(&parent).get_data()), Some(&Slot::Param(0)));
+        assert_eq!(cache.get(key(&child).get_data()), None);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.changes.is_empty());
+        assert_eq!(cache.depth, 0);
+    }
+
+    #[test]
+    fn conditional_arms_share_parent_values_but_not_their_own() {
+        // Both arms reuse the parent's `base`; values created in one arm (1/x,
+        // y+2, ...) must not leak into the sibling arm or into later outputs.
+        let expressions = [
+            crate::parse!("scoped_cache::base"),
+            crate::parse!("if(a,if(b,1/x,y+2),if(b,y+3,1/(x+1)))+scoped_cache::base"),
+            crate::parse!("if(a,1/(x+1),y+3)+scoped_cache::base"),
+            crate::parse!("if(0,1/x,y)+if(1,y+2,1/(x+1))"),
+            crate::parse!(
+                "if(a,if(scoped_cache::one^2-scoped_cache::one,1/x,y+2),if(scoped_cache::one^2-scoped_cache::one,1/(x+1),y+3))"
+            ),
+        ];
+        let parameters = [
+            crate::parse!("a"),
+            crate::parse!("b"),
+            crate::parse!("x"),
+            crate::parse!("y"),
+        ];
+        let exact = Atom::evaluator_multiple(&expressions, &parameters)
+            .add_aliases([
+                (crate::parse!("scoped_cache::base"), crate::parse!("y^2+1")),
+                (crate::parse!("scoped_cache::one"), Atom::num(1)),
+            ])
+            .unwrap()
+            .direct_translation(true)
+            .horner_iterations(0)
+            .build()
+            .unwrap();
+        let mut scalar = exact.map_coeff(&|value| value.re.to_f64());
+        let mut batch = scalar.clone().into_batch_evaluator();
+        let mut input = Vec::new();
+        let mut expected = Vec::new();
+        for [a, b, x, y] in [
+            [1., 0., 0., 2.],
+            [0., 1., -1., 3.],
+            [1., 1., 1., 4.],
+            [0., 0., 0., -1.],
+        ] {
+            let base = y * y + 1.;
+            let first = if a != 0. {
+                if b != 0. { 1. / x } else { y + 2. }
+            } else if b != 0. {
+                y + 3.
+            } else {
+                1. / (x + 1.)
+            };
+            let second = if a != 0. { 1. / (x + 1.) } else { y + 3. };
+            let reference = [
+                base,
+                first + base,
+                second + base,
+                2. * y + 2.,
+                if a != 0. { y + 2. } else { y + 3. },
+            ];
+            let row = [a, b, x, y];
+            let mut actual = [f64::NAN; 5];
+            scalar.evaluate(&row, &mut actual);
+            assert_eq!(actual, reference);
+            input.extend(row);
+            expected.extend(reference);
+        }
+        for rows in [4, 0, 1, 3, 4] {
+            let mut output = vec![f64::NAN; rows * 5];
+            batch
+                .evaluate_batch(&input[..rows * 4], &mut output, rows)
+                .unwrap();
+            assert_eq!(output, &expected[..rows * 5]);
         }
     }
 }
