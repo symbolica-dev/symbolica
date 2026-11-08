@@ -1156,9 +1156,9 @@ impl AtomView<'_> {
         self.to_polynomial_expanded_mode::<R, E, false>(field, var_map, allow_new_vars)
     }
 
-    // Only factorized rational conversion may treat mapped functions as opaque
-    // polynomial variables. Ordinary polynomial conversion can instead embed
-    // algebraic root functions in its coefficient field.
+    // Only factorized rational conversion may treat mapped functions and
+    // primitive powers as opaque polynomial variables. Ordinary polynomial
+    // conversion can instead embed algebraic roots in its coefficient field.
     fn to_polynomial_expanded_mode<
         R: Ring + ConvertToRing,
         E: Exponent,
@@ -1169,6 +1169,50 @@ impl AtomView<'_> {
         var_map: Option<&Arc<Vec<PolyVariable>>>,
         allow_new_vars: bool,
     ) -> Result<MultivariatePolynomial<R, E>, &'static str> {
+        fn mapped_power_monomial<E: Exponent>(
+            factor: AtomView<'_>,
+            vars: &[PolyVariable],
+        ) -> Option<(usize, E)> {
+            fn primitive_index(factor: AtomView<'_>, vars: &[PolyVariable]) -> Option<usize> {
+                let AtomView::Pow(power) = factor else {
+                    return None;
+                };
+                let index = vars.iter().position(|variable| {
+                    matches!(variable, PolyVariable::Power(atom) if atom.as_view() == factor)
+                })?;
+                let (base, exponent) = power.get_base_exp();
+                if matches!(exponent, AtomView::Add(_))
+                    || extract_integer_content_from_exponent(base, exponent).is_some()
+                {
+                    None
+                } else {
+                    Some(index)
+                }
+            }
+
+            let AtomView::Pow(power) = factor else {
+                return None;
+            };
+            let (base, exponent) = power.get_base_exp();
+            // Follow the general factorized converter's precedence exactly.
+            // A redundant whole-Power map entry must not bypass either rewrite.
+            if matches!(exponent, AtomView::Add(_)) {
+                return None;
+            }
+            if let Some((primitive, multiplicity)) =
+                extract_integer_content_from_exponent(base, exponent)
+            {
+                if multiplicity <= 0 {
+                    return None;
+                }
+                let multiplicity = E::try_from(i32::try_from(multiplicity).ok()?).ok()?;
+                let index = primitive_index(primitive.as_view(), vars)?;
+                Some((index, multiplicity))
+            } else {
+                primitive_index(factor, vars).map(|index| (index, E::one()))
+            }
+        }
+
         fn checked_exponent<E: Exponent>(exp: AtomView<'_>) -> Result<E, &'static str> {
             let AtomView::Num(n) = exp else {
                 return Err("Non-numeric exponent");
@@ -1220,6 +1264,11 @@ impl AtomView<'_> {
                     Ok(())
                 }
                 AtomView::Fun(_) => Err("function not supported in polynomial"),
+                AtomView::Pow(_)
+                    if MAPPED_FUNCTIONS && mapped_power_monomial::<E>(*factor, vars).is_some() =>
+                {
+                    Ok(())
+                }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
                     match base {
@@ -1366,6 +1415,14 @@ impl AtomView<'_> {
                     Ok(())
                 }
                 AtomView::Pow(p) => {
+                    if MAPPED_FUNCTIONS
+                        && let Some((index, exponent)) = mapped_power_monomial::<E>(*factor, vars)
+                    {
+                        exponents[index] = exponents[index]
+                            .checked_add(&exponent)
+                            .ok_or("Exponent sum does not fit the exponent type")?;
+                        return Ok(());
+                    }
                     let (base, exp) = p.get_base_exp();
 
                     let var_index = match base {

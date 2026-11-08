@@ -294,6 +294,193 @@ fn mapped_function_bulk_leaves_ordinary_algebraic_root_embedding_unchanged() {
     assert_eq!(new.numerator.exponents, vec![1]);
 }
 
+fn assert_power_reference<R, RO>(
+    input: &Atom,
+    vars: &Arc<Vec<PolyVariable>>,
+    field: &R,
+    out_field: &RO,
+) where
+    R: EuclideanDomain + ConvertToRing,
+    RO: EuclideanDomain + PolynomialGCD<u32>,
+    FactorizedRationalPolynomial<RO, u32>: FromNumeratorAndFactorizedDenominator<R, RO, u32>
+        + FromNumeratorAndFactorizedDenominator<RO, RO, u32>,
+    MultivariatePolynomial<RO, u32>: Factorize,
+{
+    let old = input
+        .as_view()
+        .to_factorized_rational_polynomial_mode::<_, _, u32, false>(field, out_field, vars)
+        .unwrap();
+    let candidate = input
+        .as_view()
+        .to_factorized_rational_polynomial_impl::<_, _, u32>(field, out_field, vars)
+        .unwrap();
+    assert!(same_factorized_contents(&candidate, &old), "raw: {input}");
+    let finished = input
+        .try_to_factorized_rational_polynomial::<_, _, u32>(field, out_field, Some(vars.clone()))
+        .unwrap();
+    assert!(
+        same_factorized_contents(&finished, &finish_reference(old)),
+        "finished: {input}"
+    );
+}
+
+#[test]
+fn mapped_power_bulk_preserves_primitive_powers_and_root_normalization() {
+    for (source, names) in [
+        (
+            "mu^ep*f(x)+(1/m^2)^ep*g(x)*x",
+            vec!["unused", "g(x)", "(1/m^2)^ep", "x", "f(x)", "mu^ep"],
+        ),
+        (
+            "x^(1/2)*f(x)+x^(1/3)*g(x)",
+            vec!["unused", "x^(1/3)", "f(x)", "x", "g(x)", "x^(1/2)"],
+        ),
+        (
+            "x^(ep/2)*f(x)+x^(ep/3)*g(x)",
+            vec!["unused", "x^(ep/3)", "f(x)", "g(x)", "x^(ep/2)"],
+        ),
+        (
+            "f(x)^(1/2)+g(x)^ep",
+            vec!["unused", "g(x)^ep", "f(x)^(1/2)"],
+        ),
+        (
+            "2^(1/2)*f(x)+3^(1/2)*g(x)",
+            vec!["unused", "2^(1/2)", "f(x)", "g(x)", "3^(1/2)"],
+        ),
+    ] {
+        let input = atom(source);
+        for reverse in [false, true] {
+            let mut names = names.clone();
+            if reverse {
+                names.reverse();
+            }
+            let vars = variables(&names);
+            let bulk = input
+                .as_view()
+                .to_polynomial_expanded_mode::<_, u32, true>(&Q, Some(&vars), false)
+                .unwrap();
+            assert_eq!(bulk.variables().as_ref(), vars.as_ref());
+            assert!(
+                input
+                    .as_view()
+                    .to_polynomial_expanded::<_, u32>(&Q, Some(&vars), false)
+                    .is_err()
+            );
+            assert_power_reference(&input, &vars, &Q, &Z);
+        }
+    }
+}
+
+#[test]
+fn mapped_power_bulk_preserves_positive_integer_content_and_complex_domain() {
+    let field = AlgebraicExtension::complex(Q);
+    for (source, names) in [
+        (
+            "(2+3𝑖)*mu^(3*ep)*f(x)+(7-5𝑖)*(1/m^2)^(3*ep)*g(1+𝑖)",
+            vec![
+                "unused",
+                "mu^(3*ep)",
+                "mu^ep",
+                "(1/m^2)^ep",
+                "f(x)",
+                "g(1+𝑖)",
+            ],
+        ),
+        (
+            "𝑖*x^(2/3)*f(x)+(1+𝑖)*x^(1/2)*g(x)",
+            vec!["unused", "x^(2/3)", "x^(1/3)", "x^(1/2)", "f(x)", "g(x)"],
+        ),
+        (
+            "mu^((2+4𝑖)*ep)*f(x)+mu^(2/3+4𝑖/5)*g(x)",
+            vec!["unused", "mu^((1+2𝑖)*ep)", "mu^(1/3+2𝑖/5)", "f(x)", "g(x)"],
+        ),
+        (
+            "(x^(1/2))^3*f(x)+(mu^ep)^3*g(x)",
+            vec!["unused", "x^(1/2)", "mu^ep", "f(x)", "g(x)"],
+        ),
+    ] {
+        let input = atom(source);
+        let vars = variables(&names);
+        let bulk = input
+            .as_view()
+            .to_polynomial_expanded_mode::<_, u32, true>(&field, Some(&vars), false)
+            .unwrap();
+        assert_eq!(bulk.variables().as_ref(), vars.as_ref());
+        assert_power_reference(&input, &vars, &field, &field);
+    }
+}
+
+#[test]
+fn mapped_power_bulk_keeps_legacy_decomposition_and_missing_map_fallbacks() {
+    for source in [
+        "mu^(a+ep)",
+        "mu^(2*ep)",
+        "mu^(-ep)",
+        "mu^(2/3)",
+        "mu^(-1/2)",
+        "mu^(2*ep/3)",
+        "mu^((2+4𝑖)*ep)",
+        "mu^((-2+4𝑖)*ep)",
+    ] {
+        // Supplying the undecomposed whole Power must not override the legacy
+        // Add/integer-content rewrite or invent its missing primitive variable.
+        let input = atom(source);
+        let vars = variables(&["unused", source]);
+        assert!(
+            input
+                .as_view()
+                .to_polynomial_expanded_mode::<_, u32, true>(&Q, Some(&vars), false)
+                .is_err(),
+            "incorrect whole-Power admission: {source}"
+        );
+        assert_power_reference(&input, &vars, &Q, &Z);
+    }
+    for (source, names) in [
+        ("mu^(-ep)", vec!["mu^(-ep)", "mu^ep"]),
+        ("mu^(-3*ep)", vec!["mu^(-3*ep)", "mu^ep"]),
+        ("mu^(a+ep)", vec!["mu^(a+ep)", "mu^a", "mu^ep"]),
+    ] {
+        // Even complete primitive/component maps must not override the old
+        // negative-content inversion or additive-exponent decomposition.
+        let input = atom(source);
+        let vars = variables(&names);
+        assert!(
+            input
+                .as_view()
+                .to_polynomial_expanded_mode::<_, u32, true>(&Q, Some(&vars), false)
+                .is_err(),
+            "incorrect decomposition admission: {source}"
+        );
+        assert_power_reference(&input, &vars, &Q, &Z);
+    }
+    for source in ["mu^ep*f(x)", "mu^(3*ep)*f(x)"] {
+        let input = atom(source);
+        let vars = variables(&["unused", "f(x)"]);
+        assert!(
+            input
+                .as_view()
+                .to_polynomial_expanded_mode::<_, u32, true>(&Q, Some(&vars), false)
+                .is_err()
+        );
+        assert_power_reference(&input, &vars, &Q, &Z);
+    }
+    let vars = variables(&["mu^ep"]);
+    assert!(
+        atom("mu^(255*ep)")
+            .as_view()
+            .to_polynomial_expanded_mode::<_, u8, true>(&Q, Some(&vars), false)
+            .is_ok()
+    );
+    for source in ["mu^(256*ep)", "mu^(2147483648*ep)"] {
+        assert!(
+            atom(source)
+                .as_view()
+                .to_polynomial_expanded_mode::<_, u8, true>(&Q, Some(&vars), false)
+                .is_err()
+        );
+    }
+}
+
 #[test]
 #[ignore = "bounded conversion microbenchmark; run explicitly in an isolated release test process"]
 fn mapped_function_bulk_replay_benchmark() {
@@ -340,6 +527,96 @@ fn mapped_function_bulk_replay_benchmark() {
     }
     eprintln!(
         "fixed-map 3072-term raw conversion seconds: old={old_times:?}; candidate={new_times:?}; input construction/equality excluded"
+    );
+}
+
+#[test]
+#[ignore = "replay grouped numerators from saved d879601 capture; explicit test-only file required"]
+fn mapped_power_bulk_replay_captured_numerators() {
+    let path = std::env::var_os("SYMBOLICA_MAPPED_POWER_CAPTURE_FILE")
+        .expect("set SYMBOLICA_MAPPED_POWER_CAPTURE_FILE to saved d879601 canonical .expr input");
+    let path = std::path::PathBuf::from(path);
+    assert_eq!(
+        path.file_name().unwrap(),
+        "d87960113bb4eaec6508b833002c7de6bdffe465848b74d19975c81421b27120.expr"
+    );
+    assert!(std::fs::metadata(&path).unwrap().len() < 16 * 1024 * 1024);
+    let source = std::fs::read_to_string(&path).unwrap();
+    let input = Atom::parse(&source, "vakint", Default::default())
+        .unwrap()
+        .expand();
+    assert!(input.as_view().has_complex_coefficients());
+    let AtomView::Add(sum) = input.as_view() else {
+        panic!("the captured input must be an expanded sum");
+    };
+    assert!(sum.get_nargs() < 50_000);
+    let field = AlgebraicExtension::complex(Q);
+    let discovery = input
+        .as_view()
+        .to_factorized_rational_polynomial_mode::<_, _, u32, false>(
+            &field,
+            &field,
+            &Arc::new(Vec::new()),
+        )
+        .unwrap();
+    let vars = discovery.numerator.variables().clone();
+    assert!(vars.iter().any(|v| matches!(v, PolyVariable::Power(_))));
+    drop(discovery);
+
+    // Reproduce the large numerator sums passed to conversion after grouping
+    // terms by their exact negative-integer-power denominator factors. Keep
+    // their complete original raw map; do not normalize roots per term.
+    let mut groups = std::collections::BTreeMap::<Atom, Vec<Atom>>::new();
+    for term in sum {
+        let factors = match term {
+            AtomView::Mul(product) => product.iter().collect::<Vec<_>>(),
+            factor => vec![factor],
+        };
+        let (denominator, numerator): (Vec<_>, Vec<_>) = factors.into_iter().partition(|factor| {
+            let AtomView::Pow(power) = factor else {
+                return false;
+            };
+            Rational::try_from(power.get_base_exp().1)
+                .is_ok_and(|exponent| exponent.is_integer() && exponent.is_negative())
+        });
+        groups
+            .entry(Atom::mul_many(denominator))
+            .or_default()
+            .push(Atom::mul_many(numerator));
+    }
+    let mut seconds = [0.0; 2];
+    let mut terms = 0;
+    for numerators in groups.values() {
+        let numerator = Atom::add_many(numerators);
+        terms += numerator.as_view().nterms();
+        // This assertion makes the saved 3ε scale factors an admission gate,
+        // rather than merely comparing two conversions that both fell back.
+        let bulk = numerator
+            .as_view()
+            .to_polynomial_expanded_mode::<_, u32, true>(&field, Some(&vars), false)
+            .expect("the captured numerator must use the mapped-Power bulk path");
+        assert_eq!(bulk.variables().as_ref(), vars.as_ref());
+        let start = std::time::Instant::now();
+        let old = numerator
+            .as_view()
+            .to_factorized_rational_polynomial_mode::<_, _, u32, false>(&field, &field, &vars)
+            .unwrap();
+        seconds[0] += start.elapsed().as_secs_f64();
+        let start = std::time::Instant::now();
+        let candidate = numerator
+            .as_view()
+            .to_factorized_rational_polynomial_impl::<_, _, u32>(&field, &field, &vars)
+            .unwrap();
+        seconds[1] += start.elapsed().as_secs_f64();
+        assert!(same_factorized_contents(&candidate, &old));
+        assert!(same_factorized_contents(
+            &finish_reference(candidate),
+            &finish_reference(old)
+        ));
+    }
+    eprintln!(
+        "mapped-Power captured numerator replay: groups={} terms={terms} seconds[old,candidate]={seconds:?}; parsing, grouping, map discovery, admission and equality excluded",
+        groups.len()
     );
 }
 
