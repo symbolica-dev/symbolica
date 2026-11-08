@@ -350,10 +350,27 @@ where
         candidate, reference,
         "final captured-input conversion changed"
     );
-    assert_eq!(
-        reference, discovery,
-        "supplying the discovered map changed the old result"
-    );
+    // The old converter can discover the same denominator factors in a
+    // different order with an explicit map. This bridge ignores only that
+    // order: coefficients, polynomials, maps, and multiplicities stay exact.
+    // Old/new comparisons for each mapping mode remain structural.
+    assert_eq!(reference.get_variables(), discovery.get_variables());
+    assert_eq!(reference.numerator, discovery.numerator);
+    assert_eq!(reference.numer_coeff, discovery.numer_coeff);
+    assert_eq!(reference.denom_coeff, discovery.denom_coeff);
+    let mut unmatched = discovery.denominators.iter().collect::<Vec<_>>();
+    for (denominator, exponent) in &reference.denominators {
+        let position = unmatched
+            .iter()
+            .position(|(other, other_exponent)| {
+                other.variables() == denominator.variables()
+                    && other == denominator
+                    && other_exponent == exponent
+            })
+            .expect("old automatic and fixed maps produced different denominator factors");
+        unmatched.swap_remove(position);
+    }
+    assert!(unmatched.is_empty(), "old denominator multiplicity changed");
     assert_eq!(automatic, discovery, "automatic-map conversion changed");
     (
         vars.len(),
