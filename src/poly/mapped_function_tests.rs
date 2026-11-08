@@ -33,6 +33,76 @@ fn finish_reference<R: Ring, E: PositiveExponent>(
     value
 }
 
+// Denominator factors represent a commutative product and their vector order
+// is not canonical. Ignore only that order, keeping every field, map,
+// polynomial, scalar, power and repeated factor exact.
+fn same_factorized_contents<R: Ring, E: PositiveExponent>(
+    left: &FactorizedRationalPolynomial<R, E>,
+    right: &FactorizedRationalPolynomial<R, E>,
+) -> bool {
+    if left.numerator.ring() != right.numerator.ring()
+        || left.numerator.variables() != right.numerator.variables()
+        || left.numerator != right.numerator
+        || left.numer_coeff != right.numer_coeff
+        || left.denom_coeff != right.denom_coeff
+        || left.denominators.len() != right.denominators.len()
+    {
+        return false;
+    }
+    let mut unmatched = right.denominators.iter().collect::<Vec<_>>();
+    for (factor, exponent) in &left.denominators {
+        let Some(position) = unmatched.iter().position(|(other, other_exponent)| {
+            factor.ring() == other.ring()
+                && factor.variables() == other.variables()
+                && factor == other
+                && exponent == other_exponent
+        }) else {
+            return false;
+        };
+        unmatched.swap_remove(position);
+    }
+    unmatched.is_empty()
+}
+
+#[test]
+fn factorized_content_comparison_ignores_only_factor_order() {
+    let vars = variables(&["x", "f(x)"]);
+    let reference = atom("(f(x)+1)/((x-2)*(x-3))")
+        .as_view()
+        .to_factorized_rational_polynomial_mode::<_, _, u32, false>(&Q, &Z, &vars)
+        .unwrap();
+    assert_eq!(reference.denominators.len(), 2);
+    let mut reordered = reference.clone();
+    reordered.denominators.reverse();
+    assert_ne!(reordered, reference);
+    assert!(same_factorized_contents(&reordered, &reference));
+
+    let mut changed = reference.clone();
+    changed.numerator = changed.numerator.add_constant(Z.one());
+    assert!(!same_factorized_contents(&changed, &reference));
+    let mut changed = reference.clone();
+    changed.numer_coeff = Z.zero();
+    assert!(!same_factorized_contents(&changed, &reference));
+    let mut changed = reference.clone();
+    changed.denominators[0].1 += 1;
+    assert!(!same_factorized_contents(&changed, &reference));
+    let mut changed = reference.clone();
+    changed.denominators.pop();
+    assert!(!same_factorized_contents(&changed, &reference));
+    let mut changed = reference.clone();
+    changed.denominators[0] = changed.denominators[1].clone();
+    assert!(!same_factorized_contents(&changed, &reference));
+    let replacement = PolyVariable::try_from(atom("different_variable")).unwrap();
+    let mut changed = reference.clone();
+    changed.numerator.rename_variable(&vars[0], &replacement);
+    assert!(!same_factorized_contents(&changed, &reference));
+    let mut changed = reference.clone();
+    changed.denominators[0]
+        .0
+        .rename_variable(&vars[0], &replacement);
+    assert!(!same_factorized_contents(&changed, &reference));
+}
+
 fn assert_real_reference(input: &Atom, vars: &Arc<Vec<PolyVariable>>) {
     let old = input
         .as_view()
@@ -326,52 +396,36 @@ where
         candidate.numerator.variables(),
         reference.numerator.variables()
     );
-    assert_eq!(candidate.denominators.len(), reference.denominators.len());
-    for ((candidate, _), (reference, _)) in
-        candidate.denominators.iter().zip(&reference.denominators)
-    {
-        assert_eq!(candidate.variables(), reference.variables());
-    }
-    assert_eq!(
-        candidate, reference,
+    assert!(
+        same_factorized_contents(&candidate, &reference),
         "raw captured-input conversion changed"
+    );
+    assert!(
+        same_factorized_contents(&automatic, &discovery),
+        "raw automatic-map conversion changed"
     );
 
     // The public wrapper's body is unchanged and finish_reference implements
     // that exact boundary. Apply it once to each existing raw result without
     // repeating those conversions through the public wrapper. This is
-    // a structural comparison, including final numerator/denominator maps.
+    // an exact content comparison, including final numerator/denominator maps.
     let reference = finish_reference(reference);
     let candidate = finish_reference(candidate);
     let discovery = finish_reference(discovery);
     let automatic = finish_reference(automatic);
     assert_eq!(candidate.get_variables(), reference.get_variables());
-    assert_eq!(
-        candidate, reference,
+    assert!(
+        same_factorized_contents(&candidate, &reference),
         "final captured-input conversion changed"
     );
-    // The old converter can discover the same denominator factors in a
-    // different order with an explicit map. This bridge ignores only that
-    // order: coefficients, polynomials, maps, and multiplicities stay exact.
-    // Old/new comparisons for each mapping mode remain structural.
-    assert_eq!(reference.get_variables(), discovery.get_variables());
-    assert_eq!(reference.numerator, discovery.numerator);
-    assert_eq!(reference.numer_coeff, discovery.numer_coeff);
-    assert_eq!(reference.denom_coeff, discovery.denom_coeff);
-    let mut unmatched = discovery.denominators.iter().collect::<Vec<_>>();
-    for (denominator, exponent) in &reference.denominators {
-        let position = unmatched
-            .iter()
-            .position(|(other, other_exponent)| {
-                other.variables() == denominator.variables()
-                    && other == denominator
-                    && other_exponent == exponent
-            })
-            .expect("old automatic and fixed maps produced different denominator factors");
-        unmatched.swap_remove(position);
-    }
-    assert!(unmatched.is_empty(), "old denominator multiplicity changed");
-    assert_eq!(automatic, discovery, "automatic-map conversion changed");
+    assert!(
+        same_factorized_contents(&reference, &discovery),
+        "old fixed-map and automatic-map results differ"
+    );
+    assert!(
+        same_factorized_contents(&automatic, &discovery),
+        "final automatic-map conversion changed"
+    );
     (
         vars.len(),
         [
