@@ -1213,26 +1213,26 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
         res.coefficients =
             vec![self.field.zero(); self.coefficients.len().max(rhs.coefficients.len())];
 
-        for (e1, c1) in self.coefficients.iter().enumerate() {
+        // On the joint grid the shifts cancel: the product of coefficient
+        // slots i and j belongs to slot i * r_d_s + j * r_d_o. Walking this
+        // grid directly avoids constructing and reducing rational exponents
+        // for every product, and stops before terms outside the known order.
+        // Keep the original product order and add_mul_assign operation: rings
+        // may use fused arithmetic or normalize after each accumulation.
+        for (offset, c1) in (0..res.order).step_by(r_d_s).zip(&self.coefficients) {
             if self.field.is_zero(c1) {
                 continue;
             }
 
-            let p1 = self.get_exponent(e1);
-
-            for (e2, c2) in rhs.coefficients.iter().enumerate() {
-                let p = &p1 + &rhs.get_exponent(e2);
-
+            for (index, c2) in (offset..res.order).step_by(r_d_o).zip(&rhs.coefficients) {
                 if !self.field.is_zero(c2) {
-                    let index = res.get_index(p);
-                    if index < res.order {
-                        if index >= res.coefficients.len() {
-                            res.coefficients.resize(index * 2, self.field.zero());
-                        }
-
-                        self.field
-                            .add_mul_assign(&mut res.coefficients[index], c1, c2);
+                    if index >= res.coefficients.len() {
+                        res.coefficients
+                            .resize(index.saturating_mul(2).min(res.order), self.field.zero());
                     }
+
+                    self.field
+                        .add_mul_assign(&mut res.coefficients[index], c1, c2);
                 }
             }
         }
@@ -1671,6 +1671,14 @@ impl Series<AtomField> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "series/multiplication_tests.rs"]
+mod multiplication_tests;
+
+#[cfg(test)]
+#[path = "series/multiplication_benchmark.rs"]
+mod multiplication_benchmark;
 
 #[cfg(test)]
 mod tests {
