@@ -2,6 +2,8 @@
 
 #[cfg(feature = "polynomial_benchmark_capture")]
 mod benchmark_capture;
+#[cfg(test)]
+mod coefficient_group_tests;
 pub mod factor;
 pub mod gcd;
 pub mod groebner;
@@ -1661,8 +1663,64 @@ impl AtomView<'_> {
                 }
                 if coefficients.is_empty() {
                     poly.zero()
+                } else if !field.statistical_zero_test
+                    && field.custom_normalization.is_none()
+                    && coefficients.iter().all(|coefficient| {
+                        let mut exact = true;
+                        coefficient.visitor(&mut |atom| {
+                            if let AtomView::Num(number) = atom {
+                                exact &= matches!(
+                                    number.get_coeff_view(),
+                                    CoefficientView::Natural(..) | CoefficientView::Large(..)
+                                );
+                            }
+                            exact
+                        });
+                        exact
+                    })
+                {
+                    // These child polynomials already contain nonzero literal
+                    // coefficients. Batch each equal-exponent group rather than
+                    // repeatedly copying a growing Atom sum. Preserve the old
+                    // path for heuristic zeros, custom normalization and other domains.
+                    let nvars = var_map.len();
+                    let mut indices = (0..coefficients.len()).collect::<Vec<_>>();
+                    indices.sort_unstable_by(|&i, &j| {
+                        LexOrder::cmp(
+                            &exponents[i * nvars..(i + 1) * nvars],
+                            &exponents[j * nvars..(j + 1) * nvars],
+                        )
+                    });
+                    let mut collected = MultivariatePolynomial::new(
+                        field,
+                        Some(coefficients.len()),
+                        var_map.clone(),
+                    );
+                    for group in indices.chunk_by(|&i, &j| {
+                        exponents[i * nvars..(i + 1) * nvars]
+                            == exponents[j * nvars..(j + 1) * nvars]
+                    }) {
+                        let first = group[0];
+                        let coefficient = if group.len() == 1 {
+                            std::mem::replace(&mut coefficients[first], Atom::Zero)
+                        } else {
+                            field.sum(
+                                group
+                                    .iter()
+                                    .map(|&i| std::mem::replace(&mut coefficients[i], Atom::Zero)),
+                            )
+                        };
+                        collected.append_monomial_back(
+                            coefficient,
+                            &exponents[first * nvars..(first + 1) * nvars],
+                        );
+                    }
+                    collected
                 } else {
-                    MultivariatePolynomial::from_coefficient_list(
+                    // Child polynomials already satisfy the nonzero-coefficient
+                    // invariant in this field. Preserve sequential accumulation
+                    // and its zero checks without retesting unchanged inputs.
+                    MultivariatePolynomial::from_nonzero_coefficient_list(
                         coefficients,
                         exponents,
                         var_map.clone(),
