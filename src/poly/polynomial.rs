@@ -1486,7 +1486,13 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         if self.ring().is_zero(&coefficient) {
             return;
         }
+        self.append_nonzero_monomial_back(coefficient, exponents);
+    }
 
+    // The incoming coefficient must already be nonzero in this polynomial's
+    // ring. A newly formed sum still needs the ring's full zero test.
+    #[inline]
+    fn append_nonzero_monomial_back(&mut self, coefficient: F::Element, exponents: &[E]) {
         let nterms = self.nterms();
         if nterms > 0 && exponents == self.last_exponents() {
             self.context
@@ -2423,8 +2429,26 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self::fill_coefficient_list(poly, coefficients, exponents)
     }
 
+    /// Assemble unchanged coefficients taken from valid polynomials in `ring`.
+    /// Each incoming coefficient must satisfy that ring's nonzero invariant.
+    /// Sorting, sequential addition and zero tests of accumulated sums match
+    /// [`Self::from_coefficient_list`]; only repeated incoming tests are skipped.
+    pub(super) fn from_nonzero_coefficient_list(
+        coefficients: Vec<F::Element>,
+        exponents: Vec<E>,
+        vars: Arc<Vec<PolyVariable>>,
+        ring: &F,
+    ) -> Self {
+        let poly = Self::new(ring, Some(coefficients.len()), vars);
+        Self::fill_coefficient_list_impl::<false>(poly, coefficients, exponents)
+    }
+
     /// Fill an empty polynomial, preserving its context.
-    fn fill_coefficient_list(
+    fn fill_coefficient_list(poly: Self, coefficients: Vec<F::Element>, exponents: Vec<E>) -> Self {
+        Self::fill_coefficient_list_impl::<true>(poly, coefficients, exponents)
+    }
+
+    fn fill_coefficient_list_impl<const CHECK_INCOMING: bool>(
         mut poly: Self,
         mut coefficients: Vec<F::Element>,
         exponents: Vec<E>,
@@ -2443,7 +2467,12 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
         for i in indices {
             let coefficient = std::mem::replace(&mut coefficients[i], poly.ring().zero());
-            poly.append_monomial_back(coefficient, &exponents[i * nvars..(i + 1) * nvars]);
+            let powers = &exponents[i * nvars..(i + 1) * nvars];
+            if CHECK_INCOMING {
+                poly.append_monomial_back(coefficient, powers);
+            } else {
+                poly.append_nonzero_monomial_back(coefficient, powers);
+            }
         }
 
         poly
@@ -3928,7 +3957,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         for (p, c) in coeffs.into_iter().enumerate() {
             if !self.ring().is_zero(&c) {
                 exp[var] = E::from_i32(p as i32);
-                res.append_monomial(c, &exp);
+                // The dense positions are unique and already in monomial order.
+                // Avoid repeating the coefficient zero test in append_monomial.
+                res.coefficients.push(c);
+                res.exponents.extend_from_slice(&exp);
             }
         }
         res
@@ -4212,7 +4244,10 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             for (p, c) in coeffs.into_iter().enumerate() {
                 if !self.ring().is_zero(&c) {
                     from_uni_var(p as u32, &max_degs_rev, &mut exp);
-                    r.append_monomial(c, &exp);
+                    // Mixed-radix positions decode to distinct, ordered monomials.
+                    // The coefficient has already passed the cancellation check.
+                    r.coefficients.push(c);
+                    r.exponents.extend_from_slice(&exp);
                 }
             }
 
@@ -7875,6 +7910,91 @@ mod test {
         mixed_radix_dense_work_is_bounded, packed_row_merge_is_bounded,
         total_degree_kernel_precedes_mixed_radix, total_degree_rank_table,
     };
+
+    #[test]
+    fn nonzero_child_append_preserves_semantic_zero_removal_and_reinsertion() {
+        use crate::domains::atom::AtomField;
+
+        let field = AtomField::new();
+        let variables = Arc::new(vec![super::PolyVariable::Temporary(0)]);
+        let mut checked = MultivariatePolynomial::<_, u32>::new(&field, None, variables);
+        let mut trusted = checked.zero();
+        let coefficients = [parse!("a^2-1"), parse!("(1-a)*(a+1)"), parse!("7")];
+        // The first two inputs are individually nonzero. Their sum vanishes
+        // semantically without becoming a literal zero under Atom addition.
+        assert!(!(&coefficients[0] + &coefficients[1]).is_zero());
+        for (index, coefficient) in coefficients.into_iter().enumerate() {
+            let child = checked.constant(coefficient);
+            assert_eq!(child.nterms(), 1);
+            let coefficient = child.coefficients.into_iter().next().unwrap();
+            checked.append_monomial_back(coefficient.clone(), &[2]);
+            trusted.append_nonzero_monomial_back(coefficient, &[2]);
+            assert_eq!(trusted, checked);
+            assert_eq!(trusted.nterms(), usize::from(index != 1));
+        }
+        assert_eq!(trusted.coefficients, vec![parse!("7")]);
+        assert_eq!(trusted.exponents, vec![2]);
+        trusted.check_consistency();
+    }
+
+    #[test]
+    fn dense_atom_multiplication_filters_symbolic_coefficient_cancellations() {
+        use crate::domains::atom::AtomField;
+
+        let field = AtomField::new();
+        let variables = Arc::new((0..2).map(super::PolyVariable::Temporary).collect());
+        let mut left = MultivariatePolynomial::<_, u32>::new(&field, None, variables);
+        let mut right = left.zero();
+        left.append_monomial(parse!("a^2-1"), &[0, 1]);
+        left.append_monomial(parse!("a+1"), &[1, 0]);
+        right.append_monomial(parse!("1-a"), &[0, 1]);
+        right.append_monomial(parse!("1"), &[1, 0]);
+
+        // The mixed coefficient requires an algebraic zero test, rather than
+        // a literal-zero test, even though every input coefficient is nonzero.
+        let cancellation = parse!("(a+1)*(1-a)+a^2-1");
+        assert!(!cancellation.is_zero());
+        assert!(field.is_zero(&cancellation));
+
+        let mut expected = left.zero();
+        expected.append_monomial(parse!("(a^2-1)*(1-a)"), &[0, 2]);
+        expected.append_monomial(parse!("a+1"), &[2, 0]);
+        let actual = left.mul_dense(&right).unwrap();
+        actual.check_consistency();
+        assert_eq!(actual, expected);
+        assert_eq!(&left * &right, expected);
+        assert_eq!(&right * &left, expected);
+    }
+
+    #[test]
+    fn dense_univariate_atom_multiplication_preserves_gaps_and_truncation() {
+        use crate::domains::atom::AtomField;
+
+        let field = AtomField::new();
+        // Keep inactive variables on both sides of the active one.
+        let variables = Arc::new((0..3).map(super::PolyVariable::Temporary).collect());
+        let mut left = MultivariatePolynomial::<_, u32>::new(&field, None, variables);
+        let mut right = left.zero();
+        left.append_monomial(parse!("a+1"), &[0, 0, 0]);
+        left.append_monomial(parse!("a^2-1"), &[0, 3, 0]);
+        right.append_monomial(parse!("1"), &[0, 0, 0]);
+        right.append_monomial(parse!("1-a"), &[0, 3, 0]);
+
+        for maximum_power in [None, Some(0), Some(3), Some(5), Some(6)] {
+            let mut expected = left.zero();
+            expected.append_monomial(parse!("a+1"), &[0, 0, 0]);
+            if maximum_power.is_none_or(|maximum| maximum >= 6) {
+                expected.append_monomial(parse!("(a^2-1)*(1-a)"), &[0, 6, 0]);
+            }
+            let actual = left.mul_univariate_dense(&right, maximum_power);
+            actual.check_consistency();
+            assert_eq!(actual, expected);
+            if maximum_power.is_none() {
+                assert_eq!(left.mul_dense(&right).unwrap(), expected);
+                assert_eq!(&left * &right, expected);
+            }
+        }
+    }
 
     #[test]
     fn packed_u16_exponents_round_trip_all_lengths() {
