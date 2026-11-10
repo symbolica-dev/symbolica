@@ -59,6 +59,11 @@ impl<T> Deref for SymbolCache<T> {
     }
 }
 
+// Downstream initializers may construct a complex field before the special
+// functions initializer runs. Register this formal generator independently;
+// SymbolCache enters State before its OnceLock so such callbacks may re-enter it.
+static IMAGINARY_GENERATOR: SymbolCache<Symbol> = SymbolCache::new(|| symbol!(Atom::I_STR));
+
 static SPECIALS: SymbolCache<SpecialSymbols> = SymbolCache::new(|| SpecialSymbols {
     euler_gamma: get_symbol!("euler_gamma").expect("Euler gamma not defined"),
     gamma: get_symbol!("gamma").expect("gamma not defined"),
@@ -2224,6 +2229,12 @@ pub fn polylog() -> Symbol {
 /// when the root is normalized.
 pub fn root() -> Symbol {
     SPECIALS.root
+}
+
+/// Return the formal generator used to present the exact complex field.
+/// The imaginary unit in an expression remains a numerical coefficient.
+pub(crate) fn imaginary_unit_generator() -> Symbol {
+    *IMAGINARY_GENERATOR
 }
 
 /// Return the built-in variable used as the polynomial variable in `root`.

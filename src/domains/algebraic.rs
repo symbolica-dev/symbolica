@@ -34,7 +34,7 @@ use crate::{
     },
     symbol,
     tensors::matrix::Matrix,
-    transcendental::{TranscendentalFunctions, root, root_var},
+    transcendental::{TranscendentalFunctions, imaginary_unit_generator, root, root_var},
 };
 
 use super::{
@@ -1870,7 +1870,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
         let poly = MultivariatePolynomial::new(
             &ring,
             Some(2),
-            Arc::new(vec![symbol!(Atom::I_STR).into()]),
+            Arc::new(vec![imaginary_unit_generator().into()]),
         );
 
         let poly = poly.monomial(ring.one(), vec![2]) + poly.constant(ring.one());
@@ -3436,6 +3436,27 @@ impl AlgebraicExtension<Q> {
     }
 
     pub(crate) fn imaginary_unit(&self) -> Result<AlgebraicNumber<Q>, String> {
+        // For the exact defining polynomial t^2 + 1 the selected generator is
+        // already -i (root 0) or +i (root 1). Do not rediscover it by factoring
+        // t^2 + 1 over the same field for every complex rational coefficient.
+        // Other presentations and directly isolated embeddings keep the
+        // general embedding-aware conversion below.
+        if self.poly.nvars() == 1
+            && self.poly.exponents == [0, 2]
+            && self.poly.nterms() == 2
+            && self
+                .poly
+                .coefficients
+                .iter()
+                .all(|coefficient| coefficient.is_one())
+        {
+            match &self.embedding {
+                AlgebraicEmbedding::Indexed(1) => return Ok(self.generator()),
+                AlgebraicEmbedding::Indexed(0) => return Ok(self.neg(&self.generator())),
+                _ => {}
+            }
+        }
+
         self.embedded_rational_root(&Self::imaginary_unit_defining_polynomial(), 1)
     }
 

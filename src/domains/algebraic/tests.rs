@@ -1017,3 +1017,143 @@ fn polynomial_power_variable_print() {
     let text = field.to_string();
     assert!(text.contains("(2^(1/2))^2"), "{text}");
 }
+
+#[test]
+fn imaginary_unit_uses_both_gaussian_embeddings() {
+    let canonical = AlgebraicExtension::complex(Q);
+    let renamed = crate::parse!("gaussian_embedding_test^2+1").to_polynomial::<_, u16>(&Q, None);
+
+    for polynomial in [canonical.poly().clone(), renamed] {
+        for index in [0, 1] {
+            let field =
+                AlgebraicExtension::from_polynomial_with_embedding(polynomial.clone(), index);
+            let generator = field.generator();
+            let expected = if index == 0 {
+                field.neg(&generator)
+            } else {
+                generator
+            };
+            let imaginary = field.imaginary_unit().unwrap();
+            assert_eq!(imaginary, expected);
+            // Preserve the pre-optimization root-discovery path as an exact oracle.
+            assert_eq!(
+                imaginary,
+                field
+                    .embedded_rational_root(
+                        &AlgebraicExtension::imaginary_unit_defining_polynomial(),
+                        1,
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(field.mul(&imaginary, &imaginary), field.neg(&field.one()));
+            assert_eq!(field.mul(&imaginary, &field.neg(&imaginary)), field.one());
+            assert_eq!(field.element_to_atom(&imaginary), Atom::i());
+        }
+    }
+}
+
+#[test]
+fn gaussian_coefficient_conversion_preserves_small_large_and_owned_values() {
+    use crate::coefficient::{Coefficient, CoefficientView};
+
+    let polynomial = crate::parse!("gaussian_coeff_test^2+1").to_polynomial::<_, u16>(&Q, None);
+    let mut saw_natural = false;
+    let mut saw_large = false;
+    for index in [0, 1] {
+        let field = AlgebraicExtension::from_polynomial_with_embedding(polynomial.clone(), index);
+        let imaginary = if index == 0 {
+            field.neg(&field.generator())
+        } else {
+            field.generator()
+        };
+        for input in [
+            "0",
+            "2/3",
+            "1i",
+            "-1i",
+            "2/3-5i/7",
+            "123456789012345678901234567890123456789/11+987654321098765432109876543210987654321i/13",
+        ] {
+            let atom = crate::parse!(input);
+            let AtomView::Num(number) = atom.as_view() else {
+                panic!("expected numeric coefficient: {input}");
+            };
+            let view = number.get_coeff_view();
+            saw_natural |= matches!(view, CoefficientView::Natural(..));
+            saw_large |= matches!(view, CoefficientView::Large(..));
+            let owned = view.to_owned();
+            let Coefficient::Complex(parts) = &owned else {
+                panic!("expected exact complex coefficient");
+            };
+            let expected = field.add(
+                &field.constant(parts.re.clone()),
+                &field.mul(&field.constant(parts.im.clone()), &imaginary),
+            );
+            assert_eq!(
+                field.try_element_from_coefficient_view(view).unwrap(),
+                expected
+            );
+            assert_eq!(field.try_element_from_coefficient(owned).unwrap(), expected);
+        }
+    }
+    assert!(
+        saw_natural && saw_large,
+        "exercise both borrowed coefficient storage variants"
+    );
+}
+
+#[test]
+fn imaginary_unit_preserves_noncanonical_and_isolated_fallbacks() {
+    for (polynomial, indices) in [("gaussian_fallback^2+4", 2), ("gaussian_fallback^4+1", 4)] {
+        for index in 0..indices {
+            let field = AlgebraicExtension::from_polynomial_with_embedding(
+                crate::parse!(polynomial).to_polynomial::<_, u16>(&Q, None),
+                index,
+            );
+            let imaginary = field.imaginary_unit().unwrap();
+            assert_eq!(
+                imaginary,
+                field
+                    .embedded_rational_root(
+                        &AlgebraicExtension::imaginary_unit_defining_polynomial(),
+                        1,
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(field.mul(&imaginary, &imaginary), field.neg(&field.one()));
+        }
+    }
+
+    for index in [0, 1] {
+        let mut field = AlgebraicExtension::from_polynomial_with_embedding(
+            crate::parse!("gaussian_isolated^2+1").to_polynomial::<_, u16>(&Q, None),
+            index,
+        );
+        field.embedding =
+            AlgebraicEmbedding::Isolated(Arc::new(field.isolated_embedding().unwrap()));
+        let expected = if index == 0 {
+            field.neg(&field.generator())
+        } else {
+            field.generator()
+        };
+        assert_eq!(field.imaginary_unit().unwrap(), expected);
+    }
+
+    let real = AlgebraicExtension::from_polynomial_with_embedding(
+        crate::parse!("gaussian_real_fallback^2-2").to_polynomial::<_, u16>(&Q, None),
+        1,
+    );
+    assert!(real.imaginary_unit().is_err());
+}
+
+#[test]
+fn complex_constructor_reuses_registered_generator_symbol() {
+    let first = AlgebraicExtension::complex(Q);
+    let symbol = crate::get_symbol!(Atom::I_STR).unwrap();
+    assert_eq!(first.poly().get_vars_ref(), &[PolyVariable::from(symbol)]);
+    for _ in 0..8 {
+        let field = AlgebraicExtension::complex(Q);
+        assert_eq!(field, first);
+        assert_eq!(field.poly().get_vars_ref(), &[PolyVariable::from(symbol)]);
+    }
+}
