@@ -618,6 +618,12 @@ fn adjoin_with_complex_embedding() {
         assert_eq!(extension.embedding.index(), Some(expected_embedding));
         assert_eq!(extension.mul(&r1, &r1), extension.nth(2.into()));
         assert_eq!(extension.mul(&r2, &r2), extension.neg(&extension.one()));
+        let i = if i_embedding == 1 {
+            r2
+        } else {
+            extension.neg(&r2)
+        };
+        assert_eq!(extension.imaginary_unit.get(), Some(&i));
     }
 }
 
@@ -1016,4 +1022,304 @@ fn polynomial_power_variable_print() {
     let field = AlgebraicExtension::new(modulus);
     let text = field.to_string();
     assert!(text.contains("(2^(1/2))^2"), "{text}");
+}
+
+// Count entry into the two containment/discovery paths, per test thread. A warm
+// coefficient must skip both, including AlgebraicContext's field discovery.
+thread_local! {
+    pub(super) static ROOT_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[test]
+fn imaginary_unit_cache_composite_coefficients_and_clones() {
+    use crate::coefficient::{Coefficient, CoefficientView};
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    let field = AlgebraicExtension::from_polynomial_with_embedding(
+        parse!("t^4-2*t^2+9").to_polynomial(&Q, None),
+        3, // sqrt(2) + i
+    );
+    let clone = field.clone();
+    let independent =
+        AlgebraicExtension::from_polynomial_with_embedding(field.poly.as_ref().clone(), 3);
+    let hash = |field: &AlgebraicExtension<Q>| {
+        let mut hasher = DefaultHasher::new();
+        field.hash(&mut hasher);
+        hasher.finish()
+    };
+    let before = hash(&field);
+    assert!(clone.imaginary_unit.get().is_none());
+    ROOT_DISCOVERIES.set(0);
+    let i = field.imaginary_unit().unwrap();
+    assert_eq!(ROOT_DISCOVERIES.get(), 1);
+    assert_eq!(field.pow(&i, 2), field.nth((-1).into()));
+    assert!(Arc::ptr_eq(&field.imaginary_unit, &clone.imaginary_unit));
+    assert_eq!(clone.imaginary_unit.get(), Some(&i));
+    assert_eq!(field, independent);
+    assert_eq!(hash(&field), before);
+    assert_eq!(hash(&independent), before);
+    assert!(independent.imaginary_unit.get().is_none());
+
+    let mut context = AlgebraicContext::new(clone.clone());
+    ROOT_DISCOVERIES.set(0);
+    for (text, large) in [
+        ("2+3i", false),
+        ("-7/3-5/2i", false),
+        (
+            "123456789012345678901234567890+987654321098765432109876543210i",
+            true,
+        ),
+        (
+            "-234567890123456789012345678901/7-876543210987654321098765432109/11i",
+            true,
+        ),
+    ] {
+        let atom = parse!(text);
+        let AtomView::Num(number) = atom.as_view() else {
+            panic!("expected number")
+        };
+        let view = number.get_coeff_view();
+        assert_eq!(matches!(view, CoefficientView::Large(..)), large);
+        let Coefficient::Complex(value) = view.to_owned() else {
+            panic!("expected complex")
+        };
+        let expected = field.add(
+            &field.constant(value.re),
+            &field.mul(&field.constant(value.im), &i),
+        );
+        assert_eq!(
+            clone.try_element_from_coefficient_view(view).unwrap(),
+            expected
+        );
+        assert_eq!(
+            clone.try_element_from_coefficient(view.to_owned()).unwrap(),
+            expected
+        );
+        context.extend(atom.as_view()).unwrap();
+        assert_eq!(context.image(&atom), Some(&expected));
+    }
+    assert_eq!(clone.imaginary_unit().unwrap(), i);
+    assert_eq!(ROOT_DISCOVERIES.get(), 0);
+    assert!(Arc::ptr_eq(
+        &context.field.imaginary_unit,
+        &field.imaginary_unit
+    ));
+}
+
+#[test]
+fn imaginary_unit_cache_conjugates_and_embedding_changes() {
+    for index in 0..4 {
+        let field = AlgebraicExtension::from_polynomial_with_embedding(
+            parse!("t^4-2*t^2+9").to_polynomial(&Q, None),
+            index,
+        );
+        let i = field.imaginary_unit().unwrap();
+        assert_eq!(
+            field
+                .root_index_of_element(
+                    &i,
+                    &AlgebraicExtension::imaginary_unit_defining_polynomial()
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(field.clone().imaginary_unit().unwrap(), i);
+    }
+
+    // Detach even an empty cache, before either conjugate is warmed.
+    let positive = AlgebraicExtension::complex(Q);
+    let mut negative = positive.clone();
+    negative.set_embedding(AlgebraicEmbedding::Indexed(0));
+    assert!(!Arc::ptr_eq(
+        &positive.imaginary_unit,
+        &negative.imaginary_unit
+    ));
+    assert_eq!(positive.imaginary_unit().unwrap(), positive.generator());
+    assert_eq!(
+        negative.imaginary_unit().unwrap(),
+        negative.neg(&negative.generator())
+    );
+    let mut changed = positive.clone();
+    changed.set_embedding(AlgebraicEmbedding::Isolated(Arc::new(
+        positive
+            .poly
+            .to_univariate_from_univariate(0)
+            .root(0)
+            .unwrap(),
+    )));
+    assert!(changed.imaginary_unit.get().is_none());
+    assert_eq!(
+        changed.imaginary_unit().unwrap(),
+        changed.neg(&changed.generator())
+    );
+    assert!(matches!(
+        changed.embedding(),
+        AlgebraicEmbedding::Isolated(_)
+    ));
+    assert_eq!(positive.imaginary_unit().unwrap(), positive.generator());
+}
+
+#[test]
+fn imaginary_unit_cache_seed_and_transport_isolated_extensions() {
+    let real = AlgebraicExtension::from_polynomial_with_embedding(
+        parse!("t^2-2").to_polynomial(&Q, None),
+        1,
+    );
+    assert!(real.imaginary_unit().is_err());
+    assert!(real.imaginary_unit.get().is_none());
+    let polynomial = AlgebraicExtension::imaginary_unit_defining_polynomial();
+    let (composite, _, i) = real
+        .with_adjoined_rational_root_data(&polynomial, 1)
+        .unwrap();
+    assert_eq!(composite.imaginary_unit.get(), Some(&i));
+    assert!(matches!(
+        composite.embedding(),
+        AlgebraicEmbedding::Isolated(_)
+    ));
+    ROOT_DISCOVERIES.set(0);
+    assert_eq!(composite.imaginary_unit().unwrap(), i);
+    assert_eq!(
+        composite
+            .with_adjoined_rational_root_data(&polynomial, 1)
+            .unwrap()
+            .2,
+        i
+    );
+    assert_eq!(ROOT_DISCOVERIES.get(), 0);
+
+    let (larger, old_generator, _) = composite
+        .with_adjoined_rational_root_data(&parse!("u^2-3").to_polynomial(&Q, None), 1)
+        .unwrap();
+    let transported = AlgebraicContext::transport_element(&i, &larger, &old_generator);
+    assert_eq!(larger.imaginary_unit.get(), Some(&transported));
+    assert_eq!(larger.pow(&transported, 2), larger.nth((-1).into()));
+    assert!(matches!(
+        larger.embedding(),
+        AlgebraicEmbedding::Isolated(_)
+    ));
+    ROOT_DISCOVERIES.set(0);
+    assert_eq!(larger.imaginary_unit().unwrap(), transported);
+    assert_eq!(ROOT_DISCOVERIES.get(), 0);
+
+    // Coprime binomial adjunction uses a product primitive element.
+    let gaussian = AlgebraicExtension::complex(Q);
+    let i = gaussian.imaginary_unit().unwrap();
+    let (product, old_generator, _) = gaussian
+        .with_adjoined_rational_root_data(&parse!("u^3-2").to_polynomial(&Q, None), 0)
+        .unwrap();
+    assert_eq!(
+        product.imaginary_unit.get(),
+        Some(&AlgebraicContext::transport_element(
+            &i,
+            &product,
+            &old_generator
+        ))
+    );
+    assert!(matches!(
+        product.embedding(),
+        AlgebraicEmbedding::Isolated(_)
+    ));
+    assert!(real.imaginary_unit().is_err());
+}
+
+#[test]
+fn imaginary_unit_cache_indexed_adjunctions() {
+    let base = AlgebraicExtension::trivial(Q);
+    let polynomial = parse!("u^2+1").to_polynomial(&base, None);
+    let (fields, _, generator) = base.adjoin_with_all_embeddings(&polynomial, None);
+    assert!(!Arc::ptr_eq(
+        &fields[0].imaginary_unit,
+        &fields[1].imaginary_unit
+    ));
+    assert_eq!(
+        fields[0].imaginary_unit.get(),
+        Some(&fields[0].neg(&generator))
+    );
+    assert_eq!(fields[1].imaginary_unit.get(), Some(&generator));
+
+    let gaussian = &fields[0];
+    let i = gaussian.imaginary_unit().unwrap();
+    let polynomial = parse!("v^2-2").to_polynomial(gaussian, None);
+    let (extensions, old_generator, _) =
+        gaussian.adjoin_with_all_embeddings(&polynomial, Some(symbol!("cache_gamma").into()));
+    assert!(!Arc::ptr_eq(
+        &extensions[0].imaginary_unit,
+        &extensions[1].imaginary_unit
+    ));
+    for field in extensions {
+        let expected = AlgebraicContext::transport_element(&i, &field, &old_generator);
+        assert_eq!(field.imaginary_unit.get(), Some(&expected));
+        assert_eq!(
+            field
+                .root_index_of_element(
+                    &expected,
+                    &AlgebraicExtension::imaginary_unit_defining_polynomial()
+                )
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn imaginary_unit_cache_renames_with_context() {
+    let mut context = AlgebraicContext::from_atom(parse!("sqrt(2)+1i").as_view()).unwrap();
+    let original = context.field.clone();
+    let original_i = original.imaginary_unit().unwrap();
+    let variable = symbol!("imaginary_cache_renamed").into();
+    let mut expected = original_i.clone();
+    expected
+        .poly
+        .rename_variable(&original.poly.get_vars_ref()[0], &variable);
+    context.rename_generator(variable);
+    assert_eq!(context.field.imaginary_unit.get(), Some(&expected));
+    assert!(!Arc::ptr_eq(
+        &original.imaginary_unit,
+        &context.field.imaginary_unit
+    ));
+    ROOT_DISCOVERIES.set(0);
+    context.extend(parse!("3+4i").as_view()).unwrap();
+    assert_eq!(context.field.imaginary_unit().unwrap(), expected);
+    assert_eq!(original.imaginary_unit().unwrap(), original_i);
+    assert_eq!(ROOT_DISCOVERIES.get(), 0);
+}
+
+#[test]
+fn imaginary_unit_cache_real_fields_reject_complex_coefficients() {
+    for polynomial in ["t", "t^2-2", "t^2+2"] {
+        let field = AlgebraicExtension::new(parse!(polynomial).to_polynomial(&Q, None));
+        assert!(parse!("2+3i").as_view().to_algebraic(&field).is_err());
+        assert!(field.imaginary_unit.get().is_none());
+        assert_eq!(
+            parse!("2").as_view().to_algebraic(&field).unwrap(),
+            field.nth(2.into())
+        );
+    }
+}
+
+#[test]
+fn imaginary_unit_cache_concurrent_clones() {
+    let field = AlgebraicExtension::from_polynomial_with_embedding(
+        parse!("t^4-2*t^2+9").to_polynomial(&Q, None),
+        3,
+    );
+    let barrier = std::sync::Barrier::new(4);
+    let images = std::thread::scope(|scope| {
+        (0..4)
+            .map(|_| {
+                let field = field.clone();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    field.imaginary_unit().unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    for image in images {
+        assert_eq!(field.imaginary_unit.get(), Some(&image));
+    }
 }
