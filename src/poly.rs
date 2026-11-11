@@ -1188,32 +1188,28 @@ impl AtomView<'_> {
                     }
                     _ => Ok(()),
                 },
-                AtomView::Var(v) => {
-                    let name = v.get_symbol();
-                    if !vars.contains(&name.into()) {
+                AtomView::Var(_) | AtomView::Fun(_) => {
+                    // Keep special function/coefficient conversion on the full path.
+                    if let AtomView::Fun(f) = factor
+                        && f.get_symbol().is_builtin()
+                    {
+                        return Err("Function requires full conversion");
+                    }
+                    if !vars.iter().any(|v| v == factor) {
                         if !allow_new_vars {
                             return Err("Expression contains variable that is not in variable map");
                         } else {
-                            Arc::make_mut(vars).push(v.get_symbol().into());
+                            Arc::make_mut(vars)
+                                .push(PolyVariable::try_from(factor.to_owned()).unwrap());
                         }
                     }
                     Ok(())
                 }
-                AtomView::Fun(_) => Err("function not supported in polynomial"),
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
                     match base {
-                        AtomView::Var(v) => {
-                            let name = v.get_symbol();
-                            if !vars.contains(&name.into()) {
-                                if !allow_new_vars {
-                                    return Err(
-                                        "Expression contains variable that is not in variable map",
-                                    );
-                                } else {
-                                    Arc::make_mut(vars).push(v.get_symbol().into());
-                                }
-                            }
+                        AtomView::Var(_) | AtomView::Fun(_) => {
+                            check_factor(&base, vars, allow_new_vars)?;
                         }
                         _ => return Err("base must be a variable"),
                     }
@@ -1309,35 +1305,35 @@ impl AtomView<'_> {
 
                     Ok(())
                 }
-                AtomView::Var(v) => {
-                    let id = v.get_symbol();
-                    exponents[vars.iter().position(|v| *v == id).unwrap()] += E::one();
+                AtomView::Var(_) | AtomView::Fun(_) => {
+                    let index = vars.iter().position(|v| v == factor).unwrap();
+                    exponents[index] = exponents[index]
+                        .checked_add(&E::one())
+                        .ok_or("Exponent sum does not fit the exponent type")?;
                     Ok(())
                 }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
+                    let var_index = vars.iter().position(|v| v == &base).unwrap();
 
-                    let var_index = match base {
-                        AtomView::Var(v) => {
-                            let id = v.get_symbol();
-                            vars.iter().position(|v| *v == id).unwrap()
-                        }
-                        _ => unreachable!(),
-                    };
-
-                    match exp {
+                    let value = match exp {
                         AtomView::Num(n) => match n.get_coeff_view() {
-                            CoefficientView::Natural(r, _, _, _) => {
-                                exponents[var_index] += E::from_i32(r as i32)
-                            }
-                            CoefficientView::Large(r, _) => {
-                                exponents[var_index] +=
-                                    E::from_i32(r.to_rat().numerator_ref().to_i64().unwrap() as i32)
-                            }
+                            CoefficientView::Natural(r, _, _, _) => r,
+                            CoefficientView::Large(r, _) => r
+                                .to_rat()
+                                .numerator_ref()
+                                .to_i64()
+                                .ok_or("Exponent too large")?,
                             _ => unreachable!(),
                         },
                         _ => unreachable!(),
-                    }
+                    };
+                    let exponent =
+                        E::try_from(i32::try_from(value).map_err(|_| "Exponent too large")?)
+                            .map_err(|_| "Exponent does not fit the exponent type")?;
+                    exponents[var_index] = exponents[var_index]
+                        .checked_add(&exponent)
+                        .ok_or("Exponent sum does not fit the exponent type")?;
 
                     Ok(())
                 }
@@ -3090,5 +3086,28 @@ impl Token {
                     .map_err(|e| Cow::Owned(e.to_string()))
             }),
         }
+    }
+}
+
+#[test]
+fn expanded_opaque_functions() {
+    use crate::domains::rational::Q;
+
+    let parse = |s| Atom::parse(s, "poly_test", Default::default()).unwrap();
+    let input = parse("f(x)^2+f(exp(x))+3*f(x)");
+    let polynomial = input
+        .as_view()
+        .to_polynomial_expanded::<_, u8>(&Q, None, true)
+        .unwrap();
+    assert_eq!(polynomial.nvars(), 2);
+    assert_eq!(polynomial.to_expression(), input);
+
+    for special in ["sin(x)", "exp(x+y)", "root(1-10*x^2+x^4,3)"] {
+        assert!(
+            parse(special)
+                .as_view()
+                .to_polynomial_expanded::<_, u8>(&Q, None, true)
+                .is_err()
+        );
     }
 }
