@@ -5,6 +5,8 @@ mod benchmark_capture;
 pub mod factor;
 pub mod gcd;
 pub mod groebner;
+#[cfg(test)]
+mod mapped_function_tests;
 pub mod polynomial;
 mod resultant;
 pub use resultant::PolynomialResultant;
@@ -1176,7 +1178,86 @@ impl AtomView<'_> {
         var_map: Option<&Arc<Vec<PolyVariable>>>,
         allow_new_vars: bool,
     ) -> Result<MultivariatePolynomial<R, E>, &'static str> {
-        fn check_factor(
+        self.to_polynomial_expanded_mode::<R, E, false>(field, var_map, allow_new_vars)
+    }
+
+    // Only factorized rational conversion may treat mapped functions and
+    // primitive powers as opaque polynomial variables. Ordinary polynomial
+    // conversion can instead embed algebraic roots in its coefficient field.
+    fn to_polynomial_expanded_mode<
+        R: Ring + ConvertToRing,
+        E: Exponent,
+        const MAPPED_FUNCTIONS: bool,
+    >(
+        &self,
+        field: &R,
+        var_map: Option<&Arc<Vec<PolyVariable>>>,
+        allow_new_vars: bool,
+    ) -> Result<MultivariatePolynomial<R, E>, &'static str> {
+        fn mapped_power_monomial<E: Exponent>(
+            factor: AtomView<'_>,
+            vars: &[PolyVariable],
+        ) -> Option<(usize, E)> {
+            fn primitive_index(factor: AtomView<'_>, vars: &[PolyVariable]) -> Option<usize> {
+                let AtomView::Pow(power) = factor else {
+                    return None;
+                };
+                let index = vars.iter().position(|variable| {
+                    matches!(variable, PolyVariable::Power(atom) if atom.as_view() == factor)
+                })?;
+                let (base, exponent) = power.get_base_exp();
+                if matches!(exponent, AtomView::Add(_))
+                    || extract_integer_content_from_exponent(base, exponent).is_some()
+                {
+                    None
+                } else {
+                    Some(index)
+                }
+            }
+
+            let AtomView::Pow(power) = factor else {
+                return None;
+            };
+            let (base, exponent) = power.get_base_exp();
+            // Follow the general factorized converter's precedence exactly.
+            // A redundant whole-Power map entry must not bypass either rewrite.
+            if matches!(exponent, AtomView::Add(_)) {
+                return None;
+            }
+            if let Some((primitive, multiplicity)) =
+                extract_integer_content_from_exponent(base, exponent)
+            {
+                if multiplicity <= 0 {
+                    return None;
+                }
+                let multiplicity = E::try_from(i32::try_from(multiplicity).ok()?).ok()?;
+                let index = primitive_index(primitive.as_view(), vars)?;
+                Some((index, multiplicity))
+            } else {
+                primitive_index(factor, vars).map(|index| (index, E::one()))
+            }
+        }
+
+        fn checked_exponent<E: Exponent>(exp: AtomView<'_>) -> Result<E, &'static str> {
+            let AtomView::Num(n) = exp else {
+                return Err("Non-numeric exponent");
+            };
+            let value = match n.get_coeff_view() {
+                CoefficientView::Natural(n, 1, 0, _) if n >= 0 => n,
+                CoefficientView::Large(n, i) if i.is_zero() => {
+                    let n = n.to_rat();
+                    if !n.is_integer() || n.is_negative() {
+                        return Err("Exponent negative or a fraction");
+                    }
+                    n.numerator_ref().to_i64().ok_or("Exponent too large")?
+                }
+                _ => return Err("Exponent is not an exact nonnegative integer"),
+            };
+            let value = i32::try_from(value).map_err(|_| "Exponent too large")?;
+            E::try_from(value).map_err(|_| "Exponent does not fit the exponent type")
+        }
+
+        fn check_factor<E: Exponent, const MAPPED_FUNCTIONS: bool>(
             factor: &AtomView<'_>,
             vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
@@ -1199,7 +1280,20 @@ impl AtomView<'_> {
                     }
                     Ok(())
                 }
+                AtomView::Fun(_)
+                    if MAPPED_FUNCTIONS
+                        && vars.iter().any(
+                            |v| matches!(v, PolyVariable::Function(_, a) if a.as_view() == *factor),
+                        ) =>
+                {
+                    Ok(())
+                }
                 AtomView::Fun(_) => Err("function not supported in polynomial"),
+                AtomView::Pow(_)
+                    if MAPPED_FUNCTIONS && mapped_power_monomial::<E>(*factor, vars).is_some() =>
+                {
+                    Ok(())
+                }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
                     match base {
@@ -1215,7 +1309,19 @@ impl AtomView<'_> {
                                 }
                             }
                         }
+                        AtomView::Fun(_)
+                            if MAPPED_FUNCTIONS
+                                && vars.iter().any(|v| {
+                                    matches!(v, PolyVariable::Function(_, a) if a.as_view() == base)
+                                }) =>
+                        {
+                            return checked_exponent::<E>(exp).map(|_| ());
+                        }
                         _ => return Err("base must be a variable"),
+                    }
+
+                    if MAPPED_FUNCTIONS {
+                        return checked_exponent::<E>(exp).map(|_| ());
                     }
 
                     match exp {
@@ -1259,7 +1365,7 @@ impl AtomView<'_> {
             }
         }
 
-        fn check_term(
+        fn check_term<E: Exponent, const MAPPED_FUNCTIONS: bool>(
             term: &AtomView<'_>,
             vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
@@ -1267,11 +1373,11 @@ impl AtomView<'_> {
             match term {
                 AtomView::Mul(m) => {
                     for factor in m {
-                        check_factor(&factor, vars, allow_new_vars)?;
+                        check_factor::<E, MAPPED_FUNCTIONS>(&factor, vars, allow_new_vars)?;
                     }
                     Ok(())
                 }
-                _ => check_factor(term, vars, allow_new_vars),
+                _ => check_factor::<E, MAPPED_FUNCTIONS>(term, vars, allow_new_vars),
             }
         }
 
@@ -1281,17 +1387,17 @@ impl AtomView<'_> {
         match self {
             AtomView::Add(a) => {
                 for term in a {
-                    check_term(&term, &mut vars, allow_new_vars)?;
+                    check_term::<E, MAPPED_FUNCTIONS>(&term, &mut vars, allow_new_vars)?;
                     n_terms += 1;
                 }
             }
             _ => {
-                check_term(self, &mut vars, allow_new_vars)?;
+                check_term::<E, MAPPED_FUNCTIONS>(self, &mut vars, allow_new_vars)?;
                 n_terms += 1;
             }
         }
 
-        fn parse_factor<R: Ring + ConvertToRing, E: Exponent>(
+        fn parse_factor<R: Ring + ConvertToRing, E: Exponent, const MAPPED_FUNCTIONS: bool>(
             factor: &AtomView<'_>,
             vars: &[PolyVariable],
             coefficient: &mut R::Element,
@@ -1311,10 +1417,37 @@ impl AtomView<'_> {
                 }
                 AtomView::Var(v) => {
                     let id = v.get_symbol();
-                    exponents[vars.iter().position(|v| *v == id).unwrap()] += E::one();
+                    let index = vars.iter().position(|v| *v == id).unwrap();
+                    if MAPPED_FUNCTIONS {
+                        exponents[index] = exponents[index]
+                            .checked_add(&E::one())
+                            .ok_or("Exponent sum does not fit the exponent type")?;
+                    } else {
+                        exponents[index] += E::one();
+                    }
+                    Ok(())
+                }
+                AtomView::Fun(_) if MAPPED_FUNCTIONS => {
+                    let index = vars
+                        .iter()
+                        .position(
+                            |v| matches!(v, PolyVariable::Function(_, a) if a.as_view() == *factor),
+                        )
+                        .unwrap();
+                    exponents[index] = exponents[index]
+                        .checked_add(&E::one())
+                        .ok_or("Exponent sum does not fit the exponent type")?;
                     Ok(())
                 }
                 AtomView::Pow(p) => {
+                    if MAPPED_FUNCTIONS
+                        && let Some((index, exponent)) = mapped_power_monomial::<E>(*factor, vars)
+                    {
+                        exponents[index] = exponents[index]
+                            .checked_add(&exponent)
+                            .ok_or("Exponent sum does not fit the exponent type")?;
+                        return Ok(());
+                    }
                     let (base, exp) = p.get_base_exp();
 
                     let var_index = match base {
@@ -1322,8 +1455,18 @@ impl AtomView<'_> {
                             let id = v.get_symbol();
                             vars.iter().position(|v| *v == id).unwrap()
                         }
+                        AtomView::Fun(_) if MAPPED_FUNCTIONS => vars.iter().position(|v| {
+                            matches!(v, PolyVariable::Function(_, a) if a.as_view() == base)
+                        }).unwrap(),
                         _ => unreachable!(),
                     };
+
+                    if MAPPED_FUNCTIONS {
+                        exponents[var_index] = exponents[var_index]
+                            .checked_add(&checked_exponent::<E>(exp)?)
+                            .ok_or("Exponent sum does not fit the exponent type")?;
+                        return Ok(());
+                    }
 
                     match exp {
                         AtomView::Num(n) => match n.get_coeff_view() {
@@ -1345,7 +1488,7 @@ impl AtomView<'_> {
             }
         }
 
-        fn parse_term<R: Ring + ConvertToRing, E: Exponent>(
+        fn parse_term<R: Ring + ConvertToRing, E: Exponent, const MAPPED_FUNCTIONS: bool>(
             term: &AtomView<'_>,
             vars: &[PolyVariable],
             poly: &mut MultivariatePolynomial<R, E>,
@@ -1357,10 +1500,22 @@ impl AtomView<'_> {
             match term {
                 AtomView::Mul(m) => {
                     for factor in m {
-                        parse_factor(&factor, vars, &mut coefficient, &mut exponents, field)?;
+                        parse_factor::<R, E, MAPPED_FUNCTIONS>(
+                            &factor,
+                            vars,
+                            &mut coefficient,
+                            &mut exponents,
+                            field,
+                        )?;
                     }
                 }
-                _ => parse_factor(term, vars, &mut coefficient, &mut exponents, field)?,
+                _ => parse_factor::<R, E, MAPPED_FUNCTIONS>(
+                    term,
+                    vars,
+                    &mut coefficient,
+                    &mut exponents,
+                    field,
+                )?,
             }
 
             poly.append_monomial(coefficient, &exponents);
@@ -1379,11 +1534,23 @@ impl AtomView<'_> {
                     match term {
                         AtomView::Mul(m) => {
                             for factor in m {
-                                parse_factor(&factor, &vars, coefficient, exponent, field)?;
+                                parse_factor::<R, E, MAPPED_FUNCTIONS>(
+                                    &factor,
+                                    &vars,
+                                    coefficient,
+                                    exponent,
+                                    field,
+                                )?;
                             }
                         }
                         _ => {
-                            parse_factor(&term, &vars, coefficient, exponent, field)?;
+                            parse_factor::<R, E, MAPPED_FUNCTIONS>(
+                                &term,
+                                &vars,
+                                coefficient,
+                                exponent,
+                                field,
+                            )?;
                         }
                     }
                 }
@@ -1399,7 +1566,7 @@ impl AtomView<'_> {
                 let mut poly =
                     MultivariatePolynomial::<R, E>::new(field, Some(n_terms), vars.clone());
 
-                parse_term(self, &vars, &mut poly, field)?;
+                parse_term::<R, E, MAPPED_FUNCTIONS>(self, &vars, &mut poly, field)?;
                 Ok(poly)
             }
         }
@@ -2009,8 +2176,41 @@ impl AtomView<'_> {
             + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
         MultivariatePolynomial<RO, E>: Factorize,
     {
+        self.to_factorized_rational_polynomial_mode::<R, RO, E, true>(field, out_field, var_map)
+    }
+
+    // The false instantiation is the exact pre-extension raw conversion oracle:
+    // the choice propagates through every recursive call, including Add/Mul/Pow.
+    fn to_factorized_rational_polynomial_mode<
+        R: EuclideanDomain + ConvertToRing,
+        RO: EuclideanDomain + PolynomialGCD<E>,
+        E: PositiveExponent,
+        const MAPPED_FUNCTIONS: bool,
+    >(
+        &self,
+        field: &R,
+        out_field: &RO,
+        var_map: &Arc<Vec<PolyVariable>>,
+    ) -> Result<FactorizedRationalPolynomial<RO, E>, PolynomialConversionError>
+    where
+        FactorizedRationalPolynomial<RO, E>: FromNumeratorAndFactorizedDenominator<R, RO, E>
+            + FromNumeratorAndFactorizedDenominator<RO, RO, E>,
+        MultivariatePolynomial<RO, E>: Factorize,
+    {
         // see if the current term can be cast into a polynomial using a fast routine
         if let Ok(num) = self.to_polynomial_expanded(field, Some(var_map), true) {
+            let den = vec![(num.one(), 1)];
+            return Ok(FactorizedRationalPolynomial::from_num_den(
+                num, den, out_field, false,
+            ));
+        }
+
+        // The existing fast path and ordinary converters remain unchanged.
+        // A complete supplied map is required for this additional bulk path.
+        if MAPPED_FUNCTIONS
+            && let Ok(num) =
+                self.to_polynomial_expanded_mode::<R, E, true>(field, Some(var_map), false)
+        {
             let den = vec![(num.one(), 1)];
             return Ok(FactorizedRationalPolynomial::from_num_den(
                 num, den, out_field, false,
@@ -2041,11 +2241,13 @@ impl AtomView<'_> {
                     result.numer_coeff = out_field.one();
                     for term in add {
                         let factor = base.pow(term);
-                        let mut factor = factor.as_view().to_factorized_rational_polynomial_impl(
-                            field,
-                            out_field,
-                            &result.numerator.variables(),
-                        )?;
+                        let mut factor = factor
+                            .as_view()
+                            .to_factorized_rational_polynomial_mode::<R, RO, E, MAPPED_FUNCTIONS>(
+                                field,
+                                out_field,
+                                &result.numerator.variables(),
+                            )?;
                         result.unify_variables(&mut factor);
                         result = &result * &factor;
                     }
@@ -2055,7 +2257,9 @@ impl AtomView<'_> {
                 if let Some((base, nn)) = extract_integer_content_from_exponent(base, exp) {
                     let b = base
                         .as_view()
-                        .to_factorized_rational_polynomial_impl(field, out_field, var_map)?;
+                        .to_factorized_rational_polynomial_mode::<R, RO, E, MAPPED_FUNCTIONS>(
+                            field, out_field, var_map,
+                        )?;
 
                     return if nn < 0 {
                         if b.is_zero() {
@@ -2139,11 +2343,12 @@ impl AtomView<'_> {
                 r.numerator = r.numerator.add_constant(out_field.one());
                 r.numer_coeff = out_field.one();
                 for arg in m {
-                    let mut arg_r = arg.to_factorized_rational_polynomial_impl(
-                        field,
-                        out_field,
-                        &r.numerator.variables(),
-                    )?;
+                    let mut arg_r = arg
+                        .to_factorized_rational_polynomial_mode::<R, RO, E, MAPPED_FUNCTIONS>(
+                            field,
+                            out_field,
+                            &r.numerator.variables(),
+                        )?;
                     r.unify_variables(&mut arg_r);
                     r = &r * &arg_r;
                 }
@@ -2152,11 +2357,12 @@ impl AtomView<'_> {
             AtomView::Add(a) => {
                 let mut r = FactorizedRationalPolynomial::new(out_field, var_map.clone());
                 for arg in a {
-                    let mut arg_r = arg.to_factorized_rational_polynomial_impl(
-                        field,
-                        out_field,
-                        &r.numerator.variables(),
-                    )?;
+                    let mut arg_r = arg
+                        .to_factorized_rational_polynomial_mode::<R, RO, E, MAPPED_FUNCTIONS>(
+                            field,
+                            out_field,
+                            &r.numerator.variables(),
+                        )?;
                     r.unify_variables(&mut arg_r);
                     r = &r + &arg_r;
                 }

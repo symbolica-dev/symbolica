@@ -124,25 +124,29 @@ fn integer_content_of_rational_and_complex_exponents() {
 
 #[test]
 fn split_exponential_sums() {
-    let exp_x = PolyVariable::Power(parse!("exp(x)"));
-    let exp_y = PolyVariable::Power(parse!("exp(y)"));
+    let exp_x = PolyVariable::Power(parse!("exp(split_exponential_sums_fixture_x)"));
+    let exp_y = PolyVariable::Power(parse!("exp(split_exponential_sums_fixture_y)"));
 
-    let p = parse!("exp(x+y)").to_polynomial::<_, u16>(&Q, None);
+    let p = parse!("exp(split_exponential_sums_fixture_x+split_exponential_sums_fixture_y)")
+        .to_polynomial::<_, u16>(&Q, None);
     assert_eq!(p.get_vars_ref(), &[exp_x.clone(), exp_y.clone()]);
     let term = (&p).into_iter().next().unwrap();
     assert_eq!(term.exponents, &[1, 1]);
 
-    let p_in_vars = parse!("exp(x+y)")
-        .to_polynomial_in_vars::<u16>(Arc::new(vec![exp_x.clone(), exp_y.clone()]));
+    let p_in_vars =
+        parse!("exp(split_exponential_sums_fixture_x+split_exponential_sums_fixture_y)")
+            .to_polynomial_in_vars::<u16>(Arc::new(vec![exp_x.clone(), exp_y.clone()]));
     let term = (&p_in_vars).into_iter().next().unwrap();
     assert_eq!(term.exponents, &[1, 1]);
 
-    let r = parse!("exp(x+y)").to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    let r = parse!("exp(split_exponential_sums_fixture_x+split_exponential_sums_fixture_y)")
+        .to_rational_polynomial::<_, _, u16>(&Q, &Z, None);
     assert_eq!(r.get_variables().as_ref(), &[exp_x.clone(), exp_y.clone()]);
     let term = (&r.numerator).into_iter().next().unwrap();
     assert_eq!(term.exponents, &[1, 1]);
 
-    let f = parse!("exp(x+y)").to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
+    let f = parse!("exp(split_exponential_sums_fixture_x+split_exponential_sums_fixture_y)")
+        .to_factorized_rational_polynomial::<_, _, u16>(&Q, &Z, None);
     assert_eq!(f.get_variables(), &[exp_x, exp_y]);
     let term = (&f.numerator).into_iter().next().unwrap();
     assert_eq!(term.exponents, &[1, 1]);
