@@ -43,6 +43,31 @@ use self::polynomial::MultivariatePolynomial;
 
 pub(crate) const INLINED_EXPONENTS: usize = 6;
 
+/// Zero-test cache, with one inline word for up to 64 coefficients.
+struct NonZeroMask {
+    words: SmallVec<[u64; 1]>,
+}
+
+impl NonZeroMask {
+    fn new<F: Ring>(ring: &F, coefficients: &[F::Element]) -> Self {
+        Self {
+            words: coefficients
+                .chunks(64)
+                .map(|chunk| {
+                    chunk.iter().enumerate().fold(0, |mask, (bit, c)| {
+                        mask | (u64::from(!ring.is_zero(c)) << bit)
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// Query the cached zero test for a coefficient slot.
+    fn is_zero(&self, index: usize) -> bool {
+        self.words[index / 64] & (1u64 << (index % 64)) == 0
+    }
+}
+
 /// A polynomial coefficient that can be converted to a Symbolica expression using its ring.
 pub trait CoefficientToExpression<R: Ring> {
     /// Write this coefficient as an expression to `out`.

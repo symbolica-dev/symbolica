@@ -30,7 +30,7 @@ use crate::{
     printer::{AtomPrinter, PrintOptions, PrintState},
 };
 
-use super::PolyVariable;
+use super::{NonZeroMask, PolyVariable};
 
 /// Errors that can occur during series expansion.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -742,7 +742,7 @@ impl<F: Ring> Series<F> {
 
         let d = self
             .coefficients
-            .iter_mut()
+            .iter()
             .rev()
             .position(|c| !self.field.is_zero(c))
             .unwrap_or(self.coefficients.len());
@@ -755,11 +755,14 @@ impl<F: Ring> Series<F> {
             return;
         }
 
+        // The last retained coefficient was already found to be nonzero above.
+        let last = self.coefficients.len() - 1;
         let d = self
             .coefficients
-            .iter_mut()
+            .iter()
+            .take(last)
             .position(|c| !self.field.is_zero(c))
-            .unwrap_or(self.coefficients.len());
+            .unwrap_or(last);
 
         self.shift += d as isize;
         self.order -= d;
@@ -1210,29 +1213,37 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
             ramification: r,
         };
 
-        res.coefficients =
-            vec![self.field.zero(); self.coefficients.len().max(rhs.coefficients.len())];
+        if self.is_zero() || rhs.is_zero() {
+            // A zero product inherits the truncation endpoint. Keep the
+            // relative precision representation when both inputs are empty.
+            if !self.is_zero() || !rhs.is_zero() {
+                res.shift += res.order as isize;
+                res.order = 0;
+            }
+            return res;
+        }
 
-        for (e1, c1) in self.coefficients.iter().enumerate() {
+        let len = (self.coefficients.len() - 1)
+            .saturating_mul(r_d_s)
+            .saturating_add((rhs.coefficients.len() - 1).saturating_mul(r_d_o))
+            .saturating_add(1)
+            .min(res.order);
+        res.coefficients = vec![self.field.zero(); len];
+
+        let rhs_nonzero = NonZeroMask::new(&self.field, &rhs.coefficients);
+        for (offset, c1) in (0..res.order).step_by(r_d_s).zip(&self.coefficients) {
             if self.field.is_zero(c1) {
                 continue;
             }
 
-            let p1 = self.get_exponent(e1);
-
-            for (e2, c2) in rhs.coefficients.iter().enumerate() {
-                let p = &p1 + &rhs.get_exponent(e2);
-
-                if !self.field.is_zero(c2) {
-                    let index = res.get_index(p);
-                    if index < res.order {
-                        if index >= res.coefficients.len() {
-                            res.coefficients.resize(index * 2, self.field.zero());
-                        }
-
-                        self.field
-                            .add_mul_assign(&mut res.coefficients[index], c1, c2);
-                    }
+            for (e2, (index, c2)) in (offset..res.order)
+                .step_by(r_d_o)
+                .zip(&rhs.coefficients)
+                .enumerate()
+            {
+                if !rhs_nonzero.is_zero(e2) {
+                    self.field
+                        .add_mul_assign(&mut res.coefficients[index], c1, c2);
                 }
             }
         }

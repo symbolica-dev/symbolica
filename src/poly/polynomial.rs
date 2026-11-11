@@ -680,7 +680,12 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         state: PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+        self.format(
+            element,
+            &opts.clone().mode(crate::printer::PrintMode::MathML),
+            state,
+            f,
+        )
     }
 
     fn format<W: std::fmt::Write>(
@@ -1331,7 +1336,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             for (var, e) in t.exponents.iter().enumerate() {
                 newexp[new_var_pos_other[var]] = *e;
             }
-            newother.append_monomial(t.coefficient.clone(), &newexp);
+            newother.append_monomial_nonzero(t.coefficient.clone(), &newexp);
         }
         *other = newother;
     }
@@ -1487,6 +1492,13 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             return;
         }
 
+        self.append_monomial_back_nonzero(coefficient, exponents);
+    }
+
+    /// Append a coefficient copied from a valid polynomial or already tested for zero.
+    /// A merge can still cancel, so its result must be checked.
+    #[inline]
+    fn append_monomial_back_nonzero(&mut self, coefficient: F::Element, exponents: &[E]) {
         let nterms = self.nterms();
         if nterms > 0 && exponents == self.last_exponents() {
             self.context
@@ -1508,6 +1520,13 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         if self.ring().is_zero(&coefficient) {
             return;
         }
+        self.append_monomial_nonzero(coefficient, exponents);
+    }
+
+    /// Insert a coefficient copied from a valid polynomial or already tested for zero.
+    /// The existing-coefficient invariant avoids retesting unchanged expressions;
+    /// sums formed while merging monomials still require a zero check.
+    fn append_monomial_nonzero(&mut self, coefficient: F::Element, exponents: &[E]) {
         if self.nvars() != exponents.len() {
             panic!(
                 "nvars mismatched: got {}, expected {}",
@@ -2300,7 +2319,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         let mut m = self.zero();
         for t in self.into_iter() {
             if t.exponents[var] < pow {
-                m.append_monomial(t.coefficient.clone(), t.exponents);
+                m.append_monomial_back_nonzero(t.coefficient.clone(), t.exponents);
             }
         }
         m
@@ -2383,7 +2402,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
             for (i, e) in a.exponents.iter().skip(start_index + 1).enumerate() {
                 new_exponents[start_index] += powers[i] * *e;
             }
-            res.append_monomial(a.coefficient.clone(), &new_exponents);
+            res.append_monomial_nonzero(a.coefficient.clone(), &new_exponents);
         }
         res
     }
@@ -2407,7 +2426,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
                 new_exponents[i] = total % powers[i - start_index];
                 new_exponents[i] = new_exponents[i] / powers[i - start_index - 1];
             }
-            res.append_monomial(a.coefficient.clone(), &new_exponents);
+            res.append_monomial_nonzero(a.coefficient.clone(), &new_exponents);
         }
         res
     }
@@ -3003,7 +3022,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut exp = vec![E::zero(); self.nvars()];
         for t in self {
             if t.exponents[n] == E::zero() {
-                res.append_monomial(t.coefficient.clone(), &t.exponents[..self.nvars()]);
+                res.append_monomial_nonzero(t.coefficient.clone(), &t.exponents[..self.nvars()]);
                 continue;
             }
 
@@ -3384,7 +3403,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             if t.exponents[x] == d {
                 e.copy_from_slice(t.exponents);
                 e[x] = E::zero();
-                lcoeff.append_monomial(t.coefficient.clone(), &e);
+                lcoeff.append_monomial_back_nonzero(t.coefficient.clone(), &e);
             }
         }
 
@@ -3444,7 +3463,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 e.copy_from_slice(t.exponents);
                 e[0] = E::zero();
                 e[1] = E::zero();
-                lcoeff.append_monomial(t.coefficient.clone(), &e);
+                lcoeff.append_monomial_back_nonzero(t.coefficient.clone(), &e);
             }
         }
 
@@ -3467,7 +3486,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         for t in (0..self.nterms()).rev() {
             if (0..self.nvars() - 1).all(|i| self.exponents(t)[i] == last[i] || i == n) {
                 e[n] = self.exponents(t)[n];
-                res.append_monomial(self.coefficients[t].clone(), &e);
+                res.append_monomial_nonzero(self.coefficients[t].clone(), &e);
                 e[n] = E::zero();
             } else {
                 break;
@@ -3520,7 +3539,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut e = vec![E::zero(); self.nvars()];
         for i in indices {
             e[lastvar[0]] = self.exponents(i)[lastvar[0]];
-            res.append_monomial(self.coefficients[i].clone(), &e);
+            res.append_monomial_nonzero(self.coefficients[i].clone(), &e);
             e[lastvar[0]] = E::zero();
         }
         res
@@ -3551,7 +3570,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut res = self.zero_with_capacity(self.nterms());
 
         for i in indices {
-            res.append_monomial(
+            res.append_monomial_back_nonzero(
                 self.coefficients[i].clone(),
                 &new_exp[i * self.nvars()..(i + 1) * self.nvars()],
             );
@@ -3629,7 +3648,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         );
 
         for i in indices {
-            res.append_monomial(
+            res.append_monomial_back_nonzero(
                 self.coefficients[i].clone(),
                 &new_exp[i * order.len()..(i + 1) * order.len()],
             );
@@ -3798,7 +3817,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             // Clearing their equal x coordinate therefore preserves strict Lex order.
             coefficients[index]
                 .get_or_insert_with(|| self.zero())
-                .append_monomial_back(coefficient.clone(), &coefficient_exponents);
+                .append_monomial_back_nonzero(coefficient.clone(), &coefficient_exponents);
         }
 
         coefficients
@@ -3928,7 +3947,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         for (p, c) in coeffs.into_iter().enumerate() {
             if !self.ring().is_zero(&c) {
                 exp[var] = E::from_i32(p as i32);
-                res.append_monomial(c, &exp);
+                res.append_monomial_back_nonzero(c, &exp);
             }
         }
         res
@@ -4006,7 +4025,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         for (degree, coefficient) in quotient_coefficients.into_iter().enumerate() {
             if !self.ring().is_zero(&coefficient) {
                 exponent[var] = E::from_i32(degree as i32);
-                q.append_monomial(coefficient, &exponent);
+                q.append_monomial_back_nonzero(coefficient, &exponent);
             }
         }
 
@@ -4014,7 +4033,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         for (degree, coefficient) in coefficients.into_iter().take(div_degree).enumerate() {
             if !self.ring().is_zero(&coefficient) {
                 exponent[var] = E::from_i32(degree as i32);
-                r.append_monomial(coefficient, &exponent);
+                r.append_monomial_back_nonzero(coefficient, &exponent);
             }
         }
 
@@ -4212,7 +4231,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             for (p, c) in coeffs.into_iter().enumerate() {
                 if !self.ring().is_zero(&c) {
                     from_uni_var(p as u32, &max_degs_rev, &mut exp);
-                    r.append_monomial(c, &exp);
+                    r.append_monomial_back_nonzero(c, &exp);
                 }
             }
 
@@ -5627,7 +5646,7 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
                 index
             };
             exponents[0] = self.exponents(index)[0];
-            coefficient.append_monomial(self.coefficients[index].clone(), &exponents);
+            coefficient.append_monomial_nonzero(self.coefficients[index].clone(), &exponents);
         }
         coefficient
     }

@@ -30,7 +30,7 @@ use crate::{
 };
 
 use super::{
-    PolyVariable, PositiveExponent,
+    NonZeroMask, PolyVariable, PositiveExponent,
     factor::Factorize,
     gcd::PolynomialGCD,
     polynomial::{MultivariatePolynomial, PolynomialRing},
@@ -2000,7 +2000,10 @@ impl<F: Ring> Add for UnivariatePolynomial<F> {
             self.ring.add_assign(&mut self.coefficients[i], c);
         }
 
-        self.truncate();
+        // Only equal degrees can cancel the leading coefficient
+        if self.coefficients.len() == other.coefficients.len() {
+            self.truncate();
+        }
 
         self
     }
@@ -2078,13 +2081,15 @@ impl<'a, F: Ring> Mul<&'a UnivariatePolynomial<F>> for &UnivariatePolynomial<F> 
         let mut res = self.zero();
         res.coefficients = vec![self.ring.zero(); n + m + 1];
 
+        let rhs_nonzero = NonZeroMask::new(&self.ring, &rhs.coefficients);
+
         for (e1, c1) in self.coefficients.iter().enumerate() {
             if self.ring.is_zero(c1) {
                 continue;
             }
 
             for (e2, c2) in rhs.coefficients.iter().enumerate() {
-                if !self.ring.is_zero(c2) {
+                if !rhs_nonzero.is_zero(e2) {
                     self.ring
                         .add_mul_assign(&mut res.coefficients[e1 + e2], c1, c2);
                 }
