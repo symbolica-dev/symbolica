@@ -92,7 +92,7 @@ impl TermStreamerConfig {
         Self::default()
     }
 
-    /// Set the number of cores to use.
+    /// Set the number of cores to use. Zero is treated as one core.
     pub fn cores(mut self, n_cores: usize) -> Self {
         self.n_cores = n_cores;
         self
@@ -176,7 +176,7 @@ pub struct TermStreamer<W: WriteableNamedStream> {
     file_buf: Vec<W>,
     config: TermStreamerConfig,
     filename: String,
-    thread_pool: Arc<rayon::ThreadPool>,
+    thread_pool: Option<Arc<rayon::ThreadPool>>,
     generation: usize,
 }
 
@@ -238,6 +238,15 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         let pid = std::process::id();
         let uid = TEMP_FILES_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let filename = format!("{}/{}_{:x}", config.path, pid, uid);
+        let n_cores = LicenseManager::max_threads(config.n_cores.max(1));
+        let thread_pool = (n_cores > 1).then(|| {
+            Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n_cores)
+                    .build()
+                    .unwrap(),
+            )
+        });
 
         Self {
             mem_buf: vec![],
@@ -246,12 +255,7 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
             total_size: 0,
             file_buf: vec![],
             filename,
-            thread_pool: Arc::new(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(LicenseManager::max_threads(config.n_cores))
-                    .build()
-                    .unwrap(),
-            ),
+            thread_pool,
             config,
             generation: 0,
         }
@@ -391,10 +395,18 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
         Ok(())
     }
 
+    /// Sort in the configured pool, without entering Rayon for a serial stream.
+    fn sort_buffer_by(&mut self, compare: impl Fn(&Atom, &Atom) -> std::cmp::Ordering + Sync) {
+        if let Some(pool) = &self.thread_pool {
+            pool.install(|| self.mem_buf.par_sort_by(&compare));
+        } else {
+            self.mem_buf.sort_by(compare);
+        }
+    }
+
     /// Sort all the terms in the memory buffer.
     fn sort(&mut self) {
-        self.mem_buf
-            .par_sort_by(|a, b| a.as_view().cmp_terms(&b.as_view()));
+        self.sort_buffer_by(|a, b| a.as_view().cmp_terms(&b.as_view()));
 
         let mut out = Vec::with_capacity(self.mem_buf.len());
         let old_size = self.mem_buf.len();
@@ -580,11 +592,9 @@ impl<W: WriteableNamedStream> TermStreamer<W> {
     /// Map every term in the stream using the function `f`. The resulting terms
     /// are a stream as well, which is returned by this function.
     pub fn map(&mut self, f: impl Fn(Atom) -> Atom + Send + Sync) -> Self {
-        if self.thread_pool.current_num_threads() == 1 {
+        let Some(t) = self.thread_pool.clone() else {
             return self.map_single_thread(f);
-        }
-
-        let t = self.thread_pool.clone();
+        };
 
         let new_out = self.next_generation();
 
