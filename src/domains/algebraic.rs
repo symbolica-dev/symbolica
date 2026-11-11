@@ -238,8 +238,6 @@ impl AlgebraicEmbedding {
 pub struct AlgebraicExtension<R: Ring> {
     poly: Arc<MultivariatePolynomial<R, u16>>, // TODO: convert to univariate polynomial
     embedding: AlgebraicEmbedding,
-    // Only populated for Q. Store the element, not a field, to avoid an Arc cycle.
-    // Clones share successes for this exact basis and selected embedding.
     imaginary_unit: Arc<OnceLock<AlgebraicNumber<R>>>,
 }
 
