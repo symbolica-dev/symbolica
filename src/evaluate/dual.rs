@@ -1,5 +1,16 @@
 use super::*;
 
+static DUAL_ARG: std::sync::OnceLock<Symbol> = std::sync::OnceLock::new();
+
+fn dual_arg_symbol() -> Symbol {
+    if let Some(symbol) = DUAL_ARG.get() {
+        return *symbol;
+    }
+    // State initializers can reenter vectorization, so enter State first.
+    let _ = crate::state::State::get_global_state();
+    *DUAL_ARG.get_or_init(|| crate::symbol!("symbolica::evaluate::dual_arg"))
+}
+
 impl<T: Default + Clone> ExpressionEvaluator<T> {
     /// Retain one vector component without executing instructions exclusive to
     /// other components. Keep control-flow instructions and their conditions so
@@ -595,7 +606,7 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
             .collect::<HashMap<_, _>>();
         let mut parameters = Vec::with_capacity(argument_count * dim);
         let mut index = 0usize;
-        let parameter_symbol = crate::symbol!("symbolica::evaluate::dual_arg");
+        let parameter_symbol = dual_arg_symbol();
         while parameters.len() < argument_count * dim {
             let parameter = crate::function!(parameter_symbol, index);
             index += 1;

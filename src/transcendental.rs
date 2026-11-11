@@ -59,6 +59,8 @@ impl<T> Deref for SymbolCache<T> {
     }
 }
 
+static IMAGINARY_UNIT: SymbolCache<Symbol> = SymbolCache::new(|| symbol!(Atom::I_STR));
+
 static SPECIALS: SymbolCache<SpecialSymbols> = SymbolCache::new(|| SpecialSymbols {
     euler_gamma: get_symbol!("euler_gamma").expect("Euler gamma not defined"),
     gamma: get_symbol!("gamma").expect("gamma not defined"),
@@ -2215,8 +2217,8 @@ pub fn polylog() -> Symbol {
 /// specialized root selection.
 ///
 /// In the two-argument form the polynomial variable is inferred only when
-/// there is a single indeterminate, or when `root_var` (or conventional `z`)
-/// occurs. An expression such as `root(x^2-a, 0)` is left unchanged because
+/// there is a single indeterminate, or when `root_var` occurs.
+/// An expression such as `root(x^2-a, 0)` is left unchanged because
 /// either symbol could be the polynomial variable; use `root(x^2-a, x, 0)` to
 /// resolve the ambiguity.
 ///
@@ -2224,6 +2226,11 @@ pub fn polylog() -> Symbol {
 /// when the root is normalized.
 pub fn root() -> Symbol {
     SPECIALS.root
+}
+
+/// Return the formal generator used to present the exact complex field.
+pub(crate) fn imaginary_unit_generator() -> Symbol {
+    *IMAGINARY_UNIT
 }
 
 /// Return the built-in variable used as the polynomial variable in `root`.
@@ -5325,18 +5332,23 @@ mod tests {
 
     #[test]
     fn root_simplifies_parametric_quadratic() {
-        assert_eq!(parse!("root(-a+z^2,0)"), parse!("-a^(1/2)"));
-        assert_eq!(parse!("root(-a+z^2,1)"), parse!("a^(1/2)"));
+        assert_eq!(parse!("root(-a+root_var^2,0)"), parse!("-a^(1/2)"));
+        assert_eq!(parse!("root(-a+root_var^2,1)"), parse!("a^(1/2)"));
+        assert_eq!(parse!("root(z^2-a,z,0)"), parse!("-a^(1/2)"));
+        assert_eq!(parse!("root(z^2-2,1)"), parse!("2^(1/2)"));
         assert_eq!(parse!("root(x^2-a-1,x,0)"), parse!("-(1+a)^(1/2)"));
         assert_eq!(parse!("root(x^2-a^3-1,x,0)"), parse!("-(1+a^3)^(1/2)"));
     }
 
     #[test]
     fn root_does_not_guess_between_multiple_symbols() {
-        for ambiguous in [parse!("root(x^2-a,0)"), parse!("root(x^2-a,2)")] {
-            assert!(ambiguous.contains_symbol(symbol!("x")));
-            assert!(ambiguous.contains_symbol(symbol!("a")));
-            assert!(!ambiguous.contains_symbol(super::root_var()));
+        for variable in ["x", "z"] {
+            for index in [0, 2] {
+                let ambiguous = parse!(format!("root({variable}^2-a,{index})"));
+                assert!(ambiguous.contains_symbol(symbol!(variable)));
+                assert!(ambiguous.contains_symbol(symbol!("a")));
+                assert!(!ambiguous.contains_symbol(super::root_var()));
+            }
         }
     }
 

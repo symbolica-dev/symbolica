@@ -6,6 +6,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     sync::{Arc, LazyLock, OnceLock, RwLock},
 };
 
@@ -32,9 +33,8 @@ use crate::{
         polynomial::MultivariatePolynomial,
         univariate::{IsolatedRoot, RootLocation},
     },
-    symbol,
     tensors::matrix::Matrix,
-    transcendental::{TranscendentalFunctions, root, root_var},
+    transcendental::{TranscendentalFunctions, imaginary_unit_generator, root, root_var},
 };
 
 use super::{
@@ -233,10 +233,35 @@ impl AlgebraicEmbedding {
 }
 
 /// A simple algebraic extension `R[t]/(f)` with a selected embedding.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct AlgebraicExtension<R: Ring> {
     poly: Arc<MultivariatePolynomial<R, u16>>, // TODO: convert to univariate polynomial
     embedding: AlgebraicEmbedding,
+    /// The image of the imaginary unit in this field, if known.
+    imaginary_unit: Arc<OnceLock<AlgebraicNumber<R>>>,
+}
+
+impl<R: Ring> PartialEq for AlgebraicExtension<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.poly == other.poly && self.embedding == other.embedding
+    }
+}
+
+impl<R: Ring> Eq for AlgebraicExtension<R> {}
+
+impl<R: Ring> Hash for AlgebraicExtension<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.poly.hash(state);
+        self.embedding.hash(state);
+    }
+}
+
+impl<R: Ring> AlgebraicExtension<R> {
+    fn set_embedding(&mut self, embedding: AlgebraicEmbedding) {
+        // Even empty caches must detach: a sibling may populate its cache later.
+        self.imaginary_unit = Arc::default();
+        self.embedding = embedding;
+    }
 }
 
 /// A formal simple algebraic quotient `R[t]/(f)` without a selected analytic
@@ -858,9 +883,16 @@ impl AlgebraicContext {
         for image in self.images.values_mut() {
             image.poly.rename_variable(&old_variable, &variable);
         }
+        let imaginary_unit = self.field.imaginary_unit.get().cloned().map(|mut image| {
+            image.poly.rename_variable(&old_variable, &variable);
+            image
+        });
         let embedding = self.field.embedding.clone();
         self.field = AlgebraicExtension::from_polynomial_with_embedding(polynomial, 0);
-        self.field.embedding = embedding;
+        self.field.set_embedding(embedding);
+        if let Some(image) = imaginary_unit {
+            let _ = self.field.imaginary_unit.set(image);
+        }
     }
 
     /// Return a known atom representing `element`, preferring canonical order.
@@ -954,6 +986,7 @@ impl AlgebraicContext {
 
         let old_embedding = self.field.canonical_embedding_index()?;
         let old_generator = field.embedded_rational_root(&self.field.poly, old_embedding)?;
+        self.field.transport_imaginary_unit(&field, &old_generator);
         for image in self.images.values_mut() {
             *image = Self::transport_element(image, &field, &old_generator);
         }
@@ -1525,6 +1558,9 @@ impl AtomView<'_> {
                 }
 
                 if let Some(current) = cur {
+                    if current.imaginary_unit.get().is_some() {
+                        return Some(current);
+                    }
                     current.with_adjoined_rational_root(
                         &AlgebraicExtension::imaginary_unit_defining_polynomial(),
                         1,
@@ -1543,6 +1579,7 @@ impl AtomView<'_> {
                         Some(AlgebraicExtension {
                             poly: Arc::new(poly),
                             embedding: AlgebraicEmbedding::Indexed(index),
+                            imaginary_unit: Arc::default(),
                         })
                     }
                 } else {
@@ -1631,6 +1668,7 @@ impl AtomView<'_> {
                             let ext = AlgebraicExtension {
                                 poly: Arc::new(factor),
                                 embedding: AlgebraicEmbedding::Indexed(index),
+                                imaginary_unit: Arc::default(),
                             };
                             cur = Some(c.adjoin_with_embedding(&ext, None).0);
                         }
@@ -1680,6 +1718,7 @@ impl AtomView<'_> {
                             let ext = AlgebraicExtension {
                                 poly: Arc::new(factor),
                                 embedding: AlgebraicEmbedding::Indexed(embedding),
+                                imaginary_unit: Arc::default(),
                             };
                             selected = Some(ext);
                         }
@@ -1727,6 +1766,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
             return AlgebraicExtension {
                 poly: Arc::new(poly),
                 embedding: AlgebraicEmbedding::Indexed(0),
+                imaginary_unit: Arc::default(),
             };
         }
 
@@ -1737,6 +1777,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
         AlgebraicExtension {
             poly: Arc::new(uni.to_multivariate()),
             embedding: AlgebraicEmbedding::Indexed(0),
+            imaginary_unit: Arc::default(),
         }
     }
 
@@ -1748,6 +1789,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
         AlgebraicExtension {
             poly: Arc::new(poly),
             embedding: AlgebraicEmbedding::Indexed(root_index),
+            imaginary_unit: Arc::default(),
         }
     }
 
@@ -1788,6 +1830,7 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
                     .map_coeff(|c| c.to_finite_field(field), field.clone()),
             ),
             embedding: AlgebraicEmbedding::Indexed(0),
+            imaginary_unit: Arc::default(),
         }
     }
 
@@ -1870,15 +1913,18 @@ impl<R: EuclideanDomain> AlgebraicExtension<R> {
         let poly = MultivariatePolynomial::new(
             &ring,
             Some(2),
-            Arc::new(vec![symbol!(Atom::I_STR).into()]),
+            Arc::new(vec![imaginary_unit_generator().into()]),
         );
 
         let poly = poly.monomial(ring.one(), vec![2]) + poly.constant(ring.one());
 
-        AlgebraicExtension {
+        let field = AlgebraicExtension {
             poly: Arc::new(poly),
             embedding: AlgebraicEmbedding::Indexed(1),
-        }
+            imaginary_unit: Arc::default(),
+        };
+        let _ = field.imaginary_unit.set(field.generator());
+        field
     }
 
     /// Converts an algebraic number to an atom.
@@ -2248,7 +2294,12 @@ impl<R: EuclideanDomain> Ring for AlgebraicExtension<R> {
         state: crate::printer::PrintState,
         f: &mut W,
     ) -> Result<bool, std::fmt::Error> {
-        self.format(element, &opts.clone().mode(crate::printer::PrintMode::MathML), state, f)
+        self.format(
+            element,
+            &opts.clone().mode(crate::printer::PrintMode::MathML),
+            state,
+            f,
+        )
     }
 
     fn format<W: std::fmt::Write>(
@@ -2372,6 +2423,7 @@ impl<R: EuclideanDomain> AlgebraicQuotient<R> {
         AlgebraicExtension {
             poly: self.poly.clone(),
             embedding: AlgebraicEmbedding::Indexed(0),
+            imaginary_unit: Arc::default(),
         }
     }
 
@@ -2822,6 +2874,7 @@ impl<R: Field + PolynomialGCD<u16>> AlgebraicExtension<R> {
             field = AlgebraicExtension {
                 poly: Arc::new(new_polynomial),
                 embedding: AlgebraicEmbedding::Indexed(0),
+                imaginary_unit: Arc::default(),
             };
         }
 
@@ -3176,6 +3229,28 @@ impl AlgebraicExtension<Q> {
         polynomial: &MultivariatePolynomial<Q, u16>,
         embedding: usize,
     ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
+        let adjoining_i = embedding == 1
+            && polynomial.nvars() == 1
+            && polynomial.degree(0) == 2
+            && Self::rational_binomial_data(polynomial) == Some((2, Rational::from(-1)));
+        if adjoining_i && let Some(image) = self.imaginary_unit.get() {
+            return Some((self.clone(), self.generator(), image.clone()));
+        }
+
+        let (field, old_generator, new_generator) =
+            self.with_adjoined_rational_root_data_uncached(polynomial, embedding)?;
+        self.transport_imaginary_unit(&field, &old_generator);
+        if adjoining_i {
+            let _ = field.imaginary_unit.set(new_generator.clone());
+        }
+        Some((field, old_generator, new_generator))
+    }
+
+    fn with_adjoined_rational_root_data_uncached(
+        &self,
+        polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
+    ) -> Option<(Self, AlgebraicNumber<Q>, AlgebraicNumber<Q>)> {
         let simplified = Root::new(polynomial.clone(), embedding)
             .ok()?
             .simplify()
@@ -3308,7 +3383,7 @@ impl AlgebraicExtension<Q> {
         let extension_polynomial = extension.poly.to_univariate_from_univariate(0);
         let selected_root =
             IsolatedRoot::from_rational_product(&extension_polynomial, &old_root, target);
-        extension.embedding = AlgebraicEmbedding::Isolated(Arc::new(selected_root));
+        extension.set_embedding(AlgebraicEmbedding::Isolated(Arc::new(selected_root)));
         Some((extension, old_generator, new_generator))
     }
 
@@ -3351,7 +3426,7 @@ impl AlgebraicExtension<Q> {
                 (Rational::from(shift as u64), &old_root),
             ],
         );
-        extension.embedding = AlgebraicEmbedding::Isolated(Arc::new(selected_root));
+        extension.set_embedding(AlgebraicEmbedding::Isolated(Arc::new(selected_root)));
         Some((extension, old_generator, new_generator))
     }
 
@@ -3422,7 +3497,7 @@ impl AlgebraicExtension<Q> {
                 1,
             )
             .ok()?;
-        extension.embedding = AlgebraicEmbedding::Indexed(candidates[selected[0]]);
+        extension.set_embedding(AlgebraicEmbedding::Indexed(candidates[selected[0]]));
         Some((extension, old_generator, new_generator))
     }
 
@@ -3436,7 +3511,59 @@ impl AlgebraicExtension<Q> {
     }
 
     pub(crate) fn imaginary_unit(&self) -> Result<AlgebraicNumber<Q>, String> {
-        self.embedded_rational_root(&Self::imaginary_unit_defining_polynomial(), 1)
+        if let Some(image) = self.imaginary_unit.get() {
+            return Ok(image.clone());
+        }
+
+        let image = if let AlgebraicEmbedding::Indexed(index) = &self.embedding
+            && *index <= 1
+            && self.poly.nvars() == 1
+            && self.poly.exponents == [0, 2]
+            && self
+                .poly
+                .coefficients
+                .iter()
+                .all(|coefficient| coefficient.is_one())
+        {
+            if *index == 1 {
+                self.generator()
+            } else {
+                self.neg(&self.generator())
+            }
+        } else {
+            self.embedded_rational_root(&Self::imaginary_unit_defining_polynomial(), 1)?
+        };
+
+        let _ = self.imaginary_unit.set(image.clone());
+        Ok(image)
+    }
+
+    fn cache_imaginary_unit_from_root(
+        &self,
+        polynomial: &MultivariatePolynomial<Q, u16>,
+        embedding: usize,
+        image: &AlgebraicNumber<Q>,
+    ) {
+        if embedding <= 1
+            && polynomial.degree(0) == 2
+            && Self::rational_binomial_data(polynomial) == Some((2, Rational::from(-1)))
+        {
+            let image = if embedding == 1 {
+                image.clone()
+            } else {
+                self.neg(image)
+            };
+            let _ = self.imaginary_unit.set(image);
+        }
+    }
+
+    fn transport_imaginary_unit(&self, field: &Self, old_generator: &AlgebraicNumber<Q>) {
+        if field.imaginary_unit.get().is_none()
+            && let Some(image) = self.imaginary_unit.get()
+        {
+            let image = AlgebraicContext::transport_element(image, field, old_generator);
+            let _ = field.imaginary_unit.set(image);
+        }
     }
 
     /// Adjoin the embedded extension `self[b]` and preserve the selected
@@ -3563,7 +3690,12 @@ impl AlgebraicExtension<Q> {
             let extensions = (0..extension_degree)
                 .map(|embedding| {
                     let mut field = extension.clone();
-                    field.embedding = AlgebraicEmbedding::Indexed(embedding);
+                    field.set_embedding(AlgebraicEmbedding::Indexed(embedding));
+                    field.cache_imaginary_unit_from_root(
+                        &new_generator_minimal_poly,
+                        embedding,
+                        &new_generator,
+                    );
                     field
                 })
                 .collect();
@@ -3645,7 +3777,13 @@ impl AlgebraicExtension<Q> {
             .into_iter()
             .map(|(new_generator_embedding, embedding)| {
                 let mut field = extension.clone();
-                field.embedding = AlgebraicEmbedding::Indexed(embedding);
+                field.set_embedding(AlgebraicEmbedding::Indexed(embedding));
+                self.transport_imaginary_unit(&field, &old_generator);
+                field.cache_imaginary_unit_from_root(
+                    &new_generator_minimal_poly,
+                    new_generator_embedding,
+                    &new_generator,
+                );
                 (new_generator_embedding, field)
             })
             .unzip();
@@ -3837,8 +3975,8 @@ impl Root<Q> {
 impl Root<RationalPolynomialField<IntegerRing, u16>> {
     /// Convert an expression polynomial into a root over `Q(parameters)`.
     ///
-    /// The canonical root variable, conventional `z`, or the sole
-    /// indeterminate is selected as the polynomial variable. If multiple
+    /// The canonical root variable or the sole indeterminate is selected
+    /// as the polynomial variable. If multiple
     /// other indeterminates occur, the root variable must be supplied
     /// explicitly. Every remaining indeterminate becomes part of the
     /// rational-function coefficient field.
@@ -3887,11 +4025,6 @@ impl Root<RationalPolynomialField<IntegerRing, u16>> {
             candidates
                 .iter()
                 .find(|(_, variable)| variable == &&PolyVariable::from(root_var()))
-                .or_else(|| {
-                    candidates
-                        .iter()
-                        .find(|(_, variable)| variable == &&PolyVariable::from(symbol!("z")))
-                })
                 .map(|(_, variable)| (*variable).clone())
                 .or_else(|| (candidates.len() == 1).then(|| candidates[0].1.clone()))
                 .ok_or_else(|| {

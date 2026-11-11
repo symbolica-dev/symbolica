@@ -466,10 +466,14 @@ use crate::{parse, symbol};
 
 #[test]
 fn simplify_parametric_root_struct() {
-    let root =
-        Root::<RationalPolynomialField<IntegerRing, u16>>::from_atom(parse!("-a+z^2").as_view(), 0)
-            .unwrap();
+    type ParametricRoot = Root<RationalPolynomialField<IntegerRing, u16>>;
+    let root = ParametricRoot::from_atom(parse!("-a+root_var^2").as_view(), 0).unwrap();
     assert_eq!(root.simplify().unwrap(), parse!("-a^(1/2)"));
+    assert!(ParametricRoot::from_atom(parse!("-a+z^2").as_view(), 0).is_err());
+    let explicit =
+        ParametricRoot::from_atom_with_variable(parse!("-a+z^2").as_view(), symbol!("z").into(), 0)
+            .unwrap();
+    assert_eq!(explicit.simplify().unwrap(), root.simplify().unwrap());
 }
 
 #[test]
@@ -598,6 +602,35 @@ fn adjoin_with_all_embeddings_from_degree_one_extension() {
 }
 
 #[test]
+fn imaginary_unit_in_gaussian_embeddings() {
+    for index in 0..=1 {
+        let field = AlgebraicExtension::from_polynomial_with_embedding(
+            parse!("a^2+1").to_polynomial(&Q, None),
+            index,
+        );
+        let expected = if index == 1 {
+            field.generator()
+        } else {
+            field.neg(&field.generator())
+        };
+
+        assert!(field.imaginary_unit.get().is_none());
+        let image = field.imaginary_unit().unwrap();
+        assert_eq!(image, expected);
+        assert_eq!(field.mul(&image, &image), field.neg(&field.one()));
+        assert_eq!(field.imaginary_unit.get(), Some(&image));
+        assert_eq!(field.element_to_atom(&image), parse!("1𝑖"));
+
+        let mut isolated = field.clone();
+        isolated.set_embedding(AlgebraicEmbedding::Isolated(Arc::new(
+            field.isolated_embedding().unwrap(),
+        )));
+        assert!(isolated.imaginary_unit.get().is_none());
+        assert_eq!(isolated.imaginary_unit().unwrap(), image);
+    }
+}
+
+#[test]
 fn adjoin_with_complex_embedding() {
     for (sqrt2_embedding, i_embedding, expected_embedding) in
         [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)]
@@ -618,6 +651,14 @@ fn adjoin_with_complex_embedding() {
         assert_eq!(extension.embedding.index(), Some(expected_embedding));
         assert_eq!(extension.mul(&r1, &r1), extension.nth(2.into()));
         assert_eq!(extension.mul(&r2, &r2), extension.neg(&extension.one()));
+        let imaginary_unit = if i_embedding == 1 {
+            r2.clone()
+        } else {
+            extension.neg(&r2)
+        };
+        assert_eq!(extension.poly.degree(0), 4);
+        assert_eq!(extension.imaginary_unit.get(), Some(&imaginary_unit));
+        assert_eq!(extension.imaginary_unit().unwrap(), imaginary_unit);
     }
 }
 
