@@ -29,7 +29,7 @@ fn q_poly(
 
 /// Linear factors with small and fractional roots, two coprime quadratics and
 /// a cubic.
-fn q_ring() -> PartialFractionRing<RationalField> {
+fn q_ring() -> PartialFractionRing<RationalField, false> {
     let x = variable();
     let factors = [
         q_poly(&x, &[(-1, 1), (1, 1)]),                // x - 1
@@ -60,8 +60,8 @@ fn zp_policy() -> PartialFractionSamplingPolicy<FiniteFieldSamplingPolicy> {
 }
 
 /// Sample an element with only a few factors, as in typical use.
-fn sparse_sample<F: Field + SampleableRing>(
-    ring: &PartialFractionRing<F>,
+fn sparse_sample<F: Field + SampleableRing, const EXTEND: bool>(
+    ring: &PartialFractionRing<F, EXTEND>,
     rng: &mut StdRng,
     policy: &PartialFractionSamplingPolicy<F::SamplingPolicy>,
 ) -> PartialFraction<F> {
@@ -81,8 +81,8 @@ fn sparse_sample<F: Field + SampleableRing>(
     a
 }
 
-fn to_q_rational(
-    ring: &PartialFractionRing<RationalField>,
+fn to_q_rational<const EXTEND: bool>(
+    ring: &PartialFractionRing<RationalField, EXTEND>,
     a: &PartialFraction<RationalField>,
 ) -> RationalPolynomial<IntegerRing, u16> {
     ring.to_rational_polynomial(a, &Z)
