@@ -100,6 +100,7 @@ use std::{
 use ahash::HashMap;
 use append_only_vec::AppendOnlyVec;
 use rand::Rng;
+use smallvec::SmallVec;
 
 use crate::{
     domains::{
@@ -688,6 +689,33 @@ where
     }
 }
 
+/// The products `a x, a x^2, ...` of one element `a` with powers of the
+/// variable, shared by several [PartialFractionRing::mul_fraction_cached]
+/// calls with the same `a`.
+#[derive(Clone, Debug)]
+pub struct PowerCache<F: Field> {
+    powers: Vec<PartialFraction<F>>,
+}
+
+impl<F: Field> Default for PowerCache<F> {
+    fn default() -> Self {
+        Self { powers: vec![] }
+    }
+}
+
+impl<F: Field> PowerCache<F> {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forget the cached products, before the cache is used with another
+    /// element.
+    pub fn clear(&mut self) {
+        self.powers.clear();
+    }
+}
+
 /// How a source is scaled when it is added to a destination.
 #[derive(Clone, Copy)]
 enum Scale<'a, E> {
@@ -1148,12 +1176,16 @@ impl<F: Field> PartialFractionRing<F> {
             }
         };
         add(&mut a.coefficients[..b.poly], &b.coefficients[..b.poly]);
+        // Only a block that b reaches at the top of a can become a zero top
+        // block; otherwise a stays canonical.
+        let mut top_touched = b.poly == a.poly;
         let mut targets = a.chains.iter();
         for c in &b.chains {
             let t = targets
                 .by_ref()
                 .find(|t| t.factor == c.factor)
                 .expect("the layout covers the source");
+            top_touched |= t.exponent == c.exponent;
             let len = self.chain_len(c);
             let (from, to) = (c.offset as usize, t.offset as usize);
             add(
@@ -1161,7 +1193,9 @@ impl<F: Field> PartialFractionRing<F> {
                 &b.coefficients[from..from + len],
             );
         }
-        self.normalize(a);
+        if top_touched {
+            self.normalize(a);
+        }
     }
 
     /// `a *= c` for a field element `c`.
@@ -1234,17 +1268,18 @@ impl<F: Field> PartialFractionRing<F> {
 
     /// `a * p` for a polynomial `p` given by its ascending coefficients.
     fn mul_dense(&self, a: &PartialFraction<F>, p: &[F::Element]) -> PartialFraction<F> {
-        self.mul_dense_fraction(a, p, &[])
+        self.mul_dense_fraction(a, p, &[], None)
     }
 
     /// `a * p / prod_i f_i^e_i`, computed in one final layout: the products
-    /// `a x^i` by Horner's rule and then one in-place division per factor
-    /// power, without intermediate allocations or normalizations.
+    /// `a x^i` (by Horner's rule, or taken from `cache`) and then one in-place
+    /// division per factor power, without intermediate normalizations.
     fn mul_dense_fraction(
         &self,
         a: &PartialFraction<F>,
         p: &[F::Element],
         denominator: &[(usize, usize)],
+        cache: Option<&mut PowerCache<F>>,
     ) -> PartialFraction<F> {
         let field = &self.field;
         let Some(top) = p.iter().rposition(|c| !field.is_zero(c)) else {
@@ -1256,7 +1291,7 @@ impl<F: Field> PartialFractionRing<F> {
         // The final layout: a's factors and the denominator's, with the
         // exponents added, and room for the polynomial part of a p.
         let mut chains = Vec::with_capacity(a.chains.len() + denominator.len());
-        let mut sorted: Vec<(u32, u32)> = denominator
+        let mut sorted: SmallVec<[(u32, u32); 4]> = denominator
             .iter()
             .filter(|(_, e)| *e > 0)
             .map(|&(f, e)| {
@@ -1309,36 +1344,36 @@ impl<F: Field> PartialFractionRing<F> {
             chains,
             coefficients: vec![field.zero(); offset],
         };
-        // Where every block of a lives in r.
-        let mut segments = Vec::with_capacity(a.chains.len() + 1);
-        segments.push((0, 0, a.poly));
-        let mut targets = r.chains.iter();
-        for c in &a.chains {
-            let t = targets
-                .by_ref()
-                .find(|t| t.factor == c.factor)
-                .expect("the layout holds a's factors");
-            segments.push((c.offset as usize, t.offset as usize, self.chain_len(c)));
-        }
-        let add = |r: &mut PartialFraction<F>, c: &F::Element| {
-            for &(from, to, len) in &segments {
-                for (d, s) in r.coefficients[to..to + len]
-                    .iter_mut()
-                    .zip(&a.coefficients[from..from + len])
-                {
-                    field.add_mul_assign(d, s, c);
+        let logical = match cache {
+            Some(cache) => {
+                // r = sum_i p_i (a x^i) with the cached a x^i.
+                while cache.powers.len() < top {
+                    let mut next = cache.powers.last().unwrap_or(a).clone();
+                    self.mul_variable_assign(&mut next);
+                    cache.powers.push(next);
                 }
+                for (i, c) in p[..=top].iter().enumerate() {
+                    if !field.is_zero(c) {
+                        let source = if i == 0 { a } else { &cache.powers[i - 1] };
+                        self.add_scaled_in_layout(&mut r, source, c);
+                    }
+                }
+                a.poly + top
+            }
+            None => {
+                // Horner: ((p_n a) x + p_(n-1) a) x + ...
+                self.add_scaled_in_layout(&mut r, a, &p[top]);
+                let mut logical = a.poly;
+                for c in p[..top].iter().rev() {
+                    self.mul_variable_in_layout(&mut r, logical);
+                    logical += 1;
+                    if !field.is_zero(c) {
+                        self.add_scaled_in_layout(&mut r, a, c);
+                    }
+                }
+                logical
             }
         };
-        add(&mut r, &p[top]);
-        let mut logical = a.poly;
-        for c in p[..top].iter().rev() {
-            self.mul_variable_in_layout(&mut r, logical);
-            logical += 1;
-            if !field.is_zero(c) {
-                add(&mut r, c);
-            }
-        }
         r.poly = logical;
         // One in-place division per factor power.
         let mut scratch = vec![];
@@ -1360,6 +1395,38 @@ impl<F: Field> PartialFractionRing<F> {
         r
     }
 
+    /// `r += c * b` for a source `b` whose layout `r` covers (no widening,
+    /// no normalization).
+    fn add_scaled_in_layout(
+        &self,
+        r: &mut PartialFraction<F>,
+        b: &PartialFraction<F>,
+        c: &F::Element,
+    ) {
+        let field = &self.field;
+        for (d, s) in r.coefficients[..b.poly]
+            .iter_mut()
+            .zip(&b.coefficients[..b.poly])
+        {
+            field.add_mul_assign(d, s, c);
+        }
+        let mut targets = r.chains.iter();
+        for chain in &b.chains {
+            let t = targets
+                .by_ref()
+                .find(|t| t.factor == chain.factor)
+                .expect("the layout covers the source");
+            let len = self.chain_len(chain);
+            let (from, to) = (chain.offset as usize, t.offset as usize);
+            for (d, s) in r.coefficients[to..to + len]
+                .iter_mut()
+                .zip(&b.coefficients[from..from + len])
+            {
+                field.add_mul_assign(d, s, c);
+            }
+        }
+    }
+
     /// `a * p` for a polynomial `p`.
     pub fn mul_polynomial(
         &self,
@@ -1379,7 +1446,21 @@ impl<F: Field> PartialFractionRing<F> {
         p: &UnivariatePolynomial<F>,
         denominator: &[(usize, usize)],
     ) -> PartialFraction<F> {
-        self.mul_dense_fraction(a, &p.coefficients, denominator)
+        self.mul_dense_fraction(a, &p.coefficients, denominator, None)
+    }
+
+    /// [Self::mul_fraction] for many products of the same `a`: the products
+    /// `a x^i` are computed once and kept in `cache`. The cache belongs to
+    /// `a`: [clear](PowerCache::clear) it before using it with another
+    /// element.
+    pub fn mul_fraction_cached(
+        &self,
+        a: &PartialFraction<F>,
+        p: &UnivariatePolynomial<F>,
+        denominator: &[(usize, usize)],
+        cache: &mut PowerCache<F>,
+    ) -> PartialFraction<F> {
+        self.mul_dense_fraction(a, &p.coefficients, denominator, Some(cache))
     }
 
     /// `a / f^exponent` for the basis factor `f` with index `factor`.

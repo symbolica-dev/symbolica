@@ -229,6 +229,27 @@ fn polynomial_products_and_factor_division() {
             );
             assert_eq!(divided, ring.mul(&a, &ring.inv_factor_power(factor, 2)));
         }
+        // Products sharing the powers a x^i agree with the plain ones, also
+        // when a x^i loses a pole (the factor x).
+        let mut cache = PowerCache::new();
+        for q in [
+            p.clone(),
+            q_poly(&x, &[(1, 1)]),
+            q_poly(&x, &[(0, 1), (0, 1), (0, 1), (0, 1), (2, 1), (1, 3)]),
+        ] {
+            for den in [&[][..], &[(2, 1)][..], &[(1, 2), (4, 1), (1, 1)][..]] {
+                assert_eq!(
+                    ring.mul_fraction_cached(&a, &q, den, &mut cache),
+                    ring.mul_fraction(&a, &q, den)
+                );
+            }
+        }
+        let x_pole = ring.inv_factor_power(2, 1);
+        cache.clear();
+        assert_eq!(
+            ring.mul_fraction_cached(&x_pole, &p, &[(0, 1)], &mut cache),
+            ring.mul_fraction(&x_pole, &p, &[(0, 1)])
+        );
         // Repeated and empty entries in the denominator list.
         assert_eq!(
             ring.mul_fraction(&a, &p, &[(1, 1), (4, 1), (0, 0), (1, 1)]),
