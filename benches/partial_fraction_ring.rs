@@ -17,7 +17,16 @@
 //! coefficients built with `mul_fraction` (no factorization anywhere);
 //! `partial_fraction_ring_cold` times a self-extending ring without hints,
 //! including the conversion of the coefficients from fractions (which
-//! factors every distinct denominator once) and the workload.
+//! trial-divides known factors and factors only remaining cofactors) and the workload;
+//! `partial_fraction_ring_warm` initializes the same self-extending ring and
+//! coefficients before timing, then measures only the arithmetic workload;
+//! `partial_fraction_ring_warm_reimport` also initializes the ring before
+//! timing, but rebuilds and re-imports the coefficient fractions on each
+//! iteration, using the populated denominator cache, before the workload.
+//!
+//! The original mixed fixture is preserved, but its deterministic coefficient
+//! pool never selects the quadratic. The extra `irreducible_quad` case forces
+//! a quadratic denominator and uses x^2+1, irreducible for this prime.
 
 use std::{hint::black_box, sync::Arc};
 
@@ -49,6 +58,8 @@ struct Case {
     linear: usize,
     /// Whether the basis also holds the quadratic `x^2 + x + 1`.
     quadratic: bool,
+    /// Guarantee a used irreducible quadratic x^2 + 1 (p = 3 mod 4).
+    covered_quadratic: bool,
     steps: usize,
 }
 
@@ -58,7 +69,13 @@ impl std::fmt::Display for Case {
             f,
             "{}lin{}_{}steps",
             self.linear,
-            if self.quadratic { "+quad" } else { "" },
+            if self.covered_quadratic {
+                "+irreducible_quad"
+            } else if self.quadratic {
+                "+quad"
+            } else {
+                ""
+            },
             self.steps
         )
     }
@@ -68,16 +85,25 @@ const CASES: &[Case] = &[
     Case {
         linear: 4,
         quadratic: false,
+        covered_quadratic: false,
         steps: 60,
     },
     Case {
         linear: 8,
         quadratic: false,
+        covered_quadratic: false,
         steps: 120,
     },
     Case {
         linear: 6,
         quadratic: true,
+        covered_quadratic: false,
+        steps: 60,
+    },
+    Case {
+        linear: 6,
+        quadratic: true,
+        covered_quadratic: true,
         steps: 60,
     },
 ];
@@ -105,9 +131,13 @@ fn fixture(case: Case) -> Fixture {
         .map(|r| vec![PRIME - r, 1])
         .collect();
     if case.quadratic {
-        factors.push(vec![1, 1, 1]);
+        factors.push(if case.covered_quadratic {
+            vec![1, 0, 1]
+        } else {
+            vec![1, 1, 1]
+        });
     }
-    let coefficients = (0..COEFFICIENTS)
+    let mut coefficients: Vec<Coefficient> = (0..COEFFICIENTS)
         .map(|_| {
             let numerator = (0..=next(3)).map(|_| 1 + next(20)).collect();
             let first = next(factors.len() as u64) as usize;
@@ -123,6 +153,11 @@ fn fixture(case: Case) -> Fixture {
             (numerator, denominator)
         })
         .collect();
+    if case.covered_quadratic {
+        // The original random mixed fixture never selects its quadratic.
+        // Preserve that fixture, and add this explicit nonlinear coverage.
+        coefficients[0].1 = vec![(case.linear, 1)];
+    }
     Fixture {
         field: Zp64::new(PRIME),
         variable: Arc::new(symbol!("x").into()),
@@ -161,7 +196,7 @@ impl Fixture {
         self.univariate(c).to_multivariate()
     }
 
-    fn partial_fractions(&self) -> (PartialFractionRing<Zp64>, Vec<PartialFraction<Zp64>>) {
+    fn partial_fractions(&self) -> (PartialFractionRing<Zp64, false>, Vec<PartialFraction<Zp64>>) {
         let factors: Vec<_> = self.factors.iter().map(|f| self.univariate(f)).collect();
         let ring = PartialFractionRing::with_fixed_basis(
             self.field.clone(),
@@ -179,12 +214,21 @@ impl Fixture {
     }
 
     /// A self-extending ring without hints: every coefficient enters as a
-    /// fraction, and its denominator is factored (once per distinct
-    /// denominator).
+    /// fraction; known factors are trial-divided before remaining cofactors
+    /// are factored. Decompositions are cached per denominator.
     fn cold_partial_fractions(&self) -> (PartialFractionRing<Zp64>, Vec<PartialFraction<Zp64>>) {
         let ring = PartialFractionRing::new(self.field.clone(), self.variable.clone(), &[]);
-        let coefficients = self
-            .coefficients
+        let coefficients = self.import_partial_fractions(&ring);
+        (ring, coefficients)
+    }
+
+    /// Build the input fractions and convert them through the ring's public
+    /// entry point. With a warmed ring, all denominators are cache hits.
+    fn import_partial_fractions(
+        &self,
+        ring: &PartialFractionRing<Zp64>,
+    ) -> Vec<PartialFraction<Zp64>> {
+        self.coefficients
             .iter()
             .map(|(n, d)| {
                 let mut denominator = self.univariate(&[1]);
@@ -194,8 +238,7 @@ impl Fixture {
                 ring.try_from_fraction(&self.univariate(n), &denominator)
                     .unwrap()
             })
-            .collect();
-        (ring, coefficients)
+            .collect()
     }
 
     fn rational(&self) -> Vec<RationalPolynomial<Zp64, u16>> {
@@ -239,9 +282,34 @@ impl Fixture {
 fn validate(case: Case) {
     let f = fixture(case);
     let (ring, coefficients) = f.partial_fractions();
+    if case.covered_quadratic {
+        assert!(coefficients.iter().any(|a| {
+            a.denominator_exponents()
+                .any(|(i, _)| ring.factor(i).degree() == 2)
+        }));
+    }
     let pf = run(&ring, &coefficients, f.steps);
     let (cold_ring, cold_coefficients) = f.cold_partial_fractions();
+    assert!(cold_ring.is_self_extending());
+    eprintln!(
+        "{case}: fixed basis {} factors, degrees {:?}; self-extending basis {} factors, degrees {:?}",
+        ring.factor_count(),
+        (0..ring.factor_count())
+            .map(|i| ring.factor(i).degree())
+            .collect::<Vec<_>>(),
+        cold_ring.factor_count(),
+        (0..cold_ring.factor_count())
+            .map(|i| cold_ring.factor(i).degree())
+            .collect::<Vec<_>>()
+    );
     let cold = run(&cold_ring, &cold_coefficients, f.steps);
+    let factor_count = cold_ring.factor_count();
+    let warm_coefficients = f.import_partial_fractions(&cold_ring);
+    assert_eq!(cold_ring.factor_count(), factor_count);
+    assert_eq!(warm_coefficients, cold_coefficients);
+    let warm_reimport = run(&cold_ring, &warm_coefficients, f.steps);
+    assert!(cold_ring.is_self_extending());
+    assert_eq!(cold_ring.factor_count(), factor_count);
     let rational = f.rational();
     let field = RationalPolynomialField::new(f.field.clone());
     let rp = run(&field, &rational, f.steps);
@@ -264,6 +332,10 @@ fn validate(case: Case) {
         let c = RationalPolynomial::from_num_den(numerator, denominator, &f.field, true);
         assert_eq!(&c, b);
     }
+    for (a, b) in warm_reimport.iter().zip(&rp) {
+        let a: RationalPolynomial<Zp64, u16> = cold_ring.to_rational_polynomial(a, &f.field);
+        assert_eq!(&a, b);
+    }
 }
 
 fn main() {
@@ -284,13 +356,35 @@ mod elimination {
         bencher.bench_local(|| run(&ring, black_box(&coefficients), f.steps));
     }
 
-    /// Ring creation, conversion of the coefficients (factoring their
-    /// denominators) and the workload.
+    /// Ring creation, coefficient conversion (including factor discovery),
+    /// and the workload.
     #[divan::bench(args = CASES)]
     fn partial_fraction_ring_cold(bencher: divan::Bencher, case: Case) {
         let f = fixture(case);
         bencher.bench_local(|| {
             let (ring, coefficients) = f.cold_partial_fractions();
+            run(&ring, black_box(&coefficients), f.steps)
+        });
+    }
+
+    /// Arithmetic only, after a self-extending ring has learned the factors
+    /// and all coefficients have been converted outside the timed region.
+    #[divan::bench(args = CASES)]
+    fn partial_fraction_ring_warm(bencher: divan::Bencher, case: Case) {
+        let f = fixture(case);
+        let (ring, coefficients) = f.cold_partial_fractions();
+        bencher.bench_local(|| run(&ring, black_box(&coefficients), f.steps));
+    }
+
+    /// Rebuild and re-import the coefficient fractions with a warm
+    /// denominator cache, then run the arithmetic workload. Ring creation
+    /// and the first import are outside the timed region.
+    #[divan::bench(args = CASES)]
+    fn partial_fraction_ring_warm_reimport(bencher: divan::Bencher, case: Case) {
+        let f = fixture(case);
+        let (ring, _) = f.cold_partial_fractions();
+        bencher.bench_local(|| {
+            let coefficients = f.import_partial_fractions(&ring);
             run(&ring, black_box(&coefficients), f.steps)
         });
     }
