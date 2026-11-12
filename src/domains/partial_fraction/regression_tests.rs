@@ -256,3 +256,87 @@ fn polynomial_entry_points_reject_nonconstant_wrong_variables() {
         ring.element_from_polynomial(&poly(&x, &[2]))
     );
 }
+
+#[test]
+fn fused_add_sub_products_preserve_cancellation_and_composite_bases() {
+    let x = variable();
+    let ring = PartialFractionRing::with_fixed_basis(
+        Q,
+        x.clone(),
+        &[poly(&x, &[-1, 0, 1]), poly(&x, &[2, 1])],
+    )
+    .unwrap();
+    let values = vec![
+        ring.zero(),
+        ring.one(),
+        ring.nth((-1).into()),
+        ring.element_from_polynomial(&poly(&x, &[1, 0, 1])),
+        ring.inv_factor_power(0, 2),
+        ring.try_from_fraction(&poly(&x, &[1, 1]), &poly(&x, &[-1, 0, 1]))
+            .unwrap(),
+        ring.inv_factor_power(1, 4),
+    ];
+    for a in &values {
+        for b in &values {
+            let ra: RationalPolynomial<_, u16> = ring.to_rational_polynomial(a, &Z);
+            let rb: RationalPolynomial<_, u16> = ring.to_rational_polynomial(b, &Z);
+            let expected = &ra * &rb;
+            let mut actual = ring.zero();
+            ring.add_mul_assign(&mut actual, a, b);
+            let flat: RationalPolynomial<_, u16> = ring.to_rational_polynomial(&actual, &Z);
+            assert_eq!(flat, expected);
+            ring.sub_mul_assign(&mut actual, a, b);
+            assert!(ring.is_zero(&actual));
+            ring.sub_mul_assign(&mut actual, a, b);
+            let flat: RationalPolynomial<_, u16> = ring.to_rational_polynomial(&actual, &Z);
+            assert_eq!(flat, -expected);
+            ring.add_mul_assign(&mut actual, a, b);
+            assert!(ring.is_zero(&actual));
+        }
+    }
+}
+
+#[test]
+fn nonlinear_division_recurrence_handles_high_poles_and_unequal_degrees() {
+    fn check<F: Field>(field: F) {
+        let x = variable();
+        let polynomial = |c: &[i64]| {
+            UnivariatePolynomial::from_coefficients(
+                &field,
+                c.iter().map(|&c| field.nth(c.into())).collect(),
+                x.clone(),
+            )
+        };
+        let ring = PartialFractionRing::with_fixed_basis(
+            field.clone(),
+            x.clone(),
+            &[
+                polynomial(&[-1, 1]),
+                polynomial(&[1, 0, 1]),
+                polynomial(&[1, 1, 0, 1]),
+            ],
+        )
+        .unwrap();
+        for h in 0..3 {
+            for g in 0..3 {
+                if h == g {
+                    continue;
+                }
+                for exponent in [1, 4, 16] {
+                    let coefficients = (0..ring.factor(h).degree() * exponent)
+                        .map(|i| field.nth(((i as i64 % 5) - 2).into()))
+                        .collect();
+                    let a = ring
+                        .element_from_coefficients(vec![field.one()], vec![(h, coefficients)])
+                        .unwrap();
+                    let divided = ring.div_factor_power(&a, g, 3);
+                    // Polynomial multiplication is independent of the CRT
+                    // division recurrence and must recover every coefficient.
+                    assert_eq!(ring.mul_polynomial(&divided, &ring.factor(g).pow(3)), a);
+                }
+            }
+        }
+    }
+    check(Q);
+    check(Zp64::new(101));
+}
