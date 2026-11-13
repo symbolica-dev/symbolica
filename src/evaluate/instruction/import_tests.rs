@@ -5,7 +5,7 @@ use crate::{
     domains::{
         dual::HyperDual,
         finite_field::{FiniteFieldCore, Zp64},
-        float::{Complex, Float, RealLike},
+        float::{Complex, Float, RealScalar},
         rational::Rational,
     },
     evaluate::{

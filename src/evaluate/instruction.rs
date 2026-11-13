@@ -721,7 +721,7 @@ impl<T: PartialEq + Clone + std::fmt::Debug> InstructionList<T> {
     }
 }
 
-impl<T: SingleFloat> InstructionList<T> {
+impl<T: Scalar> InstructionList<T> {
     /// Return whether `slot` refers to a known constant component equal to zero.
     pub fn is_zero(&self, slot: &Slot) -> bool {
         match slot {

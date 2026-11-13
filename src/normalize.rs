@@ -10,7 +10,7 @@ use crate::{
     },
     coefficient::{Coefficient, CoefficientView},
     domains::{
-        float::{Complex, Float, Real},
+        float::{Complex, ElementaryFunctions, Float},
         integer::Z,
         rational::{Q, Rational},
     },

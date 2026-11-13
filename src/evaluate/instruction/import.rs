@@ -1,6 +1,6 @@
 use super::*;
 
-impl<T: FloatLike + EvaluationDomain> ExpressionEvaluator<T> {
+impl<T: Numeric + EvaluationDomain> ExpressionEvaluator<T> {
     /// Load an evaluator from its structured instruction representation.
     ///
     /// Constants retain their exported values and precision. Registered constant

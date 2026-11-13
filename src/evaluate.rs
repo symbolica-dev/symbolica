@@ -66,8 +66,8 @@ use crate::{
         InternalOrdering,
         dual::DualNumberStructure,
         float::{
-            Complex, Constructible, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike,
-            Real, RealLike, SingleFloat,
+            Complex, Constructible, DoubleFloat, ElementaryFunctions, ErrorPropagatingFloat, F64,
+            Float, Numeric, RealScalar, Scalar,
         },
         integer::Integer,
         rational::Rational,
@@ -160,7 +160,7 @@ impl std::fmt::Display for OperationCount {
 #[cfg(test)]
 mod test {
     use ahash::HashMap;
-    use numerica::domains::{dual::HyperDual, float::Real};
+    use numerica::domains::{dual::HyperDual, float::ElementaryFunctions};
 
     #[cfg(feature = "native_code_generation")]
     use crate::evaluate::{CompileOptions, ExportSettings, InlineASM, JITCompilationSettings};

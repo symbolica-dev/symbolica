@@ -20,7 +20,7 @@ use crate::{
         factorized_rational_polynomial::{
             FactorizedRationalPolynomial, FromNumeratorAndFactorizedDenominator,
         },
-        float::{FixedPrecision, Real, SingleFloat},
+        float::{ElementaryFunctions, FixedPrecision, Scalar},
         integer::Z,
         rational::{Q, Rational},
         rational_polynomial::{
@@ -764,7 +764,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// ```
     fn nsolve<
         'a,
-        N: SingleFloat + EvaluationDomain + Real + PartialOrd,
+        N: Scalar + EvaluationDomain + ElementaryFunctions + PartialOrd,
         V: Into<BorrowedOrOwned<'a, Indeterminate>>,
     >(
         &self,
@@ -795,8 +795,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// assert!((roots[1].into_inner() - 0.6180339887498941).abs() < 1e-7);
     /// ```
     fn nsolve_system<
-        N: SingleFloat
-            + Real
+        N: Scalar
+            + ElementaryFunctions
             + EvaluationDomain
             + PartialOrd
             + InternalOrdering
@@ -910,7 +910,10 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let result = expr.evaluate(&const_map).unwrap();
     /// assert_eq!(result, 3.0);
     /// ```
-    fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain + FixedPrecision>(
+    fn evaluate<
+        A: AtomCore + KeyLookup,
+        T: ElementaryFunctions + EvaluationDomain + FixedPrecision,
+    >(
         &self,
         map: &StdHashMap<A, T, impl BuildHasher>,
     ) -> Result<T, EvaluationError> {
@@ -937,7 +940,7 @@ pub trait AtomCore: private::Sealed + Sized {
     /// let result = expr.evaluate_with_prec(&const_map, 200).unwrap();
     /// assert_eq!(result, Float::with_val(200, 6));
     /// ```
-    fn evaluate_with_prec<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
+    fn evaluate_with_prec<A: AtomCore + KeyLookup, T: ElementaryFunctions + EvaluationDomain>(
         &self,
         map: &StdHashMap<A, T, impl BuildHasher>,
         binary_prec: u32,

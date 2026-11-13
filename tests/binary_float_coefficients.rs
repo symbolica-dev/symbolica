@@ -6,7 +6,7 @@ use std::{
 use symbolica::{
     atom::{Atom, AtomCore, AtomView},
     coefficient::{Coefficient, CoefficientView},
-    domains::float::{Complex, Float, FloatLike, SingleFloat},
+    domains::float::{Complex, Float, Numeric, Scalar},
     parse,
     state::StateMap,
 };

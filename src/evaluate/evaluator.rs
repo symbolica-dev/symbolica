@@ -226,14 +226,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for ExpressionEvaluator<T> {
     }
 }
 
-impl<T: SingleFloat> ExpressionEvaluator<Complex<T>> {
+impl<T: Scalar> ExpressionEvaluator<Complex<T>> {
     /// Check if the expression evaluator is real, i.e., all coefficients are real.
     pub fn is_real(&self) -> bool {
         self.stack.iter().all(|x| x.is_real())
     }
 }
 
-impl<T: Real> ExpressionEvaluator<T> {
+impl<T: ElementaryFunctions> ExpressionEvaluator<T> {
     /// Evaluate the expression evaluator which yields a single result.
     pub fn evaluate_single(&mut self, params: &[T]) -> T {
         if self.result_indices.len() != 1 {

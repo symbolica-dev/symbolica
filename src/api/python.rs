@@ -80,7 +80,7 @@ use crate::{
         finite_field::{FiniteFieldCore, PrimeIteratorU64, ToFiniteField, Z2, Zp64},
         float::{
             Complex, DoubleFloat, F64, Float, PythonComplexFloat, PythonFloat,
-            PythonMultiPrecisionComplex, PythonMultiPrecisionFloat, RealLike,
+            PythonMultiPrecisionComplex, PythonMultiPrecisionFloat, RealScalar,
             register_python_floats,
         },
         integer::{FromFiniteField, Integer, IntegerRelationError, IntegerRing, Z},

@@ -1,5 +1,5 @@
 use symbolica::{
-    domains::float::{FloatField, FloatLike},
+    domains::float::{FloatField, Numeric},
     prelude::*,
 };
 

@@ -7,7 +7,7 @@ use crate::{
         Field, Ring, RingOps, UniformlySampleableRing,
         algebraic::{AlgebraicContext, AlgebraicExtension},
         finite_field::{FiniteFieldCore, FiniteFieldElement, Zp64},
-        float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Real, SingleFloat},
+        float::{Complex, ElementaryFunctions, ErrorPropagatingFloat, Float, Numeric, Scalar},
         integer::Integer,
         rational::{Q, Rational},
     },

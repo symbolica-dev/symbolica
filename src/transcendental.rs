@@ -12,8 +12,8 @@ use crate::{
         algebraic::{AlgebraicExtension, AlgebraicNumber, Root},
         backend::float::Constant,
         float::{
-            Complex, ErrorPropagatingFloat, Float, FloatField, FloatLike, Real, RealLike,
-            SingleFloat,
+            Complex, ElementaryFunctions, ErrorPropagatingFloat, Float, FloatField, Numeric,
+            RealScalar, Scalar,
         },
         integer::{Integer, IntegerRing},
         rational::{Q, Rational, RationalField},
@@ -2699,7 +2699,7 @@ fn unary_eval_real_f64(args: &[f64], evaluator: fn(f64) -> f64) -> f64 {
     evaluator(*arg)
 }
 
-fn unary_eval_real<T: Real, F: FnOnce(&T) -> T>(args: &[T], evaluator: F) -> T {
+fn unary_eval_real<T: ElementaryFunctions, F: FnOnce(&T) -> T>(args: &[T], evaluator: F) -> T {
     let [arg] = args else {
         panic!(
             "Wrong number of arguments for unary function: {}",
@@ -2709,7 +2709,7 @@ fn unary_eval_real<T: Real, F: FnOnce(&T) -> T>(args: &[T], evaluator: F) -> T {
     evaluator(arg)
 }
 
-fn atan_eval_real<T: Real>(args: &[T]) -> T {
+fn atan_eval_real<T: ElementaryFunctions>(args: &[T]) -> T {
     match args {
         [z] => z.atan2(&z.one()),
         [x, y] => y.atan2(x),
@@ -5151,7 +5151,7 @@ mod tests {
         Constant, complex_one, complex_pi, polylog_integer_numeric_eval, polylog_numeric_eval,
         polylog_series_integer,
     };
-    use crate::domains::float::FloatLike;
+    use crate::domains::float::Numeric;
 
     use ahash::HashMap;
 
@@ -5163,7 +5163,7 @@ mod tests {
     use crate::{
         atom::{Atom, AtomCore},
         coefficient::Coefficient,
-        domains::float::{Complex, Float, Real, RealLike},
+        domains::float::{Complex, ElementaryFunctions, Float, RealScalar},
         parse, symbol,
     };
 
@@ -6701,7 +6701,7 @@ mod tests {
     #[test]
     fn bessel_order_integer_detection_is_exact() {
         use super::complex_float_to_integer;
-        use crate::domains::float::FloatLike;
+        use crate::domains::float::Numeric;
 
         let one = Float::with_val(128, 1);
         let epsilon = Float::with_val(128, 0.5).pow(80);

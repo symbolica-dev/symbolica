@@ -15,7 +15,7 @@ use crate::{
     domains::{
         RingOps, Set,
         algebraic::AlgebraicExtension,
-        float::{FloatField, SingleFloat},
+        float::{FloatField, Scalar},
     },
     poly::{
         GrevLexOrder, LexOrder, PolyVariable, PositiveExponent,
@@ -509,7 +509,7 @@ where
     }
 }
 
-impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExponent>
+impl<T: Scalar + std::hash::Hash + Eq + InternalOrdering, E: PositiveExponent>
     FromNumeratorAndDenominator<FloatField<T>, FloatField<T>, E>
     for RationalPolynomial<FloatField<T>, E>
 {

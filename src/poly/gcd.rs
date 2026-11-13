@@ -15,7 +15,7 @@ use crate::domains::finite_field::{
     SMOOTH_PRIME_BASE, SMOOTH_PRIMES, ToFiniteField, Zp, Zp64, Zp64DiscreteLogContext,
     ZpDiscreteLogContext,
 };
-use crate::domains::float::{FloatField, SingleFloat};
+use crate::domains::float::{FloatField, Scalar};
 use crate::domains::integer::{
     FromFiniteField, Integer, IntegerRing, MultiPrecisionInteger, SMALL_PRIMES, Z,
 };
@@ -9677,7 +9677,7 @@ impl<E: PositiveExponent> PolynomialGCD<E> for AlgebraicExtension<RationalField>
 }
 
 /// Polynomial GCD functions for floating point coefficient return 1 (for now).
-impl<T: SingleFloat + std::hash::Hash + Eq + InternalOrdering, E: PositiveExponent> PolynomialGCD<E>
+impl<T: Scalar + std::hash::Hash + Eq + InternalOrdering, E: PositiveExponent> PolynomialGCD<E>
     for FloatField<T>
 {
     fn heuristic_gcd(

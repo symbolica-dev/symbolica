@@ -20,7 +20,7 @@ use crate::{
     domains::{
         Ring,
         backend::integer::from_digits_radix,
-        float::{Complex, Float, FloatLike},
+        float::{Complex, Float, Numeric},
         integer::Integer,
         rational::Rational,
     },

@@ -8,7 +8,7 @@ use crate::{
     domains::{
         backend::integer::{from_lsf_bytes, lsf_byte_size, write_lsf_bytes},
         finite_field::FiniteFieldElement,
-        float::SingleFloat,
+        float::Scalar,
         integer::{Integer, IntegerRing, Z},
         rational::Fraction,
         rational_polynomial::RationalPolynomial,

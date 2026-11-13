@@ -97,6 +97,10 @@ pub mod prelude {
 
     pub use crate::linear_combination::LinearCombination;
 
+    // Preserve the previous numeric trait names for downstream imports.
+    #[doc(hidden)]
+    pub use crate::domains::float::{FloatLike, Real, RealLike, SingleFloat};
+
     pub use crate::domains::{
         EuclideanDomain, Field, OrderedRing, RealEmbedding, Ring, RingOps, SampleableRing, Set,
         UniformlySampleableRing,
@@ -112,8 +116,8 @@ pub mod prelude {
             Zp64,
         },
         float::{
-            Complex, Constructible, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike,
-            Real, RealLike, SingleFloat,
+            Complex, Constructible, DoubleFloat, ElementaryFunctions, ErrorPropagatingFloat, F64,
+            Float, Numeric, RealScalar, Scalar,
         },
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational},

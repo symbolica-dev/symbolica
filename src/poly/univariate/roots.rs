@@ -846,7 +846,7 @@ impl IsolatedRoot {
 
         for _ in 0..32 {
             let derivative_at_center = derivative.evaluate(&center);
-            if SingleFloat::is_zero(&derivative_at_center) {
+            if Scalar::is_zero(&derivative_at_center) {
                 break;
             }
 
@@ -2298,7 +2298,7 @@ impl UnivariatePolynomial<RationalField> {
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     pub fn approximate_roots<
-        F: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
+        F: ElementaryFunctions + Scalar + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
     >(
         &self,
         max_iterations: usize,
@@ -2657,7 +2657,7 @@ impl UnivariatePolynomial<ExactComplexField> {
         let roots = polynomial
             .roots(256, &tolerance)
             .unwrap_or_else(|roots| roots);
-        roots.iter().all(SingleFloat::is_finite).then(|| {
+        roots.iter().all(Scalar::is_finite).then(|| {
             roots
                 .into_iter()
                 .map(|root| {

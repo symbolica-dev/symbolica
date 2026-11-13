@@ -4354,7 +4354,7 @@ impl<T: Clone + Default + std::fmt::Debug + Eq + std::hash::Hash + InternalOrder
     }
 }
 
-impl<T: Real> EvalTree<T> {
+impl<T: ElementaryFunctions> EvalTree<T> {
     /// Evaluate the evaluation tree. Consider converting to a linear form for repeated evaluation.
     pub fn evaluate(&mut self, params: &[T], out: &mut [T]) {
         for (o, e) in out.iter_mut().zip(&self.expressions.tree) {
@@ -4905,7 +4905,7 @@ impl<'a> AtomView<'a> {
         }
     }
 
-    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
+    pub(crate) fn evaluate<A: AtomCore + KeyLookup, T: ElementaryFunctions + EvaluationDomain>(
         &self,
         map: &StdHashMap<A, T, impl BuildHasher>,
         binary_prec: u32,
@@ -4914,7 +4914,7 @@ impl<'a> AtomView<'a> {
         self.evaluate_impl(map, &mut cache, binary_prec)
     }
 
-    fn evaluate_impl<A: AtomCore + KeyLookup, T: Real + EvaluationDomain>(
+    fn evaluate_impl<A: AtomCore + KeyLookup, T: ElementaryFunctions + EvaluationDomain>(
         &self,
         map: &StdHashMap<A, T, impl BuildHasher>,
         cache: &mut HashMap<AtomView<'a>, T>,
@@ -5400,7 +5400,7 @@ mod post_cpe_cse_tests {
 mod external_cache_tests {
     use crate::{
         atom::{Atom, AtomCore, EvaluationInfo, Symbol},
-        domains::float::{Complex, Real},
+        domains::float::{Complex, ElementaryFunctions},
         evaluate::OptimizationSettings,
         function, symbol,
     };
@@ -5416,7 +5416,7 @@ mod external_cache_tests {
             .cpe_iterations(Some(0))
     }
 
-    fn counted<T: Real>(calls: Arc<AtomicUsize>) -> impl Fn(&[T]) -> T + Clone {
+    fn counted<T: ElementaryFunctions>(calls: Arc<AtomicUsize>) -> impl Fn(&[T]) -> T + Clone {
         move |arguments: &[T]| {
             calls.fetch_add(1, Ordering::SeqCst);
             arguments[0].clone() * &arguments[0]

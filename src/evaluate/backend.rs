@@ -1619,7 +1619,7 @@ pub trait CompiledNumber: Sized {
     const SUFFIX: &'static str;
 
     /// Export an evaluator to C++ code for this number type.
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -1668,7 +1668,7 @@ impl CompiledNumber for f64 {
     type Settings = ();
     const SUFFIX: &'static str = "realf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -1727,7 +1727,7 @@ impl CompiledNumber for Complex<f64> {
     type Settings = ();
     const SUFFIX: &'static str = "complexf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -2097,7 +2097,7 @@ impl CompiledNumber for wide::f64x4 {
     type Settings = ();
     const SUFFIX: &'static str = "simd_realf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -2393,7 +2393,7 @@ impl CompiledNumber for Complex<wide::f64x4> {
     type Settings = ();
     const SUFFIX: &'static str = "simd_complexf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -2709,7 +2709,7 @@ impl CompiledNumber for CudaRealf64 {
     type Settings = CudaLoadSettings;
     const SUFFIX: &'static str = "cuda_realf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,
@@ -2736,7 +2736,7 @@ impl CompiledNumber for CudaComplexf64 {
     type Settings = CudaLoadSettings;
     const SUFFIX: &'static str = "cuda_complexf64";
 
-    fn export_cpp<T: ExportNumber + SingleFloat>(
+    fn export_cpp<T: ExportNumber + Scalar>(
         eval: &ExpressionEvaluator<T>,
         function_name: &str,
         settings: ExportSettings,

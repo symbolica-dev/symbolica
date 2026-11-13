@@ -11,7 +11,7 @@ use std::{ops::Neg, sync::Arc};
 use ahash::{HashMap, HashSet};
 use numerica::domains::{
     Field, RealEmbedding, Ring, RingOps,
-    float::{Complex, Float, RealLike},
+    float::{Complex, Float, RealScalar},
     rational::Rational,
 };
 
@@ -21,7 +21,7 @@ use crate::{
     domains::{
         InternalOrdering, SelfRing,
         algebraic::AlgebraicContext,
-        float::{FloatField, Real, SingleFloat},
+        float::{ElementaryFunctions, FloatField, Scalar},
         integer::Z,
         rational::Q,
         rational_polynomial::{RationalPolynomial, RationalPolynomialField},
@@ -967,7 +967,7 @@ impl AtomView<'_> {
     }
 
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
-    pub(crate) fn nsolve<N: SingleFloat + Real + EvaluationDomain + PartialOrd>(
+    pub(crate) fn nsolve<N: Scalar + ElementaryFunctions + EvaluationDomain + PartialOrd>(
         &self,
         x: &Indeterminate,
         init: N,
@@ -1029,8 +1029,8 @@ impl AtomView<'_> {
 
     /// Solve a non-linear system numerically over the reals using Newton's method.
     pub(crate) fn nsolve_system<
-        N: SingleFloat
-            + Real
+        N: Scalar
+            + ElementaryFunctions
             + EvaluationDomain
             + PartialOrd
             + InternalOrdering
@@ -1049,8 +1049,8 @@ impl AtomView<'_> {
     }
 
     fn nsolve_system_impl<
-        N: SingleFloat
-            + Real
+        N: Scalar
+            + ElementaryFunctions
             + EvaluationDomain
             + PartialOrd
             + InternalOrdering
@@ -1490,7 +1490,7 @@ mod test {
         domains::{
             Ring,
             algebraic::AlgebraicContext,
-            float::{Complex, F64, Real},
+            float::{Complex, ElementaryFunctions, F64},
             integer::Z,
             rational::Q,
             rational_polynomial::{RationalPolynomial, RationalPolynomialField},

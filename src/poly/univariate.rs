@@ -18,7 +18,7 @@ use crate::{
         EuclideanDomain, Field, InternalOrdering, Ring, RingOps, SampleableRing, SelfRing, Set,
         algebraic::{AlgebraicExtension, AlgebraicNumber},
         finite_field::{FiniteFieldCore, Zp, Zp64},
-        float::{Complex, F64, FloatField, FloatLike, Real, SingleFloat},
+        float::{Complex, ElementaryFunctions, F64, FloatField, Numeric, Scalar},
         integer::{Integer, IntegerRing, Z},
         rational::{Q, Rational, RationalField},
         rational_polynomial::{
@@ -1278,7 +1278,7 @@ impl UnivariatePolynomial<IntegerRing> {
     /// Returns `Ok(roots)` when all roots were found up to the tolerance, and `Err(roots)` when the number of iterations ran out.
     /// In that case, the current-best estimate for each root is returned.
     pub fn approximate_roots<
-        F: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
+        F: ElementaryFunctions + Scalar + std::hash::Hash + Eq + PartialOrd + InternalOrdering,
     >(
         &self,
         max_iterations: usize,
@@ -1593,7 +1593,7 @@ impl UnivariatePolynomial<IntegerRing> {
     }
 }
 
-impl<R: Real + SingleFloat + std::hash::Hash + Eq + PartialOrd + InternalOrdering>
+impl<R: ElementaryFunctions + Scalar + std::hash::Hash + Eq + PartialOrd + InternalOrdering>
     UnivariatePolynomial<FloatField<Complex<R>>>
 {
     /// Get an upper bound on the norm of all (complex) roots.

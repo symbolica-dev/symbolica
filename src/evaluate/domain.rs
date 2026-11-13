@@ -360,7 +360,7 @@ mod tracked_precision_tests {
     use crate::{
         atom::{Atom, AtomCore, Symbol},
         domains::{
-            float::{Complex, ErrorPropagatingFloat, Float, FloatLike, Magnitude, RealLike},
+            float::{Complex, ErrorPropagatingFloat, Float, Magnitude, Numeric, RealScalar},
             rational::Rational,
         },
         evaluate::EvaluationDomain,

@@ -97,7 +97,7 @@ impl ExportNumber for Rational {
     }
 }
 
-impl<T: ExportNumber + SingleFloat> ExportNumber for Complex<T> {
+impl<T: ExportNumber + Scalar> ExportNumber for Complex<T> {
     fn export(&self) -> String {
         if self.im.is_zero() {
             self.re.export()
@@ -193,7 +193,7 @@ impl ExportSettings {
     }
 }
 
-impl<T: ExportNumber + SingleFloat> ExpressionEvaluator<T> {
+impl<T: ExportNumber + Scalar> ExpressionEvaluator<T> {
     pub(super) fn external_cpp_name(
         external_fns: &[ExternalFunctionContainer<T>],
         index: usize,
@@ -921,7 +921,7 @@ extern "C" {{
     }
 }
 
-impl<T: ExportNumber + SingleFloat> ProgramView<'_, T> {
+impl<T: ExportNumber + Scalar> ProgramView<'_, T> {
     fn export_asm_body(
         &self,
         external_fns: &[ExternalFunctionContainer<T>],

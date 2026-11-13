@@ -31,7 +31,7 @@ use crate::{
     coefficient::Coefficient,
     domains::{
         finite_field::FiniteFieldCore,
-        float::{Complex, Float, Real},
+        float::{Complex, ElementaryFunctions, Float},
     },
     license::LicenseManager,
 };

@@ -3,7 +3,7 @@ use symbolica::{
     domains::{
         Ring,
         finite_field::{FiniteFieldCore, Zp},
-        float::{Complex, ErrorPropagatingFloat, Float, RealLike},
+        float::{Complex, ErrorPropagatingFloat, Float, RealScalar},
         rational::Rational,
     },
     evaluate::{

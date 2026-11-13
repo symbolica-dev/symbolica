@@ -24,7 +24,7 @@ use crate::domains::algebraic::AlgebraicExtension;
 use crate::domains::finite_field::{
     FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace,
 };
-use crate::domains::float::FloatLike;
+use crate::domains::float::Numeric;
 use crate::domains::integer::{Integer, IntegerRing, Z};
 use crate::domains::rational::{Fraction, FractionField, FractionNormalization, Q, RationalField};
 use crate::domains::{
@@ -2945,7 +2945,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
     /// Evaluate numerically at `point`, using `map_coeff` to convert coefficients.
     /// Supply one value per variable in the order of [`Self::variables`].
     /// Exponents must be nonnegative and fit in `u32`.
-    pub fn evaluate<T: FloatLike, M: Fn(&F::Element) -> T>(&self, map_coeff: M, point: &[T]) -> T {
+    pub fn evaluate<T: Numeric, M: Fn(&F::Element) -> T>(&self, map_coeff: M, point: &[T]) -> T {
         let mut res = map_coeff(&self.ring().zero());
 
         for t in self {

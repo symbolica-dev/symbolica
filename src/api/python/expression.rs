@@ -8826,7 +8826,7 @@ impl PythonExpression {
                 .iter()
                 .filter(|(k, v)| {
                     !k.expr.contains_symbol(root_variable)
-                        && crate::domains::float::SingleFloat::is_finite(&v.0.0)
+                        && crate::domains::float::Scalar::is_finite(&v.0.0)
                 })
                 .map(|(k, v)| {
                     (
