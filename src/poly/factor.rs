@@ -2786,6 +2786,55 @@ pub trait Factorize: Sized {
     fn is_irreducible(&self) -> bool;
 }
 
+impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    /// Assemble normalized sub-results. Constants are raised to their multiplicities
+    /// before being combined, and never participate in the nonconstant factor list.
+    fn collect_factorization(&self, mut factors: Vec<(Self, usize)>) -> Vec<(Self, usize)> {
+        if self.is_zero() {
+            return vec![];
+        }
+        let mut constant = self.ring().one();
+        factors.retain(|(factor, multiplicity)| {
+            if factor.is_constant() {
+                self.ring().mul_assign(
+                    &mut constant,
+                    self.ring()
+                        .pow(&factor.get_constant(), *multiplicity as u64),
+                );
+                false
+            } else {
+                true
+            }
+        });
+        factors.sort_by(|a, b| a.0.internal_cmp(&b.0).then(a.1.cmp(&b.1)));
+        if !self.ring().is_one(&constant) || factors.is_empty() {
+            factors.insert(0, (self.constant(constant), 1));
+        }
+        factors
+    }
+}
+
+impl<F: Field, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
+    fn collect_monic_factorization(&self, mut factors: Vec<(Self, usize)>) -> Vec<(Self, usize)> {
+        let mut constant = self.ring().one();
+        for (factor, multiplicity) in &mut factors {
+            if !factor.is_constant() {
+                let lc = factor.lcoeff();
+                self.ring()
+                    .mul_assign(&mut constant, self.ring().pow(&lc, *multiplicity as u64));
+                if !self.ring().is_one(&lc) {
+                    *factor =
+                        std::mem::replace(factor, self.zero()).mul_coeff(self.ring().inv(&lc));
+                }
+            }
+        }
+        if !self.ring().is_one(&constant) {
+            factors.push((self.constant(constant), 1));
+        }
+        self.collect_factorization(factors)
+    }
+}
+
 /// Finds coefficient content while separating factors that omit a variable.
 ///
 /// The common-monomial test is shared by every coefficient view of the current
@@ -4177,6 +4226,50 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             .unwrap_or_else(|| self * self)
     }
 
+    /// Keep signed content outside algorithms that reconstruct primitive polynomials.
+    /// Their returned vectors still use the public convention of a separate scalar.
+    fn reconstruct_with_content(&self, reconstruct: impl FnOnce(&Self) -> Vec<Self>) -> Vec<Self> {
+        if self.is_constant() {
+            return vec![self.clone()];
+        }
+        let mut content = self.content().abs();
+        if self.lcoeff().is_negative() {
+            content = -content;
+        }
+        let mut factors = if content.is_one() {
+            reconstruct(self)
+        } else {
+            reconstruct(&self.clone().div_coeff(&content))
+        };
+        if !content.is_one() {
+            factors.push(self.constant(content));
+        }
+        self.collect_integer_reconstruction(factors)
+    }
+
+    /// Finish an integer reconstruction. Its input content has already been removed;
+    /// normalize the units left by lifting in the original monomial order.
+    fn collect_integer_reconstruction(&self, mut factors: Vec<Self>) -> Vec<Self> {
+        let mut constant = Integer::one();
+        factors.retain_mut(|factor| {
+            if factor.is_constant() {
+                constant *= factor.get_constant();
+                false
+            } else {
+                if factor.lcoeff().is_negative() {
+                    *factor = -std::mem::replace(factor, self.zero());
+                    constant = -constant.clone();
+                }
+                true
+            }
+        });
+        factors.sort_by(|a, b| a.internal_cmp(b));
+        if !constant.is_one() || factors.is_empty() {
+            factors.insert(0, self.constant(constant));
+        }
+        factors
+    }
+
     /// Add a factor to a factorization, combining its multiplicity with an
     /// identical factor that was already recovered.
     fn append_integer_factor(factors: &mut Vec<(Self, usize)>, factor: Self, multiplicity: usize) {
@@ -4272,7 +4365,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
         }
 
-        Some(factors)
+        Some(self.collect_factorization(factors))
     }
 
     /// Return an exact integer-polynomial square root when one exists.
@@ -4801,7 +4894,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
             factors.push((self.one(), 1))
         }
 
-        factors
+        self.collect_factorization(factors)
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
@@ -4944,7 +5037,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<IntegerRing, E, L
             }
         }
 
-        factors
+        self.collect_factorization(factors)
     }
 
     fn is_irreducible(&self) -> bool {
@@ -5060,7 +5153,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<RationalField, E,
             factors.push((self.constant(c), 1));
         }
 
-        factors
+        self.collect_factorization(factors)
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
@@ -5089,7 +5182,7 @@ impl<E: PositiveExponent> Factorize for MultivariatePolynomial<RationalField, E,
             factors.push((self.constant(c), 1));
         }
 
-        factors
+        self.collect_factorization(factors)
     }
 
     fn is_irreducible(&self) -> bool {
@@ -5132,7 +5225,7 @@ impl<E: PositiveExponent> Factorize
             factors.insert(0, (self.constant(c), 1));
         }
 
-        factors
+        self.collect_factorization(factors)
     }
 
     /// Perform Trager's algorithm for factorization.
@@ -5199,7 +5292,7 @@ impl<E: PositiveExponent> Factorize
             full_factors.push((self.constant(constant), 1));
         }
 
-        full_factors
+        self.collect_monic_factorization(full_factors)
     }
 
     fn is_irreducible(&self) -> bool {
@@ -5234,7 +5327,7 @@ where
             factors.push((self.constant(c), 1))
         }
 
-        factors
+        self.collect_monic_factorization(factors)
     }
 
     fn factor(&self) -> Vec<(Self, usize)> {
@@ -5305,7 +5398,7 @@ where
             }
         }
 
-        factors
+        self.collect_monic_factorization(factors)
     }
 
     fn is_irreducible(&self) -> bool {
@@ -8904,6 +8997,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             return None;
         }
         candidate = candidate.div_coeff(&content);
+        if candidate.lcoeff().is_negative() {
+            candidate = -candidate;
+        }
         if candidate.is_constant() || candidate.degree(variable) >= self.degree(variable) {
             return None;
         }
@@ -9919,6 +10015,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
             let content = candidate.content();
             candidate = candidate.div_coeff(&content);
+            if candidate.lcoeff().is_negative() {
+                candidate = -candidate;
+            }
 
             let (quotient, remainder) = rest.quot_rem(&candidate, true);
             if !remainder.is_zero() {
@@ -10009,6 +10108,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 }
                 let content = candidate.content();
                 candidate = candidate.div_coeff(&content);
+                if candidate.lcoeff().is_negative() {
+                    candidate = -candidate;
+                }
 
                 let (quotient, remainder) = rest.quot_rem(&candidate, true);
                 if remainder.is_zero() {
@@ -10054,6 +10156,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
     /// Factor a square-free univariate polynomial over the integers by Hensel lifting factors computed over
     /// a finite field image of the polynomial.
     fn factor_reconstruct(&self) -> Vec<Self> {
+        self.reconstruct_with_content(Self::factor_reconstruct_primitive)
+    }
+
+    /// Reconstruct a primitive polynomial with positive leading coefficient.
+    fn factor_reconstruct_primitive(&self) -> Vec<Self> {
         let Some(var) = self.last_exponents().iter().position(|x| *x > E::zero()) else {
             return vec![self.clone()]; // constant polynomial
         };
@@ -10605,6 +10712,16 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
     /// Factor a square-free bivariate polynomial over the integers.
     fn bivariate_factor_reconstruct(&self, main_var: usize, interpolation_var: usize) -> Vec<Self> {
+        self.reconstruct_with_content(|primitive| {
+            primitive.bivariate_factor_reconstruct_primitive(main_var, interpolation_var)
+        })
+    }
+
+    fn bivariate_factor_reconstruct_primitive(
+        &self,
+        main_var: usize,
+        interpolation_var: usize,
+    ) -> Vec<Self> {
         if self.bivariate_irreducibility_test() {
             return vec![self.clone()];
         }
@@ -10635,6 +10752,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             factor_target = -factor_target;
         }
         let uni_fs = factor_target.factor_reconstruct();
+        debug_assert!(uni_fs.iter().all(|factor| !factor.is_constant()));
 
         // With one image factor there is nothing to recombine: the existing
         // reconstruction would return the whole input after lifting and undoing
@@ -10791,9 +10909,12 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     working_k,
                 );
                 let leading = f_mod.lcoeff_last_varorder(&[main_var, interpolation_var]);
-                let candidate = (&leading * &lifted[factor_index + 1])
+                let mut candidate = (&leading * &lifted[factor_index + 1])
                     .map_coeff(|coefficient| mod_field.to_symmetric_integer(coefficient), Z)
                     .make_primitive();
+                if candidate.lcoeff().is_negative() {
+                    candidate = -candidate;
+                }
                 if candidate.degree(main_var).to_u32() == factor_degree
                     && let Some(quotient) = shifted_poly.try_div(&candidate)
                 {
@@ -10857,6 +10978,9 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
 
                 let content = g_int.univariate_content(main_var);
                 g_int = &g_int / &content;
+                if g_int.lcoeff().is_negative() {
+                    g_int = -g_int;
+                }
 
                 let (h, r) = rest.quot_rem(&g_int, true);
 
@@ -11317,7 +11441,8 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
             debug!("Content-free lcsqf {}", lcoeff_square_free_pp);
 
-            let sqf = poly_eval.square_free_factorization();
+            let mut sqf = poly_eval.square_free_factorization();
+            sqf.retain(|(factor, _)| !factor.is_constant());
             if sqf.len() != 1 || sqf[0].1 != 1 {
                 debug!("Polynomial is not square free: {}", poly_eval);
                 return Err(main_bivariate_factors.len());
@@ -11864,14 +11989,15 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                     if c.get_constant().abs().is_one() && retained_variables_start_at_zero {
                         cur_biv_f.bivariate_factor_reconstruct(order[0], order[1])
                     } else {
-                        let mut factors = cur_biv_f
+                        cur_biv_f
                             .factor()
                             .into_iter()
                             .map(|factor| factor.0)
-                            .collect::<Vec<_>>();
-                        factors.retain(|factor| !factor.is_constant());
-                        factors
+                            .collect()
                     };
+                // Scalar factors are not polynomial images and must not enter
+                // factor counts, leading-coefficient matching, or Hensel lifting.
+                bivariate_factors.retain(|factor| !factor.is_constant());
 
                 // A one-factor admissible image certifies irreducibility. An
                 // initial primitive image with constant leading coefficient or
@@ -12104,6 +12230,11 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
                 primitive_uni_f.clone()
             };
             let mut univariate_factors = factor_target.factor_reconstruct();
+            debug_assert!(
+                univariate_factors
+                    .iter()
+                    .all(|factor| !factor.is_constant())
+            );
             if univariate_factors.is_empty() {
                 continue;
             }
@@ -12544,17 +12675,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
 
             if &test == self {
-                let mut negated_factors = 0usize;
-                for f in &mut factorization {
-                    if f.lcoeff().is_negative() {
-                        *f = -f.clone();
-                        negated_factors += 1;
-                    }
-                }
-                if negated_factors % 2 == 1 {
-                    factorization[0] = -factorization[0].clone();
-                }
-                return factorization;
+                return self.collect_integer_reconstruction(factorization);
             } else {
                 if let Some(univariate_state) = retry_context.advance(&mut coefficient_upper_bound)
                 {
@@ -12583,15 +12704,17 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
         bivariate_fallback_order: Option<&[usize]>,
         prefer_univariate_start: bool,
     ) -> Vec<Self> {
-        self.multivariate_factorization_with_retries(
-            order,
-            coefficient_upper_bound,
-            max_univariate_factors,
-            0,
-            bivariate_fallback_order,
-            prefer_univariate_start,
-            integer_factor_start_mode(),
-        )
+        self.reconstruct_with_content(|primitive| {
+            primitive.multivariate_factorization_with_retries(
+                order,
+                coefficient_upper_bound,
+                max_univariate_factors,
+                0,
+                bivariate_fallback_order,
+                prefer_univariate_start,
+                integer_factor_start_mode(),
+            )
+        })
     }
 
     /// Start bivariate factorization after restoring the variable order that
@@ -12893,17 +13016,7 @@ impl<E: PositiveExponent> MultivariatePolynomial<IntegerRing, E, LexOrder> {
             }
 
             if &test == self {
-                let mut negated_factors = 0usize;
-                for f in &mut factorization {
-                    if f.lcoeff().is_negative() {
-                        *f = -f.clone();
-                        negated_factors += 1;
-                    }
-                }
-                if negated_factors % 2 == 1 {
-                    factorization[0] = -factorization[0].clone();
-                }
-                return factorization;
+                return self.collect_integer_reconstruction(factorization);
             } else {
                 debug!(
                     "No immediate factorization of {} for sample points {:?}, retrying with factor bound {:?}",
@@ -14219,11 +14332,15 @@ mod test {
 
         let negative = -polynomial.clone();
         let mut order = vec![0, 1, 2];
-        let (_, _, _, _, negative_wang_lcoeffs) = negative.find_sample(&mut order, 10, None);
+        let (negative_images, _, _, _, negative_wang_lcoeffs) =
+            negative.find_sample(&mut order, 10, None);
+        assert_eq!(negative_images.len(), 2);
+        assert!(negative_images.iter().all(|factor| !factor.is_constant()));
         assert_eq!(negative_wang_lcoeffs.unwrap().0, Integer::from(-1));
         let mut factor_order = vec![0, 1, 2];
         let factors = negative.multivariate_factorization(&mut factor_order, 10, None, None, false);
-        assert_eq!(factors.len(), 2);
+        assert_eq!(factors.len(), 3);
+        assert_eq!(factors[0], negative.constant(Integer::from(-1)));
         let reconstructed = factors
             .into_iter()
             .fold(negative.one(), |product, factor| &product * &factor);
@@ -17656,6 +17773,70 @@ mod test {
     }
 
     #[test]
+    fn integer_reconstruction_subcalls_normalize_signs_and_content() {
+        let variables = Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()]));
+        for text in ["x^4-4*y^2", "-6*(x^4-4*y^2)", "-3*(x^2+y^2+1)"] {
+            let polynomial = parse!(text)
+                .expand()
+                .to_polynomial::<_, u32>(&Z, variables.clone());
+            for (main, interpolation) in [(0, 1), (1, 0)] {
+                let reference = polynomial.bivariate_factor_reconstruct(main, interpolation);
+                for _ in 0..16 {
+                    let factors = polynomial.bivariate_factor_reconstruct(main, interpolation);
+                    assert_eq!(factors, reference);
+                    assert_eq!(
+                        factors.iter().fold(polynomial.one(), |p, f| p * f),
+                        polynomial
+                    );
+                    for (index, factor) in factors.iter().enumerate() {
+                        if factor.is_constant() {
+                            assert_eq!(index, 0);
+                        } else {
+                            assert!(!factor.lcoeff().is_negative());
+                            assert!(factor.content().is_one());
+                        }
+                    }
+                }
+            }
+        }
+        for text in ["-6*(2*x+1)*(x^2+1)", "-3*(x+1)", "-6*x^3"] {
+            let polynomial = parse!(text)
+                .expand()
+                .to_polynomial::<_, u32>(&Z, variables.clone());
+            let reference = polynomial.factor_reconstruct();
+            assert_eq!(
+                reference[0],
+                polynomial.constant(-polynomial.content().abs())
+            );
+            for _ in 0..8 {
+                let factors = polynomial.factor_reconstruct();
+                assert_eq!(factors, reference);
+                assert_eq!(
+                    factors.iter().fold(polynomial.one(), |p, f| p * f),
+                    polynomial
+                );
+                assert!(factors[1..].iter().all(|factor| !factor.is_constant()
+                    && !factor.lcoeff().is_negative()
+                    && factor.content().is_one()));
+            }
+        }
+    }
+
+    #[test]
+    fn primitive_bivariate_reconstruction_normalizes_before_division() {
+        let polynomial = parse!("x^4-4*y^2").to_polynomial::<_, u32>(
+            &Z,
+            Some(Arc::new(vec![symbol!("x").into(), symbol!("y").into()])),
+        );
+        for _ in 0..32 {
+            let factors = polynomial.bivariate_factor_reconstruct_primitive(1, 0);
+            assert_eq!(factors.len(), 2);
+            assert!(factors.iter().all(|factor| !factor.lcoeff().is_negative()));
+            assert_eq!(&factors[0] * &factors[1], polynomial);
+        }
+    }
+
+    #[test]
     fn factor_overall_minus() {
         let poly = parse!("-v1*v3^2-v1*v2*v3^2").to_polynomial::<_, u8>(
             &Z,
@@ -17879,7 +18060,7 @@ mod test {
         let scaled = polynomial.clone().mul_coeff(field.nth(2.into()));
         assert_eq!(
             scaled.factor(),
-            vec![(polynomial, 1), (scaled.constant(field.nth(2.into())), 1)]
+            vec![(scaled.constant(field.nth(2.into())), 1), (polynomial, 1)]
         );
     }
 
