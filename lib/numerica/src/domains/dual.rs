@@ -1085,13 +1085,34 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline(always)]
             fn norm(&self) -> Self {
-                let n = self.values[0].norm();
-                if n == self.values[0] {
-                    return self.clone();
-                } else {
-                    let scale = n / &self.values[0];
-                    self.clone() * &scale
+                use $crate::domains::float::Numeric;
+
+                // A real Taylor series has norm +/-self away from zero. Check
+                // every component: a real primal may have complex derivatives.
+                if self.is_self_conjugate() {
+                    match self.values[0].real_sign() {
+                        Some(std::cmp::Ordering::Greater) => return self.clone(),
+                        Some(std::cmp::Ordering::Less) => return -self.clone(),
+                        _ => {}
+                    }
                 }
+
+                let n = self.values[0].norm();
+                if self.is_exact_zero() {
+                    let mut result = self.clone();
+                    result.values[0] = n;
+                    return result;
+                }
+
+                // The differentiation parameters are real, so conjugate all
+                // coefficients. Normalize first to avoid squaring the primal
+                // magnitude, which can overflow or underflow.
+                let normalized = self.clone() * &n.inv();
+                let mut squared = normalized.norm_squared();
+                squared.values[0] = n.one();
+                let mut result = squared.sqrt() * &n;
+                result.values[0] = n;
+                result
             }
 
             #[inline(always)]
@@ -2258,13 +2279,31 @@ impl<T: ElementaryFunctions> ElementaryFunctions for HyperDual<T> {
 
     #[inline(always)]
     fn norm(&self) -> Self {
-        let n = self.values[0].norm();
-        if n == self.values[0] {
-            return self.clone();
-        } else {
-            let scale = n / &self.values[0];
-            self.clone() * &scale
+        // A real Taylor series has norm +/-self away from zero. Check every
+        // component: a real primal may have complex derivatives.
+        if self.is_self_conjugate() {
+            match self.values[0].real_sign() {
+                Some(std::cmp::Ordering::Greater) => return self.clone(),
+                Some(std::cmp::Ordering::Less) => return -self.clone(),
+                _ => {}
+            }
         }
+
+        let n = self.values[0].norm();
+        if self.is_exact_zero() {
+            let mut result = self.clone();
+            result.values[0] = n;
+            return result;
+        }
+
+        // Normalize before forming the squared norm, preserving the scalar
+        // norm's range while differentiating complex coefficients correctly.
+        let normalized = self.clone() * &n.inv();
+        let mut squared = normalized.norm_squared();
+        squared.values[0] = n.one();
+        let mut result = squared.sqrt() * &n;
+        result.values[0] = n;
+        result
     }
 
     #[inline(always)]
