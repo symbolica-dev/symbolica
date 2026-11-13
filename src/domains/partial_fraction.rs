@@ -26,30 +26,29 @@
 //! identities, which are rational functions of the space-time dimension with
 //! a few recurring (mostly linear) denominator factors.
 //!
-//! # Self-extending and fixed bases
+//! # Denominator bases
 //!
-//! The basis is append-only: a factor's index never changes, so an element
-//! remains valid when the basis grows.
+//! Every ring can extend its append-only basis: a factor's index never changes,
+//! so existing elements remain valid when new denominators enter.
 //!
-//! - [PartialFractionRing::new] creates a *self-extending* ring (for fields
-//!   with a factorization, such as `Q` and `Z_p`). Optional hints seed the
-//!   basis; a denominator that enters the ring (conversions, inversion,
-//!   division) is trial-divided by the known factors, then only its unknown
-//!   cofactor is factored. The result is cached and new factors are appended. Sums and products never create new factors, so arithmetic
-//!   never factors. The ring is then the field `F(x)`, but inversion and
-//!   general division are expensive: they combine their operands into single
-//!   fractions and factor the new numerator.
-//! - [PartialFractionRing::with_fixed_basis] creates a ring whose basis is
-//!   given and never extended (the factors need not be irreducible); an
-//!   uncovered denominator is an error and [Ring::try_inv] and [Ring::try_div]
-//!   return `None` outside the ring. A fixed basis keeps the same structure in
-//!   related rings: [PartialFractionRing::map_field] maps a basis to its image
-//!   modulo a prime with a fixed basis, as a factor irreducible over `Q` may
-//!   split or collide with another one modulo `p`, so that factoring again
-//!   per prime would change the structure. [PartialFractionRing::strict]
-//!   gives a non-extending view of a self-extending ring. Fixed views have type
-//!   [FixedPartialFractionRing] (`PartialFractionRing<F, false>`) and implement
-//!   [Ring], while only `PartialFractionRing<F>` implements [Field].
+//! - [PartialFractionRing::new] uses [Factorize] to split new denominators.
+//!   Known factors are trial-divided first; only the remaining cofactor is
+//!   factored. Denominator decompositions are cached.
+//! - [PartialFractionRing::with_basis] preserves supplied pairwise-coprime
+//!   blocks, which need not be irreducible. It supports any coefficient field:
+//!   uncovered denominators add coprime, possibly composite blocks without
+//!   requiring polynomial factorization.
+//! - [PartialFractionRing::map_field] preserves the mapped blocks as well,
+//!   even when an irreducible rational factor splits modulo a prime.
+//!
+//! All these constructors produce the field F(x). Sums, products, and division
+//! by basis factors do not extend the basis. General inversion and division
+//! may do so. [PartialFractionLayout] separately defines fixed coordinates
+//! for reconstruction; it does not restrict the arithmetic field.
+//!
+//! Factorization is supplied internally by an adapter to [Factorize], rather
+//! than a bound on all arithmetic: outer polynomials over coefficient fields
+//! such as rational-function fields do not necessarily implement that trait.
 //!
 //! Clones of a ring share its basis. As in Symbolica's symbol table, the
 //! factors are stored in an append-only vector: reading them is lock-free,
@@ -147,8 +146,6 @@ pub enum PartialFractionError {
     NotCoprime(usize, usize),
     /// A denominator is zero.
     ZeroDenominator,
-    /// A denominator has a factor that is not a product of basis factors.
-    OutsideBasis,
     /// A polynomial depends on a variable other than the ring's variable.
     OtherVariable,
     /// A coefficient has no image in the target field, for example a rational
@@ -164,9 +161,6 @@ impl Display for PartialFractionError {
             Self::ConstantFactor(i) => write!(f, "basis factor {i} is constant"),
             Self::NotCoprime(i, j) => write!(f, "basis factors {i} and {j} are not coprime"),
             Self::ZeroDenominator => f.write_str("the denominator is zero"),
-            Self::OutsideBasis => {
-                f.write_str("the denominator has a factor outside the partial-fraction basis")
-            }
             Self::OtherVariable => {
                 f.write_str("the polynomial depends on a variable other than the ring's")
             }
@@ -375,7 +369,9 @@ struct FactorBasis<F: Field> {
     index: Mutex<HashMap<Vec<F::Element>, usize>>,
     /// The factor exponents of every monic denominator seen so far.
     denominators: Mutex<DenominatorCache<F>>,
-    /// Factorization of new denominators (self-extending bases only).
+    /// Optional adapter to Factorize, installed by PartialFractionRing::new.
+    /// When present, every stored block is irreducible. When absent, preserve
+    /// composite blocks and extend by coprime remainders without factoring.
     factorizer: Option<Factorizer<F>>,
 }
 
@@ -386,7 +382,7 @@ impl<F: Field> std::fmt::Debug for FactorBasis<F> {
                 "factors",
                 &self.factors.iter().map(|f| &f.monic).collect::<Vec<_>>(),
             )
-            .field("self_extending", &self.factorizer.is_some())
+            .field("factors_new_denominators", &self.factorizer.is_some())
             .finish()
     }
 }
@@ -510,32 +506,20 @@ where
         .collect()
 }
 
-/// The ring `F[x][1/f_1, ..., 1/f_k]` of univariate rational functions over the
-/// field `F` whose denominators are products of powers of the monic, pairwise
-/// coprime basis factors `f_i`, with elements in partial-fraction form.
+/// The field of univariate rational functions over F, stored in partial-fraction
+/// form over an append-only basis of monic, pairwise-coprime denominator blocks.
 ///
 /// See the [module documentation](self) for the representation, the two
-/// kinds of bases (self-extending and fixed) and the sharing model. Clones
-/// share the basis and are cheap. The `EXTEND` mode is a type-level distinction:
-/// `true` implements [Field], while `false` implements only [Ring].
+/// basis constructors and the sharing model. Clones share the append-only
+/// basis and are cheap. Every ring implements [Field].
 #[derive(Clone, Debug)]
-pub struct PartialFractionRing<F: Field, const EXTEND: bool = true> {
+pub struct PartialFractionRing<F: Field> {
     field: F,
     variable: Arc<PolyVariable>,
     basis: Arc<FactorBasis<F>>,
 }
 
-/// A localization with a fixed basis. Implements [Ring], but not [Field] or
-/// [EuclideanDomain]: nonzero polynomials outside the basis need not be units.
-///
-/// ```compile_fail
-/// use symbolica::domains::{Field, partial_fraction::FixedPartialFractionRing, rational::RationalField};
-/// fn require_field<F: Field>() {}
-/// require_field::<FixedPartialFractionRing<RationalField>>();
-/// ```
-pub type FixedPartialFractionRing<F> = PartialFractionRing<F, false>;
-
-impl<F: Field, const EXTEND: bool> PartialEq for PartialFractionRing<F, EXTEND> {
+impl<F: Field> PartialEq for PartialFractionRing<F> {
     fn eq(&self, other: &Self) -> bool {
         self.field == other.field
             && self.variable == other.variable
@@ -548,9 +532,9 @@ impl<F: Field, const EXTEND: bool> PartialEq for PartialFractionRing<F, EXTEND> 
     }
 }
 
-impl<F: Field, const EXTEND: bool> Eq for PartialFractionRing<F, EXTEND> {}
+impl<F: Field> Eq for PartialFractionRing<F> {}
 
-impl<F: Field, const EXTEND: bool> Hash for PartialFractionRing<F, EXTEND> {
+impl<F: Field> Hash for PartialFractionRing<F> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.field.hash(state);
         self.variable.hash(state);
@@ -754,23 +738,20 @@ enum Scale<'a, E> {
 }
 
 impl<F: Field> PartialFractionRing<F> {
-    /// Create a ring with a fixed basis: the given factors, made monic, in
-    /// this order. They must be nonconstant and pairwise coprime, but need not
-    /// be irreducible. A denominator must divide a product of powers of basis
-    /// factors; proper divisors of composite factors are accepted as well.
-    /// Otherwise entry fails (an error, or `None` from [Ring::try_inv] and
-    /// [Ring::try_div]). The returned fixed mode does not implement [Field].
+    /// Seed a field with the given blocks, made monic and kept in this order.
+    /// They must be nonconstant and pairwise coprime, but need not be irreducible.
+    /// Existing blocks are never split or replaced. New denominators are
+    /// covered by powers of these blocks and any coprime remainder is appended
+    /// as a whole block. No polynomial factorization implementation is needed.
     ///
-    /// Use a fixed basis to keep the same structure in several related rings,
-    /// for example the images of one basis modulo several primes (see
-    /// [Self::map_field]): a factor that is irreducible over `Q` may split
-    /// modulo a prime, so factoring again per prime would give a different
-    /// basis.
-    pub fn with_fixed_basis(
+    /// Use this constructor to preserve a reference denominator decomposition;
+    /// use [PartialFractionLayout] when fixed reconstruction coordinates are
+    /// required. All nonzero elements remain invertible.
+    pub fn with_basis(
         field: F,
         variable: Arc<PolyVariable>,
         factors: &[UnivariatePolynomial<F>],
-    ) -> Result<PartialFractionRing<F, false>, PartialFractionError> {
+    ) -> Result<PartialFractionRing<F>, PartialFractionError> {
         for factor in factors {
             if factor.coefficients.len() > 1 && factor.variable != variable {
                 return Err(PartialFractionError::OtherVariable);
@@ -785,11 +766,11 @@ impl<F: Field> PartialFractionRing<F> {
                 c
             })
             .collect();
-        PartialFractionRing::<F, false>::from_monic_factors(field, variable, factors, None)
+        PartialFractionRing::<F>::from_monic_factors(field, variable, factors, None)
     }
 }
 
-impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
+impl<F: Field> PartialFractionRing<F> {
     /// Create the ring from monic factors given as ascending coefficient lists.
     fn from_monic_factors(
         field: F,
@@ -816,24 +797,9 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         })
     }
 
-    /// A ring sharing this ring's basis that never extends it: a denominator
-    /// with a factor outside the current basis is refused.
-    pub fn strict(&self) -> PartialFractionRing<F, false> {
-        PartialFractionRing {
-            field: self.field.clone(),
-            variable: self.variable.clone(),
-            basis: self.basis.clone(),
-        }
-    }
-
-    /// Return `true` iff new denominators extend the basis.
-    pub fn is_self_extending(&self) -> bool {
-        EXTEND && self.basis.factorizer.is_some()
-    }
-
-    /// The factor exponents of the monic, nonconstant `d` over the basis, or
-    /// `None` if `d` has a factor outside the basis and the basis is not
-    /// extended. Factorizations are cached.
+    /// Exact factor exponents of a monic denominator. Known blocks are tried
+    /// first. With the Factorize adapter, append irreducible remainder factors;
+    /// otherwise return None for the general composite-cover path.
     fn denominator_factors(&self, d: &[F::Element]) -> Option<Vec<(usize, usize)>> {
         if let Some(e) = self.basis.denominators.lock().unwrap().get(d) {
             return Some(e.clone());
@@ -862,7 +828,7 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
             }
         }
         if rest.len() > 1 {
-            let factorizer = self.basis.factorizer.filter(|_| self.is_self_extending())?;
+            let factorizer = self.basis.factorizer?;
             for (f, m) in factorizer(field, &rest) {
                 // Irreducible factors are coprime to every other factor.
                 let i = self.basis.push(field, f).ok()?;
@@ -1838,8 +1804,8 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         (self.polynomial(n), self.polynomial(d))
     }
 
-    /// The element `numerator / denominator`, or an error if the reduced
-    /// denominator has a factor outside the basis.
+    /// Import a fraction, extending the basis as needed.
+    /// Fails for a zero denominator or incompatible variable.
     pub fn try_from_fraction(
         &self,
         numerator: &UnivariatePolynomial<F>,
@@ -1876,7 +1842,8 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         } else if let Some(exponents) = self.denominator_factors(&d) {
             exponents
         } else {
-            // A factor outside the basis must cancel against the numerator.
+            // Reduce before adding new composite blocks or covering proper
+            // divisors of existing blocks.
             let g = dense::gcd(field, &n, &d);
             n = dense::divrem_monic(field, &n, &g).0;
             d = dense::divrem_monic(field, &d, &g).0;
@@ -1888,9 +1855,7 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
                 } else {
                     // Localization at a composite factor also inverts each
                     // of its divisors: 1/g = (f/g)/f when g divides f.
-                    let (exponents, multiplier) = self
-                        .cover_denominator(&d)
-                        .ok_or(PartialFractionError::OutsideBasis)?;
+                    let (exponents, multiplier) = self.extend_denominator_cover(&d)?;
                     n = dense::mul(field, &n, &multiplier);
                     exponents
                 }
@@ -1903,12 +1868,21 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         Ok(a)
     }
 
-    /// Cover a monic denominator by powers of possibly composite basis
-    /// factors. Return exponents and the exact quotient (cover / denominator).
+    /// Read-only coverage, used to validate an explicit reconstruction target.
     fn cover_denominator(
         &self,
         d: &[F::Element],
     ) -> Option<(Vec<(usize, usize)>, Vec<F::Element>)> {
+        let (exponents, multiplier, rest) = self.denominator_cover_parts(d);
+        (rest.len() <= 1).then_some((exponents, multiplier))
+    }
+
+    /// Strip all divisors supported by existing blocks. The returned multiplier
+    /// satisfies d * multiplier = rest * product(f_i^e_i).
+    fn denominator_cover_parts(
+        &self,
+        d: &[F::Element],
+    ) -> (Vec<(usize, usize)>, Vec<F::Element>, Vec<F::Element>) {
         let field = &self.field;
         let mut rest = d.to_vec();
         let mut multiplier = vec![field.one()];
@@ -1929,10 +1903,37 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
                 exponents.push((i, e));
             }
             if rest.len() <= 1 {
-                return Some((exponents, multiplier));
+                break;
             }
         }
-        None
+        (exponents, multiplier, rest)
+    }
+
+    /// Cover a denominator without refining existing composite blocks.
+    fn extend_denominator_cover(
+        &self,
+        d: &[F::Element],
+    ) -> Result<(Vec<(usize, usize)>, Vec<F::Element>), PartialFractionError> {
+        loop {
+            let (mut exponents, multiplier, rest) = self.denominator_cover_parts(d);
+            if rest.len() > 1 {
+                match self.basis.push(&self.field, rest) {
+                    Ok(i) => exponents.push((i, 1)),
+                    // Another thread appended an overlapping block after our
+                    // snapshot. Recompute the cover against the enlarged basis.
+                    Err(PartialFractionError::NotCoprime(..)) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            if multiplier.len() == 1 && self.field.is_one(&multiplier[0]) {
+                self.basis
+                    .denominators
+                    .lock()
+                    .unwrap()
+                    .insert(d.to_vec(), exponents.clone());
+            }
+            return Ok((exponents, multiplier));
+        }
     }
 
     /// Evaluate `a` at `x`. Returns `None` if `x` is a pole of `a`.
@@ -1979,7 +1980,7 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         &self,
         field: G,
         map: impl Fn(&F::Element) -> Option<G::Element>,
-    ) -> Result<PartialFractionRing<G, false>, PartialFractionError> {
+    ) -> Result<PartialFractionRing<G>, PartialFractionError> {
         let factors = self
             .basis
             .factors
@@ -1987,19 +1988,14 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
             .map(|f| f.monic.iter().map(&map).collect::<Option<Vec<_>>>())
             .collect::<Option<Vec<_>>>()
             .ok_or(PartialFractionError::UnmappableCoefficient)?;
-        PartialFractionRing::<G, false>::from_monic_factors(
-            field,
-            self.variable.clone(),
-            factors,
-            None,
-        )
+        PartialFractionRing::<G>::from_monic_factors(field, self.variable.clone(), factors, None)
     }
 
     /// The coefficient-wise image of `a` in `target`, a ring obtained from
     /// this one with [Self::map_field] and the same `map`.
-    pub fn map_element<G: Field, const TARGET_EXTEND: bool>(
+    pub fn map_element<G: Field>(
         &self,
-        target: &PartialFractionRing<G, TARGET_EXTEND>,
+        target: &PartialFractionRing<G>,
         a: &PartialFraction<F>,
         map: impl Fn(&F::Element) -> Option<G::Element>,
     ) -> Result<PartialFraction<G>, PartialFractionError> {
@@ -2042,8 +2038,8 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         Ok(r)
     }
 
-    /// The element equal to `r`, or an error if the denominator of `r` has a
-    /// factor outside the basis or if `r` depends on another variable.
+    /// Import a rational polynomial, extending the basis as needed.
+    /// Returns an error for an incompatible variable or zero denominator.
     pub fn try_from_rational_polynomial<R: EmbedInField<F>, E: PositiveExponent>(
         &self,
         r: &RationalPolynomial<R, E>,
@@ -2053,8 +2049,8 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         self.element_from_dense_fraction(n, d)
     }
 
-    /// The element equal to `r`, or an error if a denominator factor of `r` is
-    /// not a product of basis factors or if `r` depends on another variable.
+    /// Import a factorized rational polynomial, extending the basis as needed.
+    /// Returns an error for an incompatible variable or zero denominator.
     pub fn try_from_factorized_rational_polynomial<R: EmbedInField<F>, E: PositiveExponent>(
         &self,
         r: &FactorizedRationalPolynomial<R, E>,
@@ -2095,7 +2091,7 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
         let mut exponents: Vec<(usize, usize)> = vec![];
         for (f, e) in &factors {
             let Some(resolved) = self.denominator_factors(f) else {
-                // A fixed basis may cover only the reduced denominator, or
+                // Composite blocks may cover only the reduced denominator, or
                 // a multiple of it when a basis factor is reducible. Preserve
                 // cancellation across supplied factors in this fallback.
                 let d = factors.iter().fold(vec![field.one()], |d, (f, e)| {
@@ -2164,7 +2160,7 @@ impl<F: Field, const EXTEND: bool> PartialFractionRing<F, EXTEND> {
     }
 }
 
-impl<const EXTEND: bool> PartialFractionRing<RationalField, EXTEND> {
+impl PartialFractionRing<RationalField> {
     /// The image of the ring modulo the prime of `field`.
     ///
     /// Fails if the prime divides a denominator of a factor coefficient or if
@@ -2173,7 +2169,7 @@ impl<const EXTEND: bool> PartialFractionRing<RationalField, EXTEND> {
     pub fn to_finite_field<UField: FiniteFieldWorkspace>(
         &self,
         field: &FiniteField<UField>,
-    ) -> Result<PartialFractionRing<FiniteField<UField>, false>, PartialFractionError>
+    ) -> Result<PartialFractionRing<FiniteField<UField>>, PartialFractionError>
     where
         Integer: ToFiniteField<UField>,
         FiniteField<UField>: FiniteFieldCore<UField>,
@@ -2186,7 +2182,7 @@ impl<const EXTEND: bool> PartialFractionRing<RationalField, EXTEND> {
     /// denominator of `a`.
     pub fn element_to_finite_field<UField: FiniteFieldWorkspace>(
         &self,
-        target: &PartialFractionRing<FiniteField<UField>, false>,
+        target: &PartialFractionRing<FiniteField<UField>>,
         a: &PartialFraction<RationalField>,
     ) -> Result<PartialFraction<FiniteField<UField>>, PartialFractionError>
     where
@@ -2245,7 +2241,7 @@ where
     }
 }
 
-impl<F: Field, const EXTEND: bool> Display for PartialFractionRing<F, EXTEND> {
+impl<F: Field> Display for PartialFractionRing<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}[", self.field)?;
         write!(f, "{}", self.variable)?;
@@ -2269,7 +2265,7 @@ impl<F: Field, const EXTEND: bool> Display for PartialFractionRing<F, EXTEND> {
     }
 }
 
-impl<F: Field, const EXTEND: bool> Set for PartialFractionRing<F, EXTEND> {
+impl<F: Field> Set for PartialFractionRing<F> {
     type Element = PartialFraction<F>;
 
     fn size(&self) -> Option<Integer> {
@@ -2277,7 +2273,7 @@ impl<F: Field, const EXTEND: bool> Set for PartialFractionRing<F, EXTEND> {
     }
 }
 
-impl<F: Field, const EXTEND: bool> RingOps<PartialFraction<F>> for PartialFractionRing<F, EXTEND> {
+impl<F: Field> RingOps<PartialFraction<F>> for PartialFractionRing<F> {
     fn add(&self, mut a: Self::Element, b: Self::Element) -> Self::Element {
         self.add_scaled_assign(&mut a, &b, Scale::One);
         a
@@ -2320,7 +2316,7 @@ impl<F: Field, const EXTEND: bool> RingOps<PartialFraction<F>> for PartialFracti
     }
 }
 
-impl<F: Field, const EXTEND: bool> RingOps<&PartialFraction<F>> for PartialFractionRing<F, EXTEND> {
+impl<F: Field> RingOps<&PartialFraction<F>> for PartialFractionRing<F> {
     fn add(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         let mut r = a.clone();
         self.add_scaled_assign(&mut r, b, Scale::One);
@@ -2385,7 +2381,7 @@ impl<F: Field, const EXTEND: bool> RingOps<&PartialFraction<F>> for PartialFract
     }
 }
 
-impl<F: Field, const EXTEND: bool> Ring for PartialFractionRing<F, EXTEND> {
+impl<F: Field> Ring for PartialFractionRing<F> {
     fn zero(&self) -> Self::Element {
         PartialFraction::default()
     }
@@ -2429,11 +2425,7 @@ impl<F: Field, const EXTEND: bool> Ring for PartialFractionRing<F, EXTEND> {
         self.field.characteristic()
     }
 
-    /// Invert `a`. With a self-extending basis every nonzero element is
-    /// invertible (the numerator of `a` is factored and its new factors are
-    /// appended to the basis). With a fixed basis, `a` must be a unit: a
-    /// nonzero constant times a product of integer powers of divisors of
-    /// basis factors (including proper divisors of composite factors).
+    /// Invert a nonzero element, extending the denominator basis as needed.
     fn try_inv(&self, a: &Self::Element) -> Option<Self::Element> {
         if a.is_zero() {
             return None;
@@ -2442,8 +2434,7 @@ impl<F: Field, const EXTEND: bool> Ring for PartialFractionRing<F, EXTEND> {
         self.element_from_dense_fraction(d, n).ok()
     }
 
-    /// Divide `a` by `b`. With a fixed basis, the quotient must be in the
-    /// ring.
+    /// Divide by a nonzero element, extending the denominator basis as needed.
     fn try_div(&self, a: &Self::Element, b: &Self::Element) -> Option<Self::Element> {
         if b.is_zero() {
             return None;
@@ -2451,14 +2442,7 @@ impl<F: Field, const EXTEND: bool> Ring for PartialFractionRing<F, EXTEND> {
         if a.is_zero() {
             return Some(self.zero());
         }
-        if let Some(inverse) = self.try_inv(b) {
-            return Some(self.mul(a, &inverse));
-        }
-        let field = &self.field;
-        let (na, da) = self.to_dense_fraction(a);
-        let (nb, db) = self.to_dense_fraction(b);
-        self.element_from_dense_fraction(dense::mul(field, &na, &db), dense::mul(field, &da, &nb))
-            .ok()
+        Some(self.mul(a, &self.try_inv(b)?))
     }
 
     fn format<W: std::fmt::Write>(
@@ -2534,10 +2518,9 @@ impl<F: Field, const EXTEND: bool> Ring for PartialFractionRing<F, EXTEND> {
     }
 }
 
-/// With a self-extending basis the ring is the field `F(x)`. Inversion and
-/// division combine their operands into single fractions and factor the new
-/// numerator (cached per denominator): this is much more expensive than the
-/// other operations. Use [PartialFractionRing::div_factor_power] to divide by
+/// Inversion combines an operand into a single fraction and extends the basis
+/// for its numerator, using Factorize when available or retaining whole blocks.
+/// Use [PartialFractionRing::div_factor_power] for cheaper division by known
 /// basis factors.
 impl<F: Field> EuclideanDomain for PartialFractionRing<F> {
     fn rem(&self, _a: &Self::Element, b: &Self::Element) -> Self::Element {
@@ -2562,9 +2545,8 @@ impl<F: Field> EuclideanDomain for PartialFractionRing<F> {
 ///
 /// # Panics
 ///
-/// [Field::inv] and [Field::div] panic on division by zero. Only the
-/// self-extending mode implements [Field]; fixed bases expose [Ring::try_inv]
-/// and [Ring::try_div].
+/// [Field::inv] and [Field::div] panic on division by zero. All
+/// rings implement [Field] and extend their denominator bases as needed.
 impl<F: Field> Field for PartialFractionRing<F> {
     fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         assert!(!b.is_zero(), "division by zero");
@@ -2598,9 +2580,7 @@ pub struct PartialFractionSamplingPolicy<P> {
     pub coefficient: P,
 }
 
-impl<F: Field + SampleableRing, const EXTEND: bool> SampleableRing
-    for PartialFractionRing<F, EXTEND>
-{
+impl<F: Field + SampleableRing> SampleableRing for PartialFractionRing<F> {
     type SamplingPolicy = PartialFractionSamplingPolicy<F::SamplingPolicy>;
 
     fn sample<G: rand::RngCore + ?Sized>(

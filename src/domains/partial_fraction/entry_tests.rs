@@ -61,11 +61,14 @@ fn recombined_known_factors_do_not_invoke_factorization() {
     );
     assert_eq!(factorization_inputs().len(), 1);
 
-    let strict = ring.strict();
+    let shared = ring.clone();
     let unknown = dense::mul(&Q, &known, &coefficients(&[-4, 1]));
-    assert_eq!(strict.denominator_factors(&unknown), None);
-    assert_eq!(factorization_inputs().len(), 1);
-    assert_eq!(ring.factor_count(), 3);
+    assert_eq!(
+        shared.denominator_factors(&unknown),
+        Some(vec![(0, 3), (1, 2), (3, 1)])
+    );
+    assert_eq!(factorization_inputs().len(), 2);
+    assert_eq!(ring.factor_count(), 4);
 }
 
 #[test]
@@ -112,9 +115,8 @@ fn factorized_import_keeps_factors_and_leading_coefficient_powers() {
 }
 
 #[test]
-fn factorized_import_falls_back_for_fixed_basis_cancellation() {
-    let seed = recording_ring(&[&[-1, 1]]);
-    let ring = seed.strict();
+fn factorized_import_preserves_cancellation_after_basis_extension() {
+    let ring = recording_ring(&[&[-1, 1]]);
     let known = ring.polynomial(coefficients(&[-2, 2])); // 2 (x - 1)
     let outside = ring.polynomial(coefficients(&[1, 1]));
     let input = FactorizedRationalPolynomial::<RationalField, u16> {
@@ -127,8 +129,8 @@ fn factorized_import_falls_back_for_fixed_basis_cancellation() {
         .try_from_factorized_rational_polynomial(&input)
         .unwrap();
     assert_eq!(actual, ring.inv_factor_power(0, 2));
-    assert!(factorization_inputs().is_empty());
-    assert_eq!(ring.factor_count(), 1);
+    assert_eq!(factorization_inputs(), vec![coefficients(&[1, 1])]);
+    assert_eq!(ring.factor_count(), 2);
 }
 
 #[test]

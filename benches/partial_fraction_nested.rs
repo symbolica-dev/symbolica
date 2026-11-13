@@ -8,8 +8,8 @@
 //! in the coefficient field (including the precomputed inverse differences).
 //!
 //! All fixture construction and exact validation are outside timing. The
-//! partial-fraction basis is fixed: factorization over rational-function
-//! coefficient fields is not provided by the current self-extending API.
+//! partial-fraction ring is seeded with the known factors, preserving their
+//! blocks without requiring factorization over rational-function coefficients.
 //!
 //! cargo bench --features symbolica_benchmarks --bench partial_fraction_nested
 
@@ -100,7 +100,7 @@ impl Fixture {
     fn partial_fractions(
         &self,
     ) -> (
-        PartialFractionRing<RatField, false>,
+        PartialFractionRing<RatField>,
         Vec<PartialFraction<RatField>>,
     ) {
         let factors: Vec<_> = (1..=4)
@@ -113,8 +113,7 @@ impl Fixture {
             })
             .collect();
         let ring =
-            PartialFractionRing::with_fixed_basis(self.field.clone(), self.x.clone(), &factors)
-                .unwrap();
+            PartialFractionRing::with_basis(self.field.clone(), self.x.clone(), &factors).unwrap();
         let coefficients = (0..COEFFICIENTS)
             .map(|i| {
                 let (a, b, c, s) = Self::numbers(i);
@@ -171,7 +170,7 @@ impl Fixture {
 
     fn flatten_partial_fraction(
         &self,
-        ring: &PartialFractionRing<RatField, false>,
+        ring: &PartialFractionRing<RatField>,
         a: &PartialFraction<RatField>,
     ) -> Rat {
         let (n, d) = ring.to_fraction(a);

@@ -93,8 +93,7 @@ fn main() {
         )
     };
     let reference_ring =
-        PartialFractionRing::with_fixed_basis(Q, variable.clone(), &[polynomial(&[1, 0, 1])])
-            .unwrap();
+        PartialFractionRing::with_basis(Q, variable.clone(), &[polynomial(&[1, 0, 1])]).unwrap();
     // Three polynomial slots, followed by two two-coefficient pole blocks.
     let reference = PartialFractionLayout::new(&reference_ring, 3, &[(0, 2)]).unwrap();
     assert_eq!(reference.len(), 7);

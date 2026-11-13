@@ -13,12 +13,10 @@
 //! two basis factors. Fixture construction and validation (all
 //! representations give the same results) are outside the timed regions.
 //!
-//! `partial_fraction_ring` uses a fixed basis seeded with the factors and
-//! coefficients built with `mul_fraction` (no factorization anywhere);
-//! `partial_fraction_ring_cold` times a self-extending ring without hints,
+//! `partial_fraction_ring_cold` times a ring without hints,
 //! including the conversion of the coefficients from fractions (which
 //! trial-divides known factors and factors only remaining cofactors) and the workload;
-//! `partial_fraction_ring_warm` initializes the same self-extending ring and
+//! `partial_fraction_ring_warm` initializes the same ring and
 //! coefficients before timing, then measures only the arithmetic workload;
 //! `partial_fraction_ring_warm_reimport` also initializes the ring before
 //! timing, but rebuilds and re-imports the coefficient fractions on each
@@ -196,14 +194,11 @@ impl Fixture {
         self.univariate(c).to_multivariate()
     }
 
-    fn partial_fractions(&self) -> (PartialFractionRing<Zp64, false>, Vec<PartialFraction<Zp64>>) {
+    fn seeded_partial_fractions(&self) -> (PartialFractionRing<Zp64>, Vec<PartialFraction<Zp64>>) {
         let factors: Vec<_> = self.factors.iter().map(|f| self.univariate(f)).collect();
-        let ring = PartialFractionRing::with_fixed_basis(
-            self.field.clone(),
-            self.variable.clone(),
-            &factors,
-        )
-        .unwrap();
+        let ring =
+            PartialFractionRing::with_basis(self.field.clone(), self.variable.clone(), &factors)
+                .unwrap();
         let one = ring.one();
         let coefficients = self
             .coefficients
@@ -213,7 +208,7 @@ impl Fixture {
         (ring, coefficients)
     }
 
-    /// A self-extending ring without hints: every coefficient enters as a
+    /// A ring without hints: every coefficient enters as a
     /// fraction; known factors are trial-divided before remaining cofactors
     /// are factored. Decompositions are cached per denominator.
     fn cold_partial_fractions(&self) -> (PartialFractionRing<Zp64>, Vec<PartialFraction<Zp64>>) {
@@ -281,7 +276,7 @@ impl Fixture {
 /// Check once per case that the three representations agree.
 fn validate(case: Case) {
     let f = fixture(case);
-    let (ring, coefficients) = f.partial_fractions();
+    let (ring, coefficients) = f.seeded_partial_fractions();
     if case.covered_quadratic {
         assert!(coefficients.iter().any(|a| {
             a.denominator_exponents()
@@ -290,9 +285,8 @@ fn validate(case: Case) {
     }
     let pf = run(&ring, &coefficients, f.steps);
     let (cold_ring, cold_coefficients) = f.cold_partial_fractions();
-    assert!(cold_ring.is_self_extending());
     eprintln!(
-        "{case}: fixed basis {} factors, degrees {:?}; self-extending basis {} factors, degrees {:?}",
+        "{case}: seeded basis {} factors, degrees {:?}; learned basis {} factors, degrees {:?}",
         ring.factor_count(),
         (0..ring.factor_count())
             .map(|i| ring.factor(i).degree())
@@ -308,7 +302,6 @@ fn validate(case: Case) {
     assert_eq!(cold_ring.factor_count(), factor_count);
     assert_eq!(warm_coefficients, cold_coefficients);
     let warm_reimport = run(&cold_ring, &warm_coefficients, f.steps);
-    assert!(cold_ring.is_self_extending());
     assert_eq!(cold_ring.factor_count(), factor_count);
     let rational = f.rational();
     let field = RationalPolynomialField::new(f.field.clone());
@@ -349,13 +342,6 @@ fn main() {
 mod elimination {
     use super::*;
 
-    #[divan::bench(args = CASES)]
-    fn partial_fraction_ring(bencher: divan::Bencher, case: Case) {
-        let f = fixture(case);
-        let (ring, coefficients) = f.partial_fractions();
-        bencher.bench_local(|| run(&ring, black_box(&coefficients), f.steps));
-    }
-
     /// Ring creation, coefficient conversion (including factor discovery),
     /// and the workload.
     #[divan::bench(args = CASES)]
@@ -367,7 +353,7 @@ mod elimination {
         });
     }
 
-    /// Arithmetic only, after a self-extending ring has learned the factors
+    /// Arithmetic only, after the ring has learned the factors
     /// and all coefficients have been converted outside the timed region.
     #[divan::bench(args = CASES)]
     fn partial_fraction_ring_warm(bencher: divan::Bencher, case: Case) {

@@ -29,7 +29,7 @@ fn q_poly(
 
 /// Linear factors with small and fractional roots, two coprime quadratics and
 /// a cubic.
-fn q_ring() -> PartialFractionRing<RationalField, false> {
+fn seeded_q_ring() -> PartialFractionRing<RationalField> {
     let x = variable();
     let factors = [
         q_poly(&x, &[(-1, 1), (1, 1)]),                // x - 1
@@ -40,7 +40,7 @@ fn q_ring() -> PartialFractionRing<RationalField, false> {
         q_poly(&x, &[(3, 1), (1, 1), (2, 1)]),         // 2 x^2 + x + 3
         q_poly(&x, &[(5, 1), (0, 1), (1, 1), (1, 1)]), // x^3 + x^2 + 5
     ];
-    PartialFractionRing::with_fixed_basis(Q, x, &factors).unwrap()
+    PartialFractionRing::with_basis(Q, x, &factors).unwrap()
 }
 
 fn q_policy() -> PartialFractionSamplingPolicy<RangeInclusive<Integer>> {
@@ -60,8 +60,8 @@ fn zp_policy() -> PartialFractionSamplingPolicy<FiniteFieldSamplingPolicy> {
 }
 
 /// Sample an element with only a few factors, as in typical use.
-fn sparse_sample<F: Field + SampleableRing, const EXTEND: bool>(
-    ring: &PartialFractionRing<F, EXTEND>,
+fn sparse_sample<F: Field + SampleableRing>(
+    ring: &PartialFractionRing<F>,
     rng: &mut StdRng,
     policy: &PartialFractionSamplingPolicy<F::SamplingPolicy>,
 ) -> PartialFraction<F> {
@@ -81,8 +81,8 @@ fn sparse_sample<F: Field + SampleableRing, const EXTEND: bool>(
     a
 }
 
-fn to_q_rational<const EXTEND: bool>(
-    ring: &PartialFractionRing<RationalField, EXTEND>,
+fn to_q_rational(
+    ring: &PartialFractionRing<RationalField>,
     a: &PartialFraction<RationalField>,
 ) -> RationalPolynomial<IntegerRing, u16> {
     ring.to_rational_polynomial(a, &Z)
@@ -90,9 +90,10 @@ fn to_q_rational<const EXTEND: bool>(
 
 #[test]
 fn arithmetic_agrees_with_rational_polynomials_over_q() {
-    let ring = q_ring();
     let mut rng = StdRng::seed_from_u64(1);
     for _ in 0..60 {
+        // Keep the sample pool bounded: inversion below may append a factor.
+        let ring = seeded_q_ring();
         let a = sparse_sample(&ring, &mut rng, &q_policy());
         let b = sparse_sample(&ring, &mut rng, &q_policy());
         let (ra, rb) = (to_q_rational(&ring, &a), to_q_rational(&ring, &b));
@@ -103,10 +104,8 @@ fn arithmetic_agrees_with_rational_polynomials_over_q() {
         assert_eq!(to_q_rational(&ring, &ring.neg(&a)), -ra.clone());
         if !b.is_zero() {
             let quotient = &ra / &rb;
-            match ring.try_div(&a, &b) {
-                Some(q) => assert_eq!(to_q_rational(&ring, &q), quotient),
-                None => assert!(ring.try_from_rational_polynomial(&quotient).is_err()),
-            }
+            let q = ring.div(&a, &b);
+            assert_eq!(to_q_rational(&ring, &q), quotient);
         }
     }
 }
@@ -132,7 +131,7 @@ fn arithmetic_agrees_with_rational_polynomials_over_zp() {
         poly(&[3, 1, 2]),
         poly(&[5, 0, 1, 1]),
     ];
-    let ring = PartialFractionRing::with_fixed_basis(field.clone(), x, &factors).unwrap();
+    let ring = PartialFractionRing::with_basis(field.clone(), x, &factors).unwrap();
     let mut rng = StdRng::seed_from_u64(2);
     for _ in 0..100 {
         let a = sparse_sample(&ring, &mut rng, &zp_policy());
@@ -169,7 +168,7 @@ fn arithmetic_agrees_with_rational_polynomials_over_zp() {
 
 #[test]
 fn ring_axioms() {
-    let ring = q_ring();
+    let ring = seeded_q_ring();
     let mut rng = StdRng::seed_from_u64(3);
     for _ in 0..30 {
         let a = sparse_sample(&ring, &mut rng, &q_policy());
@@ -204,7 +203,7 @@ fn ring_axioms() {
 
 #[test]
 fn polynomial_products_and_factor_division() {
-    let ring = q_ring();
+    let ring = seeded_q_ring();
     let x = ring.variable().clone();
     let mut rng = StdRng::seed_from_u64(4);
     for _ in 0..30 {
@@ -263,7 +262,7 @@ fn polynomial_products_and_factor_division() {
 
 #[test]
 fn conversions() {
-    let ring = q_ring();
+    let ring = seeded_q_ring();
     let x = ring.variable().clone();
     let variables = Arc::new(vec![x.as_ref().clone()]);
     let r: RationalPolynomial<IntegerRing, u16> = parse!(
@@ -289,16 +288,16 @@ fn conversions() {
         a
     );
 
-    // A denominator outside the basis.
+    // A new denominator extends the seeded basis.
     let outside: RationalPolynomial<IntegerRing, u16> =
         parse!("1/(pf_x-2)").to_rational_polynomial(&Q, &Z, Some(variables.clone()));
-    assert_eq!(
-        ring.try_from_rational_polynomial(&outside),
-        Err(PartialFractionError::OutsideBasis)
-    );
-    // A cancelling factor outside the basis is fine.
-    let n = q_poly(&x, &[(-2, 1), (1, 1)]);
-    let d = q_poly(&x, &[(2, 1), (-3, 1), (1, 1)]); // (x-1)(x-2)
+    let count = ring.factor_count();
+    let imported = ring.try_from_rational_polynomial(&outside).unwrap();
+    assert_eq!(ring.factor_count(), count + 1);
+    assert_eq!(to_q_rational(&ring, &imported), outside);
+    // A cancelling factor outside the basis is also accepted.
+    let n = q_poly(&x, &[(-4, 1), (1, 1)]);
+    let d = q_poly(&x, &[(4, 1), (-5, 1), (1, 1)]); // (x-1)(x-4)
     assert_eq!(
         ring.try_from_fraction(&n, &d).unwrap(),
         ring.inv_factor_power(0, 1)
@@ -315,11 +314,12 @@ fn conversions() {
     let unit = ring.mul(&ring.nth(3.into()), &ring.inv_factor_power(4, 2));
     let inverse = ring.try_inv(&unit).unwrap();
     assert!(ring.is_one(&ring.mul(&unit, &inverse)));
-    // 1 + 1/(x + 2) = (x + 3)/(x + 2) is not a unit; 1 + 1/(x - 1) = x/(x - 1) is.
-    assert!(
-        ring.try_inv(&ring.add(&ring.one(), &ring.inv_factor_power(1, 1)))
-            .is_none()
-    );
+    // Inverting (x + 3)/(x + 2) discovers x + 3 in the seeded basis.
+    let unit = ring.add(&ring.one(), &ring.inv_factor_power(1, 1));
+    let count = ring.factor_count();
+    let inverse = ring.inv(&unit);
+    assert_eq!(ring.factor_count(), count + 1);
+    assert!(ring.is_one(&ring.mul(&unit, &inverse)));
     let unit = ring.add(&ring.one(), &ring.inv_factor_power(0, 1));
     assert!(ring.is_one(&ring.mul(&unit, &ring.try_inv(&unit).unwrap())));
 
@@ -351,11 +351,11 @@ fn constructors() {
     assert_eq!(ring.factor_count(), 3);
 
     assert_eq!(
-        PartialFractionRing::with_fixed_basis(Q, x.clone(), &[q_poly(&x, &[(2, 1)])]),
+        PartialFractionRing::with_basis(Q, x.clone(), &[q_poly(&x, &[(2, 1)])]),
         Err(PartialFractionError::ConstantFactor(0))
     );
     assert_eq!(
-        PartialFractionRing::with_fixed_basis(
+        PartialFractionRing::with_basis(
             Q,
             x.clone(),
             &[
@@ -366,7 +366,7 @@ fn constructors() {
         Err(PartialFractionError::NotCoprime(0, 1))
     );
     assert_eq!(
-        PartialFractionRing::with_fixed_basis(
+        PartialFractionRing::with_basis(
             Q,
             x.clone(),
             &[
@@ -386,23 +386,21 @@ fn constructors() {
         ],
     );
     assert_eq!(ring.factor_count(), 2);
-    assert!(ring.is_self_extending());
-    assert!(!ring.strict().is_self_extending());
 }
 
 #[test]
-fn self_extending_basis() {
+fn factorizing_basis_discovers_and_reuses_factors() {
     let x = variable();
     let variables = Arc::new(vec![x.as_ref().clone()]);
     let ring = PartialFractionRing::new(Q, x.clone(), &[q_poly(&x, &[(-1, 1), (1, 1)])]);
-    let fixed = q_ring();
+    let seeded = seeded_q_ring();
     let mut rng = StdRng::seed_from_u64(6);
     for _ in 0..20 {
-        // Elements of another basis enter the self-extending ring through
+        // Elements of a seeded basis enter the factorizing ring through
         // their rational form, and arithmetic agrees.
-        let a = sparse_sample(&fixed, &mut rng, &q_policy());
-        let b = sparse_sample(&fixed, &mut rng, &q_policy());
-        let (ra, rb) = (to_q_rational(&fixed, &a), to_q_rational(&fixed, &b));
+        let a = sparse_sample(&seeded, &mut rng, &q_policy());
+        let b = sparse_sample(&seeded, &mut rng, &q_policy());
+        let (ra, rb) = (to_q_rational(&seeded, &a), to_q_rational(&seeded, &b));
         let (ea, eb) = (
             ring.try_from_rational_polynomial(&ra).unwrap(),
             ring.try_from_rational_polynomial(&rb).unwrap(),
@@ -418,13 +416,9 @@ fn self_extending_basis() {
     assert_eq!(ring.factor(0), q_poly(&x, &[(-1, 1), (1, 1)]));
     let count = ring.factor_count();
     assert!(count > 1);
-    // A strict view refuses new factors; the self-extending ring accepts them.
+    // A new irreducible denominator extends the learned basis.
     let r: RationalPolynomial<IntegerRing, u16> =
         parse!("1/(pf_x^2-7)").to_rational_polynomial(&Q, &Z, Some(variables));
-    assert_eq!(
-        ring.strict().try_from_rational_polynomial(&r),
-        Err(PartialFractionError::OutsideBasis)
-    );
     let e = ring.try_from_rational_polynomial(&r).unwrap();
     assert_eq!(ring.factor_count(), count + 1);
     assert_eq!(ring.to_rational_polynomial::<_, u16>(&e, &Z), r);
@@ -447,7 +441,7 @@ fn self_extending_basis() {
 
 #[test]
 fn images_modulo_primes() {
-    let ring = q_ring();
+    let ring = seeded_q_ring();
     let mut rng = StdRng::seed_from_u64(5);
     let field = Zp64::new(1_000_000_007);
     let image = ring.to_finite_field(&field).unwrap();
@@ -472,7 +466,7 @@ fn images_modulo_primes() {
     );
     // x - 1 and x + 2 coincide modulo 3; x^2 + 1 = (x - 2)(x + 2) modulo 5.
     let x = ring.variable().clone();
-    let small = PartialFractionRing::with_fixed_basis(
+    let small = PartialFractionRing::with_basis(
         Q,
         x.clone(),
         &[
@@ -485,7 +479,7 @@ fn images_modulo_primes() {
         small.to_finite_field(&Zp64::new(3)),
         Err(PartialFractionError::NotCoprime(0, 1))
     );
-    let quadratic = PartialFractionRing::with_fixed_basis(
+    let quadratic = PartialFractionRing::with_basis(
         Q,
         x.clone(),
         &[

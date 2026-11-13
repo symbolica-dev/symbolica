@@ -21,7 +21,7 @@ pub enum PartialFractionAlignmentError {
     SourceBasisChanged,
     /// The target acquired factors after the plan/layout was created.
     TargetBasisChanged,
-    /// The inverse of this source factor is not representable in the target.
+    /// The inverse of this source factor needs blocks absent from the target basis.
     UncoveredSourceFactor(usize),
     /// Invalid, repeated, or zero-power factor entry in a coordinate layout.
     InvalidLayout,
@@ -49,7 +49,7 @@ impl Display for PartialFractionAlignmentError {
                 f.write_str("the target basis changed; rebuild the alignment plan or layout")
             }
             Self::UncoveredSourceFactor(i) => {
-                write!(f, "source factor {i} is not invertible in the target basis")
+                write!(f, "source factor {i} is not covered by the target basis")
             }
             Self::InvalidLayout => f.write_str("invalid partial-fraction coordinate layout"),
             Self::LayoutTooLarge => {
@@ -89,31 +89,34 @@ enum FactorImage<F: Field> {
 /// Horner evaluation of each source pole chain; it never builds a common
 /// denominator for the entire element.
 ///
-/// Construction requires every source factor to be invertible in the target,
-/// so every source element is convertible. This is stronger than checking one
-/// element: if an uncovered source factor cancels only in a particular value,
-/// convert that value via [`PartialFractionRing::to_fraction`] and
-/// [`PartialFractionRing::try_from_fraction`] instead.
+/// Construction requires every source factor's inverse to be representable
+/// using the existing target blocks. It never extends the target basis, so
+/// alignment cannot silently change a reconstruction template. This is stronger
+/// than checking one element: if an uncovered source factor cancels only in a
+/// particular value, convert its reduced fraction via
+/// [PartialFractionRing::to_fraction] and
+/// [PartialFractionRing::try_from_fraction] instead.
 ///
-/// A fixed target can be a `strict()` view sharing an extensible basis. Any
-/// later growth of either captured basis invalidates this plan, including
-/// growth through another clone. Rebuild the plan explicitly in that case.
+/// Both arithmetic rings remain extensible. Any later growth of either captured
+/// basis invalidates this plan, including growth through another clone. Rebuild
+/// the plan explicitly in that case.
 /// Elements passed to [`Self::convert`] must belong to the captured source;
 /// like other ring operations, elements do not carry an owner tag.
 #[derive(Clone, Debug)]
 pub struct PartialFractionAlignment<F: Field> {
-    source: FixedPartialFractionRing<F>,
-    target: FixedPartialFractionRing<F>,
+    source: PartialFractionRing<F>,
+    target: PartialFractionRing<F>,
     source_count: usize,
     target_count: usize,
     images: Vec<FactorImage<F>>,
 }
 
 impl<F: Field> PartialFractionAlignment<F> {
-    /// Prepare a conversion to a fixed target basis.
-    pub fn new<const EXTEND: bool>(
-        source: &PartialFractionRing<F, EXTEND>,
-        target: &FixedPartialFractionRing<F>,
+    /// Prepare a conversion using only the target's current basis.
+    /// Neither construction nor conversion appends denominator blocks.
+    pub fn new(
+        source: &PartialFractionRing<F>,
+        target: &PartialFractionRing<F>,
     ) -> Result<Self, PartialFractionAlignmentError> {
         if source.field != target.field {
             return Err(PartialFractionAlignmentError::DifferentFields);
@@ -129,15 +132,22 @@ impl<F: Field> PartialFractionAlignment<F> {
             let exact = (0..target_count).find(|&j| target.basis.monic(j as u32) == factor);
             images.push(match exact {
                 Some(j) => FactorImage::Exact(j),
-                None => FactorImage::Inverse(
-                    target
-                        .element_from_dense_fraction(vec![target.field.one()], factor.to_vec())
-                        .map_err(|_| PartialFractionAlignmentError::UncoveredSourceFactor(i))?,
-                ),
+                None => {
+                    // Ordinary fraction import may extend a ring. Alignment
+                    // instead builds 1/f from a cover by existing blocks only.
+                    let (exponents, multiplier) = target
+                        .cover_denominator(factor)
+                        .ok_or(PartialFractionAlignmentError::UncoveredSourceFactor(i))?;
+                    let mut inverse = target.element_from_dense(multiplier);
+                    for (factor, exponent) in exponents {
+                        target.div_factor_power_assign(&mut inverse, factor, exponent);
+                    }
+                    FactorImage::Inverse(inverse)
+                }
             });
         }
         let plan = Self {
-            source: source.strict(),
+            source: source.clone(),
             target: target.clone(),
             source_count,
             target_count,
@@ -158,7 +168,7 @@ impl<F: Field> PartialFractionAlignment<F> {
     }
 
     /// The target ring whose elements this plan produces.
-    pub fn target(&self) -> &FixedPartialFractionRing<F> {
+    pub fn target(&self) -> &PartialFractionRing<F> {
         &self.target
     }
 
@@ -228,12 +238,16 @@ struct CoordinateBlock {
 /// A new prime requiring larger pole powers or a polynomial part outside the
 /// layout is reported, rather than silently shifting/truncating coordinates.
 ///
+/// The coordinate contract is fixed, but the underlying arithmetic ring remains
+/// extensible. Growth through any clone invalidates the layout; rebuild it
+/// explicitly instead of changing the meanings of existing coordinates.
+///
 /// This type provides alignment and coordinates, not CRT, rational
 /// reconstruction, factor matching across unrelated fields, or bad-prime
 /// detection beyond failures of the explicit coefficient/basis map.
 #[derive(Clone, Debug)]
 pub struct PartialFractionLayout<F: Field> {
-    ring: FixedPartialFractionRing<F>,
+    ring: PartialFractionRing<F>,
     factor_count: usize,
     polynomial_slots: usize,
     blocks: Vec<CoordinateBlock>,
@@ -241,11 +255,11 @@ pub struct PartialFractionLayout<F: Field> {
 }
 
 impl<F: Field> PartialFractionLayout<F> {
-    /// Prescribe polynomial slots and maximum pole powers in a fixed basis.
+    /// Prescribe polynomial slots and maximum pole powers in the current basis.
     /// Factor entries must have positive exponents, valid indices, and no
     /// duplicates. Input order is irrelevant; coordinates use sorted indices.
     pub fn new(
-        ring: &FixedPartialFractionRing<F>,
+        ring: &PartialFractionRing<F>,
         polynomial_slots: usize,
         pole_exponents: &[(usize, usize)],
     ) -> Result<Self, PartialFractionAlignmentError> {
@@ -302,7 +316,7 @@ impl<F: Field> PartialFractionLayout<F> {
     }
 
     /// The basis to which an element must belong before coordinate export.
-    pub fn ring(&self) -> &FixedPartialFractionRing<F> {
+    pub fn ring(&self) -> &PartialFractionRing<F> {
         &self.ring
     }
 
@@ -448,18 +462,12 @@ mod tests {
 
     #[test]
     fn exact_factor_permutation_preserves_all_powers() {
-        let source = PartialFractionRing::with_fixed_basis(
-            Q,
-            variable(),
-            &[q_poly(&[-1, 1]), q_poly(&[2, 1])],
-        )
-        .unwrap();
-        let target = PartialFractionRing::with_fixed_basis(
-            Q,
-            variable(),
-            &[q_poly(&[2, 1]), q_poly(&[-1, 1])],
-        )
-        .unwrap();
+        let source =
+            PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[-1, 1]), q_poly(&[2, 1])])
+                .unwrap();
+        let target =
+            PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[2, 1]), q_poly(&[-1, 1])])
+                .unwrap();
         let a = source
             .element_from_coefficients(
                 vec![3.into(), 4.into()],
@@ -482,13 +490,13 @@ mod tests {
     #[test]
     fn split_and_grouped_quadratic_bases_round_trip() {
         let field = Zp64::new(5);
-        let grouped = PartialFractionRing::with_fixed_basis(
+        let grouped = PartialFractionRing::with_basis(
             field.clone(),
             variable(),
             &[fp_poly(&field, &[1, 0, 1])],
         )
         .unwrap();
-        let split = PartialFractionRing::with_fixed_basis(
+        let split = PartialFractionRing::with_basis(
             field.clone(),
             variable(),
             &[fp_poly(&field, &[-2, 1]), fp_poly(&field, &[2, 1])],
@@ -518,8 +526,7 @@ mod tests {
 
     #[test]
     fn common_template_gives_matching_coordinate_meanings_across_primes() {
-        let q_ring =
-            PartialFractionRing::with_fixed_basis(Q, variable(), &[q_poly(&[1, 0, 1])]).unwrap();
+        let q_ring = PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[1, 0, 1])]).unwrap();
         let q_layout = PartialFractionLayout::new(&q_ring, 2, &[(0, 2)]).unwrap();
         let a = q_ring
             .element_from_coefficients(
@@ -555,23 +562,17 @@ mod tests {
     fn incompatible_fields_variables_and_uncovered_factors_are_rejected() {
         let f5 = Zp64::new(5);
         let f7 = Zp64::new(7);
-        let source = PartialFractionRing::with_fixed_basis(
-            f5.clone(),
-            variable(),
-            &[fp_poly(&f5, &[-1, 1])],
-        )
-        .unwrap();
-        let other_prime = PartialFractionRing::with_fixed_basis(
-            f7.clone(),
-            variable(),
-            &[fp_poly(&f7, &[-1, 1])],
-        )
-        .unwrap();
+        let source =
+            PartialFractionRing::with_basis(f5.clone(), variable(), &[fp_poly(&f5, &[-1, 1])])
+                .unwrap();
+        let other_prime =
+            PartialFractionRing::with_basis(f7.clone(), variable(), &[fp_poly(&f7, &[-1, 1])])
+                .unwrap();
         assert!(matches!(
             PartialFractionAlignment::new(&source, &other_prime),
             Err(PartialFractionAlignmentError::DifferentFields)
         ));
-        let other_var = PartialFractionRing::with_fixed_basis(
+        let other_var = PartialFractionRing::with_basis(
             f5.clone(),
             Arc::new(symbol!("pf_alignment_y").into()),
             &[],
@@ -581,21 +582,48 @@ mod tests {
             PartialFractionAlignment::new(&source, &other_var),
             Err(PartialFractionAlignmentError::DifferentVariables)
         ));
-        let missing = PartialFractionRing::with_fixed_basis(f5, variable(), &[]).unwrap();
+        let missing = PartialFractionRing::with_basis(f5, variable(), &[]).unwrap();
         assert!(matches!(
             PartialFractionAlignment::new(&source, &missing),
             Err(PartialFractionAlignmentError::UncoveredSourceFactor(0))
         ));
+        assert_eq!(missing.factor_count(), 0);
+    }
+
+    #[test]
+    fn alignment_rejects_partial_coverage_without_extending_target() {
+        let field = Zp64::new(5);
+        let source = PartialFractionRing::with_basis(
+            field.clone(),
+            variable(),
+            &[fp_poly(&field, &[1, 0, 1]), fp_poly(&field, &[-1, 1])],
+        )
+        .unwrap();
+        let target = PartialFractionRing::with_basis(
+            field.clone(),
+            variable(),
+            &[fp_poly(&field, &[-2, 1]), fp_poly(&field, &[2, 1])],
+        )
+        .unwrap();
+        let layout = PartialFractionLayout::new(&target, 0, &[(0, 1), (1, 1)]).unwrap();
+        // The first factor can be split over existing blocks. The second
+        // would extend the target during an ordinary fraction import.
+        assert!(matches!(
+            PartialFractionAlignment::new(&source, &target),
+            Err(PartialFractionAlignmentError::UncoveredSourceFactor(1))
+        ));
+        assert_eq!(target.factor_count(), 2);
+        assert_eq!(
+            layout.export(&target.zero()).unwrap(),
+            vec![field.zero(); 2]
+        );
     }
 
     #[test]
     fn layout_preserves_zeros_and_checks_bounds() {
-        let ring = PartialFractionRing::with_fixed_basis(
-            Q,
-            variable(),
-            &[q_poly(&[-1, 1]), q_poly(&[1, 0, 1])],
-        )
-        .unwrap();
+        let ring =
+            PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[-1, 1]), q_poly(&[1, 0, 1])])
+                .unwrap();
         let layout = PartialFractionLayout::new(&ring, 3, &[(1, 2), (0, 3)]).unwrap();
         let a = ring
             .element_from_coefficients(vec![5.into()], vec![(0, vec![2.into()])])
@@ -656,18 +684,20 @@ mod tests {
     fn captured_source_and_target_growth_is_rejected() {
         let source = PartialFractionRing::new(Q, variable(), &[q_poly(&[-1, 1])]);
         let target = PartialFractionRing::new(Q, variable(), &[q_poly(&[-1, 1]), q_poly(&[-2, 1])]);
-        let plan = PartialFractionAlignment::new(&source, &target.strict()).unwrap();
+        let plan = PartialFractionAlignment::new(&source, &target).unwrap();
         let a = source.inv_factor_power(0, 1);
-        source
+        let source_alias = source.clone();
+        source_alias
             .try_from_fraction(&q_poly(&[1]), &q_poly(&[-2, 1]))
             .unwrap();
         assert_eq!(
             plan.convert(&a),
             Err(PartialFractionAlignmentError::SourceBasisChanged)
         );
-        let plan = PartialFractionAlignment::new(&source, &target.strict()).unwrap();
-        let layout = PartialFractionLayout::new(&target.strict(), 1, &[(0, 1), (1, 1)]).unwrap();
-        target
+        let plan = PartialFractionAlignment::new(&source, &target).unwrap();
+        let layout = PartialFractionLayout::new(&target, 1, &[(0, 1), (1, 1)]).unwrap();
+        let target_alias = target.clone();
+        target_alias
             .try_from_fraction(&q_poly(&[1]), &q_poly(&[-3, 1]))
             .unwrap();
         assert_eq!(
@@ -682,12 +712,9 @@ mod tests {
 
     #[test]
     fn reference_layout_rejects_bad_prime_collisions() {
-        let ring = PartialFractionRing::with_fixed_basis(
-            Q,
-            variable(),
-            &[q_poly(&[-1, 1]), q_poly(&[-6, 1])],
-        )
-        .unwrap();
+        let ring =
+            PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[-1, 1]), q_poly(&[-6, 1])])
+                .unwrap();
         let layout = PartialFractionLayout::new(&ring, 0, &[(0, 1), (1, 1)]).unwrap();
         let field = Zp64::new(5);
         assert!(matches!(

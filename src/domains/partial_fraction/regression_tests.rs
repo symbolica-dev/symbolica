@@ -1,4 +1,4 @@
-//! Regressions for localization semantics and univariate input validation.
+//! Regressions for basis extension and univariate input validation.
 
 use super::*;
 use crate::{
@@ -18,9 +18,9 @@ fn poly(x: &Arc<PolyVariable>, coefficients: &[i64]) -> UnivariatePolynomial<Rat
     )
 }
 
-fn composite_ring() -> FixedPartialFractionRing<RationalField> {
+fn composite_ring() -> PartialFractionRing<RationalField> {
     let x = variable();
-    PartialFractionRing::with_fixed_basis(Q, x.clone(), &[poly(&x, &[-1, 0, 1])]).unwrap()
+    PartialFractionRing::with_basis(Q, x.clone(), &[poly(&x, &[-1, 0, 1])]).unwrap()
 }
 
 fn rational(
@@ -99,7 +99,7 @@ fn repeated_composite_basis_covers_unequal_divisor_multiplicities() {
     let x = variable();
     // f=(x-1)^2(x+1); a denominator (x-1)^3(x+1) requires f^2.
     let factor = poly(&x, &[1, -1, -1, 1]);
-    let ring = PartialFractionRing::with_fixed_basis(Q, x.clone(), &[factor]).unwrap();
+    let ring = PartialFractionRing::with_basis(Q, x.clone(), &[factor]).unwrap();
     let minus = poly(&x, &[-1, 1]);
     let plus = poly(&x, &[1, 1]);
     let denominator = &minus.pow(3) * &plus;
@@ -122,16 +122,19 @@ fn repeated_composite_basis_covers_unequal_divisor_multiplicities() {
 }
 
 #[test]
-fn fixed_basis_cancellation_zero_and_outside_denominators() {
+fn seeded_basis_cancellation_zero_and_new_denominators() {
     let x = variable();
     let ring = composite_ring();
     let zero = poly(&x, &[]);
     let outside = poly(&x, &[-2, 1]);
     assert!(ring.is_zero(&ring.try_from_fraction(&zero, &outside).unwrap()));
     assert!(ring.is_one(&ring.try_from_fraction(&outside, &outside).unwrap()));
+    assert_eq!(ring.factor_count(), 1);
+    let inverse = ring.try_from_fraction(&poly(&x, &[1]), &outside).unwrap();
+    assert_eq!(ring.factor_count(), 2);
     assert_eq!(
-        ring.try_from_fraction(&poly(&x, &[1]), &outside),
-        Err(PartialFractionError::OutsideBasis)
+        ring.to_fraction(&inverse),
+        (poly(&x, &[1]), outside.clone())
     );
     assert_eq!(
         ring.try_from_fraction(&zero, &zero),
@@ -148,14 +151,18 @@ fn fixed_basis_cancellation_zero_and_outside_denominators() {
 }
 
 #[test]
-fn fixed_polynomial_ring_divides_nonunits_when_the_quotient_exists() {
+fn empty_seeded_basis_inverts_nonzero_polynomials() {
     let x = variable();
-    let ring = PartialFractionRing::with_fixed_basis(Q, x.clone(), &[]).unwrap();
+    let ring = PartialFractionRing::with_basis(Q, x.clone(), &[]).unwrap();
     let a = ring.element_from_polynomial(&poly(&x, &[0, 1]));
-    assert!(ring.try_inv(&a).is_none());
+    let inverse = ring.inv(&a);
+    assert_eq!(ring.factor_count(), 1);
+    assert_eq!(ring.mul(&a, &inverse), ring.one());
+    assert_eq!(ring.try_inv(&a), Some(inverse.clone()));
     assert_eq!(ring.try_div(&a, &a), Some(ring.one()));
     assert_eq!(ring.try_div(&ring.zero(), &a), Some(ring.zero()));
-    assert!(ring.try_div(&ring.one(), &a).is_none());
+    assert_eq!(ring.try_div(&ring.one(), &a), Some(inverse));
+    assert!(ring.try_inv(&ring.zero()).is_none());
     assert!(ring.try_div(&a, &ring.zero()).is_none());
 }
 
@@ -222,7 +229,7 @@ fn constructors_check_basis_variable_identity() {
     let y = Arc::new(symbol!("pf_regression_y").into());
     let wrong = poly(&y, &[0, 1]);
     assert_eq!(
-        PartialFractionRing::with_fixed_basis(Q, x.clone(), &[wrong.clone()]).unwrap_err(),
+        PartialFractionRing::with_basis(Q, x.clone(), &[wrong.clone()]).unwrap_err(),
         PartialFractionError::OtherVariable
     );
     assert!(std::panic::catch_unwind(|| PartialFractionRing::new(Q, x.clone(), &[wrong])).is_err());
@@ -260,12 +267,9 @@ fn polynomial_entry_points_reject_nonconstant_wrong_variables() {
 #[test]
 fn fused_add_sub_products_preserve_cancellation_and_composite_bases() {
     let x = variable();
-    let ring = PartialFractionRing::with_fixed_basis(
-        Q,
-        x.clone(),
-        &[poly(&x, &[-1, 0, 1]), poly(&x, &[2, 1])],
-    )
-    .unwrap();
+    let ring =
+        PartialFractionRing::with_basis(Q, x.clone(), &[poly(&x, &[-1, 0, 1]), poly(&x, &[2, 1])])
+            .unwrap();
     let values = vec![
         ring.zero(),
         ring.one(),
@@ -307,7 +311,7 @@ fn nonlinear_division_recurrence_handles_high_poles_and_unequal_degrees() {
                 x.clone(),
             )
         };
-        let ring = PartialFractionRing::with_fixed_basis(
+        let ring = PartialFractionRing::with_basis(
             field.clone(),
             x.clone(),
             &[
@@ -339,4 +343,125 @@ fn nonlinear_division_recurrence_handles_high_poles_and_unequal_degrees() {
     }
     check(Q);
     check(Zp64::new(101));
+}
+
+#[test]
+fn composite_basis_extends_for_a_new_factor_without_splitting_existing_blocks() {
+    let x = variable();
+    let ring = composite_ring();
+    let original = ring.factor(0);
+    let known_divisor = poly(&x, &[-1, 1]);
+    let new_factor = poly(&x, &[-2, 1]);
+    let denominator = &known_divisor.pow(3) * &new_factor.pow(2);
+    let a = ring
+        .try_from_fraction(&poly(&x, &[1]), &denominator)
+        .unwrap();
+    assert_eq!(ring.factor_count(), 2);
+    assert_eq!(ring.factor(0), original);
+    assert_eq!(ring.to_fraction(&a), (poly(&x, &[1]), denominator.clone()));
+    assert_eq!(ring.mul_polynomial(&a, &denominator), ring.one());
+    // The other divisor still uses the original block after basis growth.
+    let other = ring
+        .try_from_fraction(&poly(&x, &[1]), &poly(&x, &[1, 1]))
+        .unwrap();
+    assert_eq!(ring.factor_count(), 2);
+    assert_eq!(
+        other.denominator_exponents().collect::<Vec<_>>(),
+        vec![(0, 1)]
+    );
+}
+
+#[test]
+fn nested_rational_coefficients_support_extension_without_outer_factorization() {
+    use crate::domains::{
+        factorized_rational_polynomial::FactorizedRationalPolynomialField,
+        rational_polynomial::RationalPolynomialField,
+    };
+    type Polynomial = MultivariatePolynomial<IntegerRing, u16>;
+    type Coefficient = RationalPolynomial<IntegerRing, u16>;
+    type FactoredCoefficient = FactorizedRationalPolynomial<IntegerRing, u16>;
+
+    fn check<F: Field>(field: F, coefficient: F::Element) {
+        let polynomial = UnivariatePolynomial::from_coefficients(
+            &field,
+            vec![coefficient, field.zero(), field.one()],
+            variable(),
+        );
+        let ring = PartialFractionRing::with_basis(field, variable(), &[]).unwrap();
+        let a = ring.element_from_polynomial(&polynomial);
+        let inverse = ring.inv(&a);
+        assert_eq!(ring.factor_count(), 1);
+        assert_eq!(ring.factor(0), polynomial);
+        assert_eq!(ring.mul(&a, &inverse), ring.one());
+        assert_eq!(ring.inv(&inverse), a);
+    }
+
+    let y = Arc::new(vec![symbol!("pf_extension_y").into()]);
+    let linear_y = |constant: i64| {
+        let mut p = Polynomial::new(&Z, None, y.clone());
+        p.append_monomial(constant.into(), &[0]);
+        p.append_monomial(1.into(), &[1]);
+        p
+    };
+    check(
+        RationalPolynomialField::<IntegerRing, u16>::new(Z),
+        Coefficient::from_num_den(linear_y(1), linear_y(2), &Z, true),
+    );
+    check(
+        FactorizedRationalPolynomialField::<IntegerRing, u16>::new(Z, y.clone()),
+        FactoredCoefficient::from_num_den(linear_y(1), vec![(linear_y(2), 1)], &Z, false),
+    );
+}
+
+#[test]
+fn concurrent_overlapping_denominators_preserve_values_and_coprime_blocks() {
+    use std::sync::Barrier;
+
+    for _ in 0..24 {
+        let x = variable();
+        let ring = PartialFractionRing::with_basis(Q, x.clone(), &[]).unwrap();
+        let denominators = [
+            poly(&x, &[-1, 0, 1]),
+            poly(&x, &[-1, 1]),
+            poly(&x, &[1, 1]).pow(2),
+        ];
+        let start = Barrier::new(denominators.len());
+        let answers = std::thread::scope(|scope| {
+            let handles: Vec<_> = denominators
+                .iter()
+                .map(|denominator| {
+                    let ring = &ring;
+                    let start = &start;
+                    let x = &x;
+                    scope.spawn(move || {
+                        start.wait();
+                        ring.try_from_fraction(&poly(x, &[1]), denominator).unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (answer, denominator) in answers.iter().zip(&denominators) {
+            assert_eq!(
+                ring.to_fraction(answer),
+                (poly(&x, &[1]), denominator.clone())
+            );
+            assert_eq!(ring.mul_polynomial(answer, denominator), ring.one());
+        }
+        for i in 0..ring.factor_count() {
+            for j in 0..i {
+                assert_eq!(
+                    dense::gcd(
+                        &Q,
+                        &ring.factor(i).coefficients,
+                        &ring.factor(j).coefficients
+                    ),
+                    vec![Q.one()]
+                );
+            }
+        }
+    }
 }

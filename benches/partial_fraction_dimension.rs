@@ -100,13 +100,13 @@ impl Fixture {
         &self,
         field: F,
         coefficient: impl Fn(Poly, Poly) -> F::Element,
-    ) -> (PartialFractionRing<F, false>, Vec<PartialFraction<F>>) {
+    ) -> (PartialFractionRing<F>, Vec<PartialFraction<F>>) {
         let univariate = |c| UnivariatePolynomial::from_coefficients(&field, c, self.d.clone());
         let factors: Vec<_> = (1..=4)
             .map(|i: i64| univariate(vec![field.nth((-i).into()), field.one()]))
             .collect();
         let ring =
-            PartialFractionRing::with_fixed_basis(field.clone(), self.d.clone(), &factors).unwrap();
+            PartialFractionRing::with_basis(field.clone(), self.d.clone(), &factors).unwrap();
         let coefficients = (0..COEFFICIENTS)
             .map(|i| {
                 let (a, b, c, s) = Self::numbers(i);
@@ -124,7 +124,7 @@ impl Fixture {
     fn ordinary_coefficients(
         &self,
     ) -> (
-        PartialFractionRing<RatField, false>,
+        PartialFractionRing<RatField>,
         Vec<PartialFraction<RatField>>,
     ) {
         self.partial_fractions(self.ordinary.clone(), |n, d| {
@@ -135,7 +135,7 @@ impl Fixture {
     fn factorized_coefficients(
         &self,
     ) -> (
-        PartialFractionRing<FactoredField, false>,
+        PartialFractionRing<FactoredField>,
         Vec<PartialFraction<FactoredField>>,
     ) {
         self.partial_fractions(self.factorized_y.clone(), |n, d| {
@@ -191,7 +191,7 @@ impl Fixture {
 
     fn flatten_partial_fraction<F: Field>(
         &self,
-        ring: &PartialFractionRing<F, false>,
+        ring: &PartialFractionRing<F>,
         a: &PartialFraction<F>,
         coefficient: impl Fn(&F::Element) -> Rat,
     ) -> Rat {

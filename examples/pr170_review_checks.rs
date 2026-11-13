@@ -1,8 +1,8 @@
-//! Check corrected composite-basis behavior and the fixed ring API.
+//! Check composite-basis behavior and automatic extension of seeded rings.
 use std::sync::Arc;
 use symbolica::{
     domains::{
-        Ring,
+        Field, Ring, RingOps,
         integer::Z,
         partial_fraction::PartialFractionRing,
         rational::Q,
@@ -20,7 +20,7 @@ fn main() {
             x.clone(),
         )
     };
-    let ring = PartialFractionRing::with_fixed_basis(Q, x.clone(), &[poly(&[-1, 0, 1])]).unwrap();
+    let ring = PartialFractionRing::with_basis(Q, x.clone(), &[poly(&[-1, 0, 1])]).unwrap();
     let a = ring
         .try_from_fraction(&poly(&[1, 1]), &poly(&[-1, 0, 1]))
         .unwrap();
@@ -38,11 +38,12 @@ fn main() {
         true,
     );
     assert_eq!(actual, expected);
-    let fixed = PartialFractionRing::with_fixed_basis(Q, x.clone(), &[]).unwrap();
-    let variable = fixed.element_from_polynomial(&poly(&[0, 1]));
-    assert_eq!(fixed.try_div(&variable, &variable), Some(fixed.one()));
-    assert!(fixed.try_inv(&variable).is_none());
-    println!("Composite-basis imports, exports, removable poles and fixed-ring division passed.");
-    // Field/EuclideanDomain are deliberately unavailable on this fixed mode;
-    // the module's compile-fail doctest checks the Field boundary.
+    let empty = PartialFractionRing::with_basis(Q, x.clone(), &[]).unwrap();
+    let variable = empty.element_from_polynomial(&poly(&[0, 1]));
+    assert_eq!(empty.factor_count(), 0);
+    let inverse = empty.inv(&variable);
+    assert_eq!(empty.factor_count(), 1);
+    assert_eq!(empty.mul(&variable, &inverse), empty.one());
+    assert_eq!(empty.div(&variable, &variable), empty.one());
+    println!("Composite-basis imports, exports, removable poles and automatic extension passed.");
 }
