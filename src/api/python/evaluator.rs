@@ -5,10 +5,16 @@ use crate::state::StateMap;
 // The final byte versions the state-aware evaluator envelope.
 const SAVED_EVALUATOR_MAGIC: &[u8] = b"\xffSYMEVAL\x01";
 
-fn encode_saved_evaluator<T: bincode::Encode>(evaluator: T) -> PyResult<Vec<u8>> {
+// Only the state the evaluator references is saved, so that the bytes do not
+// depend on unrelated symbols, finite fields or variable lists of the process.
+fn encode_saved_evaluator<T: bincode::Encode>(
+    evaluator: T,
+    symbols: ahash::HashSet<Symbol>,
+) -> PyResult<Vec<u8>> {
     let mut bytes = SAVED_EVALUATOR_MAGIC.to_vec();
     bytes.push(u8::from(cfg!(feature = "native_code_generation")));
-    State::export(&mut bytes).map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    State::export_symbols(&mut bytes, symbols)
+        .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
     bincode::encode_into_std_write(evaluator, &mut bytes, bincode::config::standard())
         .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
     Ok(bytes)
@@ -294,6 +300,53 @@ mod tests {
             .expect("Unversioned evaluator bytes must not be decoded as state-aware data");
             assert!(error.is_instance_of::<exceptions::PyIOError>(py));
             assert!(error.to_string().contains("recreate and save"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn python_evaluator_save_holds_only_the_state_it_references() {
+        let evaluator = parse!("x^2 + pi")
+            .evaluator(&[parse!("x")])
+            .build()
+            .unwrap();
+        let symbols = evaluator.referenced_symbols();
+        assert!(!symbols.is_empty());
+        let original = PythonExpressionEvaluator {
+            rational_constants: evaluator.get_constants().to_vec(),
+            eval_complex: evaluator.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+            eval_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
+            eval_arb_prec: None,
+            eval_arb_prec_complex: None,
+            jit_compile: false,
+            #[cfg(feature = "native_code_generation")]
+            jit_settings: JITCompilationSettings::default(),
+        };
+
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let before = original.save(py)?.as_bytes().to_vec();
+            for i in 0..64 {
+                symbol!(format!("symbolica::python::saved_state::unrelated{i}"));
+            }
+            let after = original.save(py)?.as_bytes().to_vec();
+            // Unrelated symbols created in between leave the saved bytes unchanged.
+            assert_eq!(before, after);
+            let loaded = PythonExpressionEvaluator::load(
+                &py.get_type::<PythonExpressionEvaluator>(),
+                PyBytes::new(py, &after),
+            )?;
+            assert_eq!(
+                loaded.eval_complex.set_coeff(&loaded.rational_constants).referenced_symbols(),
+                symbols,
+            );
             Ok(())
         })
         .unwrap();
@@ -974,16 +1027,20 @@ impl PythonExpressionEvaluator {
     /// Symbolica's symbolic state is included and restored automatically by `load`.
     fn save<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
         let evaluator = self.eval_complex.set_coeff(&self.rational_constants);
+        let symbols = evaluator.referenced_symbols();
         #[cfg(not(feature = "native_code_generation"))]
-        let bytes = encode_saved_evaluator(evaluator)?;
+        let bytes = encode_saved_evaluator(evaluator, symbols)?;
         #[cfg(feature = "native_code_generation")]
-        let bytes = encode_saved_evaluator(&(
-            self.jit_compile,
-            &self.jit_settings,
-            evaluator,
-            &self.jit_real,
-            &self.jit_complex,
-        ))?;
+        let bytes = encode_saved_evaluator(
+            &(
+                self.jit_compile,
+                &self.jit_settings,
+                evaluator,
+                &self.jit_real,
+                &self.jit_complex,
+            ),
+            symbols,
+        )?;
         Ok(PyBytes::new(py, &bytes))
     }
 

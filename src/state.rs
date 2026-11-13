@@ -1327,6 +1327,39 @@ impl State {
         symbols
     }
 
+    /// Write the given symbols, and the symbols their data depends on, to a binary
+    /// stream in the partial-state format, without finite fields or variable lists.
+    ///
+    /// Unlike [`State::export_partial`], the output depends only on these symbols
+    /// (their names, attributes and identifiers), not on unrelated symbols,
+    /// finite fields or polynomial variable lists registered earlier in the
+    /// process. Use it for objects, such as evaluators, that reference symbols
+    /// but no finite fields or variable lists.
+    pub fn export_symbols<W: Write>(
+        dest: &mut W,
+        symbols: HashSet<Symbol>,
+    ) -> Result<(), std::io::Error> {
+        let (n_symbols, _, _) = Self::export_registry_lengths();
+        let symbols = Self::get_dependent_symbols(symbols);
+
+        dest.write_u32::<LittleEndian>(SYMBOLICA_MAGIC)?;
+        dest.write_u16::<LittleEndian>(EXPORT_FORMAT_VERSION)?;
+        dest.write_u8(!FULL_STATE_EXPORT_FLAG)?;
+
+        dest.write_u64::<LittleEndian>(symbols.len() as u64)?;
+        for (i, (s, _)) in State::symbol_iter().take(n_symbols).enumerate() {
+            if symbols.contains(&s) {
+                dest.write_u32::<LittleEndian>(i as u32)?;
+                s.export(dest)?;
+            }
+        }
+
+        // No finite fields and no variable lists.
+        dest.write_u64::<LittleEndian>(0)?;
+        dest.write_u64::<LittleEndian>(0)?;
+        Ok(())
+    }
+
     /// Write the state of a part of the symbol table to a binary stream.
     #[inline(always)]
     pub fn export_partial<W: Write>(

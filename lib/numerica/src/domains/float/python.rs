@@ -2274,10 +2274,12 @@ impl PythonComplexFloat {
                 "Expected a numeric operand",
             ));
         }
+        // A native operand takes the larger component precision, not the precision
+        // property (the smaller one), so the more precise component is not rounded.
         let p = if value.is_instance_of::<PythonFloat>() || value.is_instance_of::<Self>() {
             None
         } else {
-            Some(self.precision_property())
+            Some(self.0.re.prec().max(self.0.im.prec()))
         };
         complex_input(value, p)
     }
@@ -2291,10 +2293,11 @@ impl PythonComplexFloat {
         if other.is_instance_of::<PyString>() || other.is_instance_of::<PyTuple>() {
             return Ok(py.NotImplemented());
         }
+        // As in method_operand: a native operand takes the larger component precision.
         let p = if other.is_instance_of::<PythonFloat>() || other.is_instance_of::<Self>() {
             None
         } else {
-            Some(self.precision_property())
+            Some(self.0.re.prec().max(self.0.im.prec()))
         };
         let rhs = match complex_input(other, p) {
             Ok(v) => v,

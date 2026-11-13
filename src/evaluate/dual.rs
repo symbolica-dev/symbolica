@@ -988,13 +988,45 @@ impl<T: DualNumberStructure> Vectorize<Complex<Rational>> for Dualizer<T> {
                     e.iter().map(|x| VectorInstruction::Assign(*x)).collect()
                 }
                 Symbol::ABS_ID => {
-                    let n = instrs.add(VectorInstruction::BuiltinFun(Symbol::ABS, *a));
-
-                    let inv_val = instrs.add(VectorInstruction::Pow(*a, -1));
-                    let scale = instrs.add(VectorInstruction::Mul(n, inv_val));
-
-                    (0..self.dual.get_len())
-                        .map(|j| scalar_yield_mul(&a.index(j), &scale, self, instrs))
+                    // Differentiation parameters are real, but their coefficients can
+                    // be complex. Reuse the dual product and square root for
+                    // |z| = sqrt(z * conj(z)), including higher/mixed components.
+                    // Normalize first, preserving the stable scalar norm instead
+                    // of squaring a potentially very large or small primal value.
+                    let norm = instrs.add(VectorInstruction::BuiltinFun(Symbol::ABS, *a));
+                    let inverse = instrs.add(VectorInstruction::Pow(norm, -1));
+                    let input = (0..self.dual.get_len())
+                        .map(|j| scalar_mul(&a.index(j), &inverse, self, instrs))
+                        .collect::<Vec<_>>();
+                    let conjugate = input
+                        .iter()
+                        .map(|slot| instrs.add(VectorInstruction::BuiltinFun(Symbol::CONJ, *slot)))
+                        .collect::<Vec<_>>();
+                    let mut norm_squared = mul(&input, &conjugate, mult_table, self, instrs);
+                    norm_squared[0] =
+                        instrs.add_constant_in_first_component(Complex::from(Rational::one()));
+                    let adjacent = norm_squared
+                        .into_iter()
+                        .map(|slot| instrs.add(VectorInstruction::Assign(slot)))
+                        .collect::<Vec<_>>();
+                    let result = self
+                        .map_instruction(
+                            &VectorInstruction::BuiltinFun(Symbol::SQRT, adjacent[0]),
+                            instrs,
+                        )
+                        .into_iter()
+                        .map(|instruction| instrs.add(instruction))
+                        .collect::<Vec<_>>();
+                    result
+                        .iter()
+                        .enumerate()
+                        .map(|(j, slot)| {
+                            if j == 0 {
+                                VectorInstruction::Assign(norm)
+                            } else {
+                                scalar_yield_mul(slot, &norm, self, instrs)
+                            }
+                        })
                         .collect()
                 }
                 Symbol::CONJ_ID => {
@@ -1513,6 +1545,67 @@ mod test {
     }
 
     #[test]
+    fn nested_shared_branches_preserve_all_vector_components() {
+        let build = |inlining, shape| {
+            parse!("dual_nested::f(x)+dual_nested::f(x+1)")
+                .evaluator(&[parse!("x"), parse!("c"), parse!("d")])
+                .add_function_with_options(
+                    symbol!("dual_nested::f"),
+                    vec![symbol!("z")],
+                    parse!("if(c,if(d,z+1,z+2)+z^2,z^2+3)"),
+                    FunctionRegistrationOptions::new().inlining(inlining),
+                )
+                .unwrap()
+                .build()
+                .unwrap()
+                .vectorize(&Dualizer::new(HyperDual::<f64>::new(shape), vec![]))
+                .unwrap()
+        };
+        for shape in [
+            vec![vec![0]],
+            vec![vec![0], vec![1]],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+        ] {
+            let dim = shape.len();
+            let exact = build(InliningPolicy::Never, shape.clone());
+            let mut shared = exact
+                .clone()
+                .map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+            let mut inline = build(InliningPolicy::Always, shape)
+                .map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+            let zero = Complex::new(0., 0.);
+            let mut parameters = vec![zero; 3 * dim];
+            parameters[0] = Complex::new(0.3, 0.7);
+            // Repeated outer-false calls used to read stale stack slots. Inner
+            // joins must close their branch once, regardless of vector size.
+            for seeded in [false, true] {
+                if seeded && dim > 1 {
+                    parameters[1] = Complex::new(0., 1.);
+                    if dim > 2 {
+                        parameters[2] = Complex::new(1., 2.);
+                        parameters[3] = Complex::new(2., -1.);
+                    }
+                }
+                for (c, d) in [(0., 0.), (0., 1.), (1., 0.), (1., 1.), (0., 0.)] {
+                    parameters[dim] = Complex::new(c, 0.);
+                    parameters[2 * dim] = Complex::new(d, 0.);
+                    let mut actual = vec![zero; dim];
+                    let mut expected = vec![zero; dim];
+                    shared.evaluate(&parameters, &mut actual);
+                    inline.evaluate(&parameters, &mut expected);
+                    for (actual, expected) in actual.into_iter().zip(expected) {
+                        assert!(
+                            (actual.re - expected.re).abs() < 1e-12
+                                && (actual.im - expected.im).abs() < 1e-12,
+                            "dim={dim}, seeded={seeded}, c={c}, d={d}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn shared_functions_preserve_captures_branches_and_higher_derivatives() {
         let build = |inlining| {
             let mut functions = FunctionMap::new();
@@ -1674,6 +1767,70 @@ mod test {
                 &mut result,
             );
             assert_eq!(result, out.map(|value| Complex::new(value, 0.)));
+        }
+    }
+
+    #[test]
+    fn complex_absolute_value_real_parameter_derivatives() {
+        let mut evaluator = dualize(
+            "abs(z)",
+            &[parse!("z")],
+            vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![2, 0], vec![1, 1]],
+        )
+        .map_coeff(&|r| Complex::new(r.re.to_f64(), r.im.to_f64()));
+        let mut out = [Complex::new(0., 0.); 5];
+        // z(s,t) = 3 + 4i + s + it. Components are Taylor coefficients.
+        evaluator.evaluate(
+            &[
+                Complex::new(3., 4.),
+                Complex::new(1., 0.),
+                Complex::new(0., 1.),
+                Complex::new(0., 0.),
+                Complex::new(0., 0.),
+            ],
+            &mut out,
+        );
+        for (actual, expected) in
+            out.into_iter()
+                .zip([5., 3. / 5., 4. / 5., 8. / 125., -12. / 125.])
+        {
+            assert!(
+                (actual.re - expected).abs() < 1e-12,
+                "{actual:?} != {expected}"
+            );
+            assert!(
+                actual.im.abs() < 1e-12,
+                "non-real modulus component: {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_value_preserves_extreme_primal_scales() {
+        let mut evaluator =
+            dualize("abs(x)", &[parse!("x")], vec![vec![0], vec![1]]).map_coeff(&|c| c.re.to_f64());
+        for x in [1e200, -1e200, 1e-200, -1e-200] {
+            let mut out = [0.; 2];
+            evaluator.evaluate(&[x, 1.], &mut out);
+            assert_eq!(out[0], x.abs());
+            assert!((out[1] - x.signum()).abs() < 1e-12, "{x}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_value_preserves_real_higher_input_components() {
+        let mut evaluator = dualize(
+            "abs(x)",
+            &[parse!("x")],
+            vec![vec![0], vec![1], vec![2], vec![3]],
+        )
+        .map_coeff(&|r| r.re.to_f64());
+        for sign in [-1., 1.] {
+            let mut out = [0.; 4];
+            evaluator.evaluate(&[sign * 3., 2., 4., 6.], &mut out);
+            for (actual, expected) in out.into_iter().zip([3., sign * 2., sign * 4., sign * 6.]) {
+                assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+            }
         }
     }
 
