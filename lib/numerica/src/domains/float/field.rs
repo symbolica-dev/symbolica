@@ -10,9 +10,7 @@ use crate::{
     printer::{self, PrintMode},
 };
 
-use super::{
-    Complex, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike, RealBall, SingleFloat,
-};
+use super::{Complex, DoubleFloat, ErrorPropagatingFloat, F64, Float, Numeric, RealBall, Scalar};
 use crate::domains::{
     EuclideanDomain, Field, InternalOrdering, Ring, RingPrinter, SampleableRing, SelfRing,
 };
@@ -115,7 +113,7 @@ impl<T> Display for FloatField<T> {
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> Set for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> Set for FloatField<T> {
     type Element = T;
 
     #[inline(always)]
@@ -124,7 +122,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Set for FloatField<T> {
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> RingOps<T> for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> RingOps<T> for FloatField<T> {
     #[inline(always)]
     fn add(&self, a: T, b: T) -> Self::Element {
         a + b
@@ -173,7 +171,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> RingOps<T> for FloatField<T>
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> RingOps<&T> for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> RingOps<&T> for FloatField<T> {
     #[inline(always)]
     fn add(&self, a: &T, b: &T) -> Self::Element {
         a.clone() + b.clone()
@@ -222,7 +220,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> RingOps<&T> for FloatField<T
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     #[inline(always)]
     fn zero(&self) -> Self::Element {
         self.rep.zero()
@@ -318,7 +316,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> Ring for FloatField<T> {
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> SampleableRing for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> SampleableRing for FloatField<T> {
     type SamplingPolicy = std::ops::RangeInclusive<i64>;
 
     #[inline(always)]
@@ -418,7 +416,7 @@ fn try_cmp_real_balls(
     if a.lower_bound() > b.upper_bound() {
         return Ok(std::cmp::Ordering::Greater);
     }
-    if SingleFloat::is_zero(&a.radius) && SingleFloat::is_zero(&b.radius) && a.center == b.center {
+    if Scalar::is_zero(&a.radius) && Scalar::is_zero(&b.radius) && a.center == b.center {
         return Ok(std::cmp::Ordering::Equal);
     }
     Err(FloatComparisonError::OverlappingIntervals)
@@ -471,12 +469,12 @@ impl RealEmbedding for FloatField<Complex<RealBall>> {
 impl SelfRing for F64 {
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        SingleFloat::is_zero(self)
+        Scalar::is_zero(self)
     }
 
     #[inline(always)]
     fn is_one(&self) -> bool {
-        SingleFloat::is_one(self)
+        Scalar::is_one(self)
     }
 
     #[inline(always)]
@@ -535,12 +533,12 @@ impl SelfRing for F64 {
 impl SelfRing for DoubleFloat {
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        SingleFloat::is_zero(self)
+        Scalar::is_zero(self)
     }
 
     #[inline(always)]
     fn is_one(&self) -> bool {
-        SingleFloat::is_one(self)
+        Scalar::is_one(self)
     }
 
     #[inline(always)]
@@ -557,12 +555,12 @@ impl SelfRing for DoubleFloat {
 impl SelfRing for Float {
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        SingleFloat::is_zero(self)
+        Scalar::is_zero(self)
     }
 
     #[inline(always)]
     fn is_one(&self) -> bool {
-        SingleFloat::is_one(self)
+        Scalar::is_one(self)
     }
 
     #[inline(always)]
@@ -621,12 +619,12 @@ impl SelfRing for Float {
 impl SelfRing for Complex<Float> {
     #[inline(always)]
     fn is_zero(&self) -> bool {
-        SingleFloat::is_zero(&self.re) && SingleFloat::is_zero(&self.im)
+        Scalar::is_zero(&self.re) && Scalar::is_zero(&self.im)
     }
 
     #[inline(always)]
     fn is_one(&self) -> bool {
-        SingleFloat::is_one(&self.re) && SingleFloat::is_zero(&self.im)
+        Scalar::is_one(&self.re) && Scalar::is_zero(&self.im)
     }
 
     #[inline(always)]
@@ -636,8 +634,8 @@ impl SelfRing for Complex<Float> {
         mut state: printer::PrintState,
         f: &mut W,
     ) -> Result<bool, fmt::Error> {
-        let re_zero = SingleFloat::is_zero(&self.re);
-        let im_zero = SingleFloat::is_zero(&self.im);
+        let re_zero = Scalar::is_zero(&self.re);
+        let im_zero = Scalar::is_zero(&self.im);
         let add_paren =
             (state.in_product || state.in_exp || state.in_exp_base) && !re_zero && !im_zero
                 || (state.in_exp || state.in_exp_base) && !im_zero;
@@ -682,7 +680,7 @@ impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
 
     #[inline(always)]
     fn is_one(&self) -> bool {
-        SingleFloat::is_one(&self.re) && !self.re.has_error() && self.im.is_exact_zero()
+        Scalar::is_one(&self.re) && !self.re.has_error() && self.im.is_exact_zero()
     }
 
     #[inline(always)]
@@ -781,7 +779,7 @@ impl SelfRing for Complex<ErrorPropagatingFloat<Float>> {
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> EuclideanDomain for FloatField<T> {
     #[inline(always)]
     fn rem(&self, a: &Self::Element, _: &Self::Element) -> Self::Element {
         a.zero()
@@ -798,7 +796,7 @@ impl<T: SingleFloat + Hash + Eq + InternalOrdering> EuclideanDomain for FloatFie
     }
 }
 
-impl<T: SingleFloat + Hash + Eq + InternalOrdering> Field for FloatField<T> {
+impl<T: Scalar + Hash + Eq + InternalOrdering> Field for FloatField<T> {
     #[inline(always)]
     fn div(&self, a: &Self::Element, b: &Self::Element) -> Self::Element {
         a.clone() / b

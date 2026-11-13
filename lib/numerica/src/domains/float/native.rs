@@ -6,10 +6,25 @@ use std::{
 
 use rand::Rng;
 
-use super::{Constructible, FixedPrecision, FloatLike, Real, RealLike, SingleFloat};
+use super::{Constructible, ElementaryFunctions, FixedPrecision, Numeric, RealScalar, Scalar};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
-impl FloatLike for f64 {
+impl Numeric for f64 {
+    #[inline(always)]
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(&0.0)
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        *self
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(f64::NAN)
     }
@@ -63,7 +78,7 @@ impl FloatLike for f64 {
     fn pow(&self, e: u64) -> Self {
         // FIXME: use binary exponentiation
         debug_assert!(e <= i32::MAX as u64);
-        self.powi(e as i32)
+        (*self).powi(e as i32)
     }
 
     #[inline(always)]
@@ -109,7 +124,7 @@ impl FloatLike for f64 {
     }
 }
 
-impl SingleFloat for f64 {
+impl Scalar for f64 {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         *self == 0.
@@ -131,7 +146,7 @@ impl SingleFloat for f64 {
     }
 }
 
-impl RealLike for f64 {
+impl RealScalar for f64 {
     #[inline]
     fn minimum_roundoff(&self) -> super::Magnitude {
         super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
@@ -177,7 +192,17 @@ impl Constructible for f64 {
     }
 }
 
-impl Real for f64 {
+impl ElementaryFunctions for f64 {
+    #[inline(always)]
+    fn expm1(&self) -> Self {
+        (*self).exp_m1()
+    }
+
+    #[inline(always)]
+    fn sin_cos(&self) -> (Self, Self) {
+        (*self).sin_cos()
+    }
+
     #[inline(always)]
     fn copy_sign(&self, sign: &Self) -> Self {
         self.abs().copysign(*sign)
@@ -221,11 +246,6 @@ impl Real for f64 {
     #[inline(always)]
     fn i(&self) -> Option<Self> {
         None
-    }
-
-    #[inline(always)]
-    fn conj(&self) -> Self {
-        *self
     }
 
     #[inline(always)]
@@ -344,7 +364,22 @@ impl F64 {
     }
 }
 
-impl FloatLike for F64 {
+impl Numeric for F64 {
+    #[inline(always)]
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&0.0)
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        *self
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(F64(f64::NAN))
     }
@@ -396,7 +431,7 @@ impl FloatLike for F64 {
 
     #[inline(always)]
     fn pow(&self, e: u64) -> Self {
-        FloatLike::pow(&self.0, e).into()
+        Numeric::pow(&self.0, e).into()
     }
 
     #[inline(always)]
@@ -582,7 +617,7 @@ impl DivAssign<F64> for F64 {
     }
 }
 
-impl SingleFloat for F64 {
+impl Scalar for F64 {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.0.is_zero()
@@ -604,7 +639,7 @@ impl SingleFloat for F64 {
     }
 }
 
-impl RealLike for F64 {
+impl RealScalar for F64 {
     #[inline]
     fn minimum_roundoff(&self) -> super::Magnitude {
         super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
@@ -646,7 +681,18 @@ impl Constructible for F64 {
     }
 }
 
-impl Real for F64 {
+impl ElementaryFunctions for F64 {
+    #[inline(always)]
+    fn expm1(&self) -> Self {
+        self.0.exp_m1().into()
+    }
+
+    #[inline(always)]
+    fn sin_cos(&self) -> (Self, Self) {
+        let (sin, cos) = self.0.sin_cos();
+        (sin.into(), cos.into())
+    }
+
     #[inline(always)]
     fn copy_sign(&self, sign: &Self) -> Self {
         self.0.abs().copysign(sign.0).into()
@@ -690,11 +736,6 @@ impl Real for F64 {
     #[inline(always)]
     fn i(&self) -> Option<Self> {
         None
-    }
-
-    #[inline(always)]
-    fn conj(&self) -> Self {
-        *self
     }
 
     #[inline(always)]

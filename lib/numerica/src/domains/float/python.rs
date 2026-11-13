@@ -1,6 +1,6 @@
 //! Python scalar types and conversion adapters for embedding applications.
 
-use super::{Complex, Float, FloatLike, Real, RealLike, SingleFloat};
+use super::{Complex, ElementaryFunctions, Float, Numeric, RealScalar, Scalar};
 use crate::domains::{integer::Integer, rational::Rational};
 use numpy::Complex64;
 use pyo3::{

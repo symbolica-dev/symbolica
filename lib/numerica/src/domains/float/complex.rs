@@ -6,8 +6,8 @@ use std::{
 
 use rand::Rng;
 
-use super::{Constructible, FixedPrecision, FloatLike, Real, SingleFloat};
-use super::{DoubleFloat, ErrorPropagatingFloat, Float, RealLike};
+use super::{Constructible, ElementaryFunctions, FixedPrecision, Numeric, Scalar};
+use super::{DoubleFloat, ErrorPropagatingFloat, Float, RealScalar};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A complex number, `re + i * im`, where `i` is the imaginary unit.
@@ -20,7 +20,7 @@ pub struct Complex<T> {
     pub im: T,
 }
 
-impl<T: RealLike> From<Complex<T>> for Complex<ErrorPropagatingFloat<T>> {
+impl<T: RealScalar> From<Complex<T>> for Complex<ErrorPropagatingFloat<T>> {
     fn from(value: Complex<T>) -> Self {
         Complex {
             re: if value.re.is_exact_zero() {
@@ -97,7 +97,7 @@ impl<T> Complex<T> {
     }
 }
 
-impl<T: FloatLike> Complex<T> {
+impl<T: Numeric> Complex<T> {
     #[inline]
     fn has_finite_real_axis(&self) -> bool {
         self.im.is_exact_zero()
@@ -165,13 +165,15 @@ impl<T: FloatLike> Complex<T> {
         }
     }
 
+    /// Compute the squared magnitude in the component type.
+    /// Use [`Numeric::norm_squared`](super::Numeric::norm_squared) for a complex result.
     #[inline]
     pub fn norm_squared(&self) -> T {
         self.re.clone() * &self.re + self.im.clone() * &self.im
     }
 }
 
-impl<T: Real> Complex<T> {
+impl<T: ElementaryFunctions> Complex<T> {
     // Used only after an unscaled exponential/hyperbolic factor overflowed.
     #[cold]
     fn exp_product(exponent: &T, factor: T, half: bool) -> T {
@@ -258,7 +260,7 @@ impl<T: Real> Complex<T> {
     }
 }
 
-impl<T: SingleFloat> Complex<T> {
+impl<T: Scalar> Complex<T> {
     pub fn is_real(&self) -> bool {
         self.im.is_exact_zero()
     }
@@ -273,7 +275,7 @@ impl<T: SingleFloat> Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<Complex<T>> for Complex<T> {
+impl<T: Numeric> Add<Complex<T>> for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -282,7 +284,7 @@ impl<T: FloatLike> Add<Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<T> for Complex<T> {
+impl<T: Numeric> Add<T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -291,7 +293,7 @@ impl<T: FloatLike> Add<T> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<&Complex<T>> for Complex<T> {
+impl<T: Numeric> Add<&Complex<T>> for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -300,7 +302,7 @@ impl<T: FloatLike> Add<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<&T> for Complex<T> {
+impl<T: Numeric> Add<&T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -309,7 +311,7 @@ impl<T: FloatLike> Add<&T> for Complex<T> {
     }
 }
 
-impl<'a, T: FloatLike> Add<&'a Complex<T>> for &Complex<T> {
+impl<'a, T: Numeric> Add<&'a Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -318,7 +320,7 @@ impl<'a, T: FloatLike> Add<&'a Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<&T> for &Complex<T> {
+impl<T: Numeric> Add<&T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -327,7 +329,7 @@ impl<T: FloatLike> Add<&T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<Complex<T>> for &Complex<T> {
+impl<T: Numeric> Add<Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -336,7 +338,7 @@ impl<T: FloatLike> Add<Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Add<T> for &Complex<T> {
+impl<T: Numeric> Add<T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -345,21 +347,21 @@ impl<T: FloatLike> Add<T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> AddAssign for Complex<T> {
+impl<T: Numeric> AddAssign for Complex<T> {
     #[inline]
     fn add_assign(&mut self, rhs: Self) {
         self.add_assign(&rhs)
     }
 }
 
-impl<T: FloatLike> AddAssign<T> for Complex<T> {
+impl<T: Numeric> AddAssign<T> for Complex<T> {
     #[inline]
     fn add_assign(&mut self, rhs: T) {
         self.re += rhs;
     }
 }
 
-impl<T: FloatLike> AddAssign<&Complex<T>> for Complex<T> {
+impl<T: Numeric> AddAssign<&Complex<T>> for Complex<T> {
     #[inline]
     fn add_assign(&mut self, rhs: &Self) {
         self.re += &rhs.re;
@@ -367,14 +369,14 @@ impl<T: FloatLike> AddAssign<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> AddAssign<&T> for Complex<T> {
+impl<T: Numeric> AddAssign<&T> for Complex<T> {
     #[inline]
     fn add_assign(&mut self, rhs: &T) {
         self.re += rhs;
     }
 }
 
-impl<T: FloatLike> Sub for Complex<T> {
+impl<T: Numeric> Sub for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -383,7 +385,7 @@ impl<T: FloatLike> Sub for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<T> for Complex<T> {
+impl<T: Numeric> Sub<T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -392,7 +394,7 @@ impl<T: FloatLike> Sub<T> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<&Complex<T>> for Complex<T> {
+impl<T: Numeric> Sub<&Complex<T>> for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -401,7 +403,7 @@ impl<T: FloatLike> Sub<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<&T> for Complex<T> {
+impl<T: Numeric> Sub<&T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -410,7 +412,7 @@ impl<T: FloatLike> Sub<&T> for Complex<T> {
     }
 }
 
-impl<'a, T: FloatLike> Sub<&'a Complex<T>> for &Complex<T> {
+impl<'a, T: Numeric> Sub<&'a Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -419,7 +421,7 @@ impl<'a, T: FloatLike> Sub<&'a Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<&T> for &Complex<T> {
+impl<T: Numeric> Sub<&T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -428,7 +430,7 @@ impl<T: FloatLike> Sub<&T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<Complex<T>> for &Complex<T> {
+impl<T: Numeric> Sub<Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -437,7 +439,7 @@ impl<T: FloatLike> Sub<Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Sub<T> for &Complex<T> {
+impl<T: Numeric> Sub<T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -446,21 +448,21 @@ impl<T: FloatLike> Sub<T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> SubAssign for Complex<T> {
+impl<T: Numeric> SubAssign for Complex<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: Self) {
         self.sub_assign(&rhs)
     }
 }
 
-impl<T: FloatLike> SubAssign<T> for Complex<T> {
+impl<T: Numeric> SubAssign<T> for Complex<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: T) {
         self.re -= rhs;
     }
 }
 
-impl<T: FloatLike> SubAssign<&Complex<T>> for Complex<T> {
+impl<T: Numeric> SubAssign<&Complex<T>> for Complex<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: &Self) {
         self.re -= &rhs.re;
@@ -468,14 +470,14 @@ impl<T: FloatLike> SubAssign<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> SubAssign<&T> for Complex<T> {
+impl<T: Numeric> SubAssign<&T> for Complex<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: &T) {
         self.re -= rhs;
     }
 }
 
-impl<T: FloatLike> Mul for Complex<T> {
+impl<T: Numeric> Mul for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -484,7 +486,7 @@ impl<T: FloatLike> Mul for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<T> for Complex<T> {
+impl<T: Numeric> Mul<T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -493,7 +495,7 @@ impl<T: FloatLike> Mul<T> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<&Complex<T>> for Complex<T> {
+impl<T: Numeric> Mul<&Complex<T>> for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -515,7 +517,7 @@ impl<T: FloatLike> Mul<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<&T> for Complex<T> {
+impl<T: Numeric> Mul<&T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -524,7 +526,7 @@ impl<T: FloatLike> Mul<&T> for Complex<T> {
     }
 }
 
-impl<'a, T: FloatLike> Mul<&'a Complex<T>> for &Complex<T> {
+impl<'a, T: Numeric> Mul<&'a Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -533,7 +535,7 @@ impl<'a, T: FloatLike> Mul<&'a Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<&T> for &Complex<T> {
+impl<T: Numeric> Mul<&T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -542,7 +544,7 @@ impl<T: FloatLike> Mul<&T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<Complex<T>> for &Complex<T> {
+impl<T: Numeric> Mul<Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -551,7 +553,7 @@ impl<T: FloatLike> Mul<Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Mul<T> for &Complex<T> {
+impl<T: Numeric> Mul<T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -560,21 +562,21 @@ impl<T: FloatLike> Mul<T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> MulAssign for Complex<T> {
+impl<T: Numeric> MulAssign for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: Self) {
         self.mul_assign(&rhs);
     }
 }
 
-impl<T: FloatLike> MulAssign<T> for Complex<T> {
+impl<T: Numeric> MulAssign<T> for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: T) {
         *self = self.clone().mul(rhs);
     }
 }
 
-impl<T: FloatLike> MulAssign<&Complex<T>> for Complex<T> {
+impl<T: Numeric> MulAssign<&Complex<T>> for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: &Self) {
         if self.has_finite_real_axis() && rhs.has_finite_real_axis() {
@@ -590,14 +592,14 @@ impl<T: FloatLike> MulAssign<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> MulAssign<&T> for Complex<T> {
+impl<T: Numeric> MulAssign<&T> for Complex<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: &T) {
         *self = self.clone().mul(rhs);
     }
 }
 
-impl<T: FloatLike> Div for Complex<T> {
+impl<T: Numeric> Div for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -606,7 +608,7 @@ impl<T: FloatLike> Div for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Div<T> for Complex<T> {
+impl<T: Numeric> Div<T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -615,7 +617,7 @@ impl<T: FloatLike> Div<T> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Div<&Complex<T>> for Complex<T> {
+impl<T: Numeric> Div<&Complex<T>> for Complex<T> {
     type Output = Self;
 
     #[inline]
@@ -734,7 +736,7 @@ mod exact_axis_division_tests {
     }
 }
 
-impl<T: FloatLike> Div<&T> for Complex<T> {
+impl<T: Numeric> Div<&T> for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -743,7 +745,7 @@ impl<T: FloatLike> Div<&T> for Complex<T> {
     }
 }
 
-impl<'a, T: FloatLike> Div<&'a Complex<T>> for &Complex<T> {
+impl<'a, T: Numeric> Div<&'a Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -752,7 +754,7 @@ impl<'a, T: FloatLike> Div<&'a Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Div<&T> for &Complex<T> {
+impl<T: Numeric> Div<&T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -761,7 +763,7 @@ impl<T: FloatLike> Div<&T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Div<Complex<T>> for &Complex<T> {
+impl<T: Numeric> Div<Complex<T>> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -770,7 +772,7 @@ impl<T: FloatLike> Div<Complex<T>> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> Div<T> for &Complex<T> {
+impl<T: Numeric> Div<T> for &Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -779,19 +781,19 @@ impl<T: FloatLike> Div<T> for &Complex<T> {
     }
 }
 
-impl<T: FloatLike> DivAssign for Complex<T> {
+impl<T: Numeric> DivAssign for Complex<T> {
     fn div_assign(&mut self, rhs: Self) {
         self.div_assign(&rhs);
     }
 }
 
-impl<T: FloatLike> DivAssign<T> for Complex<T> {
+impl<T: Numeric> DivAssign<T> for Complex<T> {
     fn div_assign(&mut self, rhs: T) {
         *self = self.clone().div(rhs);
     }
 }
 
-impl<T: FloatLike> DivAssign<&Complex<T>> for Complex<T> {
+impl<T: Numeric> DivAssign<&Complex<T>> for Complex<T> {
     fn div_assign(&mut self, rhs: &Self) {
         if self.has_finite_real_axis() && rhs.has_finite_real_axis() && !rhs.re.is_fully_zero() {
             let im = self.im.clone() * &rhs.re - rhs.im.clone() * &self.re;
@@ -803,13 +805,13 @@ impl<T: FloatLike> DivAssign<&Complex<T>> for Complex<T> {
     }
 }
 
-impl<T: FloatLike> DivAssign<&T> for Complex<T> {
+impl<T: Numeric> DivAssign<&T> for Complex<T> {
     fn div_assign(&mut self, rhs: &T) {
         *self = self.clone().div(rhs);
     }
 }
 
-impl<T: FloatLike> Neg for Complex<T> {
+impl<T: Numeric> Neg for Complex<T> {
     type Output = Complex<T>;
 
     #[inline]
@@ -818,7 +820,7 @@ impl<T: FloatLike> Neg for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Display for Complex<T> {
+impl<T: Numeric> Display for Complex<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_char('(')?;
         Display::fmt(&self.re, f)?;
@@ -828,7 +830,7 @@ impl<T: FloatLike> Display for Complex<T> {
     }
 }
 
-impl<T: FloatLike> Debug for Complex<T> {
+impl<T: Numeric> Debug for Complex<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_char('(')?;
         Debug::fmt(&self.re, f)?;
@@ -838,7 +840,7 @@ impl<T: FloatLike> Debug for Complex<T> {
     }
 }
 
-impl<T: FloatLike> LowerExp for Complex<T> {
+impl<T: Numeric> LowerExp for Complex<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_char('(')?;
         LowerExp::fmt(&self.re, f)?;
@@ -848,7 +850,7 @@ impl<T: FloatLike> LowerExp for Complex<T> {
     }
 }
 
-impl<T: SingleFloat> SingleFloat for Complex<T> {
+impl<T: Scalar> Scalar for Complex<T> {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.re.is_zero() && self.im.is_zero()
@@ -873,7 +875,33 @@ impl<T: SingleFloat> SingleFloat for Complex<T> {
     }
 }
 
-impl<T: FloatLike> FloatLike for Complex<T> {
+impl<T: Numeric> Numeric for Complex<T> {
+    #[inline]
+    fn is_self_conjugate(&self) -> bool {
+        self.im.is_exact_zero()
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<Ordering> {
+        if self.is_self_conjugate() {
+            self.re.real_sign()
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn conj(&self) -> Self {
+        Complex::conj(self)
+    }
+
+    #[inline]
+    fn norm_squared(&self) -> Self {
+        let re = Complex::norm_squared(self);
+        let im = re.zero();
+        Self::new(re, im)
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(Self {
             re: self.re.nan()?,
@@ -1020,7 +1048,7 @@ impl<T: FloatLike> FloatLike for Complex<T> {
 }
 
 /// Following the same conventions and formulas as num::Complex.
-impl<T: Real> Real for Complex<T> {
+impl<T: ElementaryFunctions> ElementaryFunctions for Complex<T> {
     #[inline]
     fn pi(&self) -> Self {
         Complex::new(self.re.pi(), self.im.zero())
@@ -1044,11 +1072,6 @@ impl<T: Real> Real for Complex<T> {
     #[inline(always)]
     fn i(&self) -> Option<Self> {
         Some(self.i())
-    }
-
-    #[inline(always)]
-    fn conj(&self) -> Self {
-        Complex::new(self.re.clone(), -self.im.clone())
     }
 
     #[inline]
@@ -1213,6 +1236,42 @@ impl<T: Real> Real for Complex<T> {
                 Self::exp_product(&self.re, c, false),
                 Self::exp_product(&self.re, s, false),
             )
+        }
+    }
+
+    #[inline]
+    fn expm1(&self) -> Self {
+        if self.im.is_exact_zero() && self.re.is_self_conjugate() {
+            return Self::new(self.re.expm1(), self.im.clone());
+        }
+        let expm1 = self.re.expm1();
+        if matches!(
+            expm1.real_classify(),
+            Some(std::num::FpCategory::Infinite | std::num::FpCategory::Nan)
+        ) {
+            // Keep the exponential's scaled products when its scalar factor overflows.
+            let mut result = self.exp();
+            result.re -= result.re.one();
+            return result;
+        }
+        let (sin, cos) = self.im.sin_cos();
+        let half_sin = (self.im.clone() / self.im.from_usize(2)).sin();
+        // exp(x)*cos(y)-1 = expm1(x)*cos(y)-2*sin(y/2)^2.
+        let re = expm1 * cos - half_sin.square() * half_sin.from_usize(2);
+        Self::new(re, self.re.exp() * sin)
+    }
+
+    #[inline]
+    fn sin_cos(&self) -> (Self, Self) {
+        if self.has_finite_real_axis() {
+            let (sin, cos) = self.re.sin_cos();
+            (
+                Self::new(sin.clone(), self.im.clone() * &cos),
+                Self::new(cos, -self.im.clone() * sin),
+            )
+        } else {
+            // The separate paths retain their scaled hyperbolic products.
+            (self.sin(), self.cos())
         }
     }
 
@@ -1427,14 +1486,14 @@ impl<T: FixedPrecision> FixedPrecision for Complex<T> {
     const DECIMAL_PRECISION: usize = T::DECIMAL_PRECISION;
 }
 
-impl<T: FloatLike> From<T> for Complex<T> {
+impl<T: Numeric> From<T> for Complex<T> {
     fn from(value: T) -> Self {
         let zero = value.zero();
         Complex::new(value, zero)
     }
 }
 
-impl<'a, T: FloatLike + From<&'a Rational>> From<&'a Rational> for Complex<T> {
+impl<'a, T: Numeric + From<&'a Rational>> From<&'a Rational> for Complex<T> {
     fn from(value: &'a Rational) -> Self {
         let c: T = value.into();
         let zero = c.zero();

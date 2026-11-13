@@ -10,7 +10,8 @@ use simba::scalar::{ComplexField, RealField};
 use xprec::{CompensatedArithmetic, Df64};
 
 use super::{
-    Constructible, FixedPrecision, Float, FloatLike, Magnitude, Real, RealLike, SingleFloat,
+    Constructible, ElementaryFunctions, FixedPrecision, Float, Magnitude, Numeric, RealScalar,
+    Scalar,
 };
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
@@ -144,7 +145,22 @@ impl DoubleFloat {
     }
 }
 
-impl FloatLike for DoubleFloat {
+impl Numeric for DoubleFloat {
+    #[inline(always)]
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(&self.zero())
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        *self
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(f64::NAN.into())
     }
@@ -404,7 +420,7 @@ impl DivAssign<DoubleFloat> for DoubleFloat {
     }
 }
 
-impl SingleFloat for DoubleFloat {
+impl Scalar for DoubleFloat {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.0 == Df64::ZERO
@@ -426,7 +442,7 @@ impl SingleFloat for DoubleFloat {
     }
 }
 
-impl RealLike for DoubleFloat {
+impl RealScalar for DoubleFloat {
     #[inline]
     fn minimum_roundoff(&self) -> super::Magnitude {
         super::Magnitude::from_f64(f64::from_bits(1)).scale_pow2(-1)
@@ -517,7 +533,25 @@ impl Constructible for DoubleFloat {
     }
 }
 
-impl Real for DoubleFloat {
+impl ElementaryFunctions for DoubleFloat {
+    #[inline]
+    fn expm1(&self) -> Self {
+        if self.is_fully_zero() || !self.0.hi().is_finite() {
+            return self.0.hi().exp_m1().into();
+        }
+        self.0.exp_m1().into()
+    }
+
+    #[inline]
+    fn sin_cos(&self) -> (Self, Self) {
+        if !self.0.hi().is_finite() {
+            let (sin, cos) = self.0.hi().sin_cos();
+            return (sin.into(), cos.into());
+        }
+        let (sin, cos) = self.0.sin_cos();
+        (sin.into(), cos.into())
+    }
+
     #[inline(always)]
     fn log1p(&self) -> Self {
         self.0.ln_1p().into()
@@ -555,11 +589,6 @@ impl Real for DoubleFloat {
     #[inline(always)]
     fn i(&self) -> Option<Self> {
         None
-    }
-
-    #[inline(always)]
-    fn conj(&self) -> Self {
-        *self
     }
 
     #[inline(always)]

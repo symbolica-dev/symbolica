@@ -18,7 +18,7 @@ use super::{
         FiniteField, FiniteFieldCore, FiniteFieldWorkspace, PrimeIteratorU64, ToFiniteField, Two,
         Z2, Zp,
     },
-    float::RealLike,
+    float::RealScalar,
     integer::{Integer, IntegerRing, Z},
 };
 
@@ -1508,7 +1508,7 @@ impl<'a> std::iter::Sum<&'a Self> for Rational {
 mod test {
     use crate::domains::{
         Field, OrderedRing, RealEmbedding, Ring, RingOps,
-        float::{Float, Real},
+        float::{ElementaryFunctions, Float},
         integer::{Integer, Z},
         rational::{FractionField, Rational},
     };

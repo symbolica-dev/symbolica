@@ -1,12 +1,32 @@
 use rand::Rng;
 use wide::{f64x2, f64x4, f64x8};
 
-use super::{FloatLike, Real};
+use super::{ElementaryFunctions, Numeric};
 use crate::domains::rational::Rational;
 
 macro_rules! simd_impl {
     ($t:ty) => {
-        impl FloatLike for $t {
+        impl Numeric for $t {
+            #[inline(always)]
+            fn is_self_conjugate(&self) -> bool {
+                true
+            }
+
+            #[inline]
+            fn real_sign(&self) -> Option<std::cmp::Ordering> {
+                let lanes = self.to_array();
+                let sign = lanes[0].partial_cmp(&0.0)?;
+                lanes
+                    .iter()
+                    .all(|lane| lane.partial_cmp(&0.0) == Some(sign))
+                    .then_some(sign)
+            }
+
+            #[inline(always)]
+            fn conj(&self) -> Self {
+                (*self)
+            }
+
             fn nan(&self) -> Option<Self> {
                 Some(Self::splat(f64::NAN))
             }
@@ -90,7 +110,18 @@ macro_rules! simd_impl {
             }
         }
 
-        impl Real for $t {
+        impl ElementaryFunctions for $t {
+            #[inline]
+            fn expm1(&self) -> Self {
+                // Preserve scalar libm behavior for tiny and exceptional lanes.
+                Self::from(self.to_array().map(f64::exp_m1))
+            }
+
+            #[inline]
+            fn sin_cos(&self) -> (Self, Self) {
+                (*self).sin_cos()
+            }
+
             #[inline(always)]
             fn pi(&self) -> Self {
                 std::f64::consts::PI.into()
@@ -114,11 +145,6 @@ macro_rules! simd_impl {
             #[inline(always)]
             fn i(&self) -> Option<Self> {
                 None
-            }
-
-            #[inline(always)]
-            fn conj(&self) -> Self {
-                (*self)
             }
 
             #[inline(always)]

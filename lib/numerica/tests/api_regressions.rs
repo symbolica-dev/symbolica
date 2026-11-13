@@ -7,8 +7,8 @@ use numerica::{
         dual::{DualNumberStructure, HyperDual},
         finite_field::{FiniteField, FiniteFieldCore, Mersenne32, Mersenne64, Z2, Zp, Zp64},
         float::{
-            Complex, DoubleFloat, ErrorPropagatingFloat, F64, Float, FloatLike, Real, RealBall,
-            RealLike, SingleFloat,
+            Complex, DoubleFloat, ElementaryFunctions, ErrorPropagatingFloat, F64, Float, Numeric,
+            RealBall, RealScalar, Scalar,
         },
         integer::{Integer, MultiPrecisionInteger, Z},
         rational::{Q, Rational},

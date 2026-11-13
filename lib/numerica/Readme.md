@@ -30,6 +30,32 @@ cargo add numerica
 Browse the [API documentation](https://docs.rs/numerica) for the full set of
 operations and the [examples](examples) for more complete applications.
 
+## Migrating to 3.1
+
+Version 3.1.0 renames the numeric traits:
+
+| Previous name | New name |
+| --- | --- |
+| `FloatLike` | `Numeric` |
+| `SingleFloat` | `Scalar` |
+| `RealLike` | `RealScalar` |
+| `Real` | `ElementaryFunctions` |
+
+The previous names remain aliases, so existing imports and trait bounds still work.
+However, **3.1.0 includes a breaking change for custom trait implementations**:
+`conj()` moves from `Real` (`ElementaryFunctions`) to `FloatLike` (`Numeric`). Move
+its implementation into your `Numeric` implementation. Types implementing only
+`Numeric` must now implement `conj()` too; real types can return `self.clone()`.
+For dual numbers, conjugate every derivative component as well as the primal value.
+Replace qualified calls such as `Real::conj(&value)` with `Numeric::conj(&value)`,
+and bring `Numeric` into scope for method calls.
+
+`Numeric::norm_squared()` returns the same numeric type, including for exact
+complex values. The existing inherent `Complex<T>::norm_squared()` still returns
+`T`; use `Numeric::norm_squared(&value)` to request the trait method explicitly.
+`Numeric::is_self_conjugate()` tests whether conjugation is known to leave a value
+unchanged; `false` can mean unknown. It does not assert that the value is a scalar.
+
 ## Examples
 
 ### Exact solutions
@@ -62,7 +88,7 @@ Subtracting nearly equal numbers can erase much of their accuracy.
 Numerica tracks an estimate of how many digits remain:
 
 ```rust
-use numerica::domains::float::{ErrorPropagatingFloat, Float, FloatLike, Real};
+use numerica::domains::float::{ErrorPropagatingFloat, Float, Numeric, ElementaryFunctions};
 
 let a = ErrorPropagatingFloat::new(Float::parse("1e-50", Some(200)).unwrap(), 60.);
 let result = (a.exp() - a.one()) / a;
@@ -82,7 +108,7 @@ finds the value and all three first derivatives of $1/(xyz)$:
 ```rust
 use numerica::{
     create_hyperdual_single_derivative,
-    domains::{float::FloatLike, rational::Rational},
+    domains::{float::Numeric, rational::Rational},
 };
 
 create_hyperdual_single_derivative!(Dual, 3);

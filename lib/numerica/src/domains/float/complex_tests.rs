@@ -1,4 +1,4 @@
-use super::{Complex, DoubleFloat, Float, FloatLike, Real, RealLike};
+use super::{Complex, DoubleFloat, ElementaryFunctions, Float, Numeric, RealScalar};
 
 fn close(actual: f64, expected: f64) {
     if actual == expected {
@@ -253,7 +253,7 @@ fn complex_small_components_and_branch_cuts() {
 
 #[test]
 fn complex_sqrt_scalar_limits() {
-    fn check<T: Real + RealLike>(at: impl Fn(f64) -> T) {
+    fn check<T: ElementaryFunctions + RealScalar>(at: impl Fn(f64) -> T) {
         // Probe the sign before conversion: DoubleFloat::to_f64 adds its two
         // words, which can turn a negative zero into a positive zero.
         let negative = |x: &T| x.one().copy_sign(x).to_f64().is_sign_negative();
@@ -339,7 +339,7 @@ fn complex_overflow_preserves_finite_components() {
     close(Complex::new(1e-310, 0.0).sinh().re, 1e-310);
 }
 
-fn scalar_backend<T: Real + RealLike>(x: T) {
+fn scalar_backend<T: ElementaryFunctions + RealScalar>(x: T) {
     let z = Complex::new(x.clone(), x.zero());
     let s = z.sqrt();
     close(s.re.to_f64(), x.sqrt().to_f64());

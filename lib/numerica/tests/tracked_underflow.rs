@@ -1,4 +1,4 @@
-use numerica::domains::float::{Float, Magnitude, RealLike};
+use numerica::domains::float::{Float, Magnitude, RealScalar};
 
 #[cfg(feature = "float-mpfr")]
 #[test]

@@ -3,7 +3,9 @@ use std::str::FromStr;
 use crate::domains::integer::Integer;
 
 use super::DoubleFloat;
-use super::{Complex, ErrorPropagatingFloat, Float, FloatLike, Rational, Real, RealLike};
+use super::{
+    Complex, ElementaryFunctions, ErrorPropagatingFloat, Float, Numeric, Rational, RealScalar,
+};
 
 fn assert_equal_hash<T: Eq + std::hash::Hash + std::fmt::Debug>(left: T, right: T) {
     use std::hash::{DefaultHasher, Hasher};
@@ -171,7 +173,7 @@ fn float_internal_ordering_distinguishes_nan() {
     check(values.map(|v| Float::with_val(128, v)).to_vec());
 }
 
-fn eval_test<T: Real>(v: &[T]) -> T {
+fn eval_test<T: ElementaryFunctions>(v: &[T]) -> T {
     v[0].sqrt() + v[1].log() + v[1].sin() - v[0].cos() + v[1].tan() - v[2].asin() + v[3].acos()
         - v[0].atan2(&v[1])
         + v[1].sinh()
@@ -236,7 +238,7 @@ fn error_propagation() {
     let e = ErrorPropagatingFloat::new(0.7, 16.);
     let f = ErrorPropagatingFloat::new(0.4, 16.);
 
-    fn expression<T: Real>(a: T, b: T, c: T, d: T, e: T, f: T) -> T {
+    fn expression<T: ElementaryFunctions>(a: T, b: T, c: T, d: T, e: T, f: T) -> T {
         a.sqrt() + b.log() + b.sin() - a.cos() + b.tan() - c.asin() + d.acos() - a.atan2(&b)
             + b.sinh()
             - a.cosh()
@@ -718,7 +720,7 @@ fn tracked_units_retain_uncertainty() {
 
 #[test]
 fn tracked_real_complex_operations_preserve_exact_imaginary_zero() {
-    fn check<T: RealLike + Real>(
+    fn check<T: RealScalar + ElementaryFunctions>(
         x: Complex<ErrorPropagatingFloat<T>>,
         y: Complex<ErrorPropagatingFloat<T>>,
     ) {
@@ -777,7 +779,7 @@ fn tracked_complex_sqrt_at_uncertain_origin_has_finite_error() {
         assert!(exact.re.is_exact_zero());
         assert!(exact.im.is_exact_zero());
     }
-    fn check<T: RealLike + Real>(value: Complex<ErrorPropagatingFloat<T>>) {
+    fn check<T: RealScalar + ElementaryFunctions>(value: Complex<ErrorPropagatingFloat<T>>) {
         let re_error = value.re.get_error_magnitude();
         let im_error = value.im.get_error_magnitude();
         let root = value.sqrt();

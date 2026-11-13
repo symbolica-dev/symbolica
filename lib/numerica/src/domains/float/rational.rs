@@ -2,7 +2,7 @@ use std::fmt::LowerExp;
 
 use rand::Rng;
 
-use super::{Constructible, FloatLike, RealLike, SingleFloat};
+use super::{Constructible, Numeric, RealScalar, Scalar};
 use super::{Float, Magnitude, RoundingDirection};
 use crate::domains::{integer::Integer, rational::Rational};
 
@@ -23,7 +23,28 @@ impl LowerExp for Rational {
     }
 }
 
-impl FloatLike for Rational {
+impl Numeric for Rational {
+    #[inline(always)]
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        Some(if self.is_zero() {
+            std::cmp::Ordering::Equal
+        } else if self.is_negative() {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        })
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        self.clone()
+    }
+
     fn set_from(&mut self, other: &Self) {
         *self = other.clone();
     }
@@ -123,7 +144,7 @@ impl Constructible for Rational {
     }
 }
 
-impl SingleFloat for Rational {
+impl Scalar for Rational {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.is_zero()
@@ -145,7 +166,7 @@ impl SingleFloat for Rational {
     }
 }
 
-impl RealLike for Rational {
+impl RealScalar for Rational {
     fn absolute_magnitude(&self) -> Magnitude {
         // Rounding away from zero before reducing the significand preserves a
         // conservative bound even when the rational is outside binary64 range.
@@ -173,7 +194,7 @@ impl RealLike for Rational {
 
 #[cfg(test)]
 mod magnitude_tests {
-    use super::{Integer, Magnitude, Rational, RealLike};
+    use super::{Integer, Magnitude, Rational, RealScalar};
 
     #[test]
     fn absolute_magnitude_preserves_rational_range_and_discarded_bits() {

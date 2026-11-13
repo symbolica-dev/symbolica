@@ -3,7 +3,7 @@
 //! ```
 //! use numerica::{
 //! create_hyperdual_from_components, create_hyperdual_single_derivative,
-//! domains::{float::FloatLike, rational::Rational},
+//! domains::{float::Numeric, rational::Rational},
 //! };
 //!
 //! create_hyperdual_single_derivative!(SingleDual, 3);
@@ -39,7 +39,7 @@ use std::sync::Arc;
 use ahash::HashMap;
 
 use crate::domains::{
-    float::{Constructible, FloatLike, Real, SingleFloat},
+    float::{Constructible, ElementaryFunctions, Numeric, Scalar},
     rational::Rational,
 };
 
@@ -316,7 +316,7 @@ pub const fn get_mult_table<const N: usize, const C: usize, const T: usize>(
 /// ```
 /// # use numerica::{
 /// # create_hyperdual_single_derivative,
-/// # domains::{float::FloatLike, rational::Rational},
+/// # domains::{float::Numeric, rational::Rational},
 /// # };
 /// create_hyperdual_single_derivative!(Dual, 3);
 ///
@@ -374,7 +374,7 @@ pub trait DualNumberStructure {
 /// ```
 /// # use numerica::{
 /// # create_hyperdual_from_components,
-/// # domains::{float::FloatLike, rational::Rational},
+/// # domains::{float::Numeric, rational::Rational},
 /// # };
 /// create_hyperdual_from_components!(
 ///     Dual,
@@ -405,7 +405,7 @@ pub trait DualNumberStructure {
 macro_rules! create_hyperdual_from_components {
     ($t: ident, $var: expr) => {
         #[allow(unused_imports)]
-        use $crate::domains::float::FloatLike as _;
+        use $crate::domains::float::Numeric as _;
 
         #[allow(long_running_const_eval)]
         const _: () = assert!(
@@ -472,7 +472,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> $t<T> {
+        impl<T: $crate::domains::float::Numeric> $t<T> {
             /// Create a new dual variable for the variable `var`, i.e. `value + 1*ε_var`,
             /// inheriting the floating point settings from `self`.
             #[allow(dead_code)]
@@ -507,7 +507,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::fmt::Display for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::fmt::Display for $t<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 use std::fmt::Write;
                 for (i, (v, s)) in self.values.iter().zip(Self::SHAPE).enumerate() {
@@ -535,7 +535,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::fmt::LowerExp for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::fmt::LowerExp for $t<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 use std::fmt::Write;
                 for (i, (v, s)) in self.values.iter().zip(Self::SHAPE).enumerate() {
@@ -563,20 +563,20 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> PartialEq for $t<T> {
+        impl<T: $crate::domains::float::Numeric> PartialEq for $t<T> {
             fn eq(&self, other: &Self) -> bool {
                 // only compare the real part
                 self.values[0].eq(&other.values[0])
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike + PartialOrd> PartialOrd for $t<T> {
+        impl<T: $crate::domains::float::Numeric + PartialOrd> PartialOrd for $t<T> {
             fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
                 self.values[0].partial_cmp(&other.values[0])
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Neg for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Neg for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -589,7 +589,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Add<&T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Add<&T> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -599,7 +599,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Add<T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Add<T> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -609,7 +609,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Sub<&T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Sub<&T> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -619,7 +619,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Sub<T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Sub<T> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -629,7 +629,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Add<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Add<&$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -642,7 +642,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Add<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Add<$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -655,7 +655,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Sub<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Sub<&$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -668,7 +668,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Sub<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Sub<$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -681,7 +681,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Mul<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Mul<&$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -704,7 +704,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Mul<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Mul<$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
@@ -713,55 +713,55 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Div<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Div<&$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
             fn div(self, rhs: &Self) -> Self::Output {
-                use $crate::domains::float::FloatLike;
+                use $crate::domains::float::Numeric;
                 self * rhs.inv()
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::Div<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::Div<$t<T>> for $t<T> {
             type Output = Self;
 
             #[inline]
             fn div(self, rhs: Self) -> Self::Output {
-                use $crate::domains::float::FloatLike;
+                use $crate::domains::float::Numeric;
                 self * rhs.inv()
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::AddAssign<&T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::AddAssign<&T> for $t<T> {
             #[inline]
             fn add_assign(&mut self, rhs: &T) {
                 self.values[0] += rhs;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::AddAssign<T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::AddAssign<T> for $t<T> {
             #[inline]
             fn add_assign(&mut self, rhs: T) {
                 self.values[0] += rhs;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::SubAssign<&T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::SubAssign<&T> for $t<T> {
             #[inline]
             fn sub_assign(&mut self, rhs: &T) {
                 self.values[0] -= rhs;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::SubAssign<T> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::SubAssign<T> for $t<T> {
             #[inline]
             fn sub_assign(&mut self, rhs: T) {
                 self.values[0] -= rhs;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::AddAssign<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::AddAssign<&$t<T>> for $t<T> {
             #[inline]
             fn add_assign(&mut self, rhs: &$t<T>) {
                 for (s, o) in self.values.iter_mut().zip(&rhs.values) {
@@ -770,14 +770,14 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::AddAssign<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::AddAssign<$t<T>> for $t<T> {
             #[inline]
             fn add_assign(&mut self, rhs: $t<T>) {
                 self.add_assign(&rhs)
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::SubAssign<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::SubAssign<&$t<T>> for $t<T> {
             #[inline]
             fn sub_assign(&mut self, rhs: &$t<T>) {
                 for (s, o) in self.values.iter_mut().zip(&rhs.values) {
@@ -786,44 +786,81 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::SubAssign<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::SubAssign<$t<T>> for $t<T> {
             #[inline]
             fn sub_assign(&mut self, rhs: $t<T>) {
                 self.sub_assign(&rhs)
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::MulAssign<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::MulAssign<&$t<T>> for $t<T> {
             #[inline]
             fn mul_assign(&mut self, rhs: &$t<T>) {
                 *self = self.clone() * rhs.clone();
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::MulAssign<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::MulAssign<$t<T>> for $t<T> {
             #[inline]
             fn mul_assign(&mut self, rhs: $t<T>) {
                 *self = self.clone() * rhs;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::DivAssign<&$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::DivAssign<&$t<T>> for $t<T> {
             #[inline]
             fn div_assign(&mut self, rhs: &$t<T>) {
-                use $crate::domains::float::FloatLike;
+                use $crate::domains::float::Numeric;
                 *self = rhs.inv() * &*self;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> std::ops::DivAssign<$t<T>> for $t<T> {
+        impl<T: $crate::domains::float::Numeric> std::ops::DivAssign<$t<T>> for $t<T> {
             #[inline]
             fn div_assign(&mut self, rhs: $t<T>) {
-                use $crate::domains::float::FloatLike;
+                use $crate::domains::float::Numeric;
                 *self = rhs.inv() * &*self;
             }
         }
 
-        impl<T: $crate::domains::float::FloatLike> $crate::domains::float::FloatLike for $t<T> {
+        impl<T: $crate::domains::float::Numeric> $crate::domains::float::Numeric for $t<T> {
+            #[inline]
+            fn is_exact_zero(&self) -> bool {
+                self.values.iter().all(|value| value.is_exact_zero())
+            }
+
+            #[inline]
+            fn is_self_conjugate(&self) -> bool {
+                self.values.iter().all(|value| value.is_self_conjugate())
+            }
+
+            #[inline]
+            fn real_sign(&self) -> Option<std::cmp::Ordering> {
+                if !self.is_self_conjugate() {
+                    return None;
+                }
+                let sign = self.values[0].real_sign()?;
+                if sign == std::cmp::Ordering::Equal
+                    && !self
+                        .values
+                        .iter()
+                        .all(|value| value.real_sign() == Some(std::cmp::Ordering::Equal))
+                {
+                    return None;
+                }
+                Some(sign)
+            }
+
+            #[inline(always)]
+            fn conj(&self) -> Self {
+                // assume variable is real
+                let mut r = self.clone();
+                for x in &mut r.values {
+                    *x = x.conj();
+                }
+                r
+            }
+
             fn nan(&self) -> Option<Self> {
                 let mut result = self.clone();
                 for value in &mut result.values {
@@ -952,7 +989,7 @@ macro_rules! create_hyperdual_from_components {
             }
         }
 
-        impl<T: $crate::domains::float::SingleFloat> $crate::domains::float::SingleFloat for $t<T> {
+        impl<T: $crate::domains::float::Scalar> $crate::domains::float::Scalar for $t<T> {
             #[inline(always)]
             fn is_zero(&self) -> bool {
                 self.values[0].is_zero()
@@ -981,34 +1018,36 @@ macro_rules! create_hyperdual_from_components {
         {
             #[inline(always)]
             fn new_one() -> Self {
-                let mut res = <Self as $crate::domains::float::FloatLike>::new_zero();
+                let mut res = <Self as $crate::domains::float::Numeric>::new_zero();
                 res.values[0] = T::new_one();
                 res
             }
 
             #[inline(always)]
             fn new_from_usize(a: usize) -> Self {
-                let mut res = <Self as $crate::domains::float::FloatLike>::new_zero();
+                let mut res = <Self as $crate::domains::float::Numeric>::new_zero();
                 res.values[0] = T::new_from_usize(a);
                 res
             }
 
             #[inline(always)]
             fn new_from_i64(a: i64) -> Self {
-                let mut res = <Self as $crate::domains::float::FloatLike>::new_zero();
+                let mut res = <Self as $crate::domains::float::Numeric>::new_zero();
                 res.values[0] = T::new_from_i64(a);
                 res
             }
 
             #[inline(always)]
             fn new_sample_unit<R: $crate::rand::Rng + ?Sized>(rng: &mut R) -> Self {
-                let mut res = <Self as $crate::domains::float::FloatLike>::new_zero();
+                let mut res = <Self as $crate::domains::float::Numeric>::new_zero();
                 res.values[0] = T::new_sample_unit(rng);
                 res
             }
         }
 
-        impl<T: $crate::domains::float::Real> $crate::domains::float::Real for $t<T> {
+        impl<T: $crate::domains::float::ElementaryFunctions>
+            $crate::domains::float::ElementaryFunctions for $t<T>
+        {
             #[inline(always)]
             fn pi(&self) -> Self {
                 let mut res = self.zero();
@@ -1045,16 +1084,6 @@ macro_rules! create_hyperdual_from_components {
             }
 
             #[inline(always)]
-            fn conj(&self) -> Self {
-                // assume variable is real
-                let mut r = self.clone();
-                for x in &mut r.values {
-                    *x = x.conj();
-                }
-                r
-            }
-
-            #[inline(always)]
             fn norm(&self) -> Self {
                 let n = self.values[0].norm();
                 if n == self.values[0] {
@@ -1067,7 +1096,7 @@ macro_rules! create_hyperdual_from_components {
 
             #[inline(always)]
             fn sqrt(&self) -> Self {
-                use $crate::domains::float::FloatLike;
+                use $crate::domains::float::Numeric;
                 let e = self.values[0].sqrt();
 
                 let norm = self.values[0].inv(); // TODO: check 0
@@ -1127,6 +1156,60 @@ macro_rules! create_hyperdual_from_components {
                 }
 
                 res * &e
+            }
+
+            #[inline]
+            fn expm1(&self) -> Self {
+                let e = self.values[0].exp();
+                let mut r = self.clone();
+                r.values[0] = self.values[0].zero();
+                let mut term = self.one();
+                let mut result = self.zero();
+                for order in 1..=Self::MAX_POW {
+                    term *= &r;
+                    term = term * &e.from_usize(order).inv();
+                    result += term.clone();
+                }
+                result = result * &e;
+                result.values[0] = self.values[0].expm1();
+                result
+            }
+
+            #[inline]
+            fn sin_cos(&self) -> (Self, Self) {
+                let (s, c) = self.values[0].sin_cos();
+                let mut r = self.clone();
+                r.values[0] = self.values[0].zero();
+                let mut term = self.one();
+                let mut sine = self.zero();
+                let mut cosine = self.zero();
+                sine.values[0] = s.clone();
+                cosine.values[0] = c.clone();
+                for order in 1..=Self::MAX_POW {
+                    term *= &r;
+                    term = term * &s.from_usize(order).inv();
+                    match order % 4 {
+                        0 => {
+                            sine += term.clone() * &s;
+                            cosine += term.clone() * &c;
+                        }
+                        1 => {
+                            sine += term.clone() * &c;
+                            cosine -= term.clone() * &s;
+                        }
+                        2 => {
+                            sine -= term.clone() * &s;
+                            cosine -= term.clone() * &c;
+                        }
+                        _ => {
+                            sine -= term.clone() * &c;
+                            cosine += term.clone() * &s;
+                        }
+                    }
+                }
+                sine.values[0] = s;
+                cosine.values[0] = c;
+                (sine, cosine)
             }
 
             #[inline(always)]
@@ -1306,7 +1389,7 @@ struct DualShape {
 /// # Example
 /// ```
 /// # use numerica::domains::dual::HyperDual;
-/// # use numerica::domains::float::FloatLike;
+/// # use numerica::domains::float::Numeric;
 /// # use numerica::domains::rational::Rational;
 /// let dual = HyperDual::<Rational>::new_single_derivative(3);
 /// let x = dual.variable(0, (1, 1).into());
@@ -1451,7 +1534,7 @@ impl<T> DualNumberStructure for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> HyperDual<T> {
+impl<T: Numeric> HyperDual<T> {
     fn single_derivative_index(&self, var: usize) -> usize {
         if var >= self.shape.shape[0].len() {
             panic!("No single derivative component for variable {}", var);
@@ -1505,7 +1588,7 @@ impl<T: for<'a> std::ops::MulAssign<&'a T>> std::ops::Mul<&T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::fmt::Display for HyperDual<T> {
+impl<T: Numeric> std::fmt::Display for HyperDual<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::fmt::Write;
         for (i, (v, s)) in self.values.iter().zip(&self.shape.shape).enumerate() {
@@ -1533,7 +1616,7 @@ impl<T: FloatLike> std::fmt::Display for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::fmt::LowerExp for HyperDual<T> {
+impl<T: Numeric> std::fmt::LowerExp for HyperDual<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use std::fmt::Write;
         for (i, (v, s)) in self.values.iter().zip(&self.shape.shape).enumerate() {
@@ -1561,20 +1644,20 @@ impl<T: FloatLike> std::fmt::LowerExp for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> PartialEq for HyperDual<T> {
+impl<T: Numeric> PartialEq for HyperDual<T> {
     fn eq(&self, other: &Self) -> bool {
         // only compare the real part
         self.values[0].eq(&other.values[0])
     }
 }
 
-impl<T: FloatLike + PartialOrd> PartialOrd for HyperDual<T> {
+impl<T: Numeric + PartialOrd> PartialOrd for HyperDual<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.values[0].partial_cmp(&other.values[0])
     }
 }
 
-impl<T: FloatLike> std::ops::Neg for HyperDual<T> {
+impl<T: Numeric> std::ops::Neg for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1587,7 +1670,7 @@ impl<T: FloatLike> std::ops::Neg for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Add<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Add<&HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1613,7 +1696,7 @@ impl<T: FloatLike> std::ops::Add<&HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Add<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Add<HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1639,7 +1722,7 @@ impl<T: FloatLike> std::ops::Add<HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Sub<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Sub<&HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1665,7 +1748,7 @@ impl<T: FloatLike> std::ops::Sub<&HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Sub<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Sub<HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1691,7 +1774,7 @@ impl<T: FloatLike> std::ops::Sub<HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Add<&T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Add<&T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1701,7 +1784,7 @@ impl<T: FloatLike> std::ops::Add<&T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Add<T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Add<T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1711,7 +1794,7 @@ impl<T: FloatLike> std::ops::Add<T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Sub<&T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Sub<&T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1721,7 +1804,7 @@ impl<T: FloatLike> std::ops::Sub<&T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Sub<T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Sub<T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1731,7 +1814,7 @@ impl<T: FloatLike> std::ops::Sub<T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Mul<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Mul<&HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1771,7 +1854,7 @@ impl<T: FloatLike> std::ops::Mul<&HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Mul<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Mul<HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1780,17 +1863,17 @@ impl<T: FloatLike> std::ops::Mul<HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Div<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Div<&HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
     fn div(self, rhs: &Self) -> Self::Output {
-        use FloatLike;
+        use Numeric;
         self * rhs.inv()
     }
 }
 
-impl<T: FloatLike> std::ops::Mul<T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Mul<T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1799,7 +1882,7 @@ impl<T: FloatLike> std::ops::Mul<T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Div<&T> for HyperDual<T> {
+impl<T: Numeric> std::ops::Div<&T> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
@@ -1808,17 +1891,17 @@ impl<T: FloatLike> std::ops::Div<&T> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::Div<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::Div<HyperDual<T>> for HyperDual<T> {
     type Output = Self;
 
     #[inline]
     fn div(self, rhs: Self) -> Self::Output {
-        use FloatLike;
+        use Numeric;
         self * rhs.inv()
     }
 }
 
-impl<T: FloatLike> std::ops::AddAssign<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::AddAssign<&HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn add_assign(&mut self, rhs: &HyperDual<T>) {
         for (s, o) in self.values.iter_mut().zip(&rhs.values) {
@@ -1827,14 +1910,14 @@ impl<T: FloatLike> std::ops::AddAssign<&HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::AddAssign<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::AddAssign<HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn add_assign(&mut self, rhs: HyperDual<T>) {
         self.add_assign(&rhs)
     }
 }
 
-impl<T: FloatLike> std::ops::SubAssign<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::SubAssign<&HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: &HyperDual<T>) {
         for (s, o) in self.values.iter_mut().zip(&rhs.values) {
@@ -1843,78 +1926,115 @@ impl<T: FloatLike> std::ops::SubAssign<&HyperDual<T>> for HyperDual<T> {
     }
 }
 
-impl<T: FloatLike> std::ops::SubAssign<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::SubAssign<HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: HyperDual<T>) {
         self.sub_assign(&rhs)
     }
 }
 
-impl<T: FloatLike> std::ops::AddAssign<&T> for HyperDual<T> {
+impl<T: Numeric> std::ops::AddAssign<&T> for HyperDual<T> {
     #[inline]
     fn add_assign(&mut self, rhs: &T) {
         self.values[0] += rhs;
     }
 }
 
-impl<T: FloatLike> std::ops::AddAssign<T> for HyperDual<T> {
+impl<T: Numeric> std::ops::AddAssign<T> for HyperDual<T> {
     #[inline]
     fn add_assign(&mut self, rhs: T) {
         self.values[0] += rhs;
     }
 }
 
-impl<T: FloatLike> std::ops::SubAssign<&T> for HyperDual<T> {
+impl<T: Numeric> std::ops::SubAssign<&T> for HyperDual<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: &T) {
         self.values[0] -= rhs;
     }
 }
 
-impl<T: FloatLike> std::ops::SubAssign<T> for HyperDual<T> {
+impl<T: Numeric> std::ops::SubAssign<T> for HyperDual<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: T) {
         self.values[0] -= rhs;
     }
 }
 
-impl<T: FloatLike> std::ops::MulAssign<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::MulAssign<&HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: &HyperDual<T>) {
         *self = self.clone() * rhs.clone();
     }
 }
 
-impl<T: FloatLike> std::ops::MulAssign<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::MulAssign<HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: HyperDual<T>) {
         *self = self.clone() * rhs;
     }
 }
 
-impl<T: FloatLike> std::ops::DivAssign<&HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::DivAssign<&HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn div_assign(&mut self, rhs: &HyperDual<T>) {
-        use FloatLike;
+        use Numeric;
         *self = rhs.inv() * &*self;
     }
 }
 
-impl<T: FloatLike> std::ops::DivAssign<HyperDual<T>> for HyperDual<T> {
+impl<T: Numeric> std::ops::DivAssign<HyperDual<T>> for HyperDual<T> {
     #[inline]
     fn div_assign(&mut self, rhs: HyperDual<T>) {
-        use FloatLike;
+        use Numeric;
         *self = rhs.inv() * &*self;
     }
 }
 
-impl<T: FloatLike> FloatLike for HyperDual<T> {
+impl<T: Numeric> Numeric for HyperDual<T> {
+    #[inline]
+    fn is_exact_zero(&self) -> bool {
+        self.values.iter().all(|value| value.is_exact_zero())
+    }
+
+    #[inline]
+    fn is_self_conjugate(&self) -> bool {
+        self.values.iter().all(|value| value.is_self_conjugate())
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        if !self.is_self_conjugate() {
+            return None;
+        }
+        let sign = self.values[0].real_sign()?;
+        if sign == std::cmp::Ordering::Equal
+            && !self
+                .values
+                .iter()
+                .all(|value| value.real_sign() == Some(std::cmp::Ordering::Equal))
+        {
+            return None;
+        }
+        Some(sign)
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        // assume variable is real
+        let mut r = self.clone();
+        for x in &mut r.values {
+            *x = x.conj();
+        }
+        r
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(Self {
             values: self
                 .values
                 .iter()
-                .map(FloatLike::nan)
+                .map(Numeric::nan)
                 .collect::<Option<_>>()?,
             shape: self.shape.clone(),
         })
@@ -2046,7 +2166,7 @@ impl<T: FloatLike> FloatLike for HyperDual<T> {
     }
 }
 
-impl<T: SingleFloat> SingleFloat for HyperDual<T> {
+impl<T: Scalar> Scalar for HyperDual<T> {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.values[0].is_zero()
@@ -2073,34 +2193,34 @@ impl<T: SingleFloat> SingleFloat for HyperDual<T> {
 impl<T: Constructible> Constructible for HyperDual<T> {
     #[inline(always)]
     fn new_one() -> Self {
-        let mut res = <Self as FloatLike>::new_zero();
+        let mut res = <Self as Numeric>::new_zero();
         res.values[0] = T::new_one();
         res
     }
 
     #[inline(always)]
     fn new_from_usize(a: usize) -> Self {
-        let mut res = <Self as FloatLike>::new_zero();
+        let mut res = <Self as Numeric>::new_zero();
         res.values[0] = T::new_from_usize(a);
         res
     }
 
     #[inline(always)]
     fn new_from_i64(a: i64) -> Self {
-        let mut res = <Self as FloatLike>::new_zero();
+        let mut res = <Self as Numeric>::new_zero();
         res.values[0] = T::new_from_i64(a);
         res
     }
 
     #[inline(always)]
     fn new_sample_unit<R: rand::Rng + ?Sized>(rng: &mut R) -> Self {
-        let mut res = <Self as FloatLike>::new_zero();
+        let mut res = <Self as Numeric>::new_zero();
         res.values[0] = T::new_sample_unit(rng);
         res
     }
 }
 
-impl<T: Real> Real for HyperDual<T> {
+impl<T: ElementaryFunctions> ElementaryFunctions for HyperDual<T> {
     #[inline(always)]
     fn pi(&self) -> Self {
         let mut res = self.zero();
@@ -2137,16 +2257,6 @@ impl<T: Real> Real for HyperDual<T> {
     }
 
     #[inline(always)]
-    fn conj(&self) -> Self {
-        // assume variable is real
-        let mut r = self.clone();
-        for x in &mut r.values {
-            *x = x.conj();
-        }
-        r
-    }
-
-    #[inline(always)]
     fn norm(&self) -> Self {
         let n = self.values[0].norm();
         if n == self.values[0] {
@@ -2159,7 +2269,7 @@ impl<T: Real> Real for HyperDual<T> {
 
     #[inline(always)]
     fn sqrt(&self) -> Self {
-        use FloatLike;
+        use Numeric;
         let e = self.values[0].sqrt();
 
         let norm = self.values[0].inv(); // TODO: check 0
@@ -2219,6 +2329,60 @@ impl<T: Real> Real for HyperDual<T> {
         }
 
         res * &e
+    }
+
+    #[inline]
+    fn expm1(&self) -> Self {
+        let e = self.values[0].exp();
+        let mut r = self.clone();
+        r.values[0] = self.values[0].zero();
+        let mut term = self.one();
+        let mut result = self.zero();
+        for order in 1..=self.shape.max_pow {
+            term *= &r;
+            term = term * &e.from_usize(order).inv();
+            result += term.clone();
+        }
+        result = result * &e;
+        result.values[0] = self.values[0].expm1();
+        result
+    }
+
+    #[inline]
+    fn sin_cos(&self) -> (Self, Self) {
+        let (s, c) = self.values[0].sin_cos();
+        let mut r = self.clone();
+        r.values[0] = self.values[0].zero();
+        let mut term = self.one();
+        let mut sine = self.zero();
+        let mut cosine = self.zero();
+        sine.values[0] = s.clone();
+        cosine.values[0] = c.clone();
+        for order in 1..=self.shape.max_pow {
+            term *= &r;
+            term = term * &s.from_usize(order).inv();
+            match order % 4 {
+                0 => {
+                    sine += term.clone() * &s;
+                    cosine += term.clone() * &c;
+                }
+                1 => {
+                    sine += term.clone() * &c;
+                    cosine -= term.clone() * &s;
+                }
+                2 => {
+                    sine -= term.clone() * &s;
+                    cosine -= term.clone() * &c;
+                }
+                _ => {
+                    sine -= term.clone() * &c;
+                    cosine += term.clone() * &s;
+                }
+            }
+        }
+        sine.values[0] = s;
+        cosine.values[0] = c;
+        (sine, cosine)
     }
 
     #[inline(always)]
@@ -2385,7 +2549,7 @@ impl<T: Real> Real for HyperDual<T> {
 mod test {
     use crate::domains::{
         dual::HyperDual,
-        float::{FloatLike, Real},
+        float::{ElementaryFunctions, Numeric},
         rational::Rational,
     };
 
@@ -2397,11 +2561,11 @@ mod test {
     #[test]
     fn integer_powers_preserve_components_precision_and_shape() {
         use super::DualNumberStructure;
-        use crate::domains::float::{Complex, Float, SingleFloat};
+        use crate::domains::float::{Complex, Float, Scalar};
 
-        fn carriers<T: Real + SingleFloat>(prototype: T)
+        fn carriers<T: ElementaryFunctions + Scalar>(prototype: T)
         where
-            Complex<T>: Real,
+            Complex<T>: ElementaryFunctions,
         {
             for primal in [0, 2] {
                 let values = [primal, 1, 3, 5, 7]

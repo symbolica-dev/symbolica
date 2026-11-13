@@ -41,7 +41,7 @@
 
 use rand::{Rng, RngCore, SeedableRng};
 
-use crate::domains::float::{Constructible, Real, RealLike};
+use crate::domains::float::{Constructible, ElementaryFunctions, RealScalar};
 
 /// Keep track of statistical quantities, such as the average,
 /// the error and the chi-squared of samples added over multiple
@@ -61,7 +61,9 @@ use crate::domains::float::{Constructible, Real, RealLike};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Default, Clone)]
-pub struct StatisticsAccumulator<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub struct StatisticsAccumulator<
+    T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd,
+> {
     sum: T,
     sum_sq: T,
     total_sum: T,
@@ -85,7 +87,9 @@ pub struct StatisticsAccumulator<T: Real + Constructible + Copy + RealLike + Par
     pub num_zero_evaluations: usize,
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> StatisticsAccumulator<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd>
+    StatisticsAccumulator<T>
+{
     /// Create a new [StatisticsAccumulator].
     pub fn new() -> StatisticsAccumulator<T> {
         StatisticsAccumulator {
@@ -392,19 +396,21 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> StatisticsAccumulat
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub enum Sample<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub enum Sample<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     Continuous(T, Vec<T>),
     Discrete(T, usize, Option<Box<Sample<T>>>), // TODO: flatten
     Uniform(T, Vec<usize>, Vec<T>),
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Default for Sample<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> Default
+    for Sample<T>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Sample<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> Sample<T> {
     /// Construct a new empty sample that can be handed over to [`Grid::sample()`].
     pub fn new() -> Sample<T> {
         Sample::Continuous(T::new_zero(), vec![])
@@ -478,7 +484,7 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Sample<T> {
 /// For uniform probes, `None` in the discrete indices skips that discrete
 /// dimension and includes its full range (Jacobian weight of 1).
 #[derive(Debug, Clone)]
-pub enum Probe<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub enum Probe<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     Continuous(Vec<Option<T>>),
     Discrete(Vec<usize>, Vec<Option<T>>),
     Uniform(Vec<Option<usize>>, Vec<Option<T>>),
@@ -528,7 +534,7 @@ pub enum Probe<T: Real + Constructible + Copy + RealLike + PartialOrd> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub enum Grid<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub enum Grid<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     /// A continuous grid.
     Continuous(ContinuousGrid<T>),
     /// A discrete grid with optional nested grids.
@@ -540,7 +546,7 @@ pub enum Grid<T: Real + Constructible + Copy + RealLike + PartialOrd> {
     Uniform(Vec<usize>, ContinuousGrid<T>),
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Grid<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> Grid<T> {
     /// Sample a position in the grid. The sample is more likely to land in a region
     /// where the function the grid is based on is changing rapidly.
     pub fn sample<R: Rng + ?Sized>(&mut self, rng: &mut R, sample: &mut Sample<T>) {
@@ -689,13 +695,13 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Grid<T> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub struct Bin<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub struct Bin<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     pub pdf: T,
     pub accumulator: StatisticsAccumulator<T>,
     pub sub_grid: Option<Grid<T>>,
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Bin<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> Bin<T> {
     /// Returns `Ok` when this grid can be merged with another grid,
     /// and `Err` when the grids have a different shape.
     pub fn is_mergeable(&self, other: &Bin<T>) -> Result<(), String> {
@@ -730,14 +736,14 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> Bin<T> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub struct DiscreteGrid<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub struct DiscreteGrid<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     pub bins: Vec<Bin<T>>,
     pub accumulator: StatisticsAccumulator<T>,
     max_prob_ratio: T,
     train_on_avg: bool,
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> DiscreteGrid<T> {
     /// Create a new discrete grid with `bins.len()` number of bins, where
     /// each bin may have a sub-grid.
     /// Returns an error if `bins` is empty.
@@ -1026,13 +1032,13 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> DiscreteGrid<T> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub struct ContinuousGrid<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub struct ContinuousGrid<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> {
     pub continuous_dimensions: Vec<ContinuousDimension<T>>,
     pub accumulator: StatisticsAccumulator<T>,
     pub min_probability_density: T,
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd> ContinuousGrid<T> {
     /// Create a new grid with `n_dims` dimensions and `n_bins` bins
     /// per dimension.
     /// Returns an error for zero dimensions, zero bins, or an empty or
@@ -1282,7 +1288,9 @@ impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousGrid<T> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Debug, Clone)]
-pub struct ContinuousDimension<T: Real + Constructible + Copy + RealLike + PartialOrd> {
+pub struct ContinuousDimension<
+    T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd,
+> {
     pub partitioning: Vec<T>,
     bin_accumulator: Vec<StatisticsAccumulator<T>>,
     bin_importance: Vec<T>,
@@ -1293,7 +1301,9 @@ pub struct ContinuousDimension<T: Real + Constructible + Copy + RealLike + Parti
     train_on_avg: bool,
 }
 
-impl<T: Real + Constructible + Copy + RealLike + PartialOrd> ContinuousDimension<T> {
+impl<T: ElementaryFunctions + Constructible + Copy + RealScalar + PartialOrd>
+    ContinuousDimension<T>
+{
     /// Create a new dimension with `n_bins` bins.
     ///
     /// With `min_samples_for_update` grid updates can be prevented if

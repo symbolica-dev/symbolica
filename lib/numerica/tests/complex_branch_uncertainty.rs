@@ -1,5 +1,5 @@
 use numerica::domains::float::{
-    Complex, ErrorPropagatingFloat, Float, FloatLike, Magnitude, Real, RealLike,
+    Complex, ElementaryFunctions, ErrorPropagatingFloat, Float, Magnitude, Numeric, RealScalar,
 };
 
 type Tracked<T> = ErrorPropagatingFloat<T>;

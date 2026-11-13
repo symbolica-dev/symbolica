@@ -4,7 +4,10 @@
 //! errors are NaN. The 32-bit error significand deliberately does not promise
 //! binary64 relative accuracy. These cases do not exercise backend exponent limits.
 use numerica::domains::{
-    float::{ErrorPropagatingFloat as E, Float, FloatLike, Magnitude, Real, RealLike, SingleFloat},
+    float::{
+        ElementaryFunctions, ErrorPropagatingFloat as E, Float, Magnitude, Numeric, RealScalar,
+        Scalar,
+    },
     rational::Rational,
 };
 

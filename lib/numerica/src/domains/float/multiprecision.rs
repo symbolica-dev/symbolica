@@ -11,7 +11,7 @@ use xprec::{CompensatedArithmetic, Df64};
 #[cfg(feature = "float-mpfr")]
 use crate::domains::backend::float::CompleteRound;
 
-use super::{DoubleFloat, FloatLike, Magnitude, Real, RealLike, SingleFloat};
+use super::{DoubleFloat, ElementaryFunctions, Magnitude, Numeric, RealScalar, Scalar};
 use crate::domains::{
     InternalOrdering,
     backend::float::{
@@ -905,7 +905,22 @@ impl From<MultiPrecisionFloat> for Float {
     }
 }
 
-impl FloatLike for Float {
+impl Numeric for Float {
+    #[inline(always)]
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&self.zero().0)
+    }
+
+    #[inline(always)]
+    fn conj(&self) -> Self {
+        self.clone()
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(Float::with_val(self.prec(), f64::NAN))
     }
@@ -1015,7 +1030,7 @@ impl FloatLike for Float {
     }
 }
 
-impl SingleFloat for Float {
+impl Scalar for Float {
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.0 == 0.
@@ -1037,7 +1052,7 @@ impl SingleFloat for Float {
     }
 }
 
-impl RealLike for Float {
+impl RealScalar for Float {
     #[inline]
     fn zero_with_prec_hint(prec: u32) -> Self {
         // Allocate at the final precision instead of creating a one-bit zero
@@ -1073,7 +1088,47 @@ impl RealLike for Float {
     }
 }
 
-impl Real for Float {
+impl ElementaryFunctions for Float {
+    #[inline]
+    fn expm1(&self) -> Self {
+        #[cfg(feature = "float-mpfr")]
+        {
+            self.0.clone().exp_m1().into()
+        }
+        #[cfg(not(feature = "float-mpfr"))]
+        {
+            if self.is_zero() {
+                return self.clone();
+            }
+            if self.0.clone().abs().to_f64() < 0.5 {
+                // exp(x)-1 = 2*exp(x/2)*sinh(x/2), without cancellation near zero.
+                let half = self.0.clone() / 2i64;
+                if half.is_zero() {
+                    return self.clone();
+                }
+                (half.clone().sinh() * half.exp() * 2i64).into()
+            } else {
+                (self.0.clone().exp() - 1.0).into()
+            }
+        }
+    }
+
+    #[inline]
+    fn sin_cos(&self) -> (Self, Self) {
+        #[cfg(feature = "float-mpfr")]
+        {
+            let (sin, cos) = self
+                .0
+                .clone()
+                .sin_cos(MultiPrecisionFloat::new(self.prec()));
+            (sin.into(), cos.into())
+        }
+        #[cfg(not(feature = "float-mpfr"))]
+        {
+            (self.sin(), self.cos())
+        }
+    }
+
     #[cfg(feature = "float-mpfr")]
     #[inline(always)]
     fn log1p(&self) -> Self {
@@ -1112,11 +1167,6 @@ impl Real for Float {
     #[inline(always)]
     fn i(&self) -> Option<Self> {
         None
-    }
-
-    #[inline(always)]
-    fn conj(&self) -> Self {
-        self.clone()
     }
 
     #[inline(always)]
@@ -1300,7 +1350,7 @@ impl Rational {
 
 #[cfg(test)]
 mod precision_tests {
-    use super::{Float, Magnitude, RealLike};
+    use super::{Float, Magnitude, RealScalar};
 
     #[test]
     fn absolute_magnitude_preserves_extended_exponents() {

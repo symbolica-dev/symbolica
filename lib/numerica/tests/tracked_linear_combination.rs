@@ -1,7 +1,7 @@
 use numerica::{
     domains::{
         Ring,
-        float::{Complex, ErrorPropagatingFloat, Float, FloatField, Magnitude, RealLike},
+        float::{Complex, ErrorPropagatingFloat, Float, FloatField, Magnitude, RealScalar},
     },
     linear_combination::LinearCombination,
 };

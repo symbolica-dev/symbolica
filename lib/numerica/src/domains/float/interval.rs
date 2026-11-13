@@ -7,7 +7,9 @@ use std::{
 
 use rand::Rng;
 
-use super::{Complex, Float, FloatLike, Magnitude, Real, RealLike, RoundingDirection, SingleFloat};
+use super::{
+    Complex, ElementaryFunctions, Float, Magnitude, Numeric, RealScalar, RoundingDirection, Scalar,
+};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A closed real interval represented by a center and a nonnegative radius.
@@ -37,12 +39,12 @@ pub type ComplexBall = Complex<RealBall>;
 impl ComplexBall {
     /// Certify that every value in this ball is real and strictly positive.
     pub fn is_strictly_positive(&self) -> bool {
-        self.is_real() && self.re.is_strictly_positive()
+        self.is_self_conjugate() && self.re.is_strictly_positive()
     }
 
     /// Certify that every value in this ball is real and strictly negative.
     pub fn is_strictly_negative(&self) -> bool {
-        self.is_real() && self.re.is_strictly_negative()
+        self.is_self_conjugate() && self.re.is_strictly_negative()
     }
 
     /// Return whether this ball contains zero.
@@ -460,7 +462,53 @@ impl LowerExp for RealBall {
     }
 }
 
-impl FloatLike for RealBall {
+impl Numeric for RealBall {
+    fn is_self_conjugate(&self) -> bool {
+        true
+    }
+
+    fn real_sign(&self) -> Option<Ordering> {
+        if self.is_exact_zero() {
+            Some(Ordering::Equal)
+        } else if self.lower_bound().real_sign() == Some(Ordering::Greater) {
+            Some(Ordering::Greater)
+        } else if self.upper_bound().real_sign() == Some(Ordering::Less) {
+            Some(Ordering::Less)
+        } else {
+            None
+        }
+    }
+
+    fn square(&self) -> Self {
+        let prec = self.get_precision();
+        let lower = self.lower_bound();
+        let upper = self.upper_bound();
+        if !lower.is_finite() || !upper.is_finite() {
+            return self.clone() * self;
+        }
+        let zero = self.center.zero();
+        let (lower, upper) = if lower >= zero {
+            (
+                lower.mul_round(&lower, prec, RoundingDirection::Down),
+                upper.mul_round(&upper, prec, RoundingDirection::Up),
+            )
+        } else if upper <= zero {
+            (
+                upper.mul_round(&upper, prec, RoundingDirection::Down),
+                lower.mul_round(&lower, prec, RoundingDirection::Up),
+            )
+        } else {
+            let left = lower.mul_round(&lower, prec, RoundingDirection::Up);
+            let right = upper.mul_round(&upper, prec, RoundingDirection::Up);
+            (zero, if left > right { left } else { right })
+        };
+        Self::from_outward_bounds(lower, upper, prec)
+    }
+
+    fn conj(&self) -> Self {
+        self.clone()
+    }
+
     fn nan(&self) -> Option<Self> {
         Some(Self {
             center: self.center.nan()?,
@@ -561,7 +609,7 @@ impl FloatLike for RealBall {
     }
 }
 
-impl SingleFloat for RealBall {
+impl Scalar for RealBall {
     fn is_zero(&self) -> bool {
         self.center.is_zero() && self.radius.is_zero()
     }
@@ -579,7 +627,7 @@ impl SingleFloat for RealBall {
     }
 }
 
-impl RealLike for RealBall {
+impl RealScalar for RealBall {
     /// Bound the absolute value of every point in the ball, including its radius.
     fn absolute_magnitude(&self) -> Magnitude {
         self.center.absolute_magnitude() + self.radius.absolute_magnitude()
@@ -614,7 +662,7 @@ impl RealLike for RealBall {
 
 #[cfg(test)]
 mod magnitude_tests {
-    use super::{Float, Magnitude, RealBall, RealLike};
+    use super::{Float, Magnitude, RealBall, RealScalar};
 
     #[test]
     fn absolute_magnitude_includes_radius_and_preserves_extended_range() {
@@ -660,7 +708,7 @@ mod magnitude_tests {
     }
 }
 
-impl Real for RealBall {
+impl ElementaryFunctions for RealBall {
     fn pi(&self) -> Self {
         Self::from_rounded_value(self.center.pi(), self.get_precision())
     }
@@ -679,10 +727,6 @@ impl Real for RealBall {
 
     fn i(&self) -> Option<Self> {
         None
-    }
-
-    fn conj(&self) -> Self {
-        self.clone()
     }
 
     fn norm(&self) -> Self {
@@ -750,6 +794,11 @@ impl Real for RealBall {
 
     fn exp(&self) -> Self {
         self.monotone_increasing(Float::exp)
+    }
+
+    fn expm1(&self) -> Self {
+        // As with exp, this uses rounded endpoint values and is not certifying.
+        self.monotone_increasing(Float::expm1)
     }
 
     fn sin(&self) -> Self {
@@ -1118,7 +1167,7 @@ mod tests {
 #[cfg(test)]
 mod sqrt_tests {
     use crate::domains::{
-        float::{Float, Real, RealBall, SingleFloat},
+        float::{ElementaryFunctions, Float, RealBall, Scalar},
         rational::Rational,
     };
 

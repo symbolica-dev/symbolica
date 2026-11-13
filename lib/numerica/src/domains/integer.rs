@@ -27,7 +27,7 @@ use super::{
         FiniteField, FiniteFieldCore, FiniteFieldElement, FiniteFieldWorkspace, Mersenne32,
         Mersenne64, PrimeIteratorU64, ToFiniteField, Two, Z2, Zp, Zp64,
     },
-    float::{FloatField, FloatLike, Real, RealLike, SingleFloat},
+    float::{ElementaryFunctions, FloatField, Numeric, RealScalar, Scalar},
     rational::Rational,
 };
 
@@ -2135,10 +2135,10 @@ impl Integer {
     /// in [`IntegerRelationError::IterationLimit`]. Initial Hermite reduction does not
     /// count towards `max_iter` and can already find a relation.
     pub fn solve_integer_relation<
-        T: FloatLike
-            + RealLike
-            + Real
-            + SingleFloat
+        T: Numeric
+            + RealScalar
+            + ElementaryFunctions
+            + Scalar
             + std::hash::Hash
             + Eq
             + InternalOrdering
@@ -4170,7 +4170,7 @@ mod test {
     };
 
     #[cfg(feature = "float-mpfr")]
-    use crate::domains::float::{Float, Real};
+    use crate::domains::float::{ElementaryFunctions, Float};
     use crate::domains::{
         Ring,
         finite_field::FiniteFieldWorkspace,

@@ -1,4 +1,4 @@
-use numerica::domains::float::{Float, FloatLike, SingleFloat};
+use numerica::domains::float::{Float, Numeric, Scalar};
 
 const PRECISIONS: &[u32] = &[2, 7, 8, 9, 53, 63, 64, 65, 256, 4096];
 

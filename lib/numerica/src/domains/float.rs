@@ -43,7 +43,15 @@ pub use python::{
     register_python_floats,
 };
 
-pub trait FloatLike:
+#[deprecated(note = "Use Numeric instead")]
+pub use Numeric as FloatLike;
+
+/// Arithmetic and precision operations for exact and approximate numeric values.
+///
+/// Supports exact values such as [Rational] and `Complex<Rational>`, floating-point
+/// numbers such as [Float], and composite domains including dual numbers, intervals,
+/// and SIMD vectors.
+pub trait Numeric:
     PartialEq
     + Clone
     + Debug
@@ -70,6 +78,18 @@ pub trait FloatLike:
     /// Compare ordered scalar values. Non-scalar types may return `None`.
     #[inline]
     fn real_cmp(&self, _other: &Self) -> Option<std::cmp::Ordering> {
+        None
+    }
+
+    /// Return true if conjugation leaves every represented value unchanged. False may mean unknown.
+    #[inline]
+    fn is_self_conjugate(&self) -> bool {
+        false
+    }
+
+    /// Return a known real sign, or `None` when it cannot be established.
+    #[inline]
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
         None
     }
 
@@ -100,12 +120,24 @@ pub trait FloatLike:
         self.is_fully_zero() && !self.has_error()
     }
 
+    /// Return the complex conjugate.
+    fn conj(&self) -> Self;
+
+    /// Compute `self * conj(self)`, preserving the numeric domain.
+    /// Use [ElementaryFunctions::norm] instead of taking the square root of this value, as the squared norm may overflow.
+    #[inline]
+    fn norm_squared(&self) -> Self {
+        self.clone() * self.conj()
+    }
+
     /// Set this value from another value. May reuse memory.
     fn set_from(&mut self, other: &Self);
 
     /// Perform `(self * a) + b`.
     fn mul_add(&self, a: &Self, b: &Self) -> Self;
+    /// Return the additive inverse of this value.
     fn neg(&self) -> Self;
+    /// Construct zero using this value as a precision and shape template.
     fn zero(&self) -> Self;
     /// Construct a NaN, preserving this value's precision and component shape.
     /// Returns `None` for exact types, such as rationals, that cannot represent NaN.
@@ -115,11 +147,46 @@ pub trait FloatLike:
     /// Create a zero that should only be used as a temporary value,
     /// as for some types it may have wrong precision information.
     fn new_zero() -> Self;
+    /// Construct one using this value as a precision and shape template.
     fn one(&self) -> Self;
+    /// Raise this value to the nonnegative integer power `e`.
     fn pow(&self, e: u64) -> Self;
+    /// Compute the algebraic square, without conjugation.
+    #[inline]
+    fn square(&self) -> Self {
+        self.clone() * self
+    }
+
+    /// Raise this value to a signed integer power, inverting first for negative powers.
+    /// Uses binary exponentiation and supports the full `i64` exponent range.
+    fn powi(&self, e: i64) -> Self {
+        if e == 0 {
+            return self.pow(0);
+        }
+        let mut power = if e < 0 { self.inv() } else { self.clone() };
+        let mut exponent = e.unsigned_abs();
+        let mut result: Option<Self> = None;
+        while exponent != 0 {
+            if exponent & 1 != 0 {
+                match &mut result {
+                    Some(result) => *result *= &power,
+                    None => result = Some(power.clone()),
+                }
+            }
+            exponent >>= 1;
+            if exponent != 0 {
+                power = power.square();
+            }
+        }
+        result.unwrap()
+    }
+
+    /// Compute the multiplicative inverse, `1 / self`.
     fn inv(&self) -> Self;
 
+    /// Convert `a` using this value's precision and shape, rounding if needed.
     fn from_usize(&self, a: usize) -> Self;
+    /// Convert `a` using this value's precision and shape, rounding if needed.
     fn from_i64(&self, a: i64) -> Self;
 
     /// Get the number of precise binary digits.
@@ -129,6 +196,7 @@ pub trait FloatLike:
     /// The value is rounded when the precision is lowered. Types with a fixed precision
     /// ignore this call.
     fn set_precision(&mut self, precision: u32);
+    /// Return the relative roundoff scale, typically `2^-precision`, or zero for exact types.
     fn get_epsilon(&self) -> f64;
     /// Return true iff the precision is fixed, or false
     /// if the precision is changed dynamically.
@@ -141,18 +209,29 @@ pub trait FloatLike:
     fn is_fully_zero(&self) -> bool;
 }
 
+#[deprecated(note = "Use Scalar instead")]
+pub use Scalar as SingleFloat;
+
 /// A number that behaves like a single number (excluding simd-like types).
-pub trait SingleFloat: FloatLike {
+pub trait Scalar: Numeric {
+    /// Test whether the value is zero; dual numbers check only their primal component.
     fn is_zero(&self) -> bool;
+    /// Test whether the value is one; dual numbers check only their primal component.
     fn is_one(&self) -> bool;
+    /// Test whether the value is finite; dual numbers check only their primal component.
     fn is_finite(&self) -> bool;
     /// Convert a rational to a float with the same precision as the current float.
     fn from_rational(&self, rat: &Rational) -> Self;
 }
 
+#[deprecated(note = "Use RealScalar instead")]
+pub use RealScalar as RealLike;
+
 /// A number that can be converted to a `usize`, `f64`, or rounded to the nearest integer (excluding complex numbers).
-pub trait RealLike: SingleFloat {
+pub trait RealScalar: Scalar {
+    /// Convert to `usize`, clamping to the range of `usize` if necessary.
     fn to_usize_clamped(&self) -> usize;
+    /// Convert to `f64`, rounding to the nearest representable value.
     fn to_f64(&self) -> f64;
 
     /// Estimate the absolute value as a nonnegative, upward-rounded magnitude.
@@ -185,6 +264,7 @@ pub trait RealLike: SingleFloat {
         Magnitude::ZERO
     }
 
+    /// Round to the nearest integer.
     fn round_to_nearest_integer(&self) -> Integer;
 
     /// Construct zero with a binary precision hint, where supported.
@@ -196,9 +276,12 @@ pub trait RealLike: SingleFloat {
 }
 
 /// A float that can be constructed without any parameters, such as `f64` (excluding multi-precision floats).
-pub trait Constructible: FloatLike {
+pub trait Constructible: Numeric {
+    /// Construct one without a precision or shape template.
     fn new_one() -> Self;
+    /// Convert `a` without a precision or shape template, rounding if needed.
     fn new_from_usize(a: usize) -> Self;
+    /// Convert `a` without a precision or shape template, rounding if needed.
     fn new_from_i64(a: i64) -> Self;
     /// Sample a point on the interval [0, 1].
     fn new_sample_unit<R: Rng + ?Sized>(rng: &mut R) -> Self;
@@ -215,11 +298,12 @@ pub trait FixedPrecision {
         / 100000;
 }
 
-/// A number that behaves like a real number, with constants like π and e
-/// and functions like sine and cosine.
-///
-/// It may also have a notion of an imaginary unit.
-pub trait Real: FloatLike {
+#[deprecated(note = "Use ElementaryFunctions instead")]
+pub use ElementaryFunctions as Real;
+
+/// Elementary functions, mathematical constants, and magnitudes
+/// for real, complex, and composite numeric types.
+pub trait ElementaryFunctions: Numeric {
     /// The constant π, 3.1415926535...
     fn pi(&self) -> Self;
     /// Euler's number, 2.7182818...
@@ -231,8 +315,9 @@ pub trait Real: FloatLike {
     /// The imaginary unit, if it exists.
     fn i(&self) -> Option<Self>;
 
-    fn conj(&self) -> Self;
+    /// The absolute value, or magnitude, of a number.
     fn norm(&self) -> Self;
+
     /// Magnitude of a pair, avoiding unnecessary overflow and underflow.
     #[inline]
     fn hypot(&self, other: &Self) -> Self {
@@ -293,17 +378,41 @@ pub trait Real: FloatLike {
         None
     }
 
+    /// Compute the square root.
     fn sqrt(&self) -> Self;
+    /// Compute the natural logarithm.
     fn log(&self) -> Self;
+    /// Compute the exponential, `e^self`.
     fn exp(&self) -> Self;
+    /// Compute `exp(self) - 1`; override the default to retain accuracy near zero.
+    #[inline]
+    fn expm1(&self) -> Self {
+        self.exp() - self.one()
+    }
+
+    /// Compute the sine, with angles in radians.
     fn sin(&self) -> Self;
+    /// Compute the cosine, with angles in radians.
     fn cos(&self) -> Self;
+    /// Compute the sine and cosine, in that order, with angles in radians.
+    #[inline]
+    fn sin_cos(&self) -> (Self, Self) {
+        (self.sin(), self.cos())
+    }
+
+    /// Compute the tangent, with angles in radians.
     fn tan(&self) -> Self;
+    /// Compute the inverse sine, returning an angle in radians.
     fn asin(&self) -> Self;
+    /// Compute the inverse cosine, returning an angle in radians.
     fn acos(&self) -> Self;
+    /// Compute the arctangent of `self / x` in radians, with quadrant correction for real scalars.
     fn atan2(&self, x: &Self) -> Self;
+    /// Compute the hyperbolic sine.
     fn sinh(&self) -> Self;
+    /// Compute the hyperbolic cosine.
     fn cosh(&self) -> Self;
+    /// Compute the hyperbolic tangent.
     fn tanh(&self) -> Self;
     /// Reciprocal hyperbolic cosine, without overflowing an intermediate cosh.
     #[inline]
@@ -321,8 +430,12 @@ pub trait Real: FloatLike {
         self.sech() / self.tanh()
     }
 
+    /// Compute the inverse hyperbolic sine.
     fn asinh(&self) -> Self;
+    /// Compute the inverse hyperbolic cosine.
     fn acosh(&self) -> Self;
+    /// Compute the inverse hyperbolic tangent.
     fn atanh(&self) -> Self;
+    /// Compute `self` raised to the power of `e`, where `e` is a float of the same type.
     fn powf(&self, e: &Self) -> Self;
 }

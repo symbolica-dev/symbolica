@@ -7,7 +7,9 @@ use std::{
 
 use rand::Rng;
 
-use super::{Complex, FixedPrecision, Float, FloatLike, Magnitude, Real, RealLike, SingleFloat};
+use super::{
+    Complex, ElementaryFunctions, FixedPrecision, Float, Magnitude, Numeric, RealScalar, Scalar,
+};
 use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 
 /// A float that estimates propagated numerical error.
@@ -21,24 +23,24 @@ use crate::domains::{InternalOrdering, integer::Integer, rational::Rational};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]
 #[derive(Copy, Clone)]
-pub struct ErrorPropagatingFloat<T: FloatLike> {
+pub struct ErrorPropagatingFloat<T: Numeric> {
     pub value: T,
     abs_err: Magnitude,
 }
 
-impl<T: FloatLike + InternalOrdering> InternalOrdering for ErrorPropagatingFloat<T> {
+impl<T: Numeric + InternalOrdering> InternalOrdering for ErrorPropagatingFloat<T> {
     fn internal_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.value.internal_cmp(&other.value)
     }
 }
 
-impl<T: FloatLike + Hash> Hash for ErrorPropagatingFloat<T> {
+impl<T: Numeric + Hash> Hash for ErrorPropagatingFloat<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.value.hash(state);
     }
 }
 
-impl<T: FloatLike + Eq> Eq for ErrorPropagatingFloat<T> {}
+impl<T: Numeric + Eq> Eq for ErrorPropagatingFloat<T> {}
 
 impl ErrorPropagatingFloat<Float> {
     /// Write the precision, error, and canonical binary center without decimal rounding.
@@ -211,7 +213,7 @@ impl From<f64> for ErrorPropagatingFloat<Float> {
     }
 }
 
-impl<T: RealLike> From<T> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> From<T> for ErrorPropagatingFloat<T> {
     fn from(value: T) -> Self {
         let scale = if value.is_fully_zero() {
             Magnitude::from_f64(1.)
@@ -225,7 +227,7 @@ impl<T: RealLike> From<T> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: FloatLike> Neg for ErrorPropagatingFloat<T> {
+impl<T: Numeric> Neg for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -237,7 +239,7 @@ impl<T: FloatLike> Neg for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Add<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Add<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -250,7 +252,7 @@ impl<T: RealLike> Add<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Add<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Add<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -259,7 +261,7 @@ impl<T: RealLike> Add<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Sub<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Sub<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -272,7 +274,7 @@ impl<T: RealLike> Sub<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Sub<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Sub<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -281,7 +283,7 @@ impl<T: RealLike> Sub<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Mul<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Mul<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -316,7 +318,7 @@ impl<T: RealLike> Mul<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike + Add<Rational, Output = T>, R: Into<Rational>> Add<R>
+impl<T: RealScalar + Add<Rational, Output = T>, R: Into<Rational>> Add<R>
     for ErrorPropagatingFloat<T>
 {
     type Output = Self;
@@ -331,7 +333,7 @@ impl<T: RealLike + Add<Rational, Output = T>, R: Into<Rational>> Add<R>
     }
 }
 
-impl<T: RealLike + Add<Rational, Output = T>, R: Into<Rational>> Sub<R>
+impl<T: RealScalar + Add<Rational, Output = T>, R: Into<Rational>> Sub<R>
     for ErrorPropagatingFloat<T>
 {
     type Output = Self;
@@ -342,7 +344,7 @@ impl<T: RealLike + Add<Rational, Output = T>, R: Into<Rational>> Sub<R>
     }
 }
 
-impl<T: RealLike + Mul<Rational, Output = T>, R: Into<Rational>> Mul<R>
+impl<T: RealScalar + Mul<Rational, Output = T>, R: Into<Rational>> Mul<R>
     for ErrorPropagatingFloat<T>
 {
     type Output = Self;
@@ -358,7 +360,7 @@ impl<T: RealLike + Mul<Rational, Output = T>, R: Into<Rational>> Mul<R>
     }
 }
 
-impl<T: RealLike + Div<Rational, Output = T>, R: Into<Rational>> Div<R>
+impl<T: RealScalar + Div<Rational, Output = T>, R: Into<Rational>> Div<R>
     for ErrorPropagatingFloat<T>
 {
     type Output = Self;
@@ -374,7 +376,7 @@ impl<T: RealLike + Div<Rational, Output = T>, R: Into<Rational>> Div<R>
     }
 }
 
-impl<T: RealLike + From<f64>> Add<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar + From<f64>> Add<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -383,7 +385,7 @@ impl<T: RealLike + From<f64>> Add<f64> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike + From<f64>> Sub<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar + From<f64>> Sub<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -392,7 +394,7 @@ impl<T: RealLike + From<f64>> Sub<f64> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike + From<f64>> Mul<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar + From<f64>> Mul<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -401,7 +403,7 @@ impl<T: RealLike + From<f64>> Mul<f64> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike + From<f64>> Div<f64> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar + From<f64>> Div<f64> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -410,7 +412,7 @@ impl<T: RealLike + From<f64>> Div<f64> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Mul<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Mul<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -419,7 +421,7 @@ impl<T: RealLike> Mul<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Div<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Div<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -437,7 +439,7 @@ impl<T: RealLike> Div<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Div<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Div<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     type Output = Self;
 
     #[inline]
@@ -446,7 +448,7 @@ impl<T: RealLike> Div<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> AddAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> AddAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn add_assign(&mut self, rhs: &ErrorPropagatingFloat<T>) {
         self.value += &rhs.value;
@@ -455,14 +457,14 @@ impl<T: RealLike> AddAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat
     }
 }
 
-impl<T: RealLike> AddAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> AddAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn add_assign(&mut self, rhs: ErrorPropagatingFloat<T>) {
         self.add_assign(&rhs)
     }
 }
 
-impl<T: RealLike> SubAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> SubAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: &ErrorPropagatingFloat<T>) {
         self.value -= &rhs.value;
@@ -471,14 +473,14 @@ impl<T: RealLike> SubAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat
     }
 }
 
-impl<T: RealLike> SubAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> SubAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn sub_assign(&mut self, rhs: ErrorPropagatingFloat<T>) {
         self.sub_assign(&rhs)
     }
 }
 
-impl<T: RealLike> MulAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> MulAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: &ErrorPropagatingFloat<T>) {
         if self.is_exact_zero() && rhs.value.is_finite()
@@ -509,14 +511,14 @@ impl<T: RealLike> MulAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat
     }
 }
 
-impl<T: RealLike> MulAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> MulAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn mul_assign(&mut self, rhs: ErrorPropagatingFloat<T>) {
         self.mul_assign(&rhs)
     }
 }
 
-impl<T: RealLike> DivAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> DivAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn div_assign(&mut self, rhs: &ErrorPropagatingFloat<T>) {
         if let Some(negative) = rhs.exact_unit_sign() {
@@ -535,14 +537,14 @@ impl<T: RealLike> DivAssign<&ErrorPropagatingFloat<T>> for ErrorPropagatingFloat
     }
 }
 
-impl<T: RealLike> DivAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> DivAssign<ErrorPropagatingFloat<T>> for ErrorPropagatingFloat<T> {
     #[inline]
     fn div_assign(&mut self, rhs: ErrorPropagatingFloat<T>) {
         self.div_assign(&rhs)
     }
 }
 
-impl<T: RealLike> ErrorPropagatingFloat<T> {
+impl<T: RealScalar> ErrorPropagatingFloat<T> {
     /// Create a new precision tracking float with a number of precise decimal digits `prec`.
     /// The `prec` must be smaller than the precision of the underlying float.
     ///
@@ -834,7 +836,7 @@ impl<T: RealLike> ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: FloatLike> ErrorPropagatingFloat<T> {
+impl<T: Numeric> ErrorPropagatingFloat<T> {
     /// Construct with an explicit, nonnegative error magnitude.
     /// Stores the supplied value and error without adding roundoff or changing
     /// the value's precision. Infinity denotes an unbounded estimate; NaN denotes
@@ -864,7 +866,7 @@ impl<T: FloatLike> ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> fmt::Display for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> fmt::Display for ErrorPropagatingFloat<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         if let Some(p) = self.get_precision() {
             if p < 0. {
@@ -880,7 +882,7 @@ impl<T: RealLike> fmt::Display for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> Debug for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Debug for ErrorPropagatingFloat<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Debug::fmt(&self.value, f)?;
 
@@ -894,26 +896,45 @@ impl<T: RealLike> Debug for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> LowerExp for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> LowerExp for ErrorPropagatingFloat<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(self, f)
     }
 }
 
-impl<T: FloatLike> PartialEq for ErrorPropagatingFloat<T> {
+impl<T: Numeric> PartialEq for ErrorPropagatingFloat<T> {
     fn eq(&self, other: &Self) -> bool {
         // TODO: ignore precision for partial equality?
         self.value == other.value
     }
 }
 
-impl<T: FloatLike + PartialOrd> PartialOrd for ErrorPropagatingFloat<T> {
+impl<T: Numeric + PartialOrd> PartialOrd for ErrorPropagatingFloat<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.value.partial_cmp(&other.value)
     }
 }
 
-impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Numeric for ErrorPropagatingFloat<T> {
+    fn is_self_conjugate(&self) -> bool {
+        self.value.is_self_conjugate()
+    }
+
+    fn real_sign(&self) -> Option<std::cmp::Ordering> {
+        if self.abs_err.is_nan() || self.uncertainty_reaches_zero() {
+            None
+        } else {
+            self.value.real_sign()
+        }
+    }
+
+    fn conj(&self) -> Self {
+        ErrorPropagatingFloat {
+            abs_err: self.abs_err,
+            value: self.value.conj(),
+        }
+    }
+
     fn has_error(&self) -> bool {
         !self.abs_err.is_zero()
     }
@@ -1096,7 +1117,7 @@ impl<T: RealLike> FloatLike for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> SingleFloat for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> Scalar for ErrorPropagatingFloat<T> {
     fn is_zero(&self) -> bool {
         self.value.is_zero()
     }
@@ -1120,7 +1141,7 @@ impl<T: RealLike> SingleFloat for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: RealLike> RealLike for ErrorPropagatingFloat<T> {
+impl<T: RealScalar> RealScalar for ErrorPropagatingFloat<T> {
     fn absolute_magnitude(&self) -> Magnitude {
         self.value.absolute_magnitude()
     }
@@ -1151,7 +1172,7 @@ impl<T: RealLike> RealLike for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
+impl<T: ElementaryFunctions + RealScalar> ElementaryFunctions for ErrorPropagatingFloat<T> {
     fn pi(&self) -> Self {
         let v = self.value.pi();
         ErrorPropagatingFloat {
@@ -1198,13 +1219,6 @@ impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
             value: self.value.i()?,
             abs_err: Magnitude::from_f64(1.).scale_pow2(-(self.value.get_precision() as i64)),
         })
-    }
-
-    fn conj(&self) -> Self {
-        ErrorPropagatingFloat {
-            abs_err: self.abs_err,
-            value: self.value.conj(),
-        }
     }
 
     fn copy_sign(&self, sign: &Self) -> Self {
@@ -1382,6 +1396,39 @@ impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
             abs_err += v.minimum_roundoff().max(Magnitude::MIN_POSITIVE);
         }
         ErrorPropagatingFloat { abs_err, value: v }.with_roundoff()
+    }
+
+    fn expm1(&self) -> Self {
+        if self.is_exact_zero() {
+            return self.clone();
+        }
+        let value = self.value.expm1();
+        let derivative = self.value.exp();
+        let abs_err = Self::scaled_error(
+            Self::exponential_change(self.abs_err, false),
+            Self::rounded_magnitude(&derivative),
+        );
+        Self { value, abs_err }.with_roundoff()
+    }
+
+    fn sin_cos(&self) -> (Self, Self) {
+        let (sin, cos) = self.value.sin_cos();
+        let second_order = (self.abs_err * self.abs_err).scale_pow2(-1);
+        let estimate = |value: T, derivative: &T| {
+            let error = Self::scaled_error(self.abs_err, Self::rounded_magnitude(derivative))
+                + second_order;
+            let limit = if self.abs_err.is_nan() {
+                Magnitude::NAN
+            } else {
+                Magnitude::ONE + value.absolute_magnitude()
+            };
+            Self {
+                value,
+                abs_err: Self::bounded_error(error, limit),
+            }
+            .with_roundoff()
+        };
+        (estimate(sin.clone(), &cos), estimate(cos, &sin))
     }
 
     fn sin(&self) -> Self {
@@ -1664,7 +1711,7 @@ impl<T: Real + RealLike> Real for ErrorPropagatingFloat<T> {
     }
 }
 
-impl<T: FloatLike + FixedPrecision> FixedPrecision for ErrorPropagatingFloat<T> {
+impl<T: Numeric + FixedPrecision> FixedPrecision for ErrorPropagatingFloat<T> {
     const BINARY_PRECISION: usize = T::BINARY_PRECISION;
     const DECIMAL_PRECISION: usize = T::DECIMAL_PRECISION;
 }
@@ -1672,14 +1719,15 @@ impl<T: FloatLike + FixedPrecision> FixedPrecision for ErrorPropagatingFloat<T> 
 #[cfg(test)]
 mod hypot_tests {
     use crate::domains::float::{
-        Complex, DoubleFloat, ErrorPropagatingFloat, Float, FloatLike, Real, RealLike, SingleFloat,
+        Complex, DoubleFloat, ElementaryFunctions, ErrorPropagatingFloat, Float, Numeric,
+        RealScalar, Scalar,
     };
 
-    fn tracked<T: FloatLike>(value: T, accuracy: f64) -> ErrorPropagatingFloat<T> {
+    fn tracked<T: Numeric>(value: T, accuracy: f64) -> ErrorPropagatingFloat<T> {
         ErrorPropagatingFloat::new_with_accuracy(value, accuracy)
     }
 
-    fn scaled_hypot<T: Real + RealLike>(one: T) {
+    fn scaled_hypot<T: ElementaryFunctions + RealScalar>(one: T) {
         let big = one.from_usize(10).pow(200);
         let tiny = big.inv();
         for scale in [big, tiny] {
