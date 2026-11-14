@@ -2799,6 +2799,28 @@ impl Token {
         }
     }
 
+    /// Parse one polynomial of the fast `[...]` format with [Token::parse_polynomial],
+    /// ignoring surrounding whitespace and returning an error if part of the
+    /// input is not consumed.
+    fn parse_bracketed_polynomial<R: Ring + ConvertToRing, E: PositiveExponent>(
+        input: &str,
+        var_map: &Arc<Vec<PolyVariable>>,
+        var_name_map: &[SmartString<LazyCompact>],
+        field: &R,
+    ) -> Result<MultivariatePolynomial<R, E>, Cow<'static, str>> {
+        let (rest, poly) =
+            Token::parse_polynomial(input.trim().as_bytes(), var_map, var_name_map, field);
+        if rest.is_empty() {
+            Ok(poly)
+        } else {
+            Err(format!(
+                "Could not parse polynomial in []: unexpected input '{}'",
+                String::from_utf8_lossy(rest)
+            )
+            .into())
+        }
+    }
+
     /// Convert a parsed expression to a rational polynomial if possible,
     /// skipping the conversion to a Symbolica expression. This method
     /// is faster if the parsed expression is already in the same format
@@ -2825,9 +2847,9 @@ impl Token {
                 Err("Empty [] in input")?
             };
 
-            let num = Token::parse_polynomial(num.as_bytes(), var_map, var_name_map, field).1;
+            let num = Self::parse_bracketed_polynomial(num, var_map, var_name_map, field)?;
             let den = if let Some(den) = iter.next() {
-                Token::parse_polynomial(den.as_bytes(), var_map, var_name_map, field).1
+                Self::parse_bracketed_polynomial(den, var_map, var_name_map, field)?
             } else {
                 num.one()
             };
@@ -2934,12 +2956,12 @@ impl Token {
                 Err("Empty [] in input")?
             };
 
-            let num = Token::parse_polynomial(num.as_bytes(), var_map, var_name_map, field).1;
+            let num = Self::parse_bracketed_polynomial(num, var_map, var_name_map, field)?;
 
             let mut dens = vec![];
 
             let den = if let Some(den) = iter.next() {
-                Token::parse_polynomial(den.as_bytes(), var_map, var_name_map, field).1
+                Self::parse_bracketed_polynomial(den, var_map, var_name_map, field)?
             } else {
                 num.one()
             };
@@ -2954,7 +2976,7 @@ impl Token {
                 }
 
                 while let Some(p) = iter.next() {
-                    let den = Token::parse_polynomial(p.as_bytes(), var_map, var_name_map, field).1;
+                    let den = Self::parse_bracketed_polynomial(p, var_map, var_name_map, field)?;
 
                     let p = iter.next().ok_or("Missing power")?;
                     let p = p

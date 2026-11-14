@@ -1906,6 +1906,10 @@ impl Token {
 
     /// A special routine that can parse a polynomial written in expanded form,
     /// where the coefficient comes first.
+    ///
+    /// Parsing stops at the first byte that cannot continue the polynomial,
+    /// such as whitespace or a parenthesis, and the unparsed remainder of the
+    /// input is returned together with the polynomial read so far.
     pub fn parse_polynomial<'a, R: Ring + ConvertToRing, E: PositiveExponent>(
         mut input: &'a [u8],
         var_map: &Arc<Vec<PolyVariable>>,
@@ -1930,9 +1934,17 @@ impl Token {
                 *e = E::zero();
             }
 
+            let term_start = last_pos;
             if c == b'+' {
                 last_pos = input;
                 c = input.get_u8();
+            }
+
+            // a term starts with a sign, a number or a variable: stop at any
+            // other byte (e.g. whitespace) and return the unparsed input
+            // instead of appending empty terms without making progress
+            if c != b'-' && c != b'#' && !c.is_ascii_alphanumeric() {
+                return (term_start, poly);
             }
 
             // read number
@@ -2116,7 +2128,7 @@ mod test {
         atom::{AtomCore, SymbolAttribute},
         domains::{SelfRing, integer::Z},
         parse,
-        parser::Token,
+        parser::{ParseSettings, Token},
         printer::{PrintOptions, PrintState},
         symbol,
     };
@@ -2415,6 +2427,56 @@ mod test {
         assert_eq!(
             input,
             parse!("5+2748*v1^2*v2").to_polynomial(&Z, var_map.clone())
+        );
+    }
+
+    #[test]
+    fn poly_stops_at_unexpected_input() {
+        let var_names = ["v1".into(), "v2".into()];
+        let var_map = Arc::new(vec![symbol!("v1").into(), symbol!("v2").into()]);
+
+        for (input, parsed, rest) in [
+            ("v1 + v2", "v1", " + v2"),
+            ("v1+ v2", "v1", "+ v2"),
+            ("2*v1 -v2", "2*v1", " -v2"),
+            (" v1", "0", " v1"),
+            ("v1+v2\n", "v1+v2", ""),
+        ] {
+            let (r, p) =
+                Token::parse_polynomial::<_, u8>(input.as_bytes(), &var_map, &var_names, &Z);
+            assert_eq!(r, rest.as_bytes(), "{input:?}");
+            assert_eq!(
+                p,
+                parse!(parsed).to_polynomial(&Z, var_map.clone()),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rational_polynomial_fast_format_rejects_unparsed_input() {
+        let var_names = ["v1".into(), "v2".into()];
+        let var_map = Arc::new(vec![symbol!("v1").into(), symbol!("v2").into()]);
+
+        let token = Token::parse("[v1 + v2]", ParseSettings::default()).unwrap();
+        assert!(
+            token
+                .to_rational_polynomial::<_, _, u8>(&Z, &Z, &var_map, &var_names)
+                .is_err()
+        );
+        assert!(
+            token
+                .to_factorized_rational_polynomial::<_, _, u8>(&Z, &Z, &var_map, &var_names)
+                .is_err()
+        );
+
+        let token = Token::parse("[v1+v2, v2]", ParseSettings::default()).unwrap();
+        let r = token
+            .to_rational_polynomial::<_, _, u8>(&Z, &Z, &var_map, &var_names)
+            .unwrap();
+        assert_eq!(
+            r,
+            parse!("(v1+v2)/v2").to_rational_polynomial(&Z, &Z, Some(var_map.clone()))
         );
     }
 
