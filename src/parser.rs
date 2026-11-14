@@ -2076,7 +2076,7 @@ impl Token {
                     .expect("Undefined variable");
 
                 // read pow
-                if c == b'^' {
+                let pow = if c == b'^' {
                     let pow_start = input;
 
                     // read pow
@@ -2095,10 +2095,13 @@ impl Token {
                         len -= 1;
                     }
                     let n = unsafe { std::str::from_utf8_unchecked(&pow_start[..len]) };
-                    exponents[index] = E::from_u32(n.parse::<u32>().unwrap());
+                    n.parse::<u32>().unwrap()
                 } else {
-                    exponents[index] = E::one();
-                }
+                    1
+                };
+
+                // a variable may occur more than once in a term, e.g. `v1*v1`
+                exponents[index] = E::from_u32(exponents[index].to_u32().saturating_add(pow));
 
                 if input.is_empty() {
                     break;
@@ -2448,6 +2451,27 @@ mod test {
             assert_eq!(
                 p,
                 parse!(parsed).to_polynomial(&Z, var_map.clone()),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn poly_repeated_variable() {
+        let var_names = ["v1".into(), "v2".into()];
+        let var_map = Arc::new(vec![symbol!("v1").into(), symbol!("v2").into()]);
+
+        for (input, expected) in [
+            ("v1*v1", "v1^2"),
+            ("3*v1^2*v2*v1", "3*v1^3*v2"),
+            ("v2*v1^2*v2^3+v1*v1", "v1^2*v2^4+v1^2"),
+        ] {
+            let (rest, p) =
+                Token::parse_polynomial::<_, u8>(input.as_bytes(), &var_map, &var_names, &Z);
+            assert!(rest.is_empty(), "{input:?}");
+            assert_eq!(
+                p,
+                parse!(expected).to_polynomial(&Z, var_map.clone()),
                 "{input:?}"
             );
         }
