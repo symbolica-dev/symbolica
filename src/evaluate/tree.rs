@@ -2304,6 +2304,30 @@ pub enum Expression<T> {
 }
 
 impl<T> Expression<T> {
+    /// Return whether the tree calls a function that is not a fixed built-in or has tags.
+    pub fn uses_symbolic_state(&self) -> bool {
+        match self {
+            Expression::Const(..)
+            | Expression::Parameter(..)
+            | Expression::ReadArg(..)
+            | Expression::SubExpression(..) => false,
+            Expression::Fun(_, symbol, tags, args) => {
+                !symbol.is_fixed_builtin()
+                    || !tags.is_empty()
+                    || args.iter().any(Self::uses_symbolic_state)
+            }
+            Expression::Eval(_, _, args) | Expression::Add(_, args) | Expression::Mul(_, args) => {
+                args.iter().any(Self::uses_symbolic_state)
+            }
+            Expression::Pow(_, p) => p.0.uses_symbolic_state(),
+            Expression::Powf(_, p) => p.0.uses_symbolic_state() || p.1.uses_symbolic_state(),
+            Expression::BuiltinFun(_, _, arg) => arg.uses_symbolic_state(),
+            Expression::IfElse(_, b) => {
+                b.0.uses_symbolic_state() || b.1.uses_symbolic_state() || b.2.uses_symbolic_state()
+            }
+        }
+    }
+
     fn get_hash(&self) -> ExpressionHash {
         match self {
             Expression::Const(h, _) => *h,

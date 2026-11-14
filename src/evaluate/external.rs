@@ -250,6 +250,18 @@ impl<T> ExternalFunctionContainer<T> {
         &self.export_name
     }
 
+    /// Return whether the function refers to symbolic data that depends on the Symbolica
+    /// state: a symbol that is not a fixed built-in, tags, or such calls in its body.
+    pub fn uses_symbolic_state(&self) -> bool {
+        !self.symbol.is_fixed_builtin()
+            || !self.tags.is_empty()
+            || self.body.as_ref().is_some_and(|body| {
+                body.instructions
+                    .iter()
+                    .any(|(instruction, _)| instruction.uses_symbolic_state())
+            })
+    }
+
     pub(super) fn tag_views(&self) -> Vec<AtomView<'_>> {
         self.tags.iter().map(|x| x.as_view()).collect()
     }

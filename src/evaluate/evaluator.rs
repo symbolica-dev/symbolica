@@ -36,6 +36,27 @@ pub(super) struct ProgramView<'a, T> {
 }
 
 impl<T> ExpressionEvaluator<T> {
+    /// Return whether the evaluator refers to symbolic data that depends on the
+    /// Symbolica state: functions that are not fixed built-ins, function tags, or such
+    /// calls in the instructions or hot-start expressions. If so, export the
+    /// [`State`](crate::state::State) together with a binary encoding of the evaluator.
+    /// Built-in functions and constants are the same in every state.
+    pub fn uses_symbolic_state(&self) -> bool {
+        self.instructions
+            .iter()
+            .any(|(instruction, _)| instruction.uses_symbolic_state())
+            || self
+                .external_fns
+                .iter()
+                .any(ExternalFunctionContainer::uses_symbolic_state)
+            || self
+                .settings
+                .hot_start
+                .iter()
+                .flatten()
+                .any(Expression::uses_symbolic_state)
+    }
+
     pub(super) fn program(&self) -> ProgramView<'_, T> {
         ProgramView {
             instructions: &self.instructions,

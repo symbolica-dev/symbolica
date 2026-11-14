@@ -11471,7 +11471,8 @@ class Evaluator:
         """
         Save the evaluator to a byte string that can be imported in another thread or machine.
         The external functions are not exported, so they need to be provided separately when importing.
-        Symbolica's symbolic state is included and restored automatically by `load`.
+        If the evaluator refers to functions or tags that are not built-in, Symbolica's symbolic
+        state is included and restored automatically by `load`.
         """
 
     def export_symjit(self, complex: bool = False) -> bytes:
