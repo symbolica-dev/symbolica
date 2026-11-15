@@ -1,6 +1,6 @@
 //! Native algebraic containers use the same frontend and bounded protocol as atoms.
 use super::*;
-use crate::printer::mathml::AlgebraicMathMl;
+use crate::printer::mathml::{AlgebraicMathMl, MathMlPageOptions};
 
 struct Source<T> {
     value: T,
@@ -9,17 +9,19 @@ struct Source<T> {
 
 impl<T: AlgebraicMathMl + Send> MathMLPageSource for Source<T> {
     fn page(&mut self, _: Python<'_>, request: MathMLPageRequest<'_>) -> PyResult<MathMLPage> {
+        let expansions = native_expansions(request.expansions);
         let page = self
             .value
-            .page_expanded(
+            .page(
                 &self.options,
                 request.path,
-                request.start,
-                request.size,
-                request.expansions,
+                &MathMlPageOptions::new()
+                    .start(request.start)
+                    .limit(request.size)
+                    .expansions(&expansions),
             )
             .ok_or_else(|| exceptions::PyValueError::new_err("Unknown algebraic subexpression"))?;
-        let mut result = MathMLPage::new(page.html, page.start, page.end, page.total);
+        let mut result = MathMLPage::new(page.html(), page.start, page.end, page.total);
         result.kind = self.value.kind().into();
         result.unit = "terms".into();
         result.markers = page
@@ -63,7 +65,9 @@ pub(in crate::api::python) fn formatted<T: AlgebraicMathMl + Send + Sync + 'stat
         if backend == FormattedOutputBackend::Latex {
             return Ok(None);
         }
-        let page = value.page(&options, &[], 0, size).unwrap();
+        let page = value
+            .page(&options, &[], &MathMlPageOptions::new().limit(size))
+            .unwrap();
         Ok(Some(match backend {
             FormattedOutputBackend::Html => algebraic_fragment_html(&page.fragment()),
             FormattedOutputBackend::Text if page.is_partial() => format!(

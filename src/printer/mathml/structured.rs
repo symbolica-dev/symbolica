@@ -350,8 +350,10 @@ pub(crate) fn atom_coefficient<W: std::fmt::Write>(
 
 fn omission(live: bool) -> String {
     if live {
-        "<mrow><mo form=\"infix\">+</mo><mtext data-symbolica-marker=\"0\">[1]</mtext></mrow>"
-            .to_owned()
+        format!(
+            "<mrow><mo form=\"infix\">+</mo>{}</mrow>",
+            MathMlMarker::token(0)
+        )
     } else {
         "<mrow><mo form=\"infix\">+</mo><mtext>⋯</mtext></mrow>".to_owned()
     }
@@ -359,43 +361,41 @@ fn omission(live: bool) -> String {
 
 /// Owned algebraic sources page their native storage, without converting the
 /// full object to an expression or serializing hidden terms.
-pub(crate) trait AlgebraicMathMl: SelfRing {
+///
+/// ```
+/// use symbolica::prelude::*;
+/// use symbolica::printer::mathml::{AlgebraicMathMl, MathMlPageOptions};
+///
+/// let p = parse!("x^3 + 2*x^2 + 3*x + 4").to_polynomial::<_, u8>(&Z, [symbol!("x")]);
+/// let page = p.page(&PrintOptions::new(), &[], &MathMlPageOptions::new().limit(2)).unwrap();
+/// assert_eq!((page.end, page.total), (2, 4));
+/// assert_eq!(p.kind(), "Polynomial");
+/// ```
+pub trait AlgebraicMathMl: SelfRing {
+    /// Render a page of the subexpression at the child-index `path`, or return
+    /// `None` if the path does not exist. [`MathMlPageOptions::layout`] is
+    /// ignored; expansions are relative to `path`.
     fn page(
         &self,
         opts: &PrintOptions,
         path: &[usize],
-        start: usize,
-        size: usize,
+        page: &MathMlPageOptions<'_>,
     ) -> Option<MathMlPage>;
-    fn page_expanded(
-        &self,
-        opts: &PrintOptions,
-        path: &[usize],
-        start: usize,
-        size: usize,
-        _expansions: &[(Vec<usize>, usize)],
-    ) -> Option<MathMlPage> {
-        self.page(opts, path, start, size)
-    }
+
+    /// A short name for the kind of object, such as `"Polynomial"`.
     fn kind(&self) -> &'static str;
 }
 
 fn sequence_page(body: String, start: usize, end: usize, total: usize) -> MathMlPage {
-    MathMlPage {
-        html: format!("{MATH_OPEN}{body}{MATH_CLOSE}"),
-        start,
-        end,
-        total,
-        custom: false,
-        markers: if end < total {
-            vec![MathMlMarker {
-                path: vec![],
-                label: "Inspect omitted terms [1]".into(),
-                start: end,
-            }]
-        } else {
-            vec![]
-        },
+    let page = MathMlPage::new(body, start, end, total);
+    if end < total {
+        page.with_markers(vec![MathMlMarker::new(
+            vec![],
+            "Inspect omitted terms [1]",
+            end,
+        )])
+    } else {
+        page
     }
 }
 
@@ -407,17 +407,24 @@ impl<R: Ring, E: Exponent, O: MonomialOrder> AlgebraicMathMl for MultivariatePol
         &self,
         opts: &PrintOptions,
         path: &[usize],
-        start: usize,
-        size: usize,
+        page: &MathMlPageOptions<'_>,
     ) -> Option<MathMlPage> {
         if !path.is_empty() {
             return None;
         }
         let total = self.nterms().max(1);
-        let start = start.min(total - 1);
+        let start = page.start.min(total - 1);
         let mut body = String::new();
-        let (_, end) =
-            polynomial_range(self, opts, PrintState::new(), &mut body, start, size, true).ok()?;
+        let (_, end) = polynomial_range(
+            self,
+            opts,
+            PrintState::new(),
+            &mut body,
+            start,
+            page.limit,
+            true,
+        )
+        .ok()?;
         Some(sequence_page(body, start, end, total))
     }
 }
@@ -430,8 +437,7 @@ impl<R: Ring> AlgebraicMathMl for Series<R> {
         &self,
         opts: &PrintOptions,
         path: &[usize],
-        start: usize,
-        size: usize,
+        page: &MathMlPageOptions<'_>,
     ) -> Option<MathMlPage> {
         if !path.is_empty() {
             return None;
@@ -441,10 +447,18 @@ impl<R: Ring> AlgebraicMathMl for Series<R> {
             .filter(|(_, c)| !self.get_field().is_zero(c))
             .count()
             .max(1);
-        let start = start.min(total - 1);
+        let start = page.start.min(total - 1);
         let mut body = String::new();
-        let (_, end) =
-            series_range(self, opts, PrintState::new(), &mut body, start, size, true).ok()?;
+        let (_, end) = series_range(
+            self,
+            opts,
+            PrintState::new(),
+            &mut body,
+            start,
+            page.limit,
+            true,
+        )
+        .ok()?;
         Some(sequence_page(body, start, end, total))
     }
 }
@@ -457,61 +471,45 @@ impl<R: Ring, E: PositiveExponent> AlgebraicMathMl for RationalPolynomial<R, E> 
         &self,
         opts: &PrintOptions,
         path: &[usize],
-        start: usize,
-        size: usize,
+        page: &MathMlPageOptions<'_>,
     ) -> Option<MathMlPage> {
-        self.page_expanded(opts, path, start, size, &[])
-    }
-    fn page_expanded(
-        &self,
-        opts: &PrintOptions,
-        path: &[usize],
-        start: usize,
-        size: usize,
-        expansions: &[(Vec<usize>, usize)],
-    ) -> Option<MathMlPage> {
+        let plain = MathMlPageOptions::new().start(page.start).limit(page.limit);
         if let Some((part, rest)) = path.split_first() {
             return match part {
-                0 => self.numerator.page(opts, rest, start, size),
-                1 => self.denominator.page(opts, rest, start, size),
+                0 => self.numerator.page(opts, rest, &plain),
+                1 => self.denominator.page(opts, rest, &plain),
                 _ => None,
             };
         }
         if self.denominator.is_one() {
-            return self.numerator.page(opts, path, start, size);
+            return self.numerator.page(opts, path, &plain);
         }
         let inner = PrintOptions {
             print_ring: false,
             ..opts.clone()
         };
         let limit = |part| {
-            expansions
-                .iter()
-                .filter(|(path, _)| path.as_slice() == [part])
-                .map(|(_, count)| *count)
-                .max()
-                .unwrap_or(size)
-                .max(size)
+            page.expansion(&[part])
+                .unwrap_or(page.limit)
+                .max(page.limit)
                 .min(500)
         };
-        let num = self.numerator.page(&inner, &[], 0, limit(0))?;
-        let den = self.denominator.page(&inner, &[], 0, limit(1))?;
+        let num = self
+            .numerator
+            .page(&inner, &[], &MathMlPageOptions::new().limit(limit(0)))?;
+        let den = self
+            .denominator
+            .page(&inner, &[], &MathMlPageOptions::new().limit(limit(1)))?;
         let mut markers = vec![];
         let mut parts = vec![];
         for (part, page) in [num, den].into_iter().enumerate() {
-            let mut body =
-                page.html[MATH_OPEN.len()..page.html.len() - MATH_CLOSE.len()].to_owned();
+            let mut body = page.body().to_owned();
             if !page.markers.is_empty() {
                 let id = markers.len();
-                body = body
-                    .replace(
-                        "data-symbolica-marker=\"0\"",
-                        &format!("data-symbolica-marker=\"{id}\""),
-                    )
-                    .replace(">[1]</mtext>", &format!(">[{}]</mtext>", id + 1));
-                markers.push(MathMlMarker {
-                    path: vec![part],
-                    label: format!(
+                body = body.replace(&MathMlMarker::token(0), &MathMlMarker::token(id));
+                markers.push(MathMlMarker::new(
+                    vec![part],
+                    format!(
                         "Inspect {} [{}]",
                         if part == 0 {
                             "numerator"
@@ -520,20 +518,13 @@ impl<R: Ring, E: PositiveExponent> AlgebraicMathMl for RationalPolynomial<R, E> 
                         },
                         id + 1
                     ),
-                    start: page.end,
-                });
+                    page.end,
+                ));
             }
             parts.push(body);
         }
         let mut body = format!("<mfrac>{}{}</mfrac>", parts[0], parts[1]);
         domain(self.numerator.ring(), opts, &mut body);
-        Some(MathMlPage {
-            html: format!("{MATH_OPEN}{body}{MATH_CLOSE}"),
-            start: 0,
-            end: 1,
-            total: 1,
-            markers,
-            custom: false,
-        })
+        Some(MathMlPage::new(body, 0, 1, 1).with_markers(markers))
     }
 }

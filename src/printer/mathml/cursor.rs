@@ -21,13 +21,31 @@ struct Bookmarks {
     cursors: VecDeque<Cursor>,
 }
 
-pub(crate) struct MathMlCursorCache<'a> {
+/// A bounded cache of positions in a borrowed expression, used to resume
+/// paged MathML rendering and to locate omitted subexpressions by path.
+///
+/// The cache is `Send + Sync` and uses interior mutability, so one cache can be
+/// shared by concurrent renders of the same expression. Its memory use is
+/// bounded regardless of how many pages are requested.
+///
+/// ```
+/// use symbolica::{parse, printer::{PrintOptions, mathml::{MathMlCursorCache, MathMlPageOptions}}};
+///
+/// let e = parse!("f(a + b, g(c))");
+/// let cursors = MathMlCursorCache::new(e.as_view());
+/// let inner = cursors.locate(&[1, 0]).unwrap();
+/// assert_eq!(inner, parse!("c").as_view());
+/// let page = inner.render_mathml_page_cached(&PrintOptions::new(), &MathMlPageOptions::new(), &cursors, None);
+/// assert!(page.is_ok());
+/// ```
+pub struct MathMlCursorCache<'a> {
     expression: AtomView<'a>,
     bookmarks: Mutex<Bookmarks>,
 }
 
 impl<'a> MathMlCursorCache<'a> {
-    pub(crate) fn new(expression: AtomView<'a>) -> Self {
+    /// Create an empty cache for `expression`.
+    pub fn new(expression: AtomView<'a>) -> Self {
         Self {
             expression,
             bookmarks: Mutex::default(),
@@ -45,7 +63,9 @@ impl<'a> MathMlCursorCache<'a> {
         (end <= root.len()).then_some(start..end)
     }
 
-    pub(crate) fn locate(&self, path: &[usize]) -> Option<AtomView<'_>> {
+    /// Locate the subexpression at the child-index `path`, as reported by
+    /// [`MathMlMarker::path`](super::MathMlMarker::path).
+    pub fn locate(&self, path: &[usize]) -> Option<AtomView<'_>> {
         let prefix = {
             let mut bookmarks = self.bookmarks.lock().unwrap();
             let index = bookmarks

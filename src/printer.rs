@@ -19,7 +19,7 @@ use crate::{
 
 pub use numerica::printer::*;
 
-pub(crate) mod mathml;
+pub mod mathml;
 
 /// Track if Symbolica should colorize output, based on the `SYMBOLICA_COLOR` environment variable or if stdout is a terminal.
 static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {

@@ -4455,8 +4455,7 @@ impl PythonExpression {
     pub fn _repr_html_(&self) -> PyResult<String> {
         Ok(display::preview(&self.expr.as_view().render_mathml_page(
             &display::default_options(),
-            0,
-            crate::printer::mathml::DEFAULT_PAGE_SIZE,
+            &crate::printer::mathml::MathMlPageOptions::new(),
         )))
     }
 
@@ -4505,8 +4504,7 @@ impl PythonExpression {
             .as_view()
             .render_mathml_page(
                 &display::default_options(),
-                0,
-                crate::printer::mathml::DEFAULT_PAGE_SIZE,
+                &crate::printer::mathml::MathMlPageOptions::new(),
             )
             .is_partial()
         {

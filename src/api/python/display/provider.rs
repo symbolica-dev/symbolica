@@ -25,10 +25,7 @@ impl MathMLMarker {
     /// Insert this at the marker's zero-based index in `MathMLPage::markers`.
     /// Operators and fences belong outside the returned MathML.
     pub fn marker(index: usize) -> String {
-        format!(
-            "<mtext data-symbolica-marker=\"{index}\">[{}]</mtext>",
-            index as u128 + 1
-        )
+        crate::printer::mathml::MathMlMarker::token(index)
     }
 
     /// Construct the corresponding public Python object.

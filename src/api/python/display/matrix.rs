@@ -79,26 +79,25 @@ impl Source<'_> {
                     .iter()
                     .filter_map(|(path, count)| {
                         path.strip_prefix(&[index])
-                            .map(|rest| (rest.to_vec(), *count))
+                            .map(|rest| MathMlExpansion::new(rest.to_vec(), *count))
                     })
                     .collect::<Vec<_>>();
                 let compact_size = (self.cell_size >> request.layout).max(1);
-                let size = expansions
-                    .iter()
-                    .filter(|(path, _)| path.is_empty())
-                    .map(|(_, count)| *count)
-                    .max()
+                let options = MathMlPageOptions::new().expansions(&expansions);
+                let size = options
+                    .expansion(&[])
                     .unwrap_or(compact_size)
                     .max(compact_size);
                 let page = self
                     .entry(index)?
-                    .page_expanded(&default_options(), &[], 0, size, &expansions)
+                    .page(&default_options(), &[], &options.limit(size))
                     .unwrap();
+                let page_html = page.html();
                 // Small, complete values should not become omission buttons
                 // just because earlier rows used the detailed-expression budget.
                 // The shared provider still enforces the hard page-size limit.
-                let detailed = !page.markers.is_empty() || page.html.len() > 1024;
-                if (detailed && bytes + page.html.len() > HTML_BUDGET)
+                let detailed = !page.markers.is_empty() || page_html.len() > 1024;
+                if (detailed && bytes + page_html.len() > HTML_BUDGET)
                     || markers.len() + page.markers.len() > 900
                 {
                     let id = markers.len();
@@ -110,21 +109,16 @@ impl Source<'_> {
                     ));
                 } else {
                     if detailed {
-                        bytes += page.html.len();
+                        bytes += page_html.len();
                     }
                     let offset = markers.len();
-                    let mut html = page.html;
+                    let mut html = page_html;
                     // Descending replacement avoids renumbering an ID twice.
                     for id in (0..page.markers.len()).rev() {
-                        html = html
-                            .replace(
-                                &format!("data-symbolica-marker=\"{id}\""),
-                                &format!("data-symbolica-marker=\"{}\"", offset + id),
-                            )
-                            .replace(
-                                &format!(">[{}]</mtext>", id + 1),
-                                &format!(">[{}]</mtext>", offset + id + 1),
-                            );
+                        html = html.replace(
+                            &mathml::MathMlMarker::token(id),
+                            &mathml::MathMlMarker::token(offset + id),
+                        );
                     }
                     if static_output {
                         html = super::html::wrapping_mathml(&html).unwrap_or(html);
@@ -178,16 +172,18 @@ impl MathMLPageSource for Source<'static> {
         } else {
             request.size
         };
+        let expansions = native_expansions(request.expansions);
         let page = value
-            .page_expanded(
+            .page(
                 &default_options(),
                 path,
-                request.start,
-                size,
-                request.expansions,
+                &MathMlPageOptions::new()
+                    .start(request.start)
+                    .limit(size)
+                    .expansions(&expansions),
             )
             .ok_or_else(|| exceptions::PyValueError::new_err("Unknown matrix subexpression"))?;
-        let mut result = MathMLPage::new(page.html, page.start, page.end, page.total);
+        let mut result = MathMLPage::new(page.html(), page.start, page.end, page.total);
         let cols = self.matrix.matrix.ncols();
         result.kind = format!("Entry ({}, {})", entry / cols + 1, entry % cols + 1);
         result.unit = "terms".into();

@@ -5,14 +5,15 @@ mod compact;
 mod cursor;
 mod structured;
 use cursor::MathMlChildren;
-pub(crate) use cursor::MathMlCursorCache;
-pub(crate) use structured::{
-    AlgebraicMathMl, atom_coefficient, polynomial, rational_polynomial, series,
-};
+pub use cursor::MathMlCursorCache;
+pub use structured::AlgebraicMathMl;
+pub(crate) use structured::{atom_coefficient, polynomial, rational_polynomial, series};
 
-pub(crate) const DEFAULT_PAGE_SIZE: usize = 25;
+/// The default number of items rendered on one page.
+pub const DEFAULT_PAGE_SIZE: usize = 25;
 // Bounded alternatives let each notebook view fit locally without kernel traffic.
-pub(crate) const LAYOUTS: [(usize, usize); 8] = [
+// Each entry is a (nested item limit, depth limit) pair.
+const LAYOUTS: [(usize, usize); 8] = [
     (500, 32),
     (32, 24),
     (16, 20),
@@ -33,50 +34,270 @@ const PRODUCT_ROW_COST: usize = 48;
 const MATH_OPEN: &str = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" displaystyle=\"true\" style=\"font-family:'STIX Two Math',math;font-size:21px;font-synthesis:none\">";
 const MATH_CLOSE: &str = "</math>";
 
-pub(crate) struct MathMlPage {
-    pub html: String,
-    pub start: usize,
-    pub end: usize,
-    pub total: usize,
-    pub markers: Vec<MathMlMarker>,
-    pub custom: bool,
+/// One of a fixed set of bounded layouts, from most to least detailed.
+///
+/// Less detailed layouts abbreviate nested expressions sooner, so that the
+/// same page fits in less space. Algebraic containers ignore the layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MathMlLayout(u8);
+
+impl MathMlLayout {
+    /// The number of available layouts.
+    pub const COUNT: usize = LAYOUTS.len();
+    /// The most detailed layout, which is the default.
+    pub const DETAILED: Self = Self(0);
+    /// The least detailed layout.
+    pub const COMPACT: Self = Self(LAYOUTS.len() as u8 - 1);
+
+    /// The layout with the given index, or `None` if `index >= COUNT`.
+    pub const fn new(index: usize) -> Option<Self> {
+        if index < Self::COUNT {
+            Some(Self(index as u8))
+        } else {
+            None
+        }
+    }
+
+    /// The index of this layout, in `0..COUNT`.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// All layouts, from most to least detailed.
+    pub fn all() -> impl ExactSizeIterator<Item = Self> + DoubleEndedIterator {
+        (0..Self::COUNT as u8).map(Self)
+    }
+
+    /// The maximum number of items shown in a nested expression.
+    pub const fn nested_limit(self) -> usize {
+        LAYOUTS[self.0 as usize].0
+    }
+
+    /// The maximum nesting depth shown before a subexpression is omitted.
+    pub const fn depth_limit(self) -> usize {
+        LAYOUTS[self.0 as usize].1
+    }
 }
 
-pub(crate) struct MathMlMarker {
+/// A request to show more of an omitted subexpression.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MathMlExpansion {
+    /// The child-index path of the subexpression, relative to the rendered root.
     pub path: Vec<usize>,
-    pub label: String,
+    /// The number of items to show for the subexpression.
+    pub count: usize,
+}
+
+impl MathMlExpansion {
+    /// Show `count` items of the subexpression at `path`.
+    pub fn new(path: Vec<usize>, count: usize) -> Self {
+        Self { path, count }
+    }
+}
+
+impl From<(Vec<usize>, usize)> for MathMlExpansion {
+    fn from((path, count): (Vec<usize>, usize)) -> Self {
+        Self { path, count }
+    }
+}
+
+/// Which part of an expression to render, and how.
+///
+/// ```
+/// use symbolica::printer::mathml::{MathMlLayout, MathMlPageOptions};
+///
+/// let page = MathMlPageOptions::new().start(25).limit(10).layout(MathMlLayout::COMPACT);
+/// assert_eq!(page.limit, 10);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MathMlPageOptions<'a> {
+    /// The index of the first top-level item.
     pub start: usize,
+    /// The maximum number of top-level items.
+    pub limit: usize,
+    /// The layout used for nested expressions.
+    pub layout: MathMlLayout,
+    /// Omitted subexpressions to show in more detail.
+    pub expansions: &'a [MathMlExpansion],
+}
+
+impl Default for MathMlPageOptions<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> MathMlPageOptions<'a> {
+    /// The first [`DEFAULT_PAGE_SIZE`] items in the most detailed layout.
+    pub const fn new() -> Self {
+        Self {
+            start: 0,
+            limit: DEFAULT_PAGE_SIZE,
+            layout: MathMlLayout::DETAILED,
+            expansions: &[],
+        }
+    }
+
+    /// Start at top-level item `start`.
+    pub const fn start(mut self, start: usize) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Show at most `limit` top-level items.
+    pub const fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// Use `layout` for nested expressions.
+    pub const fn layout(mut self, layout: MathMlLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Show the listed omitted subexpressions in more detail.
+    pub const fn expansions(mut self, expansions: &'a [MathMlExpansion]) -> Self {
+        self.expansions = expansions;
+        self
+    }
+
+    /// The requested number of items shown at `path`, if it is expanded.
+    pub fn expansion(&self, path: &[usize]) -> Option<usize> {
+        self.expansions
+            .iter()
+            .filter(|e| e.path == path)
+            .map(|e| e.count)
+            .max()
+    }
+}
+
+/// A bounded page of MathML output.
+///
+/// Omitted subtrees are display metadata only; they are never substituted in
+/// the underlying expression. Each omission is shown as a numbered `[n]` token
+/// that corresponds to `markers[n - 1]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MathMlPage {
+    body: String,
+    /// The index of the first top-level item on this page.
+    pub start: usize,
+    /// One past the index of the last top-level item on this page.
+    pub end: usize,
+    /// The total number of top-level items.
+    pub total: usize,
+    /// Omitted nested expressions, in the order of their `[n]` labels.
+    pub markers: Vec<MathMlMarker>,
+    /// Whether a custom printer rendered the root as a single item, so that its
+    /// children are not paged.
+    pub opaque: bool,
+}
+
+/// A reference to an omitted expression in a [`MathMlPage`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct MathMlMarker {
+    /// The child-index path from the root to the omitted expression.
+    pub path: Vec<usize>,
+    /// A human-readable label for the omission.
+    pub label: String,
+    /// The index of the first omitted item within the expression at `path`.
+    pub start: usize,
+}
+
+impl MathMlMarker {
+    /// An omission of the items from `start` onwards of the expression at `path`.
+    pub fn new(path: Vec<usize>, label: impl Into<String>, start: usize) -> Self {
+        Self {
+            path,
+            label: label.into(),
+            start,
+        }
+    }
+
+    /// The `<mtext>` token that shows the omission with index `index` in a page.
+    pub fn token(index: usize) -> String {
+        format!(
+            "<mtext data-symbolica-marker=\"{index}\">[{}]</mtext>",
+            index as u128 + 1
+        )
+    }
 }
 
 impl MathMlPage {
-    pub(crate) fn fragment(&self) -> std::borrow::Cow<'_, str> {
-        let body = &self.html[MATH_OPEN.len()..self.html.len() - MATH_CLOSE.len()];
+    /// A page with MathML `body`, without the enclosing `<math>` element,
+    /// showing items `start..end` of `total`. Omissions in `body` must use
+    /// [`MathMlMarker::token`] and be listed with [`MathMlPage::with_markers`].
+    pub fn new(body: impl Into<String>, start: usize, end: usize, total: usize) -> Self {
+        Self {
+            body: body.into(),
+            start,
+            end,
+            total,
+            markers: vec![],
+            opaque: false,
+        }
+    }
+
+    /// Set the omissions listed in the body.
+    pub fn with_markers(mut self, markers: Vec<MathMlMarker>) -> Self {
+        self.markers = markers;
+        self
+    }
+
+    /// The MathML body without the enclosing `<math>` element, including the
+    /// numbered omission tokens.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// The complete `<math>` element, including the numbered omission tokens.
+    pub fn html(&self) -> String {
+        format!("{MATH_OPEN}{}{MATH_CLOSE}", self.body)
+    }
+
+    /// The MathML body without the enclosing `<math>` element, with omission
+    /// tokens replaced by an ellipsis. Use this for static output.
+    pub fn fragment(&self) -> std::borrow::Cow<'_, str> {
         if self.markers.is_empty() {
-            return std::borrow::Cow::Borrowed(body);
+            return std::borrow::Cow::Borrowed(&self.body);
         }
         // A plain formatter has no live page metadata. Keep omissions visible,
         // without creating marker links that cannot be resolved by its caller.
-        let mut body = body.to_owned();
+        let mut body = self.body.clone();
         for index in 0..self.markers.len() {
-            body = body.replace(
-                &format!(
-                    "<mtext data-symbolica-marker=\"{index}\">[{}]</mtext>",
-                    index + 1
-                ),
-                "<mtext>⋯</mtext>",
-            );
+            body = body.replace(&MathMlMarker::token(index), "<mtext>⋯</mtext>");
         }
         std::borrow::Cow::Owned(body)
     }
 
+    /// Whether anything was omitted from this page.
     pub fn is_partial(&self) -> bool {
         self.start != 0 || self.end < self.total || !self.markers.is_empty()
     }
 }
 
-// Keep Python errors in the page source; the native renderer only needs to stop.
-pub(crate) type SemanticPrinter<'a> =
-    dyn FnMut(AtomView<'_>, &PrintOptions, &PrintState) -> Result<Option<String>, ()> + 'a;
+/// The error returned when a [`SemanticPrinter`] aborts rendering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct MathMlAborted;
+
+impl std::fmt::Display for MathMlAborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MathML rendering was aborted by the semantic printer")
+    }
+}
+
+impl std::error::Error for MathMlAborted {}
+
+/// A custom printer that may override the MathML of variables and functions.
+///
+/// Return `Ok(Some(fragment))` to replace the rendering with a single grouped
+/// MathML fragment without a `<math>` root, `Ok(None)` to use the default
+/// rendering, and `Err(MathMlAborted)` to abort rendering. Keep any richer
+/// error information in the printer's captured state.
+pub type SemanticPrinter<'a> = dyn FnMut(AtomView<'_>, &PrintOptions, &PrintState) -> Result<Option<String>, MathMlAborted>
+    + 'a;
 
 struct Renderer<'a, 'r> {
     opts: &'a PrintOptions,
@@ -91,7 +312,7 @@ struct Renderer<'a, 'r> {
     budget_holes: usize,
     nested_limit: usize,
     depth_limit: usize,
-    expansions: &'a [(Vec<usize>, usize)],
+    expansions: &'a [MathMlExpansion],
     multiline_sums: bool,
     markers: Vec<MathMlMarker>,
     semantic: Option<&'r mut SemanticPrinter<'r>>,
@@ -481,10 +702,7 @@ impl Renderer<'_, '_> {
         if matches!(atom, AtomView::Fun(_))
             || (start == 0 && matches!(atom, AtomView::Add(_) | AtomView::Mul(_)))
         {
-            return format!(
-                "<mtext data-symbolica-marker=\"{index}\">[{}]</mtext>",
-                index + 1
-            );
+            return MathMlMarker::token(index);
         }
         let marker_type = match atom {
             AtomView::Add(_) => "+",
@@ -505,8 +723,8 @@ impl Renderer<'_, '_> {
             ""
         };
         format!(
-            "<mrow><mo form=\"infix\">{marker_type}</mo>{gap}<mtext data-symbolica-marker=\"{index}\">[{}]</mtext></mrow>",
-            index + 1
+            "<mrow><mo form=\"infix\">{marker_type}</mo>{gap}{}</mrow>",
+            MathMlMarker::token(index)
         )
     }
 
@@ -545,7 +763,7 @@ impl Renderer<'_, '_> {
         match semantic(atom, self.opts, &state) {
             Ok(Some(fragment)) => self.custom_fragment(atom, path, fragment, true),
             Ok(None) => None,
-            Err(()) => {
+            Err(MathMlAborted) => {
                 self.failed = true;
                 Some(String::new())
             }
@@ -631,9 +849,9 @@ impl Renderer<'_, '_> {
         let depth_limit = self
             .expansions
             .iter()
-            .filter(|(p, _)| p.starts_with(path) || path.starts_with(p))
-            .fold(self.depth_limit, |limit, (p, _)| {
-                limit.max((p.len() + 4).min(64))
+            .filter(|e| e.path.starts_with(path) || path.starts_with(&e.path))
+            .fold(self.depth_limit, |limit, e| {
+                limit.max((e.path.len() + 4).min(64))
             });
         if self.hard_semantic_limit(atom, depth) {
             self.budget_exhausted |= self.nodes == 0 || self.bytes < MAX_LEAF_BYTES;
@@ -853,10 +1071,10 @@ impl Renderer<'_, '_> {
         let mut limit = self
             .expansions
             .iter()
-            .find(|(p, _)| p == path)
-            .map_or(limit, |(_, count)| *count);
+            .find(|e| e.path == *path)
+            .map_or(limit, |e| e.count);
         // A compact alternative must retain the ancestors of an expanded part.
-        for (p, _) in self.expansions {
+        for MathMlExpansion { path: p, .. } in self.expansions {
             if depth > 0 && p.starts_with(path) && p.len() > path.len() {
                 limit = limit.max((p[path.len()] + 1).saturating_sub(start));
             }
@@ -940,7 +1158,7 @@ impl Renderer<'_, '_> {
         let mut body = String::new();
         let expanded_sum = depth > 0
             && matches!(atom, AtomView::Add(_))
-            && (self.multiline_sums || self.expansions.iter().any(|(p, _)| p == path));
+            && (self.multiline_sums || self.expansions.iter().any(|e| e.path == *path));
         let previous_nested_limit = self.nested_limit;
         let previous_depth_limit = self.depth_limit;
         if matches!(atom, AtomView::Add(_)) && (depth == 0 || expanded_sum) {
@@ -948,7 +1166,7 @@ impl Renderer<'_, '_> {
             // paying for additional rows by folding each term's factors.
             // Keep the ordinary node/text/depth bounds: if a term exhausts
             // them, the loop retains one navigable sum suffix.
-            self.nested_limit = LAYOUTS[0].0;
+            self.nested_limit = MathMlLayout::DETAILED.nested_limit();
             self.depth_limit = self.depth_limit.max((depth + 4).min(MAX_DEPTH));
         }
         let mut expanded_terms = Vec::new();
@@ -1134,7 +1352,7 @@ impl Renderer<'_, '_> {
         // Every root product needs factor boundaries: even two factors may be
         // wider than the available notebook cell. The browser repacks these
         // rows with the loaded font, while static output keeps a bounded fallback.
-        let expanded = self.expansions.iter().any(|(p, _)| p == path);
+        let expanded = self.expansions.iter().any(|e| e.path == *path);
         let multiline = depth == 0 || expanded;
         let previous_nested_limit = self.nested_limit;
         if expanded {
@@ -1430,12 +1648,9 @@ impl<'a> AtomView<'a> {
         state: PrintState,
     ) -> Result<bool, std::fmt::Error> {
         let page = self
-            .render_mathml_layout_with_state(
+            .render_mathml_page_with_state(
                 options,
-                0,
-                options.max_terms.unwrap_or(usize::MAX),
-                0,
-                &[],
+                &MathMlPageOptions::new().limit(options.max_terms.unwrap_or(usize::MAX)),
                 state,
                 None,
                 None,
@@ -1486,71 +1701,59 @@ impl<'a> AtomView<'a> {
 
     /// Render one page, retaining paths to omitted nested expressions. Rendering
     /// and output are bounded; locating a page scans the preceding children.
-    pub(crate) fn render_mathml_page(
+    ///
+    /// ```
+    /// use symbolica::{parse, printer::{PrintOptions, mathml::MathMlPageOptions}};
+    ///
+    /// let e = parse!("a + b + c + d");
+    /// let page = e.as_view().render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new().limit(2));
+    /// assert_eq!((page.start, page.end, page.total), (0, 2, 4));
+    /// assert!(page.is_partial());
+    /// ```
+    pub fn render_mathml_page(
         self,
         options: &PrintOptions,
-        start: usize,
-        limit: usize,
+        page: &MathMlPageOptions<'_>,
     ) -> MathMlPage {
-        self.render_mathml_layout(options, start, limit, 0, &[])
+        self.render_mathml_page_with_state(options, page, PrintState::new(), None, None)
+            .unwrap()
     }
 
-    pub(crate) fn render_mathml_layout(
+    /// Like [`AtomView::render_mathml_page`], reusing the bookmarks in `cursors`
+    /// to resume deep pages quickly and optionally consulting a `semantic`
+    /// printer for variables and functions.
+    pub fn render_mathml_page_cached<'r>(
         self,
         options: &PrintOptions,
-        start: usize,
-        limit: usize,
-        layout: usize,
-        expansions: &[(Vec<usize>, usize)],
-    ) -> MathMlPage {
-        self.render_mathml_layout_with_state(
-            options,
-            start,
-            limit,
-            layout,
-            expansions,
-            PrintState::new(),
-            None,
-            None,
-        )
-        .unwrap()
-    }
-
-    pub(crate) fn render_mathml_layout_cached<'r>(
-        self,
-        options: &PrintOptions,
-        start: usize,
-        limit: usize,
-        layout: usize,
-        expansions: &[(Vec<usize>, usize)],
+        page: &MathMlPageOptions<'_>,
         cursors: &MathMlCursorCache<'_>,
         semantic: Option<&'r mut SemanticPrinter<'r>>,
-    ) -> Result<MathMlPage, ()> {
-        self.render_mathml_layout_with_state(
+    ) -> Result<MathMlPage, MathMlAborted> {
+        self.render_mathml_page_with_state(
             options,
-            start,
-            limit,
-            layout,
-            expansions,
+            page,
             PrintState::new(),
             Some(cursors),
             semantic,
         )
     }
 
-    fn render_mathml_layout_with_state<'r>(
+    fn render_mathml_page_with_state<'r>(
         self,
         options: &PrintOptions,
-        start: usize,
-        limit: usize,
-        layout: usize,
-        expansions: &[(Vec<usize>, usize)],
+        page: &MathMlPageOptions<'_>,
         state: PrintState,
         cursors: Option<&MathMlCursorCache<'_>>,
         semantic: Option<&'r mut SemanticPrinter<'r>>,
-    ) -> Result<MathMlPage, ()> {
+    ) -> Result<MathMlPage, MathMlAborted> {
+        let &MathMlPageOptions {
+            start,
+            limit,
+            layout,
+            expansions,
+        } = page;
         let atom = self;
-        let (nested_limit, depth_limit) = LAYOUTS[layout];
+        let (nested_limit, depth_limit) = (layout.nested_limit(), layout.depth_limit());
         let opts = PrintOptions {
             mode: PrintMode::MathML,
             color_mode: ColorMode::Never,
@@ -1565,7 +1768,7 @@ impl<'a> AtomView<'a> {
         // fixed ceiling even for many independently expanded subexpressions.
         let requested = expansions
             .iter()
-            .fold(limit, |total, (_, count)| total.saturating_add(*count));
+            .fold(limit, |total, e| total.saturating_add(e.count));
         // Scripted tensors and fractions can exceed 16 KiB of markup while
         // occupying only a few lines. Give the initial preview 64 KiB as well
         // as the corresponding node allowance; keep the 256 KiB ceiling.
@@ -1640,18 +1843,24 @@ impl<'a> AtomView<'a> {
             (renderer.render(atom, &mut vec![], 0), 1)
         };
         if renderer.failed {
-            return Err(());
+            return Err(MathMlAborted);
         }
         Ok(MathMlPage {
-            html: format!("{MATH_OPEN}{body}{MATH_CLOSE}"),
+            body,
             start,
             end,
             total,
             markers: renderer.markers,
-            custom: has_custom,
+            opaque: has_custom,
         })
     }
 }
+
+const _: () = {
+    const fn shareable<T: Send + Sync>() {}
+    shareable::<MathMlCursorCache<'static>>();
+    shareable::<MathMlPage>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -1662,15 +1871,12 @@ mod tests {
         input: &str,
         layout: usize,
         semantic: &'r mut SemanticPrinter<'r>,
-    ) -> Result<MathMlPage, ()> {
+    ) -> Result<MathMlPage, MathMlAborted> {
         let expression = crate::parse!(input);
         let cursors = MathMlCursorCache::new(expression.as_view());
-        expression.as_view().render_mathml_layout_cached(
+        expression.as_view().render_mathml_page_cached(
             &PrintOptions::new(),
-            0,
-            25,
-            layout,
-            &[],
+            &MathMlPageOptions::new().layout(MathMlLayout::new(layout).unwrap()),
             &cursors,
             Some(semantic),
         )
@@ -1679,18 +1885,19 @@ mod tests {
     #[test]
     fn native_polynomial_tails_use_rendered_script_width() {
         let expression = parse!("19380*x*y^3*z^16+q");
-        for layout in 0..LAYOUTS.len() {
-            let page =
-                expression
-                    .as_view()
-                    .render_mathml_layout(&PrintOptions::new(), 0, 25, layout, &[]);
-            assert!(page.markers.is_empty(), "layout {layout}: {}", page.html);
-            assert!(page.html.contains("<mn>16</mn>"));
+        for layout in 0..MathMlLayout::COUNT {
+            let page = expression.as_view().render_mathml_page(
+                &PrintOptions::new(),
+                &MathMlPageOptions::new().layout(MathMlLayout::new(layout).unwrap()),
+            );
+            assert!(page.markers.is_empty(), "layout {layout}: {}", page.html());
+            assert!(page.html().contains("<mn>16</mn>"));
         }
         let long = parse!("f(19380*x*long_variable_y^3*long_variable_z^16+q)");
-        let page = long
-            .as_view()
-            .render_mathml_layout(&PrintOptions::new(), 0, 25, 5, &[]);
+        let page = long.as_view().render_mathml_page(
+            &PrintOptions::new(),
+            &MathMlPageOptions::new().layout(MathMlLayout::new(5).unwrap()),
+        );
         assert!(!page.markers.is_empty());
     }
 
@@ -1699,34 +1906,33 @@ mod tests {
         let sum = parse!("(x+y+z+w)^20").expand();
         let expression = &sum * parse!("1+a");
         let cursors = MathMlCursorCache::new(expression.as_view());
-        let initial =
-            expression
-                .as_view()
-                .render_mathml_layout(&PrintOptions::new(), 0, 25, 1, &[]);
+        let initial = expression.as_view().render_mathml_page(
+            &PrintOptions::new(),
+            &MathMlPageOptions::new().layout(MathMlLayout::new(1).unwrap()),
+        );
         let omitted = initial
             .markers
             .iter()
             .find(|marker| matches!(cursors.locate(&marker.path), Some(AtomView::Add(_))))
             .unwrap();
         let count = omitted.start + 25;
-        for layout in 0..LAYOUTS.len() {
-            let page = expression.as_view().render_mathml_layout(
+        for layout in 0..MathMlLayout::COUNT {
+            let page = expression.as_view().render_mathml_page(
                 &PrintOptions::new(),
-                0,
-                25,
-                layout,
-                &[(omitted.path.clone(), count)],
+                &MathMlPageOptions::new()
+                    .layout(MathMlLayout::new(layout).unwrap())
+                    .expansions(&[MathMlExpansion::new(omitted.path.clone(), count)]),
             );
             assert!(
                 page.markers
                     .iter()
                     .all(|marker| marker.path == omitted.path),
                 "layout {layout}: {}",
-                page.html
+                page.html()
             );
             assert_eq!(page.markers.len(), 1);
             assert_eq!(page.markers[0].start, count);
-            assert!(page.html.contains("data-symbolica-sum"));
+            assert!(page.html().contains("data-symbolica-sum"));
         }
     }
 
@@ -1754,16 +1960,16 @@ mod tests {
         };
         let root = scoped_page("mathml_scoped::target(a,b,c,d,e)", 7, &mut semantic).unwrap();
         assert_eq!((root.start, root.end, root.total), (0, 1, 1));
-        assert!(root.custom);
+        assert!(root.opaque);
         assert!(root.markers.is_empty());
         let nested =
             scoped_page("f(g(mathml_scoped::target(a,b,c,d,e)))", 7, &mut semantic).unwrap();
         assert!(
             nested
-                .html
+                .html()
                 .contains(&Renderer::tagged(fragment.into(), &[0, 0]))
         );
-        assert!(nested.markers.is_empty(), "{}", nested.html);
+        assert!(nested.markers.is_empty(), "{}", nested.html());
 
         let mut states = Vec::new();
         let mut semantic = |atom: AtomView<'_>, _: &PrintOptions, state: &PrintState| {
@@ -1776,7 +1982,7 @@ mod tests {
             &mut semantic,
         )
         .unwrap();
-        assert!(power.html.contains(&format!(
+        assert!(power.html().contains(&format!(
             "<msup>{}{}</msup>",
             Renderer::tagged(fragment.into(), &[0]),
             Renderer::tagged(fragment.into(), &[1])
@@ -1812,8 +2018,8 @@ mod tests {
                 Ok((atom.get_symbol() == Some(metric)).then(|| fragment.to_owned()))
             };
             let actual = scoped_page(input, 5, &mut semantic).unwrap();
-            assert!(actual.markers.is_empty(), "{}", actual.html);
-            assert!(actual.html.contains(fragment));
+            assert!(actual.markers.is_empty(), "{}", actual.html());
+            assert!(actual.html().contains(fragment));
             assert_eq!(compact_order, full_order);
         }
     }
@@ -1834,13 +2040,13 @@ mod tests {
                 }
             };
             let actual = scoped_page(&input, 5, &mut semantic).unwrap();
-            assert!(actual.markers.is_empty(), "{}", actual.html);
-            assert!(actual.html.contains(fragment));
+            assert!(actual.markers.is_empty(), "{}", actual.html());
+            assert!(actual.html().contains(fragment));
             assert_eq!(states.len(), 1);
             assert!(states[0].in_exp_base);
             if exponent == "-1" {
-                assert_eq!(actual.html.matches("<mfrac>").count(), 1);
-                assert!(!actual.html.contains("<mn>1</mn>"));
+                assert_eq!(actual.html().matches("<mfrac>").count(), 1);
+                assert!(!actual.html().contains("<mn>1</mn>"));
             }
         }
     }
@@ -1869,14 +2075,14 @@ mod tests {
             assert_eq!(actual.markers.len(), 1);
             assert_eq!(actual.markers[0].start, 2);
             assert_eq!(actual.markers[0].path, [0]);
-            assert!(!actual.html.contains(&fragment));
+            assert!(!actual.html().contains(&fragment));
         }
 
         let mut calls = 0;
         let mut failing = |atom: AtomView<'_>, _: &PrintOptions, _: &PrintState| {
             if atom.get_symbol() == Some(target) {
                 calls += 1;
-                Err(())
+                Err(MathMlAborted)
             } else {
                 Ok(None)
             }
@@ -1988,15 +2194,14 @@ mod tests {
             assert_ne!(atom.get_symbol(), Some(target));
             Ok(None)
         };
-        for layout in 0..LAYOUTS.len() {
+        for layout in 0..MathMlLayout::COUNT {
             let page = expression
                 .as_view()
-                .render_mathml_layout_cached(
+                .render_mathml_page_cached(
                     &PrintOptions::new(),
-                    0,
-                    1,
-                    layout,
-                    &[],
+                    &MathMlPageOptions::new()
+                        .limit(1)
+                        .layout(MathMlLayout::new(layout).unwrap()),
                     &cursors,
                     Some(&mut semantic),
                 )
@@ -2241,24 +2446,26 @@ mod tests {
             };
             let page = expression
                 .as_view()
-                .render_mathml_layout_cached(
+                .render_mathml_page_cached(
                     &PrintOptions::new(),
-                    0,
-                    25,
-                    0,
-                    &[],
+                    &MathMlPageOptions::new(),
                     &cursors,
                     Some(&mut semantic),
                 )
                 .unwrap();
             assert_eq!((page.end, page.total), (2, 2));
-            assert_eq!(page.html.matches("&#x2061;").count(), 1, "{}", page.html);
-            assert!(page.html.matches(fragment).count() > 1);
+            assert_eq!(
+                page.html().matches("&#x2061;").count(),
+                1,
+                "{}",
+                page.html()
+            );
+            assert!(page.html().matches(fragment).count() > 1);
             if count == 200 {
                 // Moderate scripted output fits the initial preview, although its
                 // markup exceeded the old allowance.
                 assert!(page.markers.is_empty());
-                assert_eq!(page.html.matches(fragment).count(), count);
+                assert_eq!(page.html().matches(fragment).count(), count);
             } else {
                 assert_eq!(page.markers.len(), 1);
                 assert_eq!(page.markers[0].path, [1]);
@@ -2282,9 +2489,9 @@ mod tests {
             let expression = parse!(&input);
             let page = expression
                 .as_view()
-                .render_mathml_page(&PrintOptions::new(), 0, 25);
-            assert_eq!((page.end, page.total), (2, 2), "{}", page.html);
-            assert!(page.html.contains("<mi>x"), "{}", page.html);
+                .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
+            assert_eq!((page.end, page.total), (2, 2), "{}", page.html());
+            assert!(page.html().contains("<mi>x"), "{}", page.html());
             assert!(page.markers.iter().any(|m| m.path == [1, 0] && m.start > 0));
             assert!(page.markers.iter().all(|m| !m.path.is_empty()));
         }
@@ -2307,18 +2514,15 @@ mod tests {
         };
         let page = expression
             .as_view()
-            .render_mathml_layout_cached(
+            .render_mathml_page_cached(
                 &PrintOptions::new(),
-                0,
-                25,
-                0,
-                &[],
+                &MathMlPageOptions::new(),
                 &cursors,
                 Some(&mut semantic),
             )
             .unwrap();
-        assert!(page.html.contains(fragment));
-        assert!(!page.html.contains("&#x2061;"), "{}", page.html);
+        assert!(page.html().contains(fragment));
+        assert!(!page.html().contains("&#x2061;"), "{}", page.html());
         assert_eq!(page.markers.len(), 1);
         assert_eq!(page.markers[0].path, [1]);
         assert!(page.markers[0].start > 0);
@@ -2331,16 +2535,18 @@ mod tests {
         let mut calls = 0;
         let mut fail = |_: AtomView<'_>, _: &PrintOptions, _: &PrintState| {
             calls += 1;
-            Err(())
+            Err(MathMlAborted)
         };
         assert!(scoped_page("f(a,b,c)", 0, &mut fail).is_err());
         assert_eq!(calls, 1);
 
         let long_name = "x".repeat(MAX_LEAF_BYTES + 1);
-        let mut forbidden =
-            |_: AtomView<'_>, _: &PrintOptions, _: &PrintState| -> Result<Option<String>, ()> {
-                panic!("hard limit must run before scoped dispatch")
-            };
+        let mut forbidden = |_: AtomView<'_>,
+                             _: &PrintOptions,
+                             _: &PrintState|
+         -> Result<Option<String>, MathMlAborted> {
+            panic!("hard limit must run before scoped dispatch")
+        };
         assert!(
             !scoped_page(&long_name, 0, &mut forbidden)
                 .unwrap()
@@ -2357,12 +2563,9 @@ mod tests {
         };
         let page = expression
             .as_view()
-            .render_mathml_layout_cached(
+            .render_mathml_page_cached(
                 &PrintOptions::new(),
-                0,
-                25,
-                0,
-                &[(vec![0; 64], 1)],
+                &MathMlPageOptions::new().expansions(&[MathMlExpansion::new(vec![0; 64], 1)]),
                 &cursors,
                 Some(&mut semantic),
             )
@@ -2378,14 +2581,14 @@ mod tests {
         );
         let input = "f(g(mathml_scoped_decline::target(a,b,c,d,e)))";
         let expression = crate::parse!(input);
-        for layout in 0..LAYOUTS.len() {
-            let expected =
-                expression
-                    .as_view()
-                    .render_mathml_layout(&PrintOptions::new(), 0, 25, layout, &[]);
+        for layout in 0..MathMlLayout::COUNT {
+            let expected = expression.as_view().render_mathml_page(
+                &PrintOptions::new(),
+                &MathMlPageOptions::new().layout(MathMlLayout::new(layout).unwrap()),
+            );
             let mut decline = |_: AtomView<'_>, _: &PrintOptions, _: &PrintState| Ok(None);
             let actual = scoped_page(input, layout, &mut decline).unwrap();
-            assert_eq!(actual.html, expected.html);
+            assert_eq!(actual.html(), expected.html());
             assert_eq!(
                 (actual.start, actual.end, actual.total),
                 (expected.start, expected.end, expected.total)
@@ -2407,11 +2610,11 @@ mod tests {
                 Ok(matches!(atom, AtomView::Fun(_)).then(|| fragment.clone()))
             };
             let page = scoped_page("f(a,b,c)", 0, &mut semantic).unwrap();
-            assert!(!page.custom);
+            assert!(!page.opaque);
             assert_eq!((page.start, page.end, page.total), (0, 3, 3));
-            assert!(page.markers.is_empty(), "{}", page.html);
-            assert!(page.html.contains("<mi>a</mi>"));
-            assert!(!page.html.contains("μ"));
+            assert!(page.markers.is_empty(), "{}", page.html());
+            assert!(page.html().contains("<mi>a</mi>"));
+            assert!(!page.html().contains("μ"));
         }
     }
 
@@ -2470,8 +2673,8 @@ mod tests {
     fn page(input: &str) -> String {
         crate::parse!(input)
             .as_view()
-            .render_mathml_page(&PrintOptions::new(), 0, 25)
-            .html
+            .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new())
+            .html()
     }
 
     #[test]
@@ -2482,12 +2685,12 @@ mod tests {
         let cursors = MathMlCursorCache::new(expression.as_view());
         let page = expression
             .as_view()
-            .render_mathml_page(&PrintOptions::new(), 0, 25);
+            .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
 
         assert_eq!((page.end, page.total), (2, 2));
-        assert_eq!(page.html.matches("data-symbolica-factor").count(), 2);
+        assert_eq!(page.html().matches("data-symbolica-factor").count(), 2);
         for name in ["x", "y", "z", "w"] {
-            assert!(page.html.contains(&format!("<mi>{name}</mi>")));
+            assert!(page.html().contains(&format!("<mi>{name}</mi>")));
         }
         assert!(page.markers.iter().all(|marker| !marker.path.is_empty()));
         let omission = page
@@ -2498,7 +2701,10 @@ mod tests {
         assert!(omission.start > 0);
         let target = cursors.locate(&omission.path).unwrap();
         assert_eq!(target, sum.as_view());
-        let next = target.render_mathml_page(&PrintOptions::new(), omission.start, 25);
+        let next = target.render_mathml_page(
+            &PrintOptions::new(),
+            &MathMlPageOptions::new().start(omission.start),
+        );
         assert_eq!(next.start, omission.start);
         assert_eq!(next.end, omission.start + 25);
         assert_eq!(next.total, 1771);
@@ -2530,18 +2736,15 @@ mod tests {
             };
             let page = expression
                 .as_view()
-                .render_mathml_layout_cached(
+                .render_mathml_page_cached(
                     &PrintOptions::new(),
-                    0,
-                    25,
-                    0,
-                    &[],
+                    &MathMlPageOptions::new(),
                     &cursors,
                     Some(&mut semantic),
                 )
                 .unwrap();
             assert_eq!((page.end, page.total), (3, 3));
-            assert!(page.html.contains("<msub><mi>C</mi><mi>A</mi></msub>"));
+            assert!(page.html().contains("<msub><mi>C</mi><mi>A</mi></msub>"));
             assert_eq!(calls, 1);
             assert!(page.markers.iter().all(|marker| !marker.path.is_empty()));
             assert!(page.markers.iter().any(|marker| marker.path == [1]));
@@ -2575,12 +2778,9 @@ mod tests {
             };
             let page = expression
                 .as_view()
-                .render_mathml_layout_cached(
+                .render_mathml_page_cached(
                     &PrintOptions::new(),
-                    start,
-                    size,
-                    0,
-                    &[],
+                    &MathMlPageOptions::new().start(start).limit(size),
                     &cursors,
                     Some(&mut semantic),
                 )
@@ -2593,9 +2793,9 @@ mod tests {
                         .iter()
                         .any(|marker| marker.path.is_empty() && marker.start == 2)
                 );
-                assert!(!page.html.contains(fragment));
+                assert!(!page.html().contains(fragment));
             } else {
-                assert!(page.html.contains(fragment));
+                assert!(page.html().contains(fragment));
             }
         }
     }
@@ -2623,12 +2823,9 @@ mod tests {
                 };
                 let page = expression
                     .as_view()
-                    .render_mathml_layout_cached(
+                    .render_mathml_page_cached(
                         &PrintOptions::new(),
-                        0,
-                        25,
-                        0,
-                        &[],
+                        &MathMlPageOptions::new(),
                         &cursors,
                         Some(&mut observe),
                     )
@@ -2637,18 +2834,21 @@ mod tests {
                 assert!(bytes <= MAX_TEXT_BYTES * MIN_BUDGET_PAGES);
                 assert_eq!(page.total, 3);
                 assert_eq!(page.end, 3);
-                assert!(page.html.contains(&format!("<mi>{prefix}")));
-                assert_eq!(page.html.contains("<mfrac"), fraction);
+                assert!(page.html().contains(&format!("<mi>{prefix}")));
+                assert_eq!(page.html().contains("<mfrac"), fraction);
                 if fraction {
-                    assert!(page.html.contains("<mo>−</mo>"));
+                    assert!(page.html().contains("<mo>−</mo>"));
                 }
                 let path = if fraction { vec![2, 0] } else { vec![1] };
                 assert!(page.markers.iter().any(|m| m.path == path && m.start > 0));
                 for marker in &page.markers {
                     let target = cursors.locate(&marker.path).unwrap();
-                    let next = target.render_mathml_page(&PrintOptions::new(), marker.start, 25);
+                    let next = target.render_mathml_page(
+                        &PrintOptions::new(),
+                        &MathMlPageOptions::new().start(marker.start),
+                    );
                     assert!(next.end > next.start);
-                    assert!(next.html.contains("<mi>") || next.html.contains("<mn>"));
+                    assert!(next.html().contains("<mi>") || next.html().contains("<mn>"));
                     assert!(
                         !next
                             .markers
@@ -2685,19 +2885,16 @@ mod tests {
                     };
                     let page = expression
                         .as_view()
-                        .render_mathml_layout_cached(
+                        .render_mathml_page_cached(
                             &PrintOptions::new(),
-                            start,
-                            25,
-                            0,
-                            &[],
+                            &MathMlPageOptions::new().start(start),
                             &cursors,
                             Some(&mut observe),
                         )
                         .unwrap();
                     assert!(nodes <= MAX_NODES * MIN_BUDGET_PAGES);
                     assert!(bytes <= MAX_TEXT_BYTES * MIN_BUDGET_PAGES);
-                    assert!(page.html.contains("<mi>"), "{}", page.html);
+                    assert!(page.html().contains("<mi>"), "{}", page.html());
                     assert!(page.is_partial());
                     assert_eq!((page.start, page.total), (start, 2));
                     assert_eq!(page.end, if prefix == "x" { 2 } else { start + 1 });
@@ -2705,10 +2902,12 @@ mod tests {
                     for marker in &page.markers {
                         let target = cursors.locate(&marker.path).unwrap();
                         assert!(!marker.path.is_empty() || marker.start > start);
-                        let opened =
-                            target.render_mathml_page(&PrintOptions::new(), marker.start, 25);
+                        let opened = target.render_mathml_page(
+                            &PrintOptions::new(),
+                            &MathMlPageOptions::new().start(marker.start),
+                        );
                         assert!(opened.end > opened.start);
-                        assert!(opened.html.contains("<mi>"));
+                        assert!(opened.html().contains("<mi>"));
                         assert!(
                             !opened
                                 .markers
@@ -2735,14 +2934,16 @@ mod tests {
             .join("*");
         let expression = crate::parse!(&factors);
         let atom = expression.as_view();
-        let compact = atom.render_mathml_page(&PrintOptions::new(), 0, 25);
+        let compact = atom.render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
         assert!(compact.end < compact.total);
-        let expanded = atom.render_mathml_page(&PrintOptions::new(), 0, 50);
+        let expanded =
+            atom.render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new().limit(50));
         assert!(expanded.end > compact.end);
-        let complete = atom.render_mathml_page(&PrintOptions::new(), 0, 100);
+        let complete =
+            atom.render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new().limit(100));
         assert_eq!(complete.end, complete.total);
         assert_eq!(complete.total, 34);
-        assert!(complete.html.len() < 256 * 1024);
+        assert!(complete.html().len() < 256 * 1024);
     }
 
     #[test]
@@ -2759,22 +2960,25 @@ mod tests {
         let before = expression.clone();
         let html = expression
             .as_view()
-            .render_mathml_page(&PrintOptions::new(), 0, 25);
-        assert!(html.markers.is_empty(), "{}", html.html);
+            .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
+        assert!(html.markers.is_empty(), "{}", html.html());
         assert!(
-            html.html.contains("<mtable data-symbolica-product"),
+            html.html().contains("<mtable data-symbolica-product"),
             "{}",
-            html.html
+            html.html()
         );
-        assert_eq!(html.html.matches("data-symbolica-factor").count(), 2);
-        assert_eq!(html.html.matches("data-symbolica-sum").count(), 2);
-        assert_eq!(html.html.matches("data-symbolica-term").count(), 24);
+        assert_eq!(html.html().matches("data-symbolica-factor").count(), 2);
+        assert_eq!(html.html().matches("data-symbolica-sum").count(), 2);
+        assert_eq!(html.html().matches("data-symbolica-term").count(), 24);
         assert_eq!(expression, before);
         // Small products use the same scalar spacing as their inline form.
         let short = crate::parse!("x*y")
             .as_view()
-            .render_mathml_page(&PrintOptions::new().multiplication_operator('·'), 0, 25)
-            .html;
+            .render_mathml_page(
+                &PrintOptions::new().multiplication_operator('·'),
+                &MathMlPageOptions::new(),
+            )
+            .html();
         assert_eq!(short.matches("data-symbolica-factor").count(), 2);
         assert!(short.contains("<mo>&#x2062;</mo>"), "{short}");
         assert!(!short.contains("<mo>·</mo>"), "{short}");
@@ -2821,19 +3025,24 @@ mod tests {
             let before = expression.clone();
             let page = expression
                 .as_view()
-                .render_mathml_page(&PrintOptions::new(), 0, 25);
-            let first = page.html.find("<mrow data-symbolica-factor=").unwrap();
-            let content = first + page.html[first..].find('>').unwrap() + 1;
+                .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
+            let first = page.html().find("<mrow data-symbolica-factor=").unwrap();
+            let content = first + page.html()[first..].find('>').unwrap() + 1;
             assert!(
-                page.html[content..].starts_with("<mo>−</mo>"),
+                page.html()[content..].starts_with("<mo>−</mo>"),
                 "{}",
-                page.html
+                page.html()
             );
-            assert_eq!(page.html.matches("<mo>−</mo>").count(), 1, "{}", page.html);
+            assert_eq!(
+                page.html().matches("<mo>−</mo>").count(),
+                1,
+                "{}",
+                page.html()
+            );
             assert!(
                 Renderer::leading_minus(expression.as_view(), &page.fragment()).is_some(),
                 "{}",
-                page.html
+                page.html()
             );
             assert_eq!(expression, before);
         }
@@ -2841,11 +3050,11 @@ mod tests {
         // the omitted suffix. Its sign must still belong to a packed factor.
         let tail = parse!("-x")
             .as_view()
-            .render_mathml_page(&PrintOptions::new(), 0, 1);
+            .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new().limit(1));
         assert_eq!(tail.end, 1);
         assert_eq!(tail.markers.len(), 1);
         assert!(
-            tail.html
+            tail.html()
                 .contains("<mrow data-symbolica-factor=\"\"><mo>−</mo><mn>1</mn></mrow>")
         );
     }
@@ -2858,25 +3067,22 @@ mod tests {
             .children()
             .position(|term| matches!(term, AtomView::Mul(_)))
             .unwrap();
-        let page = expression.as_view().render_mathml_layout(
+        let page = expression.as_view().render_mathml_page(
             &PrintOptions::new(),
-            0,
-            25,
-            0,
-            &[(vec![product], 25)],
+            &MathMlPageOptions::new().expansions(&[MathMlExpansion::new(vec![product], 25)]),
         );
-        let first = page.html.find("<mrow data-symbolica-factor=").unwrap();
-        let content = first + page.html[first..].find('>').unwrap() + 1;
+        let first = page.html().find("<mrow data-symbolica-factor=").unwrap();
+        let content = first + page.html()[first..].find('>').unwrap() + 1;
         assert!(
-            page.html[content..].starts_with("<mo form=\"infix\">−</mo>"),
+            page.html()[content..].starts_with("<mo form=\"infix\">−</mo>"),
             "{}",
-            page.html
+            page.html()
         );
-        assert_eq!(page.html.matches("<mo form=\"infix\">−</mo>").count(), 1);
+        assert_eq!(page.html().matches("<mo form=\"infix\">−</mo>").count(), 1);
         assert!(
-            !page.html.contains("<mo form=\"infix\">+</mo>"),
+            !page.html().contains("<mo form=\"infix\">+</mo>"),
             "{}",
-            page.html
+            page.html()
         );
     }
 
@@ -2889,7 +3095,7 @@ mod tests {
         };
         let expression = parse!("mathml_product_sign::target(x)*y");
         let page = scoped_page("mathml_product_sign::target(x)*y", 0, &mut semantic).unwrap();
-        assert!(page.html.contains("<mo>−</mo>"));
+        assert!(page.html().contains("<mo>−</mo>"));
         assert!(Renderer::leading_minus(expression.as_view(), &page.fragment()).is_none());
     }
 
@@ -3031,15 +3237,12 @@ mod tests {
             .unwrap();
         let inline = page("a-b*c/8");
         assert!(!inline.contains("data-symbolica-product-fraction"));
-        let expanded = expression.as_view().render_mathml_layout(
+        let expanded = expression.as_view().render_mathml_page(
             &PrintOptions::new(),
-            0,
-            25,
-            0,
-            &[(vec![product], 25)],
+            &MathMlPageOptions::new().expansions(&[MathMlExpansion::new(vec![product], 25)]),
         );
-        assert!(expanded.html.contains("data-symbolica-product-fraction"));
-        assert!(expanded.html.contains("<mo form=\"infix\">−</mo>"));
+        assert!(expanded.html().contains("data-symbolica-product-fraction"));
+        assert!(expanded.html().contains("<mo form=\"infix\">−</mo>"));
     }
 
     #[test]
@@ -3059,47 +3262,48 @@ mod tests {
             let before = expression.clone();
             let page = expression
                 .as_view()
-                .render_mathml_page(&PrintOptions::new(), 0, 25);
+                .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new());
             assert_eq!(page.end, 25);
             assert_eq!(page.markers.len(), 1);
             assert!(page.markers[0].path.is_empty());
             assert_eq!(page.markers[0].start, 25);
-            assert_eq!(page.html.matches(tail).count(), 1, "{}", page.html);
-            assert!(!page.html.contains("<mo form=\"infix\">·</mo>"));
+            assert_eq!(page.html().matches(tail).count(), 1, "{}", page.html());
+            assert!(!page.html().contains("<mo form=\"infix\">·</mo>"));
             if fraction {
                 // The omitted product multiplies the numerator. Leaving it
                 // after the fraction places it beside the center of a wrapped
                 // numerator instead of after the final visible factor.
                 let numerator_end = page
-                    .html
+                    .html()
                     .find("</mtable></mrow><mrow><mtable")
                     .expect("canonical numerator and denominator tables");
                 assert!(
-                    page.html.find(tail).unwrap() < numerator_end,
+                    page.html().find(tail).unwrap() < numerator_end,
                     "{}",
-                    page.html
+                    page.html()
                 );
-                assert_eq!(page.html.matches("<mfrac").count(), 1);
+                assert_eq!(page.html().matches("<mfrac").count(), 1);
                 if !negative {
                     assert!(
-                        page.html
+                        page.html()
                             .contains("<mrow data-symbolica-factor=\"\"><mn>1</mn></mrow>"),
                         "{}",
-                        page.html
+                        page.html()
                     );
                 }
             }
             assert_eq!(
-                page.html.matches("<mo>−</mo>").count(),
+                page.html().matches("<mo>−</mo>").count(),
                 usize::from(negative)
             );
-            let rest = expression
-                .as_view()
-                .render_mathml_page(&PrintOptions::new(), page.end, 25);
+            let rest = expression.as_view().render_mathml_page(
+                &PrintOptions::new(),
+                &MathMlPageOptions::new().start(page.end),
+            );
             assert_eq!(rest.start, 25);
             assert_eq!(rest.end, rest.total);
             assert!(rest.markers.is_empty());
-            assert!(rest.html.contains("<mtext>⋯</mtext>"));
+            assert!(rest.html().contains("<mtext>⋯</mtext>"));
             assert_eq!(expression, before);
         }
     }
@@ -3111,21 +3315,22 @@ mod tests {
             .collect::<Vec<_>>()
             .join("*");
         let expression = parse!(&format!("outer(-3*({product})/8)"));
-        let page = expression
-            .as_view()
-            .render_mathml_layout(&PrintOptions::new(), 0, 25, 5, &[]);
-        assert!(!page.html.contains("data-symbolica-product"));
+        let page = expression.as_view().render_mathml_page(
+            &PrintOptions::new(),
+            &MathMlPageOptions::new().layout(MathMlLayout::new(5).unwrap()),
+        );
+        assert!(!page.html().contains("data-symbolica-product"));
         assert_eq!(page.markers.len(), 1);
         assert_eq!(page.markers[0].path, [0]);
         assert_eq!(page.markers[0].start, 2);
         assert!(
-            page.html
+            page.html()
                 .contains("</mfrac><mrow><mo form=\"infix\">×</mo><mspace width=\"0.25em\"/>"),
             "{}",
-            page.html
+            page.html()
         );
-        assert_eq!(page.html.matches("<mo form=\"infix\">×</mo>").count(), 1);
-        assert_eq!(page.html.matches("<mo>−</mo>").count(), 1);
+        assert_eq!(page.html().matches("<mo form=\"infix\">×</mo>").count(), 1);
+        assert_eq!(page.html().matches("<mo>−</mo>").count(), 1);
     }
 
     #[test]
@@ -3151,15 +3356,14 @@ mod tests {
             assert_eq!(html.matches(">(</mo>").count(), pairs, "{input}: {html}");
             assert_eq!(html.matches(">)</mo>").count(), pairs, "{input}: {html}");
         }
-        let partial =
-            crate::parse!("(a+b)*(c+d)")
-                .as_view()
-                .render_mathml_page(&PrintOptions::new(), 0, 1);
+        let partial = crate::parse!("(a+b)*(c+d)")
+            .as_view()
+            .render_mathml_page(&PrintOptions::new(), &MathMlPageOptions::new().limit(1));
         assert_eq!(
-            partial.html.matches(">(</mo>").count(),
+            partial.html().matches(">(</mo>").count(),
             1,
             "{}",
-            partial.html
+            partial.html()
         );
         assert!(!partial.markers.is_empty());
     }
@@ -3215,7 +3419,9 @@ pub(crate) fn symbol_html(symbol: Symbol, opts: &PrintOptions) -> String {
     }
 }
 
-pub(crate) fn document(fragment: &str) -> String {
+/// Wrap a MathML fragment, such as [`MathMlPage::fragment`], in a block-level
+/// `<math>` element.
+pub fn document(fragment: &str) -> String {
     let open = MATH_OPEN
         .replace("<math ", "<math display=\"block\" ")
         .replace(

@@ -1,6 +1,8 @@
 //! Lazy notebook paging shared by Expression and FormattedOutput.
 use super::*;
-use crate::printer::mathml::{self, MathMlCursorCache, MathMlPage};
+use crate::printer::mathml::{
+    self, MathMlCursorCache, MathMlExpansion, MathMlLayout, MathMlPage, MathMlPageOptions,
+};
 
 pub(super) mod algebraic;
 mod html;
@@ -12,6 +14,14 @@ pub use provider::{MathMLPageRequest, MathMLPageSource, MathMLViewer};
 #[cfg(not(feature = "python_export"))]
 pub(super) use provider::{MathMLPageRequest, MathMLPageSource, MathMLViewer};
 mod paging;
+
+/// Convert the stable provider expansions to the native representation.
+pub(super) fn native_expansions(expansions: &[(Vec<usize>, usize)]) -> Vec<MathMlExpansion> {
+    expansions
+        .iter()
+        .map(|(path, count)| MathMlExpansion::new(path.clone(), *count))
+        .collect()
+}
 
 pub(super) fn default_options() -> PrintOptions {
     PrintOptions::new()
@@ -27,11 +37,11 @@ pub(super) fn with_math(format: impl FnOnce(&dyn Fn(&Atom) -> String) -> String)
     let text = format(&|atom| {
         let mut fragments = fragments.borrow_mut();
         let marker = format!("\u{e000}{}\u{e001}", fragments.len());
-        fragments.push(preview(&atom.as_view().render_mathml_page(
-            &default_options(),
-            0,
-            mathml::DEFAULT_PAGE_SIZE,
-        )));
+        fragments.push(preview(
+            &atom
+                .as_view()
+                .render_mathml_page(&default_options(), &MathMlPageOptions::new()),
+        ));
         marker
     });
     let fragments = fragments.into_inner();
@@ -87,9 +97,8 @@ impl MathMLPageSource for PageSource {
                 "page_size must be between 1 and 500",
             ));
         }
-        if layout >= mathml::LAYOUTS.len() {
-            return Err(exceptions::PyValueError::new_err("Unknown layout"));
-        }
+        let layout = MathMlLayout::new(layout)
+            .ok_or_else(|| exceptions::PyValueError::new_err("Unknown layout"))?;
         let cursors = self.cursors.borrow_dependent();
         let atom = cursors
             .locate(path)
@@ -108,28 +117,31 @@ impl MathMLPageSource for PageSource {
         let mut render = |atom: AtomView<'_>, options: &PrintOptions, state: &PrintState| {
             renderer.as_mut().unwrap()(py, atom, options, state).map_err(|err| {
                 error = Some(err);
+                mathml::MathMlAborted
             })
         };
+        let expansions = native_expansions(expansions);
         let page = atom
-            .render_mathml_layout_cached(
+            .render_mathml_page_cached(
                 &self.options,
-                start,
-                size,
-                layout,
-                expansions,
+                &MathMlPageOptions::new()
+                    .start(start)
+                    .limit(size)
+                    .layout(layout)
+                    .expansions(&expansions),
                 cursors,
                 has_renderer.then_some(&mut render as &mut mathml::SemanticPrinter<'_>),
             )
-            .map_err(|()| error.unwrap())?;
+            .map_err(|mathml::MathMlAborted| error.unwrap())?;
         let (kind, unit) = match atom {
-            AtomView::Fun(_) if page.custom => ("Function", "expressions"),
+            AtomView::Fun(_) if page.opaque => ("Function", "expressions"),
             AtomView::Add(_) => ("Sum", "terms"),
             AtomView::Mul(_) => ("Product", "factors"),
             AtomView::Fun(_) => ("Function", "arguments"),
             AtomView::Pow(_) => ("Power", "expressions"),
             _ => ("Value", "expressions"),
         };
-        let mut result = MathMLPage::new(page.html, page.start, page.end, page.total);
+        let mut result = MathMLPage::new(page.html(), page.start, page.end, page.total);
         result.kind = kind.into();
         result.unit = unit.into();
         // A root omission cannot navigate anywhere new. It is emitted before
@@ -194,7 +206,7 @@ impl MathMLViewer {
             options,
             renderer,
         })
-        .layout_count(mathml::LAYOUTS.len())
+        .layout_count(MathMlLayout::COUNT)
         .supports_expansion(true)
     }
 }
@@ -245,7 +257,7 @@ pub(super) fn algebraic_fragment_html(fragment: &str) -> String {
 
 pub(super) fn algebraic_html(value: &impl mathml::AlgebraicMathMl) -> String {
     let page = value
-        .page(&default_options(), &[], 0, mathml::DEFAULT_PAGE_SIZE)
+        .page(&default_options(), &[], &MathMlPageOptions::new())
         .unwrap();
     algebraic_fragment_html(&page.fragment())
 }
@@ -257,12 +269,12 @@ pub(super) fn preview(page: &MathMlPage) -> String {
 /// A cell embedded in a larger result must not become its own scrollport.
 /// The containing result owns horizontal overflow, including math glyph ink.
 pub(super) fn embedded_preview(atom: AtomView<'_>) -> String {
-    let page = atom.render_mathml_page(&default_options(), 0, mathml::DEFAULT_PAGE_SIZE);
+    let page = atom.render_mathml_page(&default_options(), &MathMlPageOptions::new());
     preview_with_scroll(&page, false)
 }
 
 fn preview_with_scroll(page: &MathMlPage, scroll: bool) -> String {
-    let html = boxed_mathml(&page.html, scroll);
+    let html = boxed_mathml(&page.html(), scroll);
     if page.is_partial() {
         format!(
             "<div>{}<p>Expression preview · items {}–{} of {}. Omitted subexpressions are marked ⋯. Use .formatted(page_size=25) in a live notebook with symbolica[notebook] to navigate.</p></div>",
@@ -294,7 +306,9 @@ pub(super) fn formatted(
             return Ok(None);
         }
         let expression = &expression.get().expr;
-        let page = expression.as_view().render_mathml_page(&options, 0, size);
+        let page = expression
+            .as_view()
+            .render_mathml_page(&options, &MathMlPageOptions::new().limit(size));
         Ok(Some(match backend {
             FormattedOutputBackend::Html => preview(&page),
             FormattedOutputBackend::Text if page.is_partial() => format!(
@@ -452,19 +466,16 @@ mod tests {
                 let viewer = MathMLViewer::expression(owner.clone_ref(py), options.clone(), None)
                     .page_size(2)
                     .into_python(py)?;
-                for layout in 0..mathml::LAYOUTS.len() {
-                    let expected = owner.get().expr.as_view().render_mathml_layout(
+                for layout in MathMlLayout::all() {
+                    let expected = owner.get().expr.as_view().render_mathml_page(
                         &options,
-                        0,
-                        2,
-                        layout,
-                        &[],
+                        &MathMlPageOptions::new().limit(2).layout(layout),
                     );
-                    let actual = viewer.call_method1(py, "_render_page", (layout,))?;
+                    let actual = viewer.call_method1(py, "_render_page", (layout.index(),))?;
                     let actual = actual.bind(py).cast::<PyDict>()?;
                     assert_eq!(
                         actual.get_item("html")?.unwrap().extract::<String>()?,
-                        expected.html
+                        expected.html()
                     );
                     for (key, value) in [
                         ("start", expected.start),
