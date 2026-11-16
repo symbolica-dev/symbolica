@@ -1325,6 +1325,22 @@ impl UnivariatePolynomial<IntegerRing> {
     /// Isolate the distinct real roots as rational intervals, together with
     /// their multiplicities.
     pub fn isolate_real_root_intervals(&self) -> Vec<(Rational, Rational, usize)> {
+        self.isolate_real_root_intervals_with_factors()
+            .into_iter()
+            .map(|(lower, upper, pow, _)| (lower, upper, pow))
+            .collect()
+    }
+
+    /// Isolate the distinct real roots as rational intervals, together with
+    /// their multiplicities and the square-free factor they are a root of.
+    pub(crate) fn isolate_real_root_intervals_with_factors(
+        &self,
+    ) -> Vec<(
+        Rational,
+        Rational,
+        usize,
+        std::sync::Arc<UnivariatePolynomial<RationalField>>,
+    )> {
         let fs = self.clone().to_multivariate::<u16>();
         let mut intervals = vec![];
 
@@ -1339,7 +1355,7 @@ impl UnivariatePolynomial<IntegerRing> {
                 *c = -c.clone();
             }
 
-            let f_rat = f.map_coeff(|c| c.to_rational(), Q);
+            let f_rat = std::sync::Arc::new(f.map_coeff(|c| c.to_rational(), Q));
 
             for (i, p) in [neg_f, f].into_iter().enumerate() {
                 for mut x in p.isolate_real_roots_square_free() {
@@ -1375,7 +1391,7 @@ impl UnivariatePolynomial<IntegerRing> {
 
         intervals
             .into_iter()
-            .map(|(x, _, pow)| (x.0, x.1, pow))
+            .map(|(x, f, pow)| (x.0, x.1, pow, f))
             .collect()
     }
 
