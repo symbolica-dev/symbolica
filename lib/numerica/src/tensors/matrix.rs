@@ -1896,14 +1896,18 @@ impl<F: Field> Matrix<F> {
             }
             let x = self[(i, j)].clone();
             let inv_x = self.field.inv(&x);
+            let ncols = self.ncols as usize;
             for k in i + 1..self.nrows {
                 if !self.field.is_zero(&self[(k, j)]) {
                     let s = self.field.mul(&self[(k, j)], &inv_x);
-                    self[(k, j)] = self.field.zero();
-                    for l in j + 1..self.ncols {
-                        let mut e = std::mem::replace(&mut self[(k, l)], zero.clone());
-                        self.field.sub_mul_assign(&mut e, &self[(i, l)], &s);
-                        self[(k, l)] = e;
+                    self[(k, j)] = zero.clone();
+
+                    // borrow the pivot row and row `k > i` at the same time
+                    let (top, bottom) = self.data.split_at_mut(k as usize * ncols);
+                    let pivot_row = &top[i as usize * ncols..(i as usize + 1) * ncols];
+                    let row = &mut bottom[..ncols];
+                    for l in j as usize + 1..ncols {
+                        self.field.sub_mul_assign(&mut row[l], &pivot_row[l], &s);
                     }
                 }
             }
@@ -1931,13 +1935,17 @@ impl<F: Field> Matrix<F> {
                     }
                 }
 
+                let ncols = self.ncols as usize;
                 for k in 0..i {
                     if !self.field.is_zero(&self[(k, j)]) {
                         let scale = std::mem::replace(&mut self[(k, j)], field.zero());
-                        for l in j + 1..self.ncols {
-                            let mut e = std::mem::replace(&mut self[(k, l)], field.zero());
-                            field.sub_mul_assign(&mut e, &self[(i, l)], &scale);
-                            self[(k, l)] = e;
+
+                        // borrow row `k < i` and the pivot row at the same time
+                        let (top, bottom) = self.data.split_at_mut(i as usize * ncols);
+                        let row = &mut top[k as usize * ncols..(k as usize + 1) * ncols];
+                        let pivot_row = &bottom[..ncols];
+                        for l in j as usize + 1..ncols {
+                            field.sub_mul_assign(&mut row[l], &pivot_row[l], &scale);
                         }
                     }
                 }

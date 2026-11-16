@@ -4276,8 +4276,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let quotient_degree = dividend_degree - div_degree;
         let mut quotient_coefficients = vec![self.ring().zero(); quotient_degree + 1];
+        // The degrees are processed from the top and only lower degrees are updated,
+        // so the coefficients can be popped instead of being replaced by a zero.
         for degree in (div_degree..=dividend_degree).rev() {
-            let coefficient = std::mem::replace(&mut coefficients[degree], self.ring().zero());
+            let coefficient = coefficients.pop().unwrap();
+            debug_assert_eq!(coefficients.len(), degree);
             if self.ring().is_zero(&coefficient) {
                 continue;
             }
@@ -6684,15 +6687,21 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return (quotient, zero_remainder);
         }
 
+        let mut quotient_terms = Vec::with_capacity(self.nterms());
+
         let mut coefficients = (0..total).map(|_| ring.zero()).collect::<Vec<_>>();
-        for (term, &index) in dividend_indices.iter().enumerate() {
-            coefficients[index as usize] =
-                std::mem::replace(&mut self.coefficients[term], ring.zero());
+        for (coefficient, &index) in std::mem::take(&mut self.coefficients)
+            .into_iter()
+            .zip(&dividend_indices)
+        {
+            coefficients[index as usize] = coefficient;
         }
 
-        let mut quotient_terms = Vec::with_capacity(self.nterms());
+        // The positions are processed from the top and only lower positions are updated,
+        // so the coefficients can be popped instead of being replaced by a zero.
         for position in (0..total).rev() {
-            let coefficient = std::mem::replace(&mut coefficients[position], ring.zero());
+            let coefficient = coefficients.pop().unwrap();
+            debug_assert_eq!(coefficients.len(), position);
             if ring.is_zero(&coefficient) {
                 continue;
             }
@@ -6794,16 +6803,24 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut m_cache = vec![E::zero(); div.nvars()];
         let mut c;
 
+        // The terms are consumed from the back, so the coefficients can be popped
+        // instead of being replaced by a zero placeholder.
+        let nterms = self.nterms();
+        let nvars = self.nvars();
+        let mut coefficients = std::mem::take(&mut self.coefficients);
+        let exponents_back = |k: usize| {
+            let index = nterms - k - 1;
+            &self.exponents[index * nvars..(index + 1) * nvars]
+        };
+
         let mut k = 0;
-        while !h.is_empty() || k < self.nterms() {
-            if k < self.nterms() && (h.is_empty() || self.exponents_back(k) >= h.peek().unwrap()) {
-                for (s, e) in m.iter_mut().zip(self.exponents_back(k)) {
+        while !h.is_empty() || k < nterms {
+            if k < nterms && (h.is_empty() || exponents_back(k) >= h.peek().unwrap()) {
+                for (s, e) in m.iter_mut().zip(exponents_back(k)) {
                     *s = *e;
                 }
 
-                let coefficient_index = self.nterms() - k - 1;
-                let zero = self.ring().zero();
-                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
+                c = coefficients.pop().unwrap();
                 k += 1;
             } else {
                 for (s, e) in m.iter_mut().zip(h.peek().unwrap().as_slice()) {
@@ -7078,16 +7095,16 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let mut q_exp = Vec::with_capacity(self.nterms());
 
-        let mut k = 0;
-        while !h.is_empty() || k < self.nterms() {
-            if k < self.nterms()
-                && (h.is_empty() || pack_a[self.nterms() - k - 1] >= *h.peek().unwrap())
-            {
-                m = pack_a[self.nterms() - k - 1];
+        // The terms are consumed from the back, so the coefficients can be popped
+        // instead of being replaced by a zero placeholder.
+        let nterms = self.nterms();
+        let mut coefficients = std::mem::take(&mut self.coefficients);
 
-                let coefficient_index = self.nterms() - k - 1;
-                let zero = self.ring().zero();
-                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
+        let mut k = 0;
+        while !h.is_empty() || k < nterms {
+            if k < nterms && (h.is_empty() || pack_a[nterms - k - 1] >= *h.peek().unwrap()) {
+                m = pack_a[nterms - k - 1];
+                c = coefficients.pop().unwrap();
 
                 k += 1;
             } else {
