@@ -1413,6 +1413,9 @@ impl AtomView<'_> {
         let mut polynomial =
             self.to_polynomial_impl(field, var_map.as_ref().unwrap_or(&Arc::new(Vec::new())))?;
         polynomial.reduce_rational_power_variable_basis();
+        if var_map.is_none() {
+            polynomial.sort_variables();
+        }
         Ok(polynomial)
     }
 
@@ -1712,6 +1715,7 @@ impl AtomView<'_> {
         RationalPolynomial<RO, E>:
             FromNumeratorAndDenominator<R, RO, E> + FromNumeratorAndDenominator<RO, RO, E>,
     {
+        let sort_variables = var_map.is_none();
         let mut polynomial =
             self.try_to_rational_polynomial_preserve_power_variables(field, out_field, var_map)?;
         polynomial.numerator.reduce_rational_power_variable_basis();
@@ -1721,6 +1725,9 @@ impl AtomView<'_> {
         polynomial
             .numerator
             .unify_variables(&mut polynomial.denominator);
+        if sort_variables {
+            polynomial.sort_variables();
+        }
         Ok(polynomial)
     }
 
@@ -1751,6 +1758,9 @@ impl AtomView<'_> {
         polynomial
             .numerator
             .unify_variables(&mut polynomial.denominator);
+        if var_map.is_none() {
+            polynomial.sort_variables();
+        }
         Ok(polynomial)
     }
 
@@ -1979,10 +1989,12 @@ impl AtomView<'_> {
         for (denominator, _) in &mut polynomial.denominators {
             denominator.reduce_rational_power_variable_basis();
         }
-        for _ in 0..2 {
-            for (denominator, _) in &mut polynomial.denominators {
-                polynomial.numerator.unify_variables(denominator);
-            }
+        let mut polys = vec![&mut polynomial.numerator];
+        polys.extend(polynomial.denominators.iter_mut().map(|(d, _)| d));
+        MultivariatePolynomial::unify_variables_mut(&mut polys);
+
+        if var_map.is_none() {
+            polynomial.sort_variables();
         }
         Ok(polynomial)
     }

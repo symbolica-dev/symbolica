@@ -1351,6 +1351,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// specified by `var_map`. If new variables are encountered, they are
     /// added to the variable map. Similarly, non-polynomial parts are automatically
     /// defined as a new independent variable in the polynomial.
+    /// If `var_map` is `None`, the variables of the result are sorted by
+    /// [`PolyVariable`](crate::poly::PolyVariable)'s ordering.
     ///
     /// # Example
     ///
@@ -1381,6 +1383,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// specified by `var_map`. If new variables are encountered, they are
     /// added to the variable map. Similarly, non-polynomial parts are automatically
     /// defined as a new independent variable in the polynomial.
+    /// If `var_map` is `None`, the variables of the result are sorted by
+    /// [`PolyVariable`](crate::poly::PolyVariable)'s ordering.
     ///
     /// # Example
     ///
@@ -1514,6 +1518,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// specified by `var_map`. If new variables are encountered, they are
     /// added to the variable map. Similarly, non-rational polynomial parts are automatically
     /// defined as a new independent variable in the rational polynomial.
+    /// If `var_map` is `None`, the variables of the result are sorted by
+    /// [`PolyVariable`](crate::poly::PolyVariable)'s ordering.
     ///
     /// # Example
     ///
@@ -1607,6 +1613,8 @@ pub trait AtomCore: private::Sealed + Sized {
     /// specified by `var_map`. If new variables are encountered, they are
     /// added to the variable map. Similarly, non-rational polynomial parts are automatically
     /// defined as a new independent variable in the rational polynomial.
+    /// If `var_map` is `None`, the variables of the result are sorted by
+    /// [`PolyVariable`](crate::poly::PolyVariable)'s ordering.
     ///
     /// # Example
     ///

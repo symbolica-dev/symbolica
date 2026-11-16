@@ -20,17 +20,11 @@ pub struct PythonMatrix {
 
 impl PythonMatrix {
     fn unify(&self, rhs: &PythonMatrix) -> (PythonMatrix, PythonMatrix) {
-        let mut zero = self.matrix.field().zero();
-
         let mut self_data = self.matrix.clone().into_vec();
-        let mut new_rhs_data = rhs.matrix.clone().into_vec();
-
-        for e in &mut self_data {
-            zero.unify_variables(e);
-        }
-        for e in &mut new_rhs_data {
-            zero.unify_variables(e);
-        }
+        let n_self = self_data.len();
+        self_data.extend(rhs.matrix.clone().into_vec());
+        RationalPolynomial::unify_variables_list(&mut self_data);
+        let new_rhs_data = self_data.split_off(n_self);
 
         (
             PythonMatrix {
@@ -58,16 +52,10 @@ impl PythonMatrix {
         &self,
         rhs: &PythonRationalPolynomial,
     ) -> (PythonMatrix, PythonRationalPolynomial) {
-        let mut zero = self.matrix.field().zero();
-
         let mut self_data = self.matrix.clone().into_vec();
-
-        for e in &mut self_data {
-            zero.unify_variables(e);
-        }
-
-        let mut new_rhs = rhs.poly.clone();
-        zero.unify_variables(&mut new_rhs);
+        self_data.push(rhs.poly.clone());
+        RationalPolynomial::unify_variables_list(&mut self_data);
+        let new_rhs = self_data.pop().unwrap();
 
         (
             PythonMatrix {
@@ -134,12 +122,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = diag.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut diag);
 
         let field = RationalPolynomialField::new(Z);
 
@@ -166,12 +149,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = entries.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut entries);
 
         let field = RationalPolynomialField::new(Z);
 
@@ -207,12 +185,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = entries.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut entries);
 
         let field = RationalPolynomialField::new(Z);
 

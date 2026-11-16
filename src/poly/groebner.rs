@@ -769,6 +769,10 @@ impl<R: Field + Echelonize, E: Exponent, O: MonomialOrder> GroebnerBasis<R, E, O
     ///
     /// Zero generators are ignored. The zero ideal has an empty basis.
     ///
+    /// The variable order of the generators determines the monomial order.
+    /// To control it, give all generators the same variable map. Otherwise
+    /// the maps are unified with [`MultivariatePolynomial::unify_variables_list`].
+    ///
     /// Progress can be monitored with `print_stats`.
     pub fn new(
         ideal: &[MultivariatePolynomial<R, E, O>],
@@ -1097,7 +1101,14 @@ impl<R: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
         if gs.iter().any(|x| self.variables() != x.variables()) {
             let mut sys: Vec<_> = gs.to_vec();
             sys.push(self.clone());
-            Self::unify_variables_list(&mut sys);
+            // preserve the variable order, and therefore the monomial order, of the basis
+            if let Some(g) = gs.first()
+                && gs.iter().all(|x| x.variables() == g.variables())
+            {
+                Self::unify_variables_list_with_prefix(&mut sys, g.variables());
+            } else {
+                Self::unify_variables_list(&mut sys);
+            }
             return sys.last().unwrap().reduce(&sys[..gs.len()]);
         }
 
@@ -1136,6 +1147,7 @@ impl<R: Field, E: Exponent, O: MonomialOrder> MultivariatePolynomial<R, E, O> {
             // strip leading monomial that is not reducible
             rest_exponents.extend_from_slice(r.exponents(r.nterms() - 1));
             rest_coeff.push(r.coefficients.pop().unwrap());
+            r.exponents.truncate(r.nterms() * r.nvars());
         }
 
         // append in sorted order

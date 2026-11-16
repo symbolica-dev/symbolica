@@ -1121,6 +1121,12 @@ impl PythonPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -1484,6 +1490,12 @@ impl PythonPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })
@@ -2727,6 +2739,12 @@ impl PythonFiniteFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -3028,6 +3046,12 @@ impl PythonFiniteFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })
@@ -3910,6 +3934,12 @@ impl PythonPrimeTwoPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -4185,6 +4215,12 @@ impl PythonPrimeTwoPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v;
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })
@@ -4921,6 +4957,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -5196,6 +5238,12 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v;
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })
@@ -5924,6 +5972,12 @@ impl PythonGaloisFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -6199,6 +6253,12 @@ impl PythonGaloisFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v;
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })
@@ -6979,6 +7039,12 @@ impl PythonNumberFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = rhs.poly.clone();
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
 
             let self_uni = new_self.to_univariate(x);
             let rhs_uni = new_rhs.to_univariate(x);
@@ -7273,6 +7339,12 @@ impl PythonNumberFieldPolynomial {
             let mut new_self = self.poly.clone();
             let mut new_rhs = v;
             new_self.unify_variables(&mut new_rhs);
+            // the variable index may change after unification
+            let x = new_self
+                .get_vars_ref()
+                .iter()
+                .position(|y| *y == self.poly.get_vars_ref()[x])
+                .unwrap();
             Ok(Self {
                 poly: new_self.replace_with_poly(x, &new_rhs),
             })

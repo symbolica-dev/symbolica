@@ -1275,18 +1275,14 @@ impl AtomView<'_> {
             mat.extend_from_slice(&row);
         }
 
-        let Some((first, rest)) = mat.split_first_mut() else {
+        if mat.is_empty() {
             return Err(SolveError::EmptySystem);
-        };
-
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-            for x in &mut rhs {
-                first.unify_variables(x);
-            }
         }
+
+        let n_mat = mat.len();
+        mat.append(&mut rhs);
+        RationalPolynomial::unify_variables_list(&mut mat);
+        rhs = mat.split_off(n_mat);
 
         let field = RationalPolynomialField::new(Z);
 

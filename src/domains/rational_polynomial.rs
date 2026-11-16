@@ -165,8 +165,58 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E>
 where
     Self: FromNumeratorAndDenominator<R, R, E>,
 {
+    /// Sort the variable map by [`PolyVariable`]'s ordering.
+    pub(crate) fn sort_variables(&mut self) {
+        assert_eq!(self.numerator.variables(), self.denominator.variables());
+        if let Some(vars) =
+            MultivariatePolynomial::<R, E>::sorted_variable_map(self.numerator.variables())
+        {
+            self.numerator.embed_in_variable_map(&vars);
+            self.denominator.embed_in_variable_map(&vars);
+
+            // this may require a new normalization of the denominator
+            *self = Self::from_num_den(
+                self.numerator.clone(),
+                self.denominator.clone(),
+                &self.numerator.ring(),
+                false,
+            );
+        }
+    }
+
+    /// Unify the variable maps of all rational functions in the slice, such that they
+    /// all share the same variable map. See [`MultivariatePolynomial::unify_variables_list`]
+    /// for which variable map is chosen.
+    pub fn unify_variables_list(polys: &mut [Self]) {
+        let Some(vars) = MultivariatePolynomial::<R, E>::unified_variable_map(
+            polys.iter().map(|p| p.numerator.variables()),
+        ) else {
+            return;
+        };
+
+        for p in polys {
+            assert_eq!(p.numerator.variables(), p.denominator.variables());
+            if p.numerator.variables() == &vars {
+                continue;
+            }
+
+            p.numerator.embed_in_variable_map(&vars);
+            p.denominator.embed_in_variable_map(&vars);
+
+            // this may require a new normalization of the denominator
+            *p = Self::from_num_den(
+                p.numerator.clone(),
+                p.denominator.clone(),
+                &p.numerator.ring(),
+                false,
+            );
+        }
+    }
+
     /// Unify the variable order of both rational functions in place, remapping
     /// the numerator and denominator exponents without changing their values.
+    ///
+    /// See [`MultivariatePolynomial::unify_variables`] for which variable map is chosen.
     pub fn unify_variables(&mut self, other: &mut Self) {
         assert_eq!(self.numerator.variables(), self.denominator.variables());
         assert_eq!(other.numerator.variables(), other.denominator.variables());
@@ -725,15 +775,20 @@ where
             .iter()
             .position(|x| x == f.variable.as_ref())
             .unwrap_or_else(|| {
-                let mut r = RationalPolynomial::new(
-                    f.coefficients[0].numerator.ring(),
-                    Arc::new(vec![f.variable.as_ref().clone()]),
-                );
+                // append the variable to the map, such that the coefficients keep their order
+                let mut vars = f.coefficients[0].get_variables().as_ref().clone();
+                vars.push(f.variable.as_ref().clone());
+                let mut r =
+                    RationalPolynomial::new(f.coefficients[0].numerator.ring(), Arc::new(vars));
                 for c in &mut f.coefficients {
                     c.unify_variables(&mut r);
                 }
 
-                f.coefficients[0].get_variables().len() - 1
+                f.coefficients[0]
+                    .get_variables()
+                    .iter()
+                    .position(|x| x == f.variable.as_ref())
+                    .unwrap()
             });
 
         let mut res =
@@ -1653,14 +1708,16 @@ where
             }
         }
 
-        // create new temporary variable
-        let mut t = MultivariatePolynomial::new(
-            self.numerator.ring(),
-            None,
-            Arc::new(vec![PolyVariable::Temporary(0)]),
-        )
-        .monomial(self.numerator.ring().one(), vec![E::one()])
-        .into();
+        // create new temporary variable, appended to the variable map such that
+        // unification with `t` does not change the position of `var`
+        let x_var = self.numerator.get_vars_ref()[var].clone();
+        let mut t_vars = self.numerator.get_vars_ref().to_vec();
+        t_vars.push(PolyVariable::Temporary(0));
+        let mut t_exp = vec![E::zero(); t_vars.len()];
+        t_exp[t_vars.len() - 1] = E::one();
+        let mut t = MultivariatePolynomial::new(self.numerator.ring(), None, Arc::new(t_vars))
+            .monomial(self.numerator.ring().one(), t_exp)
+            .into();
 
         let mut w = vec![];
 
@@ -1674,7 +1731,12 @@ where
 
             constant.unify_variables(&mut t);
 
-            let new_var = p.coefficients[0].numerator.nvars() - 1;
+            let coeff_vars = p.coefficients[0].get_variables();
+            let var = coeff_vars.iter().position(|v| *v == x_var).unwrap();
+            let new_var = coeff_vars
+                .iter()
+                .position(|v| *v == PolyVariable::Temporary(0))
+                .unwrap();
 
             let b = h.clone() - p.derivative().mul_coeff(&t);
 
