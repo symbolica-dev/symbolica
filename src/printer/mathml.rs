@@ -1,6 +1,7 @@
 //! Bounded native MathML presentation. Omitted subtrees are display metadata,
 //! never substitutions in the underlying expression.
 use super::*;
+mod builtin;
 mod compact;
 mod cursor;
 mod structured;
@@ -31,7 +32,9 @@ const MIN_BUDGET_PAGES: usize = 4;
 const PRODUCT_ROW_COST: usize = 48;
 // Scroll HTML containers, not the MathML root: a scrollport on inline math can
 // clip glyph ink and create miniature scrollbars in grid layouts.
-const MATH_OPEN: &str = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" displaystyle=\"true\" style=\"font-family:'STIX Two Math',math;font-size:21px;font-synthesis:none\">";
+// The font size defaults to 21px. Set the inherited CSS custom property
+// `--symbolica-math-font-size` on any ancestor to override it.
+const MATH_OPEN: &str = "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" displaystyle=\"true\" style=\"font-family:'STIX Two Math',math;font-size:var(--symbolica-math-font-size,21px);font-synthesis:none\">";
 const MATH_CLOSE: &str = "</math>";
 
 /// One of a fixed set of bounded layouts, from most to least detailed.
@@ -189,8 +192,8 @@ pub struct MathMlPage {
     pub total: usize,
     /// Omitted nested expressions, in the order of their `[n]` labels.
     pub markers: Vec<MathMlMarker>,
-    /// Whether a custom printer rendered the root as a single item, so that its
-    /// children are not paged.
+    /// Whether a custom printer, or a built-in notation such as `|z|`, rendered
+    /// the root as a single item, so that its children are not paged.
     pub opaque: bool,
 }
 
@@ -253,6 +256,9 @@ impl MathMlPage {
     }
 
     /// The complete `<math>` element, including the numbered omission tokens.
+    ///
+    /// The font size is 21px unless an ancestor sets the CSS custom property
+    /// `--symbolica-math-font-size`.
     pub fn html(&self) -> String {
         format!("{MATH_OPEN}{}{MATH_CLOSE}", self.body)
     }
@@ -673,7 +679,7 @@ impl Renderer<'_, '_> {
             return Self::tagged(
                 Self::row(format!(
                     "{}<mo>&#x2061;</mo>{}",
-                    self.name(f.get_symbol()),
+                    self.head(f.get_symbol()),
                     Self::fence(marker)
                 )),
                 path,
@@ -732,6 +738,88 @@ impl Renderer<'_, '_> {
         let name = symbol_html(symbol, self.opts);
         self.bytes = self.bytes.saturating_sub(name.len());
         name
+    }
+
+    /// The name of a function, using conventional notation for built-ins.
+    fn head(&mut self, symbol: Symbol) -> String {
+        let Some(head) = builtin::notation(symbol).and_then(builtin::Notation::head) else {
+            return self.name(symbol);
+        };
+        self.bytes = self.bytes.saturating_sub(head.len());
+        head.to_owned()
+    }
+
+    /// Conventional layouts of built-in functions whose arguments become
+    /// scripts or delimiters, such as `ψ⁽ⁿ⁾(z)`, `Jₙ(z)`, `|z|` and `z*`.
+    /// Other argument counts use the ordinary function layout.
+    fn builtin(
+        &mut self,
+        atom: AtomView<'_>,
+        path: &mut Vec<usize>,
+        depth: usize,
+    ) -> Option<String> {
+        use builtin::Notation;
+        let AtomView::Fun(f) = atom else {
+            return None;
+        };
+        let notation = builtin::notation(f.get_symbol())?;
+        let mut argument = |this: &mut Self, index: usize| {
+            path.push(index);
+            let html = this.render(f.get(index), path, depth + 1);
+            path.pop();
+            html
+        };
+        let html = match (notation, f.get_nargs()) {
+            (Notation::Abs, 1) => {
+                let body = argument(self, 0);
+                Self::row(format!(
+                    "<mo fence=\"true\">|</mo>{body}<mo fence=\"true\">|</mo>"
+                ))
+            }
+            (Notation::Conjugate, 1) => {
+                let mut body = argument(self, 0);
+                if !Self::script_base(f.get(0)) {
+                    body = Self::fence(body);
+                }
+                format!("<msup>{body}<mo>*</mo></msup>")
+            }
+            (Notation::DerivativeOrder(head), 2) => {
+                let head = if f.get(0).is_zero() {
+                    head.to_owned()
+                } else {
+                    let order = argument(self, 0);
+                    format!("<msup>{head}{}</msup>", Self::fence(order))
+                };
+                let body = argument(self, 1);
+                Self::row(format!("{head}<mo>&#x2061;</mo>{}", Self::fence(body)))
+            }
+            (Notation::Indexed(head), 2) => {
+                let index = argument(self, 0);
+                let body = argument(self, 1);
+                Self::row(format!(
+                    "<msub>{head}{index}</msub><mo>&#x2061;</mo>{}",
+                    Self::fence(body)
+                ))
+            }
+            _ => return None,
+        };
+        self.bytes = self.bytes.saturating_sub(64);
+        Some(html)
+    }
+
+    /// Whether an atom can carry a script without parentheses.
+    fn script_base(atom: AtomView<'_>) -> bool {
+        match atom {
+            AtomView::Var(_) => true,
+            AtomView::Fun(f) => {
+                builtin::notation(f.get_symbol()) != Some(builtin::Notation::Conjugate)
+            }
+            AtomView::Num(n) => matches!(
+                n.get_coeff_view(),
+                CoefficientView::Natural(r, 1, 0, 1) if r >= 0
+            ),
+            _ => false,
+        }
     }
 
     fn render(&mut self, atom: AtomView<'_>, path: &mut Vec<usize>, depth: usize) -> String {
@@ -896,6 +984,13 @@ impl Renderer<'_, '_> {
         if let Some(custom) = self.custom(atom, path, state) {
             return custom;
         }
+        if let Some(builtin) = self.builtin(atom, path, depth) {
+            return if depth > 0 {
+                Self::tagged(builtin, path)
+            } else {
+                builtin
+            };
+        }
         match atom {
             AtomView::Num(_) => {
                 if self.opts.precision.is_some_and(|p| p > MAX_LEAF_BYTES) {
@@ -1001,9 +1096,7 @@ impl Renderer<'_, '_> {
                         );
                     }
                 }
-                let positive_integer = matches!(base, AtomView::Num(n)
-                    if matches!(n.get_coeff_view(), CoefficientView::Natural(r, 1, 0, 1) if r >= 0));
-                if !matches!(base, AtomView::Var(_) | AtomView::Fun(_)) && !positive_integer {
+                if !Self::script_base(base) {
                     b = Self::fence(b);
                 }
                 path.push(1);
@@ -1096,7 +1189,7 @@ impl Renderer<'_, '_> {
             let AtomView::Fun(f) = atom else {
                 unreachable!()
             };
-            let head = self.name(symbol);
+            let head = self.head(symbol);
             let mut orders = String::new();
             let mut arguments = String::new();
             let mut end = start;
@@ -1176,7 +1269,7 @@ impl Renderer<'_, '_> {
         // Reserve the function head before rendering its arguments, so nested
         // long names cannot evade the text budget while unwinding recursion.
         let head = if let AtomView::Fun(f) = atom {
-            Some(self.name(f.get_symbol()))
+            Some(self.head(f.get_symbol()))
         } else {
             None
         };
@@ -1801,6 +1894,7 @@ impl<'a> AtomView<'a> {
                 renderer
                     .semantic(atom, &[], state)
                     .or_else(|| renderer.custom(atom, &[], state))
+                    .or_else(|| renderer.builtin(atom, &mut vec![], 0))
             }
         } else {
             None
@@ -2678,6 +2772,64 @@ mod tests {
     }
 
     #[test]
+    fn builtin_functions_use_conventional_notation() {
+        // Compare the visible structure: rows and attributes other than an
+        // explicit upright variant do not change the notation.
+        let shape = |input: &str| {
+            let html = page(input);
+            let mut shape = String::new();
+            for part in html.split('<').skip(1) {
+                let (tag, text) = part.split_once('>').unwrap();
+                let name = tag.split(' ').next().unwrap();
+                if !matches!(name, "math" | "/math" | "mrow" | "/mrow") {
+                    let upright = tag.contains("mathvariant=\"normal\"");
+                    let variant = if upright {
+                        " mathvariant=\"normal\""
+                    } else {
+                        ""
+                    };
+                    shape.push_str(&format!("<{name}{variant}>{text}"));
+                }
+            }
+            shape.replace("<mo>&#x2061;</mo>", "")
+        };
+        for (input, expected) in [
+            (
+                "gamma(x)",
+                "<mi mathvariant=\"normal\">Γ</mi><mo>(</mo><mi>x</mi><mo>)</mo>",
+            ),
+            ("zeta(3)", "<mi>ζ</mi><mo>(</mo><mn>3</mn><mo>)</mo>"),
+            ("asinh(x)", "<mi>arsinh</mi><mo>(</mo><mi>x</mi><mo>)</mo>"),
+            ("polygamma(0,x)", "<mi>ψ</mi><mo>(</mo><mi>x</mi><mo>)</mo>"),
+            (
+                "polygamma(2,x)",
+                "<msup><mi>ψ</mi><mo>(</mo><mn>2</mn><mo>)</mo></msup><mo>(</mo><mi>x</mi><mo>)</mo>",
+            ),
+            (
+                "polylog(2,x)",
+                "<msub><mi>Li</mi><mn>2</mn></msub><mo>(</mo><mi>x</mi><mo>)</mo>",
+            ),
+            (
+                "bessel_j(n,x)",
+                "<msub><mi>J</mi><mi>n</mi></msub><mo>(</mo><mi>x</mi><mo>)</mo>",
+            ),
+            ("abs(x)", "<mo>|</mo><mi>x</mi><mo>|</mo>"),
+            ("conj(x)", "<msup><mi>x</mi><mo>*</mo></msup>"),
+            (
+                "conj(x)^2",
+                "<msup><mo>(</mo><msup><mi>x</mi><mo>*</mo></msup><mo>)</mo><mn>2</mn></msup>",
+            ),
+            // Other argument counts keep the ordinary function layout.
+            (
+                "bessel_j(1,2,3)",
+                "<mi>J</mi><mo>(</mo><mn>1</mn><mo>,</mo><mn>2</mn><mo>,</mo><mn>3</mn><mo>)</mo>",
+            ),
+        ] {
+            assert_eq!(shape(input), expected, "{input}: {}", page(input));
+        }
+    }
+
+    #[test]
     fn large_sum_after_small_factor_keeps_its_preview() {
         let sum = parse!("(x+y+z+w)^20").expand();
         let expression = &sum * parse!("1+x");
@@ -3420,7 +3572,7 @@ pub(crate) fn symbol_html(symbol: Symbol, opts: &PrintOptions) -> String {
 }
 
 /// Wrap a MathML fragment, such as [`MathMlPage::fragment`], in a block-level
-/// `<math>` element.
+/// `<math>` element. Its font size follows [`MathMlPage::html`].
 pub fn document(fragment: &str) -> String {
     let open = MATH_OPEN
         .replace("<math ", "<math display=\"block\" ")

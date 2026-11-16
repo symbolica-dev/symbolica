@@ -20,13 +20,13 @@ def backend_pages():
     from symbolica import E
 
     factors = 'G^8*' + '*'.join(f'(k{i}+p{i})' for i in range(12))
-    imaginary = E('-1i/16*' + factors).mathml_viewer(8)
+    imaginary = E('-1i/16*' + factors).formatted(page_size=8).mathml_viewer()
     # Complete-term previews retain modest products even in narrow alternatives.
     # Use a product beyond the per-layout factor bound to exercise expansion.
     negative_sum = E('a-1i/16*G^8*' + '*'.join(
-        f'(k{i}+p{i})' for i in range(600))).mathml_viewer(25)
-    rational = E('-3/16*' + factors).mathml_viewer(8)
-    unit = E('-x').mathml_viewer(1)
+        f'(k{i}+p{i})' for i in range(600))).formatted(page_size=25).mathml_viewer()
+    rational = E('-3/16*' + factors).formatted(page_size=8).mathml_viewer()
+    unit = E('-x').formatted(page_size=1).mathml_viewer()
     try:
         preview = imaginary.page()
         _, expanded = imaginary.handle_message(dict(action='expand_all', value=[]))

@@ -18,40 +18,6 @@ pub struct PythonSeries {
 }
 
 impl PythonSeries {
-    fn format_latex_with_options(
-        &self,
-        max_line_length: Option<usize>,
-        max_terms: Option<usize>,
-        precision: Option<usize>,
-        show_namespaces: bool,
-        hide_namespace: Option<&str>,
-        include_attributes: bool,
-        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
-    ) -> String {
-        format!(
-            "$${}$$",
-            self.series.format_string(
-                &PrintOptions {
-                    max_line_length,
-                    precision,
-                    hide_all_namespaces: !show_namespaces,
-                    hide_namespace: if show_namespaces {
-                        hide_namespace.map(|x| std::borrow::Cow::Owned(x.to_owned()))
-                    } else {
-                        None
-                    },
-                    include_attributes,
-                    max_terms,
-                    custom_print_mode: custom_print_mode
-                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
-                        .unwrap_or_default(),
-                    ..(*LATEX_PRINT_OPTIONS).clone()
-                },
-                PrintState::new(),
-            )
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn format_with_color_mode(
         &self,
@@ -281,7 +247,8 @@ impl PythonSeries {
         Ok(display::algebraic_html(&self.series))
     }
 
-    /// Create a native pager without importing notebook or widget packages.
+    /// Deprecated and undocumented: use `formatted(...).mathml_viewer()`, which
+    /// also accepts print options and `font_size`. Kept for compatibility.
     #[pyo3(signature = (page_size=25))]
     #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
     pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
@@ -290,6 +257,7 @@ impl PythonSeries {
             self.series.clone(),
             display::default_options(),
             page_size,
+            None,
         )
     }
 
@@ -301,13 +269,13 @@ impl PythonSeries {
         include: Option<Vec<String>>,
         exclude: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
-        display::algebraic::formatted(self.series.clone(), display::default_options(), 25)?
+        display::algebraic::formatted(self.series.clone(), display::default_options(), None, None)?
             ._repr_mimebundle_(py, include, exclude)
     }
 
     /// Display native MathML with paging in marimo.
     pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        display::algebraic::formatted(self.series.clone(), display::default_options(), 25)?
+        display::algebraic::formatted(self.series.clone(), display::default_options(), None, None)?
             ._display_(py)
     }
 
@@ -491,8 +459,11 @@ impl PythonSeries {
 
     /// Convert the series into a rich display object, with tunable settings.
     ///
-    /// In notebooks, the returned object displays as native MathML while
-    /// `str(...)` returns the plain formatted text. Set `mathml=False` for highlighted text.
+    /// In notebooks, the returned object displays as native MathML with paging,
+    /// while `str(...)` returns the plain formatted text. Set `mathml=False` for
+    /// highlighted text. `page_size` (1–500) sets the initial preview and popup
+    /// page size, and `font_size` the MathML font size in CSS pixels. Use
+    /// `.mathml_viewer()` on the result for a pager without notebook packages.
     #[pyo3(signature =
         (max_terms = None,
             mode = PythonPrintMode::Symbolica,
@@ -517,7 +488,7 @@ impl PythonSeries {
             show_namespaces = false,
             hide_namespace = None,
             include_attributes = false,
-            custom_print_mode = None, *, mathml = true, page_size = 25)
+            custom_print_mode = None, *, mathml = true, page_size = None, font_size = None)
         )]
     pub fn formatted(
         &self,
@@ -544,112 +515,39 @@ impl PythonSeries {
         include_attributes: bool,
         custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         mathml: bool,
-        page_size: usize,
+        page_size: Option<usize>,
+        font_size: Option<f64>,
     ) -> PyResult<PythonFormattedOutput> {
-        if matches!(mode, PythonPrintMode::MathML)
-            || (mathml && matches!(mode, PythonPrintMode::Symbolica))
-        {
-            return display::algebraic::formatted(
-                self.series.clone(),
-                PrintOptions {
-                    mode: PrintMode::MathML,
-                    precision,
-                    print_ring,
-                    symmetric_representation_for_finite_field,
-                    multiplication_operator,
-                    hide_all_namespaces: !show_namespaces,
-                    hide_namespace: hide_namespace.map(|s| Cow::Owned(s.to_owned())),
-                    include_attributes,
-                    max_terms,
-                    custom_print_mode: custom_print_mode
-                        .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
-                        .unwrap_or_default(),
-                    ..display::default_options()
-                },
-                page_size,
-            );
-        }
-
-        let text = self.format_with_color_mode(
-            if matches!(mode, PythonPrintMode::MathML) {
-                PythonPrintMode::Symbolica
-            } else {
-                mode
-            },
-            max_line_length,
-            indentation,
-            fill_indented_lines,
-            terms_on_new_line,
-            color_top_level_sum,
-            color_builtin_symbols,
-            bracket_level_colors,
-            print_ring,
-            symmetric_representation_for_finite_field,
-            explicit_rational_polynomial,
-            number_thousands_separator,
-            multiplication_operator,
-            double_star_for_exponentiation,
-            function_brackets,
-            num_exp_as_superscript,
-            precision,
-            show_namespaces,
-            hide_namespace,
-            include_attributes,
-            max_terms,
-            custom_print_mode.clone(),
-            ColorMode::Never,
-        );
-
-        let native_mathml = matches!(mode, PythonPrintMode::MathML)
-            || (mathml && matches!(mode, PythonPrintMode::Symbolica));
-        let formatted = self.format_with_color_mode(
-            if native_mathml {
-                PythonPrintMode::MathML
-            } else {
-                mode
-            },
-            max_line_length,
-            indentation,
-            fill_indented_lines,
-            terms_on_new_line,
-            color_top_level_sum,
-            color_builtin_symbols,
-            bracket_level_colors,
-            print_ring,
-            symmetric_representation_for_finite_field,
-            explicit_rational_polynomial,
-            number_thousands_separator,
-            multiplication_operator,
-            double_star_for_exponentiation,
-            function_brackets,
-            num_exp_as_superscript,
-            precision,
-            show_namespaces,
-            hide_namespace,
-            include_attributes,
-            max_terms,
-            custom_print_mode.clone(),
-            ColorMode::Always,
-        );
-        let latex = self.format_latex_with_options(
-            max_line_length,
-            max_terms,
-            precision,
-            show_namespaces,
-            hide_namespace,
-            include_attributes,
-            custom_print_mode,
-        );
-
-        Ok(PythonFormattedOutput::new(
-            text,
-            Some(if native_mathml {
-                display::algebraic_fragment_html(&formatted)
-            } else {
-                crate::printer::AnsiHtmlFormatter::new(&formatted).to_string()
-            }),
-            Some(latex),
-        ))
+        display::algebraic::formatted_with_options(
+            self.series.clone(),
+            display::print_options(
+                mode,
+                max_line_length,
+                indentation,
+                fill_indented_lines,
+                terms_on_new_line,
+                color_top_level_sum,
+                color_builtin_symbols,
+                bracket_level_colors,
+                print_ring,
+                symmetric_representation_for_finite_field,
+                explicit_rational_polynomial,
+                number_thousands_separator,
+                multiplication_operator,
+                double_star_for_exponentiation,
+                function_brackets,
+                num_exp_as_superscript,
+                precision,
+                show_namespaces,
+                hide_namespace,
+                include_attributes,
+                max_terms,
+                custom_print_mode,
+            ),
+            mathml,
+            page_size,
+            font_size,
+        )
     }
 
     pub fn sin(&self) -> PyResult<Self> {

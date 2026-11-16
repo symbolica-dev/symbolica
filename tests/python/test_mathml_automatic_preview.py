@@ -207,8 +207,8 @@ class AutomaticProductPreviewTests(unittest.TestCase):
 
     def test_native_expression_default_and_explicit_sizes(self):
         expression = E("*".join(f"x{i}" for i in range(34)))
-        automatic = expression.mathml_viewer()
-        explicit = expression.mathml_viewer(25)
+        automatic = expression.formatted().mathml_viewer()
+        explicit = expression.formatted(page_size=25).mathml_viewer()
         self.addCleanup(automatic.close)
         self.addCleanup(explicit.close)
         self.assertEqual(automatic.page()["end"], 34)
@@ -218,12 +218,12 @@ class AutomaticProductPreviewTests(unittest.TestCase):
         # More markup is affordable for short indexed labels, not for long
         # visible factor names which would make the automatic preview unwieldy.
         small_names = E("*".join(f"x{i}" for i in range(100)))
-        automatic = small_names.mathml_viewer()
+        automatic = small_names.formatted().mathml_viewer()
         self.addCleanup(automatic.close)
         self.assertEqual(automatic.page()["end"], 100)
         long_names = E("*".join(f"long_visible_factor_name_{i}" for i in range(100)))
-        automatic = long_names.mathml_viewer()
-        complete = long_names.mathml_viewer(100)
+        automatic = long_names.formatted().mathml_viewer()
+        complete = long_names.formatted(page_size=100).mathml_viewer()
         self.addCleanup(automatic.close)
         self.addCleanup(complete.close)
         self.assertEqual(automatic.page()["end"], 25)
@@ -234,8 +234,8 @@ class AutomaticProductPreviewTests(unittest.TestCase):
         # eligible: its complete output still contains budget omissions.
         large_sum = "+".join(f"y{i}" for i in range(100))
         complex_product = E("*".join(f"f{i}({large_sum})" for i in range(34)))
-        automatic = complex_product.mathml_viewer()
-        explicit = complex_product.mathml_viewer(25)
+        automatic = complex_product.formatted().mathml_viewer()
+        explicit = complex_product.formatted(page_size=25).mathml_viewer()
         self.addCleanup(automatic.close)
         self.addCleanup(explicit.close)
         self.assertEqual(automatic.page()["html"], explicit.page()["html"])

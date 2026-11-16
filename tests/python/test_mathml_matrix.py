@@ -31,7 +31,7 @@ class MatrixMathMLTests(unittest.TestCase):
         x, y = S('x', 'y')
         large = E('(1+x)^100').expand()
         matrix = Matrix.from_nested([[large, E('(1+y)^90').expand()], [1, 2]])
-        viewer = matrix.mathml_viewer(page_size=7)
+        viewer = matrix.formatted(page_size=7).mathml_viewer()
         original = str(matrix)
         try:
             _, page = viewer.handle_message({'action': 'attach', 'view': 'matrix'})
@@ -57,7 +57,7 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_rational_cell_parts_keep_distinct_paths(self):
         value = RationalPolynomial.parse('(1+x)^40/(1+y)^35', ['x','y'])
-        viewer = Matrix.from_nested([[1, value]]).mathml_viewer(page_size=7)
+        viewer = Matrix.from_nested([[1, value]]).formatted(page_size=7).mathml_viewer()
         try:
             page = viewer.page()
             self.assertEqual([m[0] for m in page['markers']], [[1, 0], [1, 1]])
@@ -71,7 +71,7 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_large_matrix_pages_cover_every_entry_once(self):
         matrix = Matrix.from_linear(12, 11, list(range(132)))
-        viewer = matrix.mathml_viewer(page_size=7)
+        viewer = matrix.formatted(page_size=7).mathml_viewer()
         try:
             page = viewer.page()
             seen = []
@@ -93,7 +93,7 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_wide_rows_and_last_page_have_no_placeholder_cells(self):
         matrix = Matrix.from_linear(8, 40, list(range(320)))
-        viewer = matrix.mathml_viewer(page_size=3)
+        viewer = matrix.formatted(page_size=3).mathml_viewer()
         try:
             page = viewer.page()
             self.assertEqual((page['start'], page['end'], page['total']), (0, 3, 8))
@@ -110,7 +110,7 @@ class MatrixMathMLTests(unittest.TestCase):
             viewer.close()
 
     def test_small_complete_values_remain_visible_across_many_rows(self):
-        viewer = Matrix.from_linear(52, 11, list(range(572))).mathml_viewer()
+        viewer = Matrix.from_linear(52, 11, list(range(572))).formatted().mathml_viewer()
         try:
             page = viewer.page()
             self.assertEqual((page['start'], page['end'], page['total']), (0, 25, 52))
@@ -128,7 +128,7 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_coordinates_only_label_truncated_dimensions(self):
         for rows, cols, expected_rows, expected_cols in [(32, 11, True, False), (1, 40, False, False), (2, 2, False, False)]:
-            viewer = Matrix.from_linear(rows, cols, list(range(rows * cols))).mathml_viewer()
+            viewer = Matrix.from_linear(rows, cols, list(range(rows * cols))).formatted().mathml_viewer()
             try:
                 html = ET.fromstring(viewer.page()['html'])
                 self.assertEqual(bool(html.findall('.//th[@scope="row"]')), expected_rows)
@@ -139,7 +139,7 @@ class MatrixMathMLTests(unittest.TestCase):
     def test_dense_large_cells_stay_within_the_transfer_budget(self):
         large = E('(1+x)^100').expand()
         matrix = Matrix.from_nested([[large] * 8 for _ in range(32)])
-        viewer = matrix.mathml_viewer()
+        viewer = matrix.formatted().mathml_viewer()
         try:
             page = viewer.page()
             self.assertEqual((page['start'], page['end'], page['total']), (0, 25, 32))
@@ -158,7 +158,7 @@ class MatrixMathMLTests(unittest.TestCase):
 
     def test_viewer_snapshot_and_bounds_without_notebook_imports(self):
         matrix = Matrix.from_nested([[1,2],[3,4]])
-        viewer = matrix.mathml_viewer()
+        viewer = matrix.formatted().mathml_viewer()
         try:
             original = viewer.page()['html']
             matrix.swap_rows(0, 1)
@@ -169,7 +169,7 @@ class MatrixMathMLTests(unittest.TestCase):
         finally:
             viewer.close()
         for size in (0, 501):
-            with self.assertRaises(ValueError): matrix.mathml_viewer(page_size=size)
+            with self.assertRaises(ValueError): matrix.formatted(page_size=size).mathml_viewer()
         for name in ['anywidget','ipywidgets','IPython','marimo','traitlets']:
             self.assertNotIn(name, sys.modules)
 

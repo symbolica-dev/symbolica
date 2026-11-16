@@ -23,6 +23,8 @@ impl Deref for Snapshot<'_> {
 
 struct Source<'a> {
     matrix: Snapshot<'a>,
+    /// Print options for the entries.
+    options: PrintOptions,
     cell_size: usize,
 }
 
@@ -90,7 +92,7 @@ impl Source<'_> {
                     .max(compact_size);
                 let page = self
                     .entry(index)?
-                    .page(&default_options(), &[], &options.limit(size))
+                    .page(&self.options, &[], &options.limit(size))
                     .unwrap();
                 let page_html = page.html();
                 // Small, complete values should not become omission buttons
@@ -175,7 +177,7 @@ impl MathMLPageSource for Source<'static> {
         let expansions = native_expansions(request.expansions);
         let page = value
             .page(
-                &default_options(),
+                &self.options,
                 path,
                 &MathMlPageOptions::new()
                     .start(request.start)
@@ -200,35 +202,50 @@ impl MathMLPageSource for Source<'static> {
     }
 }
 
+/// Deprecated `Matrix.mathml_viewer()`: the viewer of `formatted()` with defaults.
 pub(in crate::api::python) fn viewer(
     py: Python<'_>,
     matrix: PythonMatrix,
     size: usize,
 ) -> PyResult<Py<PyAny>> {
-    shared_viewer(py, Arc::new(matrix), size)
+    shared_viewer(py, Arc::new(matrix), default_options(), size, None)
 }
 
-fn shared_viewer(py: Python<'_>, matrix: Arc<PythonMatrix>, size: usize) -> PyResult<Py<PyAny>> {
+fn shared_viewer(
+    py: Python<'_>,
+    matrix: Arc<PythonMatrix>,
+    options: PrintOptions,
+    size: usize,
+    font_size: Option<f64>,
+) -> PyResult<Py<PyAny>> {
     MathMLViewer::new(Source {
         matrix: Snapshot::Shared(matrix),
+        options,
         cell_size: size,
     })
     .page_size(size)
     .layout_count(LAYOUT_COUNT)
     .supports_expansion(true)
+    .font_size(font_size)
     .into_python(py)
 }
 
 pub(in crate::api::python) fn static_html(matrix: &PythonMatrix) -> PyResult<String> {
+    static_page(matrix, default_options(), 25)
+}
+
+/// The first `size` rows, with omitted entries and terms shown as an ellipsis.
+fn static_page(matrix: &PythonMatrix, options: PrintOptions, size: usize) -> PyResult<String> {
     let source = Source {
         matrix: Snapshot::Borrowed(matrix),
-        cell_size: 25,
+        options,
+        cell_size: size,
     };
     let page = source.matrix_page(
         &MathMLPageRequest {
             path: &[],
             start: 0,
-            size: 25,
+            size,
             layout: 0,
             expansions: &[],
         },
@@ -241,12 +258,25 @@ pub(in crate::api::python) fn static_html(matrix: &PythonMatrix) -> PyResult<Str
     Ok(html)
 }
 
-pub(in crate::api::python) fn formatted(matrix: PythonMatrix) -> PyResult<PythonFormattedOutput> {
+/// Native MathML for a matrix, with `options` for its entries. `size = None`
+/// selects the default of 25 rows and 25 terms per entry.
+pub(in crate::api::python) fn formatted(
+    matrix: PythonMatrix,
+    options: PrintOptions,
+    size: Option<usize>,
+    font_size: Option<f64>,
+) -> PyResult<PythonFormattedOutput> {
+    let size = super::page_size(size)?.unwrap_or(25);
+    let font_size = super::font_size(font_size)?;
     let matrix = Arc::new(matrix);
     let notebook = Arc::clone(&matrix);
+    let notebook_options = options.clone();
     Ok(PythonFormattedOutput::lazy(move |_, backend| {
         Ok(match backend {
-            FormattedOutputBackend::Html => Some(static_html(&matrix)?),
+            FormattedOutputBackend::Html => Some(super::sized_html(
+                static_page(&matrix, options.clone(), size)?,
+                font_size,
+            )),
             FormattedOutputBackend::Text => Some(format!(
                 "Matrix {}×{} (MathML preview)",
                 matrix.matrix.nrows(),
@@ -255,5 +285,13 @@ pub(in crate::api::python) fn formatted(matrix: PythonMatrix) -> PyResult<Python
             FormattedOutputBackend::Latex => None,
         })
     })
-    .with_notebook(move |py| shared_viewer(py, Arc::clone(&notebook), 25)))
+    .with_notebook(move |py| {
+        shared_viewer(
+            py,
+            Arc::clone(&notebook),
+            notebook_options.clone(),
+            size,
+            font_size,
+        )
+    }))
 }

@@ -11,7 +11,7 @@ class ExpansionDetailTests(unittest.TestCase):
         polynomial = E("(x+y+z+w)^20").expand()
         for expression, prefix in ((polynomial, []), (polynomial * E("1+a"), [1])):
             with self.subTest(prefix=prefix):
-                viewer = expression.mathml_viewer()
+                viewer = expression.formatted().mathml_viewer()
                 self.addCleanup(viewer.close)
                 initial = viewer.page()
 
@@ -68,7 +68,7 @@ class ExpansionDetailTests(unittest.TestCase):
         self.assertEqual(bytes(expression.__getstate__()), original)
 
     def test_short_native_power_tails_stay_visible(self):
-        viewer = E("19380*x*y^3*z^16+q").mathml_viewer()
+        viewer = E("19380*x*y^3*z^16+q").formatted().mathml_viewer()
         self.addCleanup(viewer.close)
         page = viewer.page()
         for layout in [page, *page["layouts"]]:
@@ -77,7 +77,7 @@ class ExpansionDetailTests(unittest.TestCase):
                 self.assertIn("<mn>16</mn>", layout["html"])
 
     def test_parentheses_allow_taller_detail_to_replace_an_omission(self):
-        viewer = (E("(x+y+z+w)^20").expand() * E("1+a")).mathml_viewer()
+        viewer = (E("(x+y+z+w)^20").expand() * E("1+a")).formatted().mathml_viewer()
         self.addCleanup(viewer.close)
         initial = viewer.page()
         for page in [initial, *initial["layouts"]]:
@@ -91,7 +91,7 @@ class ExpansionDetailTests(unittest.TestCase):
                         self.assertNotEqual(row[-1].get("stretchy"), "false")
 
     def test_larger_root_sum_page_keeps_complete_terms(self):
-        viewer = E("(x+y+z+w)^20").expand().mathml_viewer()
+        viewer = E("(x+y+z+w)^20").expand().formatted().mathml_viewer()
         self.addCleanup(viewer.close)
         viewer.page()
         _, expanded = viewer.handle_message({"action": "size", "value": 50})

@@ -76,7 +76,7 @@ class CompactPowerPickleTests(unittest.TestCase):
         self.assertEqual(restored[::-1], expected[::-1])
         self.assertEqual(restored[5][0][0], E('2'))
         self.assertEqual(restored[5][1], E('2'))
-        viewers = (restored.mathml_viewer(page_size=2), expected.mathml_viewer(page_size=2))
+        viewers = (restored.formatted(page_size=2).mathml_viewer(), expected.formatted(page_size=2).mathml_viewer())
         try:
             for index, value in enumerate(values):
                 with self.subTest(index=index):
@@ -93,7 +93,7 @@ class CompactPowerPickleTests(unittest.TestCase):
 
         expected = E('pickle_g(' + ','.join(['2'] * 30) + ')')
         restored = pickle.loads(pickle.dumps(E(f'pickle_f({expected},{expected})')))
-        viewer = restored.mathml_viewer(page_size=2)
+        viewer = restored.formatted(page_size=2).mathml_viewer()
         try:
             for index in (0, 1):
                 self.assert_same_expression(restored[index], expected)

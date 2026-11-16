@@ -164,7 +164,7 @@ class AlgebraicMathMLTests(unittest.TestCase):
                    E('exp(x)').series(x, 0, 40), P('+'.join(f'x^{i}' for i in range(41)), modulus=7)]
         for obj in objects:
             original = str(obj)
-            viewer = obj.mathml_viewer(page_size=7)
+            viewer = obj.formatted(page_size=7).mathml_viewer()
             try:
                 _, page = viewer.handle_message({'action': 'attach', 'view': 'algebraic'})
                 self.assertTrue(page['markers'], (type(obj).__name__, page['start'], page['end'], page['total'], str(obj)[:120]))
@@ -200,7 +200,7 @@ class AlgebraicMathMLTests(unittest.TestCase):
 
     def test_rational_pager_exposes_numerator_and_denominator(self):
         poly = RationalPolynomial.parse('((1+x)^40)/((1+y)^35)', ['x','y'])
-        viewer = poly.mathml_viewer(page_size=7)
+        viewer = poly.formatted(page_size=7).mathml_viewer()
         original = str(poly)
         try:
             _, page = viewer.handle_message({'action': 'attach', 'view': 'rational'})
@@ -235,7 +235,7 @@ class AlgebraicMathMLTests(unittest.TestCase):
                    E('exp(x)').series(x, 0, 20)]
         for obj in objects:
             original = str(obj)
-            viewer = obj.mathml_viewer(page_size=7)
+            viewer = obj.formatted(page_size=7).mathml_viewer()
             try:
                 compact = viewer.page()
                 self.assertTrue(compact['supports_expansion'])
@@ -258,7 +258,7 @@ class AlgebraicMathMLTests(unittest.TestCase):
 
     def test_rational_parts_expand_independently_and_collapse_together(self):
         poly = RationalPolynomial.parse('(1+x)^40/(1+y)^35', ['x', 'y'])
-        viewer = poly.mathml_viewer(page_size=7)
+        viewer = poly.formatted(page_size=7).mathml_viewer()
         def counts(page):
             fraction = next(n for n in root(page['html']).iter() if kind(n) == 'mfrac')
             return [sum(not any('data-symbolica-marker' in n.attrib for n in term.iter())
