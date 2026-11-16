@@ -363,21 +363,6 @@ impl SpecialSymbols {
                         **out = function!(gamma_symbol, arg) * function!(polygamma_symbol, 0, arg);
                     }
                 })
-                .with_print_function(|view, opt, state| {
-                    if let AtomView::Fun(f) = view {
-                        if opt.mode.is_latex() {
-                            let mut str = String::new();
-                            let _ = f.format(Some("\\Gamma"), &mut str, opt, *state);
-                            return Some(str);
-                        } else if opt.mode.is_typst() {
-                            let mut str = String::new();
-                            let _ = f.format(Some("Gamma"), &mut str, opt, *state);
-                            return Some(str);
-                        }
-                    }
-
-                    None
-                })
                 .with_series_function(
                     move |args| {
                         let [arg] = args else { return None; };

@@ -20,6 +20,8 @@ use crate::{
 pub use numerica::printer::*;
 
 pub mod mathml;
+mod notation;
+use notation::Notation;
 
 /// Track if Symbolica should colorize output, based on the `SYMBOLICA_COLOR` environment variable or if stdout is a terminal.
 static SHOULD_COLORIZE: LazyLock<bool> = LazyLock::new(|| {
@@ -455,6 +457,19 @@ impl<'a> AtomPrinter<'a> {
     }
 
     /// Format a bracket based on the current bracket level and print options.
+    /// Write the separator between two factors of a product. LaTeX and Typst
+    /// use implicit multiplication, as in typeset mathematics.
+    pub fn format_multiplication<W: std::fmt::Write>(
+        f: &mut W,
+        opts: &PrintOptions,
+    ) -> fmt::Result {
+        if opts.mode.is_latex() || opts.mode.is_typst() {
+            f.write_char(' ')
+        } else {
+            f.write_char(opts.multiplication_operator)
+        }
+    }
+
     pub fn format_bracket<W: std::fmt::Write>(
         bracket: char,
         f: &mut W,
@@ -1368,8 +1383,12 @@ impl FormattedPrintNum for NumView<'_> {
                     if opts.mode.is_latex() {
                         f.write_str(" \\infty")?;
                     } else {
-                        f.write_char(opts.multiplication_operator)?;
-                        f.write_char('∞')?;
+                        AtomPrinter::format_multiplication(f, opts)?;
+                        f.write_str(if opts.mode.is_typst() {
+                            "infinity"
+                        } else {
+                            "∞"
+                        })?;
                     }
                 }
                 Ok(false)
@@ -1580,11 +1599,7 @@ impl FormattedPrintMul for MulView<'_> {
             }
 
             if !first {
-                if opts.mode.is_latex() {
-                    f.write_char(' ')?;
-                } else {
-                    f.write_char(opts.multiplication_operator)?;
-                }
+                AtomPrinter::format_multiplication(f, opts)?;
             }
 
             x.format(f, opts, print_state)?;
@@ -1707,11 +1722,7 @@ impl FormattedPrintMul for MulView<'_> {
                         }
 
                         if !first {
-                            if opts.mode.is_latex() {
-                                f.write_char(' ')?;
-                            } else {
-                                f.write_char(opts.multiplication_operator)?;
-                            }
+                            AtomPrinter::format_multiplication(f, opts)?;
                         }
 
                         count += 1;
@@ -1887,6 +1898,13 @@ impl FunView<'_> {
             return Ok(false);
         }
 
+        if custom_head.is_none()
+            && (opts.mode.is_latex() || opts.mode.is_typst())
+            && let Some(notation) = notation::notation(id)
+        {
+            return self.format_notation(notation, f, opts, print_state);
+        }
+
         if let Some(custom_head) = custom_head {
             f.write_str(custom_head)?;
         } else if opts.mode.is_typst() {
@@ -2056,6 +2074,92 @@ impl FunView<'_> {
             AtomPrinter::format_bracket(brackets.1, f, opts, print_state)?;
         }
 
+        Ok(false)
+    }
+
+    /// Write a built-in function in conventional LaTeX or Typst notation, such
+    /// as `\psi^{(n)}\!\left(z\right)` or `J_(n)(z)`. Argument counts without a
+    /// special form use the ordinary layout with the conventional name.
+    fn format_notation<W: std::fmt::Write>(
+        &self,
+        notation: Notation,
+        f: &mut W,
+        opts: &PrintOptions,
+        print_state: PrintState,
+    ) -> Result<bool, Error> {
+        let latex = opts.mode.is_latex();
+        let name = |head: notation::Head| if latex { head.latex } else { head.typst };
+        // Arguments, scripts and delimited bodies start a new expression.
+        let mut inner = print_state;
+        inner.bracket_level = inner.bracket_level.max(1) + 1;
+        inner.top_level_add_child = false;
+        inner.level += 1;
+        inner.in_sum = false;
+        inner.in_product = false;
+        inner.in_exp = false;
+        inner.in_exp_base = false;
+        inner.suppress_one = false;
+        let call = |f: &mut W, argument: AtomView<'_>| -> Result<(), Error> {
+            f.write_str(if latex { "\\!\\left(" } else { "(" })?;
+            argument.format(f, opts, inner)?;
+            f.write_str(if latex { "\\right)" } else { ")" })
+        };
+
+        match (notation, self.get_nargs()) {
+            (Notation::Abs, 1) => {
+                f.write_str(if latex { "\\left|" } else { "abs(" })?;
+                self.get(0).format(f, opts, inner)?;
+                f.write_str(if latex { "\\right|" } else { ")" })?;
+            }
+            (Notation::Conjugate, 1) => {
+                // A script cannot carry another script: (z*)² needs parentheses.
+                if print_state.in_exp_base {
+                    f.write_str(if latex { "\\left(" } else { "(" })?;
+                }
+                let mut base = inner;
+                base.in_exp_base = true;
+                if latex {
+                    f.write_char('{')?;
+                    self.get(0).format(f, opts, base)?;
+                    f.write_str("}^{*}")?;
+                } else {
+                    self.get(0).format(f, opts, base)?;
+                    f.write_str("^*")?;
+                }
+                if print_state.in_exp_base {
+                    f.write_str(if latex { "\\right)" } else { ")" })?;
+                }
+            }
+            (Notation::DerivativeOrder(head), 2) => {
+                f.write_str(name(head))?;
+                if !self.get(0).is_zero() {
+                    f.write_str(if latex { "^{(" } else { "^((" })?;
+                    self.get(0).format(f, opts, inner)?;
+                    f.write_str(if latex { ")}" } else { "))" })?;
+                }
+                call(f, self.get(1))?;
+            }
+            (Notation::Indexed(head), 2) => {
+                f.write_str(name(head))?;
+                f.write_str(if latex { "_{" } else { "_(" })?;
+                self.get(0).format(f, opts, inner)?;
+                f.write_str(if latex { "}" } else { ")" })?;
+                call(f, self.get(1))?;
+            }
+            _ => {
+                return match notation.head() {
+                    Some(head) => self.format(Some(name(head)), f, opts, print_state),
+                    None => {
+                        let mut plain = String::new();
+                        self.get_symbol().format(opts, print_state, &mut plain)?;
+                        if opts.mode.is_typst() {
+                            plain = format!("op({plain})");
+                        }
+                        self.format(Some(&plain), f, opts, print_state)
+                    }
+                };
+            }
+        }
         Ok(false)
     }
 }
@@ -2472,6 +2576,77 @@ mod test {
         printer::{AnsiHtmlFormatter, AnsiWrap, AtomPrinter, ColorMode, PrintOptions, PrintState},
         symbol,
     };
+
+    #[test]
+    fn builtin_functions_use_conventional_latex_and_typst() {
+        let print =
+            |input: &str, opts: PrintOptions| parse!(input).format_string(&opts, PrintState::new());
+        for (input, latex, typst) in [
+            ("gamma(x)^2", "\\Gamma\\!\\left(x\\right)^{2}", "Gamma(x)^2"),
+            ("zeta(s)", "\\zeta\\!\\left(s\\right)", "zeta(s)"),
+            ("polygamma(0,x)", "\\psi\\!\\left(x\\right)", "psi(x)"),
+            (
+                "polygamma(2,x)",
+                "\\psi^{(2)}\\!\\left(x\\right)",
+                "psi^((2))(x)",
+            ),
+            (
+                "dzeta(1,s)",
+                "\\zeta^{(1)}\\!\\left(s\\right)",
+                "zeta^((1))(s)",
+            ),
+            (
+                "polylog(2,1-x)",
+                "\\operatorname{Li}_{2}\\!\\left(1-x\\right)",
+                "op(\"Li\")_(2)(1-x)",
+            ),
+            (
+                "bessel_k(n+1,x^2)",
+                "K_{1+n}\\!\\left(x^{2}\\right)",
+                "K_(1+n)(x^2)",
+            ),
+            (
+                "erf(x)",
+                "\\operatorname{erf}\\!\\left(x\\right)",
+                "op(\"erf\")(x)",
+            ),
+            ("tan(x)", "\\tan\\!\\left(x\\right)", "op(\"tan\")(x)"),
+            (
+                "asin(x)",
+                "\\arcsin\\!\\left(x\\right)",
+                "op(\"arcsin\")(x)",
+            ),
+            (
+                "asinh(x)",
+                "\\operatorname{arsinh}\\!\\left(x\\right)",
+                "op(\"arsinh\")(x)",
+            ),
+            ("abs(x+y)^2", "\\left|x+y\\right|^{2}", "abs(x+y)^2"),
+            ("conj(x)", "{x}^{*}", "x^*"),
+            ("conj(x)^2", "\\left({x}^{*}\\right)^{2}", "(x^*)^2"),
+            // Other argument counts keep the ordinary layout.
+            ("bessel_j(1,2,3)", "J\\!\\left(1,2,3\\right)", "J(1,2,3)"),
+        ] {
+            assert_eq!(print(input, PrintOptions::latex()), latex, "{input}");
+            assert_eq!(print(input, PrintOptions::typst()), typst, "{input}");
+        }
+    }
+
+    #[test]
+    fn typst_products_use_implicit_multiplication() {
+        // Like LaTeX, Typst ignores the operator. A `·` would also continue a
+        // Typst identifier, so that `pi·x` would be one unknown name.
+        for operator in [' ', '·', '*'] {
+            let opts = PrintOptions {
+                multiplication_operator: operator,
+                ..PrintOptions::typst()
+            };
+            assert_eq!(
+                parse!("pi*x*sin(y)").format_string(&opts, PrintState::new()),
+                "pi x op(sin)(y)"
+            );
+        }
+    }
 
     #[test]
     fn typst_imaginary_fractions() {

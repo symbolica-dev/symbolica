@@ -1,10 +1,10 @@
 //! Bounded native MathML presentation. Omitted subtrees are display metadata,
 //! never substitutions in the underlying expression.
 use super::*;
-mod builtin;
 mod compact;
 mod cursor;
 mod structured;
+use super::notation::{self, Notation};
 use cursor::MathMlChildren;
 pub use cursor::MathMlCursorCache;
 pub use structured::AlgebraicMathMl;
@@ -742,11 +742,11 @@ impl Renderer<'_, '_> {
 
     /// The name of a function, using conventional notation for built-ins.
     fn head(&mut self, symbol: Symbol) -> String {
-        let Some(head) = builtin::notation(symbol).and_then(builtin::Notation::head) else {
+        let Some(head) = notation::notation(symbol).and_then(Notation::head) else {
             return self.name(symbol);
         };
-        self.bytes = self.bytes.saturating_sub(head.len());
-        head.to_owned()
+        self.bytes = self.bytes.saturating_sub(head.mathml.len());
+        head.mathml.to_owned()
     }
 
     /// Conventional layouts of built-in functions whose arguments become
@@ -758,11 +758,10 @@ impl Renderer<'_, '_> {
         path: &mut Vec<usize>,
         depth: usize,
     ) -> Option<String> {
-        use builtin::Notation;
         let AtomView::Fun(f) = atom else {
             return None;
         };
-        let notation = builtin::notation(f.get_symbol())?;
+        let notation = notation::notation(f.get_symbol())?;
         let mut argument = |this: &mut Self, index: usize| {
             path.push(index);
             let html = this.render(f.get(index), path, depth + 1);
@@ -785,10 +784,10 @@ impl Renderer<'_, '_> {
             }
             (Notation::DerivativeOrder(head), 2) => {
                 let head = if f.get(0).is_zero() {
-                    head.to_owned()
+                    head.mathml.to_owned()
                 } else {
                     let order = argument(self, 0);
-                    format!("<msup>{head}{}</msup>", Self::fence(order))
+                    format!("<msup>{}{}</msup>", head.mathml, Self::fence(order))
                 };
                 let body = argument(self, 1);
                 Self::row(format!("{head}<mo>&#x2061;</mo>{}", Self::fence(body)))
@@ -797,7 +796,8 @@ impl Renderer<'_, '_> {
                 let index = argument(self, 0);
                 let body = argument(self, 1);
                 Self::row(format!(
-                    "<msub>{head}{index}</msub><mo>&#x2061;</mo>{}",
+                    "<msub>{}{index}</msub><mo>&#x2061;</mo>{}",
+                    head.mathml,
                     Self::fence(body)
                 ))
             }
@@ -811,9 +811,7 @@ impl Renderer<'_, '_> {
     fn script_base(atom: AtomView<'_>) -> bool {
         match atom {
             AtomView::Var(_) => true,
-            AtomView::Fun(f) => {
-                builtin::notation(f.get_symbol()) != Some(builtin::Notation::Conjugate)
-            }
+            AtomView::Fun(f) => notation::notation(f.get_symbol()) != Some(Notation::Conjugate),
             AtomView::Num(n) => matches!(
                 n.get_coeff_view(),
                 CoefficientView::Natural(r, 1, 0, 1) if r >= 0

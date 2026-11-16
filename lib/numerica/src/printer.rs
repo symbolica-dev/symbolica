@@ -112,7 +112,8 @@ pub struct PrintOptions {
     pub explicit_rational_polynomial: bool,
     /// The character to use as a thousands separator in numbers. If None, no separator is used.
     pub number_thousands_separator: Option<char>,
-    /// The character to use for multiplication.
+    /// The character to use for multiplication. LaTeX and Typst use implicit
+    /// multiplication instead.
     pub multiplication_operator: char,
     /// Whether to use `**` for exponentiation (e.g. for sympy) instead of `^`.
     pub double_star_for_exponentiation: bool,

@@ -3114,7 +3114,7 @@ class Expression:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -3223,7 +3223,7 @@ class Expression:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7215,7 +7215,7 @@ class Transformer:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7553,7 +7553,7 @@ class Series:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7658,7 +7658,7 @@ class Series:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -8209,7 +8209,7 @@ class Polynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -8295,7 +8295,7 @@ class Polynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -9126,7 +9126,7 @@ class NumberFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -9243,7 +9243,7 @@ class NumberFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -9886,7 +9886,7 @@ class FiniteFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -10003,7 +10003,7 @@ class FiniteFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -10669,7 +10669,7 @@ class RationalPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -11074,7 +11074,7 @@ class FiniteFieldRationalPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -11482,7 +11482,7 @@ class Matrix:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -11587,7 +11587,7 @@ class Matrix:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
