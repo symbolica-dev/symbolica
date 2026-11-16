@@ -2114,6 +2114,17 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
             unsafe { std::ptr::copy_nonoverlapping(e.as_ptr(), out.add(len), e.len()) };
             len += e.len();
         };
+        // Write the coefficients into uninitialized memory as well, since pushing
+        // reloads and stores the length around every (non-inlined) ring operation.
+        // If a ring operation panics, the written coefficients are leaked.
+        let coefficients_out: *mut F::Element = new_coefficients.as_mut_ptr();
+        let mut coefficients_len = 0;
+        let mut push_coefficient = |c: F::Element| {
+            debug_assert!(coefficients_len < n + m);
+            // SAFETY: at most `n + m` coefficients are written in total.
+            unsafe { std::ptr::write(coefficients_out.add(coefficients_len), c) };
+            coefficients_len += 1;
+        };
 
         let mut coeffs_self = mem::take(&mut self.coefficients).into_iter();
         let mut coeffs_other = mem::take(&mut other.coefficients).into_iter();
@@ -2126,12 +2137,12 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
             let e2 = &other.exponents[j * nvars..(j + 1) * nvars];
             match O::cmp(e1, e2) {
                 Ordering::Less => {
-                    new_coefficients.push(coeffs_self.next().unwrap());
+                    push_coefficient(coeffs_self.next().unwrap());
                     push_exponents(e1);
                     i += 1;
                 }
                 Ordering::Greater => {
-                    new_coefficients.push(coeffs_other.next().unwrap());
+                    push_coefficient(coeffs_other.next().unwrap());
                     push_exponents(e2);
                     j += 1;
                 }
@@ -2139,7 +2150,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
                     let mut c = coeffs_self.next().unwrap();
                     ring.add_assign(&mut c, &coeffs_other.next().unwrap());
                     if !ring.is_zero(&c) {
-                        new_coefficients.push(c);
+                        push_coefficient(c);
                         push_exponents(e1);
                     }
                     i += 1;
@@ -2147,6 +2158,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
                 }
             }
         }
+
+        // SAFETY: the first `coefficients_len` coefficients are initialized.
+        unsafe { new_coefficients.set_len(coefficients_len) };
 
         // at most one of the polynomials has terms left
         new_coefficients.extend(coeffs_self);
@@ -2204,6 +2218,17 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
             unsafe { std::ptr::copy_nonoverlapping(e.as_ptr(), out.add(len), e.len()) };
             len += e.len();
         };
+        // Write the coefficients into uninitialized memory as well, since pushing
+        // reloads and stores the length around every (non-inlined) ring operation.
+        // If a ring operation panics, the written coefficients are leaked.
+        let coefficients_out: *mut F::Element = new_coefficients.as_mut_ptr();
+        let mut coefficients_len = 0;
+        let mut push_coefficient = |c: F::Element| {
+            debug_assert!(coefficients_len < n + m);
+            // SAFETY: at most `n + m` coefficients are written in total.
+            unsafe { std::ptr::write(coefficients_out.add(coefficients_len), c) };
+            coefficients_len += 1;
+        };
         let ring = self.ring();
 
         let mut i = 0;
@@ -2213,19 +2238,19 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
             let e2 = &other.exponents[j * nvars..(j + 1) * nvars];
             match O::cmp(e1, e2) {
                 Ordering::Less => {
-                    new_coefficients.push(self.coefficients[i].clone());
+                    push_coefficient(self.coefficients[i].clone());
                     push_exponents(e1);
                     i += 1;
                 }
                 Ordering::Greater => {
-                    new_coefficients.push(other.coefficients[j].clone());
+                    push_coefficient(other.coefficients[j].clone());
                     push_exponents(e2);
                     j += 1;
                 }
                 Ordering::Equal => {
                     let c = ring.add(&self.coefficients[i], &other.coefficients[j]);
                     if !ring.is_zero(&c) {
-                        new_coefficients.push(c);
+                        push_coefficient(c);
                         push_exponents(e1);
                     }
                     i += 1;
@@ -2233,6 +2258,9 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
                 }
             }
         }
+
+        // SAFETY: the first `coefficients_len` coefficients are initialized.
+        unsafe { new_coefficients.set_len(coefficients_len) };
 
         // at most one of the polynomials has terms left
         new_coefficients.extend_from_slice(&self.coefficients[i..]);
