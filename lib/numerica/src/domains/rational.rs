@@ -1,7 +1,7 @@
 //! Fraction fields and rational numbers.
 
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     fmt::{Display, Error, Formatter},
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
@@ -87,6 +87,78 @@ impl<R: EuclideanDomain + FractionNormalization> FractionField<R> {
                 numerator: self.ring.mul(&numerator, &f),
                 denominator: self.ring.mul(&denominator, &f),
             }
+        }
+    }
+}
+
+impl<R: EuclideanDomain + FractionNormalization> FractionField<R> {
+    /// Add fractions over a running common denominator and reduce once at the end.
+    ///
+    /// Adding a term costs at most one gcd, of the running denominator and the
+    /// term's denominator, and none when the denominator is one or equal to the
+    /// running denominator. Repeated pairwise addition instead also reduces every
+    /// intermediate sum, with a gcd involving the growing numerator.
+    fn sum_borrowed<T: Borrow<Fraction<R>>>(
+        &self,
+        terms: impl IntoIterator<Item = T>,
+    ) -> Fraction<R> {
+        let r = &self.ring;
+        let mut num = r.zero();
+        let mut den = r.one();
+
+        for t in terms {
+            let t = t.borrow();
+            if r.is_zero(&t.numerator) {
+                continue;
+            }
+
+            if r.is_one(&t.denominator) {
+                if r.is_one(&den) {
+                    r.add_assign(&mut num, &t.numerator);
+                } else {
+                    r.add_mul_assign(&mut num, &t.numerator, &den);
+                }
+                continue;
+            }
+
+            if t.denominator == den {
+                r.add_assign(&mut num, &t.numerator);
+                continue;
+            }
+
+            if r.is_one(&den) {
+                r.mul_assign(&mut num, &t.denominator);
+                r.add_assign(&mut num, &t.numerator);
+                den = t.denominator.clone();
+                continue;
+            }
+
+            // den / g and t.den / g are coprime, so the new common denominator
+            // is lcm(den, t.den) = den * (t.den / g).
+            let g = r.gcd(&den, &t.denominator);
+            if r.is_one(&g) {
+                r.mul_assign(&mut num, &t.denominator);
+                r.add_mul_assign(&mut num, &t.numerator, &den);
+                r.mul_assign(&mut den, &t.denominator);
+                continue;
+            }
+
+            let t_den_red = r.quot_rem(&t.denominator, &g).0;
+            let den_red = r.quot_rem(&den, &g).0;
+            if r.is_one(&t_den_red) {
+                // t.den divides den
+                r.add_mul_assign(&mut num, &t.numerator, &den_red);
+            } else {
+                r.mul_assign(&mut num, &t_den_red);
+                r.add_mul_assign(&mut num, &t.numerator, &den_red);
+                r.mul_assign(&mut den, &t_den_red);
+            }
+        }
+
+        if r.is_one(&den) {
+            self.to_element_numerator(num)
+        } else {
+            self.to_element(num, den, true)
         }
     }
 }
@@ -513,6 +585,14 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
     #[inline]
     fn kernels(&self) -> crate::kernels::RingKernels<'_, Self::Element> {
         self.ring.fraction_kernels()
+    }
+
+    /// Add the fractions over a common denominator and reduce once at the end.
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        self.sum_borrowed(elements)
     }
 
     fn zero(&self) -> Self::Element {
@@ -1046,6 +1126,27 @@ impl Rational {
         Q.gcd(self, other)
     }
 
+    /// Add the rationals in `terms`, returning zero if there are none.
+    ///
+    /// The terms are added over a common denominator, which is reduced once
+    /// at the end. This is faster than adding the terms one by one.
+    pub fn sum<T: Borrow<Rational>>(terms: impl IntoIterator<Item = T>) -> Rational {
+        Q.sum_borrowed(terms)
+    }
+
+    /// Multiply the rationals in `factors`, returning one if there are none.
+    pub fn product<T: Borrow<Rational>>(factors: impl IntoIterator<Item = T>) -> Rational {
+        let mut factors = factors.into_iter();
+        let Some(first) = factors.next() else {
+            return Rational::one();
+        };
+        let mut product = first.borrow().clone();
+        for f in factors {
+            Q.mul_assign(&mut product, f.borrow());
+        }
+        product
+    }
+
     pub fn to_f64(&self) -> f64 {
         fn fixed_to_f64(value: &Integer) -> Option<f64> {
             match value {
@@ -1500,7 +1601,13 @@ impl DivAssign<Rational> for Rational {
 
 impl<'a> std::iter::Sum<&'a Self> for Rational {
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Rational::zero(), |a, b| a + b)
+        Rational::sum(iter)
+    }
+}
+
+impl std::iter::Sum<Self> for Rational {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        Rational::sum(iter)
     }
 }
 
@@ -1510,7 +1617,7 @@ mod test {
         Field, OrderedRing, RealEmbedding, Ring, RingOps,
         float::{ElementaryFunctions, Float},
         integer::{Integer, Z},
-        rational::{FractionField, Rational},
+        rational::{FractionField, Q, Rational},
     };
 
     #[test]
@@ -1555,6 +1662,54 @@ mod test {
         assert_eq!(f.sign(&Rational::zero()), std::cmp::Ordering::Equal);
         assert_eq!(f.cmp(&half, &two_thirds), std::cmp::Ordering::Less);
         assert_eq!(f.try_cmp(&half, &two_thirds), Ok(std::cmp::Ordering::Less));
+    }
+
+    #[test]
+    fn sum_and_product() {
+        let mut terms: Vec<Rational> = vec![];
+        let mut state = 12345u64;
+        for i in 0..300i64 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let num = (state >> 40) as i64 % 1000 - 500;
+            let den = match i % 6 {
+                0 => 1,
+                1 => 6,
+                2 => 1 + (state >> 20) as i64 % 30,
+                3 => -(1 + (state >> 20) as i64 % 30),
+                4 => 1 << (i % 20),
+                _ => 1 + (state >> 10) as i64 % 1000,
+            };
+            terms.push(Rational::new(num, den));
+        }
+        terms.push(Rational::zero());
+
+        let pairwise = terms.iter().fold(Rational::zero(), |a, b| a + b);
+        assert_eq!(Rational::sum(&terms), pairwise);
+        assert_eq!(terms.iter().sum::<Rational>(), pairwise);
+        assert_eq!(terms.clone().into_iter().sum::<Rational>(), pairwise);
+        assert_eq!(Q.sum(terms.clone()), pairwise);
+
+        // terms that cancel, sums that reduce, integers only, and the empty sum
+        assert_eq!(Rational::sum([(1, 6), (1, 3), (-1, 2)].map(Rational::from)), 0);
+        assert_eq!(Rational::sum([(1, 6), (1, 6), (1, 6)].map(Rational::from)), (1, 2));
+        assert_eq!(Rational::sum([(1, 4), (3, 4), (5, 2)].map(Rational::from)), (7, 2));
+        assert_eq!(Rational::sum([3, -5, 7].map(Rational::from)), 5);
+        assert_eq!(Rational::sum(Vec::<Rational>::new()), 0);
+        let big = Integer::one() << 200u32;
+        let big_terms = [
+            Rational::from_int_unchecked(1.into(), big.clone()),
+            Rational::from_int_unchecked(1.into(), &big * 3),
+        ];
+        assert_eq!(Rational::sum(&big_terms), &big_terms[0] + &big_terms[1]);
+
+        let pairwise = terms[..40]
+            .iter()
+            .filter(|t| !t.is_zero())
+            .fold(Rational::one(), |a, b| a * b);
+        let factors = terms[..40].iter().filter(|t| !t.is_zero());
+        assert_eq!(Rational::product(factors), pairwise);
+        assert_eq!(Rational::product(Vec::<Rational>::new()), 1);
+        assert_eq!(Rational::product([(2, 3), (3, 4), (0, 1)].map(Rational::from)), 0);
     }
 
     #[test]
