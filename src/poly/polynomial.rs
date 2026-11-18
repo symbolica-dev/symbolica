@@ -619,6 +619,14 @@ impl<R: Ring, E: Exponent> Ring for PolynomialRing<R, E> {
         MultivariatePolynomial::new(&self.ring, None, Arc::new(vec![]))
     }
 
+    /// Add the polynomials in one pass using [`MultivariatePolynomial::sum`].
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        MultivariatePolynomial::sum(elements).unwrap_or_else(|| self.zero())
+    }
+
     #[inline]
     fn one(&self) -> Self::Element {
         self.zero().one()
@@ -2276,6 +2284,32 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
             context: self.context.clone(),
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<F: Ring, E: Exponent, O: MonomialOrder> std::iter::Sum for MultivariatePolynomial<F, E, O> {
+    /// Add the polynomials in one pass using [`MultivariatePolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the polynomial ring to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        MultivariatePolynomial::sum(iter).expect("cannot add an empty iterator of polynomials")
+    }
+}
+
+impl<'a, F: Ring, E: Exponent, O: MonomialOrder> std::iter::Sum<&'a Self>
+    for MultivariatePolynomial<F, E, O>
+{
+    /// Add the polynomials in one pass using [`MultivariatePolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the polynomial ring to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.cloned().sum()
     }
 }
 

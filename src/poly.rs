@@ -3827,6 +3827,119 @@ mod bulk_sum_tests {
     }
 
     #[test]
+    fn ring_sum_and_iterator_sum_use_bulk_sums() {
+        use crate::domains::Ring;
+        use crate::domains::atom::AtomField;
+        use crate::domains::factorized_rational_polynomial::FactorizedRationalPolynomialField;
+        use crate::domains::rational_polynomial::RationalPolynomialField;
+        use crate::poly::polynomial::PolynomialRing;
+
+        let parts = ["x^2+1", "y-x", "z*x+3", "1/(y+1)", "x/(z+x)", "w", "-x^2"];
+        let atoms = parts.iter().map(|p| parse(p)).collect::<Vec<_>>();
+        let expected = Atom::sum(&atoms);
+
+        let field = AtomField::new();
+        assert_eq!(field.sum(atoms.clone()), expected);
+        assert_eq!(atoms.iter().sum::<Atom>(), expected);
+        assert_eq!(field.sum(vec![]), Atom::num(0));
+
+        let empty = Arc::new(vec![]);
+        let rationals = atoms
+            .iter()
+            .map(|a| {
+                a.as_view()
+                    .to_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &empty)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let field = RationalPolynomialField::<_, u16>::new(Z);
+        let expected = rationals[1..]
+            .iter()
+            .fold(rationals[0].clone(), |a, b| &a + b)
+            .to_expression();
+        assert_eq!(field.sum(rationals.clone()).to_expression(), expected);
+        assert_eq!(
+            rationals
+                .iter()
+                .sum::<RationalPolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert_eq!(
+            rationals
+                .clone()
+                .into_iter()
+                .sum::<RationalPolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert!(field.is_zero(&field.sum(vec![])));
+
+        let factorized = atoms
+            .iter()
+            .map(|a| {
+                a.as_view()
+                    .to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &empty)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let field = FactorizedRationalPolynomialField::<_, u16>::new(Z, empty.clone());
+        let expected = factorized[1..]
+            .iter()
+            .fold(factorized[0].clone(), |a, b| &a + b)
+            .to_expression();
+        assert_eq!(field.sum(factorized.clone()).to_expression(), expected);
+        assert_eq!(
+            factorized
+                .iter()
+                .sum::<FactorizedRationalPolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert_eq!(
+            factorized
+                .clone()
+                .into_iter()
+                .sum::<FactorizedRationalPolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert!(field.is_zero(&field.sum(vec![])));
+
+        let polynomial_parts = ["x^2+1", "y-x", "z*x+3", "w", "-x^2"];
+        let expected = Atom::sum(polynomial_parts.iter().map(|p| parse(p)));
+        let polynomials = polynomial_parts
+            .iter()
+            .map(|p| parse(p).to_polynomial::<_, u16>(&Q, None))
+            .collect::<Vec<_>>();
+        let ring = PolynomialRing::<_, u16>::new(Q);
+        assert_eq!(ring.sum(polynomials.clone()).to_expression(), expected);
+        assert_eq!(
+            polynomials
+                .iter()
+                .sum::<MultivariatePolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert_eq!(
+            polynomials
+                .into_iter()
+                .sum::<MultivariatePolynomial<_, u16>>()
+                .to_expression(),
+            expected
+        );
+        assert!(ring.sum(vec![]).is_zero());
+    }
+
+    #[test]
+    #[should_panic(expected = "empty iterator")]
+    fn iterator_sum_of_no_polynomials_panics() {
+        let _ = Vec::<MultivariatePolynomial<_, u16>>::new()
+            .into_iter()
+            .sum::<MultivariatePolynomial<crate::domains::rational::RationalField, u16>>();
+    }
+
+    #[test]
     fn factorized_rational_polynomials_convert_to_expressions() {
         for source in [
             "0",

@@ -1223,6 +1223,14 @@ where
         }
     }
 
+    /// Add the rational functions at once using [`FactorizedRationalPolynomial::sum`].
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        FactorizedRationalPolynomial::sum(elements).unwrap_or_else(|| self.zero())
+    }
+
     fn one(&self) -> Self::Element {
         FactorizedRationalPolynomial {
             numerator: MultivariatePolynomial::new(&self.ring, None, self.var_map.clone()).one(),
@@ -1456,6 +1464,39 @@ where
         r.denominators = den;
 
         r
+    }
+}
+
+impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> std::iter::Sum
+    for FactorizedRationalPolynomial<R, E>
+where
+    FactorizedRationalPolynomial<R, E>: FromNumeratorAndFactorizedDenominator<R, R, E>,
+{
+    /// Add the rational functions at once using [`FactorizedRationalPolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the factorized rational polynomial field to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        FactorizedRationalPolynomial::sum(iter)
+            .expect("cannot add an empty iterator of factorized rational polynomials")
+    }
+}
+
+impl<'a, R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> std::iter::Sum<&'a Self>
+    for FactorizedRationalPolynomial<R, E>
+where
+    FactorizedRationalPolynomial<R, E>: FromNumeratorAndFactorizedDenominator<R, R, E>,
+{
+    /// Add the rational functions at once using [`FactorizedRationalPolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the factorized rational polynomial field to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.cloned().sum()
     }
 }
 

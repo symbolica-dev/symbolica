@@ -960,6 +960,14 @@ where
         }
     }
 
+    /// Add the rational functions at once using [`RationalPolynomial::sum`].
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        RationalPolynomial::sum(elements).unwrap_or_else(|| self.zero())
+    }
+
     fn one(&self) -> Self::Element {
         let num = MultivariatePolynomial::new_zero(&self.ring).one();
         RationalPolynomial {
@@ -1265,6 +1273,38 @@ where
             sums = next;
         }
         sums.pop()
+    }
+}
+
+impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> std::iter::Sum
+    for RationalPolynomial<R, E>
+where
+    RationalPolynomial<R, E>: FromNumeratorAndDenominator<R, R, E>,
+{
+    /// Add the rational functions at once using [`RationalPolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the rational polynomial field to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        RationalPolynomial::sum(iter).expect("cannot add an empty iterator of rational polynomials")
+    }
+}
+
+impl<'a, R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> std::iter::Sum<&'a Self>
+    for RationalPolynomial<R, E>
+where
+    RationalPolynomial<R, E>: FromNumeratorAndDenominator<R, R, E>,
+{
+    /// Add the rational functions at once using [`RationalPolynomial::sum`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the iterator is empty, as the coefficient ring of the sum is unknown.
+    /// Use [`Ring::sum`] of the rational polynomial field to obtain zero for an empty sum.
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.cloned().sum()
     }
 }
 

@@ -92,74 +92,65 @@ impl<R: EuclideanDomain + FractionNormalization> FractionField<R> {
 }
 
 impl<R: EuclideanDomain + FractionNormalization> FractionField<R> {
-    /// Add fractions over a running common denominator and reduce once at the end.
+    /// Add fractions with few gcds and balanced operand sizes.
     ///
-    /// Adding a term costs at most one gcd, of the running denominator and the
-    /// term's denominator, and none when the denominator is one or equal to the
-    /// running denominator. Repeated pairwise addition instead also reduces every
-    /// intermediate sum, with a gcd involving the growing numerator.
-    fn sum_borrowed<T: Borrow<Fraction<R>>>(
-        &self,
-        terms: impl IntoIterator<Item = T>,
-    ) -> Fraction<R> {
+    /// The numerators of terms with equal denominators are added with the
+    /// ring's bulk [`Ring::sum`] and reduced with one gcd per distinct
+    /// denominator. The sums for distinct denominators are then added pairwise
+    /// in a balanced tree, so the gcds involve operands of similar size instead
+    /// of a growing accumulator.
+    fn sum_grouped(&self, terms: impl IntoIterator<Item = Fraction<R>>) -> Fraction<R> {
         let r = &self.ring;
-        let mut num = r.zero();
-        let mut den = r.one();
 
+        // Denominators are normalized, so equal denominators compare and hash equal.
+        let mut index: std::collections::HashMap<R::Element, usize> = Default::default();
+        let mut groups: Vec<(R::Element, Vec<R::Element>)> = vec![];
         for t in terms {
-            let t = t.borrow();
             if r.is_zero(&t.numerator) {
                 continue;
             }
-
-            if r.is_one(&t.denominator) {
-                if r.is_one(&den) {
-                    r.add_assign(&mut num, &t.numerator);
-                } else {
-                    r.add_mul_assign(&mut num, &t.numerator, &den);
-                }
-                continue;
-            }
-
-            if t.denominator == den {
-                r.add_assign(&mut num, &t.numerator);
-                continue;
-            }
-
-            if r.is_one(&den) {
-                r.mul_assign(&mut num, &t.denominator);
-                r.add_assign(&mut num, &t.numerator);
-                den = t.denominator.clone();
-                continue;
-            }
-
-            // den / g and t.den / g are coprime, so the new common denominator
-            // is lcm(den, t.den) = den * (t.den / g).
-            let g = r.gcd(&den, &t.denominator);
-            if r.is_one(&g) {
-                r.mul_assign(&mut num, &t.denominator);
-                r.add_mul_assign(&mut num, &t.numerator, &den);
-                r.mul_assign(&mut den, &t.denominator);
-                continue;
-            }
-
-            let t_den_red = r.quot_rem(&t.denominator, &g).0;
-            let den_red = r.quot_rem(&den, &g).0;
-            if r.is_one(&t_den_red) {
-                // t.den divides den
-                r.add_mul_assign(&mut num, &t.numerator, &den_red);
+            if let Some(&i) = index.get(&t.denominator) {
+                groups[i].1.push(t.numerator);
             } else {
-                r.mul_assign(&mut num, &t_den_red);
-                r.add_mul_assign(&mut num, &t.numerator, &den_red);
-                r.mul_assign(&mut den, &t_den_red);
+                index.insert(t.denominator.clone(), groups.len());
+                groups.push((t.denominator, vec![t.numerator]));
             }
         }
+        drop(index);
 
-        if r.is_one(&den) {
-            self.to_element_numerator(num)
-        } else {
-            self.to_element(num, den, true)
+        let mut sums = groups
+            .into_iter()
+            .filter_map(|(denominator, numerators)| {
+                if numerators.len() == 1 {
+                    let numerator = numerators.into_iter().next().unwrap();
+                    return Some(Fraction {
+                        numerator,
+                        denominator,
+                    });
+                }
+                let numerator = r.sum(numerators);
+                if r.is_zero(&numerator) {
+                    None
+                } else if r.is_one(&denominator) {
+                    Some(self.to_element_numerator(numerator))
+                } else {
+                    Some(self.to_element(numerator, denominator, true))
+                }
+            })
+            .collect::<Vec<_>>();
+
+        while sums.len() > 1 {
+            let mut next = Vec::with_capacity(sums.len().div_ceil(2));
+            let mut it = sums.into_iter();
+            while let Some(a) = it.next() {
+                next.push(match it.next() {
+                    Some(b) => self.add(a, b),
+                    None => a,
+                });
+            }
+            sums = next;
         }
+        sums.pop().unwrap_or_else(|| self.zero())
     }
 }
 
@@ -587,12 +578,12 @@ impl<R: EuclideanDomain + FractionNormalization> Ring for FractionField<R> {
         self.ring.fraction_kernels()
     }
 
-    /// Add the fractions over a common denominator and reduce once at the end.
+    /// Add the fractions, grouping equal denominators and merging the groups in a balanced tree.
     fn sum<I>(&self, elements: I) -> Self::Element
     where
         I: IntoIterator<Item = Self::Element>,
     {
-        self.sum_borrowed(elements)
+        self.sum_grouped(elements)
     }
 
     fn zero(&self) -> Self::Element {
@@ -1128,10 +1119,10 @@ impl Rational {
 
     /// Add the rationals in `terms`, returning zero if there are none.
     ///
-    /// The terms are added over a common denominator, which is reduced once
-    /// at the end. This is faster than adding the terms one by one.
+    /// Terms with equal denominators are added first and the partial sums are
+    /// combined in a balanced tree. This is faster than adding the terms one by one.
     pub fn sum<T: Borrow<Rational>>(terms: impl IntoIterator<Item = T>) -> Rational {
-        Q.sum_borrowed(terms)
+        Q.sum(terms.into_iter().map(|t| t.borrow().clone()))
     }
 
     /// Multiply the rationals in `factors`, returning one if there are none.
@@ -1607,7 +1598,7 @@ impl<'a> std::iter::Sum<&'a Self> for Rational {
 
 impl std::iter::Sum<Self> for Rational {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Rational::sum(iter)
+        Q.sum(iter)
     }
 }
 
