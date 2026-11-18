@@ -1194,9 +1194,9 @@ impl AtomView<'_> {
         /// A power with a non-numeric exponent is a variable with a multiplicity,
         /// exactly as the full conversion routines make it: `x^(4*y)` is `(x^y)^4`
         /// and `x^y` is itself. Returns the variable when it differs from `factor`.
-        /// Exponent sums and negative content are split or inverted by the full
-        /// routines, which also resolve a power with content that is itself a map
-        /// variable in different ways.
+        /// Exponent sums are split into factors by the callers. Negative content is
+        /// inverted by the full routines, which also resolve a power with content
+        /// that is itself a map variable in different ways.
         fn opaque_power(
             factor: AtomView<'_>,
             base: AtomView<'_>,
@@ -1264,6 +1264,27 @@ impl AtomView<'_> {
                         return Err("Non-numeric exponent requires full conversion");
                     }
                     let (base, exp) = p.get_base_exp();
+                    if let AtomView::Add(sum) = exp {
+                        // x^(a+b) is x^a*x^b, as the full routines split it. The
+                        // rational routine first takes a whole power of the map.
+                        if vars.iter().any(|v| v == factor) {
+                            return Err(
+                                "Mapped power with an exponent sum requires full conversion",
+                            );
+                        }
+                        for term in sum {
+                            let part = base.pow(term);
+                            match part.as_view() {
+                                AtomView::Mul(m) => {
+                                    for f in m {
+                                        check_factor(&f, vars, allow_new_vars, field)?;
+                                    }
+                                }
+                                part => check_factor(&part, vars, allow_new_vars, field)?,
+                            }
+                        }
+                        return Ok(());
+                    }
                     let (primitive, _) = opaque_power(*factor, base, exp, vars)?;
                     let variable = primitive.as_ref().map_or(*factor, |p| p.as_view());
                     check_variable(variable, vars, allow_new_vars)
@@ -1378,6 +1399,20 @@ impl AtomView<'_> {
                 }
                 AtomView::Pow(p) if !matches!(p.get_base_exp().1, AtomView::Num(_)) => {
                     let (base, exp) = p.get_base_exp();
+                    if let AtomView::Add(sum) = exp {
+                        for term in sum {
+                            let part = base.pow(term);
+                            match part.as_view() {
+                                AtomView::Mul(m) => {
+                                    for f in m {
+                                        parse_factor(&f, vars, coefficient, exponents, field)?;
+                                    }
+                                }
+                                part => parse_factor(&part, vars, coefficient, exponents, field)?,
+                            }
+                        }
+                        return Ok(());
+                    }
                     let (primitive, content) = opaque_power(*factor, base, exp, vars)?;
                     let variable = primitive.as_ref().map_or(*factor, |p| p.as_view());
                     let index = vars.iter().position(|v| v == &variable).unwrap();
@@ -3259,17 +3294,18 @@ fn expanded_opaque_functions() {
     use crate::domains::rational::Q;
 
     let parse = |s| Atom::parse(s, "poly_test", Default::default()).unwrap();
-    let input = parse("f(x)^2+f(exp(x))+3*f(x)+sin(x)*exp(2*y)^2+x^(2*y)+x^y");
+    let input = parse("f(x)^2+f(exp(x))+3*f(x)+sin(x)*exp(2*y)^2+x^(2*y)+x^y+exp(x+y)+x^(y+2)");
     let polynomial = input
         .as_view()
         .to_polynomial_expanded::<_, u8>(&Q, None, true)
         .unwrap();
-    // f(x), f(exp(x)), sin(x), exp(y) and x^y
-    assert_eq!(polynomial.nvars(), 5);
+    // f(x), f(exp(x)), sin(x), exp(y), x^y, exp(x) and x
+    assert_eq!(polynomial.nvars(), 7);
     assert_eq!(polynomial.to_expression(), input);
 
-    // Sums in exponents and negative powers keep the full conversion.
-    for special in ["x^(y+1)", "exp(x+y)", "x^(-y)", "x^(-2*y)"] {
+    // Negative and fractional powers, also as parts of an exponent sum, keep
+    // the full conversion.
+    for special in ["x^(-y)", "x^(-2*y)", "x^(y-1)", "x^(y+1/2)", "(x+1)^(y+1)"] {
         assert!(
             parse(special)
                 .as_view()
@@ -3369,6 +3405,7 @@ mod opaque_fast_path_tests {
         let complete = complete.variables();
         let mut redundant = complete.as_ref().clone();
         redundant.push(PolyVariable::Power(parse("x^(4*ep)")));
+        redundant.push(PolyVariable::Power(parse("x^(ep+1)")));
         let redundant = Arc::new(redundant);
 
         for (name, map) in [
@@ -3454,6 +3491,26 @@ mod opaque_fast_path_tests {
             false,
         );
         assert_same(&sum(20, |k| format!("x^(-{}*ep)", k % 3 + 1)), false);
+        // exponent sums are products of their parts
+        assert_same(
+            &sum(40, |k| {
+                format!("x^(ep+{})*y^({}*ep+{}*g+1)", k % 3, k % 2 + 1, k % 3 + 2)
+            }),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| format!("2^(g+{})*(x*y)^(ep+{})", k % 3, k % 2)),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| format!("exp(x+{}*y)*f(z)^(ep+g)", k % 3 + 1)),
+            true,
+        );
+        assert_same(&sum(20, |k| format!("x^(ep+1)*x^(ep+{})", k % 3)), true);
+        // ... unless a part is a negative or fractional power or a sum
+        assert_same(&sum(20, |k| format!("x^(ep-{})", k % 2 + 1)), false);
+        assert_same(&sum(20, |k| format!("x^(ep+{}/2)", 2 * (k % 2) + 1)), false);
+        assert_same(&sum(20, |k| format!("(1+x)^(ep+{})", k % 2 + 1)), false);
         // numeric fractional exponents keep the full routines
         assert_same(&sum(20, |k| format!("x^({}/2)", 2 * (k % 3) + 1)), false);
     }
@@ -3475,8 +3532,8 @@ mod opaque_fast_path_tests {
             true,
         );
         assert_same(&sum(30, |k| format!("𝑒^({}*log(x))", k % 3 + 1)), true);
-        // exp(x+y) is the exponent sum 𝑒^(x+y), which the full routines split
-        assert_same(&sum(30, |k| format!("exp(x+y)*sin(x)^{}", k % 3)), false);
+        // exp(x+y) is the exponent sum 𝑒^(x+y), so 𝑒^x*𝑒^y
+        assert_same(&sum(30, |k| format!("exp(x+y)*sin(x)^{}", k % 3)), true);
     }
 
     #[test]
