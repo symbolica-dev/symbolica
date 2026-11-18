@@ -3990,6 +3990,75 @@ impl PythonExpression {
         }
     }
 
+    /// Add all expressions in `terms` at once.
+    ///
+    /// This is much faster than repeated addition, such as with Python's built-in `sum`
+    /// or `+=` in a loop, which copies the growing sum for every term and therefore
+    /// scales quadratically with the number of terms.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = Expression.sum(x**i for i in range(5))
+    /// >>> print(e)
+    /// 1+x+x^2+x^3+x^4
+    ///
+    /// Parameters
+    /// ----------
+    /// terms: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal]
+    ///     The terms to add. An empty iterable gives `0`.
+    #[classmethod]
+    pub fn sum(
+        _cls: &Bound<'_, PyType>,
+        py: Python,
+        #[gen_stub(override_type(
+            type_repr = "typing.Iterable[Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal]",
+            imports = ("typing", "decimal")
+        ))]
+        terms: &Bound<'_, PyAny>,
+    ) -> PyResult<PythonExpression> {
+        let terms = terms
+            .try_iter()?
+            .map(|t| t?.extract::<ConvertibleToExpression>().map(|t| t.to_expression().expr))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(py.detach(|| Atom::sum(&terms)).into())
+    }
+
+    /// Multiply all expressions in `factors` at once.
+    ///
+    /// This is much faster than repeated multiplication, such as with `math.prod`
+    /// or `*=` in a loop, which renormalizes the growing product for every factor.
+    ///
+    /// Examples
+    /// --------
+    /// >>> from symbolica import *
+    /// >>> x = S('x')
+    /// >>> e = Expression.product(x + i for i in range(3))
+    /// >>> print(e)
+    /// x*(1+x)*(2+x)
+    ///
+    /// Parameters
+    /// ----------
+    /// factors: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal]
+    ///     The factors to multiply. An empty iterable gives `1`.
+    #[classmethod]
+    pub fn product(
+        _cls: &Bound<'_, PyType>,
+        py: Python,
+        #[gen_stub(override_type(
+            type_repr = "typing.Iterable[Expression | int | float | complex | Float | ComplexFloat | decimal.Decimal]",
+            imports = ("typing", "decimal")
+        ))]
+        factors: &Bound<'_, PyAny>,
+    ) -> PyResult<PythonExpression> {
+        let factors = factors
+            .try_iter()?
+            .map(|t| t?.extract::<ConvertibleToExpression>().map(|t| t.to_expression().expr))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(py.detach(|| Atom::product(&factors)).into())
+    }
+
     /// Euler's number `e`, approximately `2.7182`.
     #[classattr]
     #[pyo3(name = "E")]

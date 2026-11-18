@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Callable, Iterator, Literal, Protocol, Sequence, overload
+from typing import Any, Callable, Iterable, Iterator, Literal, Protocol, Sequence, overload
 
 import numpy as np
 import numpy.typing as npt
@@ -2840,6 +2840,57 @@ class Expression:
             The value to convert into a Symbolica number.
         relative_error: float | None
             The maximum relative error used when converting floating-point input to a rational number.
+        """
+
+    @classmethod
+    def sum(
+        _cls,
+        terms: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal],
+    ) -> Expression:
+        """
+        Add all expressions in `terms` at once.
+
+        This is much faster than repeated addition, such as with Python's built-in `sum`
+        or `+=` in a loop, which copies the growing sum for every term and therefore
+        scales quadratically with the number of terms.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = Expression.sum(x**i for i in range(5))
+        >>> print(e)
+        1+x+x^2+x^3+x^4
+
+        Parameters
+        ----------
+        terms: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal]
+            The terms to add. An empty iterable gives `0`.
+        """
+
+    @classmethod
+    def product(
+        _cls,
+        factors: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal],
+    ) -> Expression:
+        """
+        Multiply all expressions in `factors` at once.
+
+        This is much faster than repeated multiplication, such as with `math.prod`
+        or `*=` in a loop, which renormalizes the growing product for every factor.
+
+        Examples
+        --------
+        >>> from symbolica import *
+        >>> x = S('x')
+        >>> e = Expression.product(x + i for i in range(3))
+        >>> print(e)
+        x*(1+x)*(2+x)
+
+        Parameters
+        ----------
+        factors: Iterable[Expression | int | float | complex | Float | ComplexFloat | Decimal]
+            The factors to multiply. An empty iterable gives `1`.
         """
 
     @classmethod

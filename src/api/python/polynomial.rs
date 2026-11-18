@@ -5562,11 +5562,15 @@ impl PythonGaloisFieldPrimeTwoPolynomial {
             Arc::new(c.get_vars_ref().to_vec()),
         );
 
-        for term in c.into_iter() {
-            let mut t = term.coefficient.poly.clone();
-            poly.unify_variables(&mut t);
-            poly = poly + t.mul_exp(&term.exponents);
-        }
+        let terms = c
+            .into_iter()
+            .map(|term| {
+                let mut t = term.coefficient.poly.clone();
+                poly.unify_variables(&mut t);
+                t.mul_exp(&term.exponents)
+            })
+            .collect::<Vec<_>>();
+        let poly = MultivariatePolynomial::sum(terms).unwrap_or(poly);
         Ok(PythonPrimeTwoPolynomial { poly })
     }
 
@@ -6676,11 +6680,15 @@ impl PythonGaloisFieldPolynomial {
             Arc::new(c.get_vars_ref().to_vec()),
         );
 
-        for term in c.into_iter() {
-            let mut t = term.coefficient.poly.clone();
-            poly.unify_variables(&mut t);
-            poly = poly + t.mul_exp(&term.exponents);
-        }
+        let terms = c
+            .into_iter()
+            .map(|term| {
+                let mut t = term.coefficient.poly.clone();
+                poly.unify_variables(&mut t);
+                t.mul_exp(&term.exponents)
+            })
+            .collect::<Vec<_>>();
+        let poly = MultivariatePolynomial::sum(terms).unwrap_or(poly);
         Ok(PythonFiniteFieldPolynomial { poly })
     }
 
@@ -7893,11 +7901,15 @@ impl PythonNumberFieldPolynomial {
 
         let mut poly = MultivariatePolynomial::new(&Q, None, Arc::new(c.get_vars_ref().to_vec()));
 
-        for term in c.into_iter() {
-            let mut t = term.coefficient.poly.clone();
-            poly.unify_variables(&mut t);
-            poly = poly + t.mul_exp(&term.exponents);
-        }
+        let terms = c
+            .into_iter()
+            .map(|term| {
+                let mut t = term.coefficient.poly.clone();
+                poly.unify_variables(&mut t);
+                t.mul_exp(&term.exponents)
+            })
+            .collect::<Vec<_>>();
+        let poly = MultivariatePolynomial::sum(terms).unwrap_or(poly);
         Ok(PythonPolynomial { poly })
     }
 
