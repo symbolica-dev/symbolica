@@ -1169,6 +1169,20 @@ where
     }
 }
 
+/// Whether the bulk conversion takes built-in calls and powers with non-numeric
+/// exponents as variables. Tests compare it with the full conversion routines.
+#[inline]
+fn opaque_fast_path_enabled() -> bool {
+    #[cfg(test)]
+    {
+        opaque_fast_path_tests::ENABLED.with(|enabled| enabled.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 impl AtomView<'_> {
     /// Convert an expanded expression to a polynomial.
     fn to_polynomial_expanded<R: Ring + ConvertToRing, E: Exponent>(
@@ -1177,10 +1191,53 @@ impl AtomView<'_> {
         var_map: Option<&Arc<Vec<PolyVariable>>>,
         allow_new_vars: bool,
     ) -> Result<MultivariatePolynomial<R, E>, &'static str> {
-        fn check_factor(
+        /// A power with a non-numeric exponent is a variable with a multiplicity,
+        /// exactly as the full conversion routines make it: `x^(4*y)` is `(x^y)^4`
+        /// and `x^y` is itself. Returns the variable when it differs from `factor`.
+        /// Exponent sums and negative content are split or inverted by the full
+        /// routines, which also resolve a power with content that is itself a map
+        /// variable in different ways.
+        fn opaque_power(
+            factor: AtomView<'_>,
+            base: AtomView<'_>,
+            exponent: AtomView<'_>,
+            vars: &[PolyVariable],
+        ) -> Result<(Option<Atom>, i64), &'static str> {
+            if matches!(exponent, AtomView::Add(_)) {
+                return Err("Exponent sum requires full conversion");
+            }
+            match extract_integer_content_from_exponent(base, exponent) {
+                None => Ok((None, 1)),
+                Some((_, content)) if content < 0 => Err("Negative power requires full conversion"),
+                Some(_) if vars.iter().any(|v| v == &factor) => {
+                    Err("Mapped power with integer content requires full conversion")
+                }
+                Some((primitive, _)) if !matches!(primitive.as_view(), AtomView::Pow(_)) => {
+                    Err("Power simplifies and requires full conversion")
+                }
+                Some((primitive, content)) => Ok((Some(primitive), content)),
+            }
+        }
+
+        fn check_variable(
+            variable: AtomView<'_>,
+            vars: &mut Arc<Vec<PolyVariable>>,
+            allow_new_vars: bool,
+        ) -> Result<(), &'static str> {
+            if !vars.iter().any(|v| v == &variable) {
+                if !allow_new_vars {
+                    return Err("Expression contains variable that is not in variable map");
+                }
+                Arc::make_mut(vars).push(PolyVariable::try_from(variable.to_owned()).unwrap());
+            }
+            Ok(())
+        }
+
+        fn check_factor<R: ConvertToRing>(
             factor: &AtomView<'_>,
             vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
+            field: &R,
         ) -> Result<(), &'static str> {
             match factor {
                 AtomView::Num(n) => match n.get_coeff_view() {
@@ -1190,27 +1247,32 @@ impl AtomView<'_> {
                     _ => Ok(()),
                 },
                 AtomView::Var(_) | AtomView::Fun(_) => {
-                    // Keep special function/coefficient conversion on the full path.
+                    // A built-in call that the coefficient field represents, such as
+                    // an algebraic root, becomes a coefficient on the full path.
+                    // Every other call is a variable there as well.
                     if let AtomView::Fun(f) = factor
                         && f.get_symbol().is_builtin()
+                        && (!opaque_fast_path_enabled()
+                            || field.try_element_from_root(*factor).is_some())
                     {
                         return Err("Function requires full conversion");
                     }
-                    if !vars.iter().any(|v| v == factor) {
-                        if !allow_new_vars {
-                            return Err("Expression contains variable that is not in variable map");
-                        } else {
-                            Arc::make_mut(vars)
-                                .push(PolyVariable::try_from(factor.to_owned()).unwrap());
-                        }
+                    check_variable(*factor, vars, allow_new_vars)
+                }
+                AtomView::Pow(p) if !matches!(p.get_base_exp().1, AtomView::Num(_)) => {
+                    if !opaque_fast_path_enabled() {
+                        return Err("Non-numeric exponent requires full conversion");
                     }
-                    Ok(())
+                    let (base, exp) = p.get_base_exp();
+                    let (primitive, _) = opaque_power(*factor, base, exp, vars)?;
+                    let variable = primitive.as_ref().map_or(*factor, |p| p.as_view());
+                    check_variable(variable, vars, allow_new_vars)
                 }
                 AtomView::Pow(p) => {
                     let (base, exp) = p.get_base_exp();
                     match base {
                         AtomView::Var(_) | AtomView::Fun(_) => {
-                            check_factor(&base, vars, allow_new_vars)?;
+                            check_factor(&base, vars, allow_new_vars, field)?;
                         }
                         _ => return Err("base must be a variable"),
                     }
@@ -1256,19 +1318,20 @@ impl AtomView<'_> {
             }
         }
 
-        fn check_term(
+        fn check_term<R: ConvertToRing>(
             term: &AtomView<'_>,
             vars: &mut Arc<Vec<PolyVariable>>,
             allow_new_vars: bool,
+            field: &R,
         ) -> Result<(), &'static str> {
             match term {
                 AtomView::Mul(m) => {
                     for factor in m {
-                        check_factor(&factor, vars, allow_new_vars)?;
+                        check_factor(&factor, vars, allow_new_vars, field)?;
                     }
                     Ok(())
                 }
-                _ => check_factor(term, vars, allow_new_vars),
+                _ => check_factor(term, vars, allow_new_vars, field),
             }
         }
 
@@ -1278,12 +1341,12 @@ impl AtomView<'_> {
         match self {
             AtomView::Add(a) => {
                 for term in a {
-                    check_term(&term, &mut vars, allow_new_vars)?;
+                    check_term(&term, &mut vars, allow_new_vars, field)?;
                     n_terms += 1;
                 }
             }
             _ => {
-                check_term(self, &mut vars, allow_new_vars)?;
+                check_term(self, &mut vars, allow_new_vars, field)?;
                 n_terms += 1;
             }
         }
@@ -1310,6 +1373,19 @@ impl AtomView<'_> {
                     let index = vars.iter().position(|v| v == factor).unwrap();
                     exponents[index] = exponents[index]
                         .checked_add(&E::one())
+                        .ok_or("Exponent sum does not fit the exponent type")?;
+                    Ok(())
+                }
+                AtomView::Pow(p) if !matches!(p.get_base_exp().1, AtomView::Num(_)) => {
+                    let (base, exp) = p.get_base_exp();
+                    let (primitive, content) = opaque_power(*factor, base, exp, vars)?;
+                    let variable = primitive.as_ref().map_or(*factor, |p| p.as_view());
+                    let index = vars.iter().position(|v| v == &variable).unwrap();
+                    let exponent =
+                        E::try_from(i32::try_from(content).map_err(|_| "Exponent too large")?)
+                            .map_err(|_| "Exponent does not fit the exponent type")?;
+                    exponents[index] = exponents[index]
+                        .checked_add(&exponent)
                         .ok_or("Exponent sum does not fit the exponent type")?;
                     Ok(())
                 }
@@ -3107,20 +3183,260 @@ fn expanded_opaque_functions() {
     use crate::domains::rational::Q;
 
     let parse = |s| Atom::parse(s, "poly_test", Default::default()).unwrap();
-    let input = parse("f(x)^2+f(exp(x))+3*f(x)");
+    let input = parse("f(x)^2+f(exp(x))+3*f(x)+sin(x)*exp(2*y)^2+x^(2*y)+x^y");
     let polynomial = input
         .as_view()
         .to_polynomial_expanded::<_, u8>(&Q, None, true)
         .unwrap();
-    assert_eq!(polynomial.nvars(), 2);
+    // f(x), f(exp(x)), sin(x), exp(y) and x^y
+    assert_eq!(polynomial.nvars(), 5);
     assert_eq!(polynomial.to_expression(), input);
 
-    for special in ["sin(x)", "exp(x+y)", "root(1-10*x^2+x^4,3)"] {
+    // Sums in exponents and negative powers keep the full conversion.
+    for special in ["x^(y+1)", "exp(x+y)", "x^(-y)", "x^(-2*y)"] {
         assert!(
             parse(special)
                 .as_view()
                 .to_polynomial_expanded::<_, u8>(&Q, None, true)
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod opaque_fast_path_tests {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use crate::atom::{Atom, AtomCore};
+    use crate::domains::algebraic::AlgebraicExtension;
+    use crate::domains::factorized_rational_polynomial::FactorizedRationalPolynomial;
+    use crate::domains::integer::Z;
+    use crate::domains::rational::Q;
+    use crate::poly::PolyVariable;
+
+    thread_local! {
+        /// Test switch: send built-in calls and powers with non-numeric exponents
+        /// through the full conversion routines.
+        pub(super) static ENABLED: Cell<bool> = const { Cell::new(true) };
+    }
+
+    fn parse(source: &str) -> Atom {
+        Atom::parse(source, "opaque_fast_path_tests", Default::default()).unwrap()
+    }
+
+    /// Evaluate `convert` with the opaque bulk route and with the full routines.
+    fn fast_and_full<T>(convert: impl Fn() -> T) -> (T, T) {
+        let fast = convert();
+        ENABLED.with(|enabled| enabled.set(false));
+        let full = convert();
+        ENABLED.with(|enabled| enabled.set(true));
+        (fast, full)
+    }
+
+    fn sum(n: usize, factor: impl Fn(usize) -> String) -> String {
+        (0..n)
+            .map(|k| {
+                format!(
+                    "{}/{}*ep^{}*f({})^{}*{}",
+                    k + 1,
+                    k % 5 + 2,
+                    k % 7,
+                    k % 3,
+                    k / 21,
+                    factor(k)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    fn assert_same_factorized<R: crate::domains::EuclideanDomain + std::fmt::Debug>(
+        fast: &FactorizedRationalPolynomial<R, u32>,
+        full: &FactorizedRationalPolynomial<R, u32>,
+        context: &str,
+    ) where
+        R::Element: std::fmt::Debug,
+    {
+        assert_eq!(
+            fast.numerator.variables(),
+            full.numerator.variables(),
+            "{context}"
+        );
+        assert_eq!(fast.numerator, full.numerator, "{context}");
+        assert_eq!(fast.numer_coeff, full.numer_coeff, "{context}");
+        assert_eq!(fast.denom_coeff, full.denom_coeff, "{context}");
+        let mut left = fast.denominators.clone();
+        let mut right = full.denominators.clone();
+        left.sort_by_key(|(factor, power)| (format!("{factor}"), *power));
+        right.sort_by_key(|(factor, power)| (format!("{factor}"), *power));
+        assert_eq!(left, right, "{context}");
+    }
+
+    /// Every conversion routine gives the same result with and without the
+    /// opaque bulk route, for an empty map, the complete map and a map with a
+    /// redundant entry for a whole power with integer content.
+    fn assert_same(source: &str, bulk: bool) {
+        let expression = parse(source);
+        let view = expression.as_view();
+        let empty = Arc::new(Vec::<PolyVariable>::new());
+
+        assert_eq!(
+            view.to_polynomial_expanded::<_, u32>(&Q, Some(&empty), true)
+                .is_ok(),
+            bulk,
+            "{source}"
+        );
+
+        let (_, complete) =
+            fast_and_full(|| view.to_polynomial_impl::<_, u32>(&Q, &empty).unwrap());
+        let complete = complete.variables();
+        let mut redundant = complete.as_ref().clone();
+        redundant.push(PolyVariable::Power(parse("x^(4*ep)")));
+        let redundant = Arc::new(redundant);
+
+        for (name, map) in [
+            ("empty", &empty),
+            ("complete", &complete),
+            ("redundant", &redundant),
+        ] {
+            let context = format!("{source} with the {name} map");
+
+            let (fast, full) =
+                fast_and_full(|| view.to_polynomial_impl::<_, u32>(&Q, map).unwrap());
+            assert_eq!(fast.variables(), full.variables(), "{context}");
+            assert_eq!(fast, full, "{context}");
+
+            let (fast, full) = fast_and_full(|| {
+                view.to_rational_polynomial_impl::<_, _, u32>(&Q, &Z, map)
+                    .unwrap()
+            });
+            assert_eq!(
+                fast.numerator.variables(),
+                full.numerator.variables(),
+                "{context}"
+            );
+            assert_eq!(fast.numerator, full.numerator, "{context}");
+            assert_eq!(fast.denominator, full.denominator, "{context}");
+
+            let (fast, full) = fast_and_full(|| {
+                view.to_factorized_rational_polynomial_impl::<_, _, u32>(&Q, &Z, map)
+                    .unwrap()
+            });
+            assert_same_factorized(&fast, &full, &context);
+
+            let (fast, full) = fast_and_full(|| view.to_polynomial_in_vars::<u32>(map));
+            assert_eq!(fast.variables(), full.variables(), "{context}");
+            assert_eq!(fast, full, "{context}");
+
+            let field = AlgebraicExtension::complex(Q);
+            let gaussian = &parse("𝑖") * &expression;
+            let (fast, full) = fast_and_full(|| {
+                gaussian
+                    .as_view()
+                    .to_factorized_rational_polynomial_impl::<_, _, u32>(&field, &field, map)
+                    .unwrap()
+            });
+            assert_same_factorized(&fast, &full, &context);
+            let (fast, full) = fast_and_full(|| {
+                gaussian
+                    .as_view()
+                    .to_polynomial_impl::<_, u32>(&field, map)
+                    .unwrap()
+            });
+            assert_eq!(fast.variables(), full.variables(), "{context}");
+            assert_eq!(fast, full, "{context}");
+        }
+    }
+
+    #[test]
+    fn opaque_powers_convert_in_bulk_like_the_full_routines() {
+        // a primitive power, its integer multiples and a power of a power
+        assert_same(&sum(60, |k| format!("x^({}*ep)", k % 4 + 1)), true);
+        assert_same(
+            &sum(60, |k| format!("(m^(-2))^({}*ep)", 4 * (k % 2 + 1))),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| {
+                format!("x^(ep/{})*y^({}*ep/3)", k % 3 + 1, k % 4 + 1)
+            }),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| {
+                format!("(1+x)^({}*ep)*2^({}*g)", k % 2 + 1, k % 3 + 1)
+            }),
+            true,
+        );
+        assert_same(&sum(20, |k| format!("x^({}*𝑖*ep)", k % 2 + 1)), true);
+        // a redundant whole power, negative content and sums in the exponent
+        assert_same(&sum(20, |k| format!("x^({}*ep)*x^(4*ep)", k % 4 + 1)), true);
+        assert_same("x^(4*ep)", true);
+        assert_same(
+            &sum(40, |k| format!("𝑒^(-{}*g)*x^(ep+{})", k % 3 + 1, k % 2)),
+            false,
+        );
+        assert_same(&sum(20, |k| format!("x^(-{}*ep)", k % 3 + 1)), false);
+        // numeric fractional exponents keep the full routines
+        assert_same(&sum(20, |k| format!("x^({}/2)", 2 * (k % 3) + 1)), false);
+    }
+
+    #[test]
+    fn builtin_calls_convert_in_bulk_like_the_full_routines() {
+        assert_same(
+            &sum(40, |k| format!("exp(y)^{}*log(z)*h({k})", k % 3)),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| {
+                format!("sin(x)^{}*exp({}*y)*cos({k})", k % 4, k % 3 + 1)
+            }),
+            true,
+        );
+        assert_same(
+            &sum(30, |k| format!("root(1-10*x^2+x^4,3)^{}*x^ep", k % 3)),
+            true,
+        );
+        assert_same(&sum(30, |k| format!("𝑒^({}*log(x))", k % 3 + 1)), true);
+        // exp(x+y) is the exponent sum 𝑒^(x+y), which the full routines split
+        assert_same(&sum(30, |k| format!("exp(x+y)*sin(x)^{}", k % 3)), false);
+    }
+
+    #[test]
+    fn coefficient_field_roots_keep_the_full_routines() {
+        // The field Q(a) with a^4-10*a^2+1 represents root(1-10*x^2+x^4,3), so
+        // the polynomial routines make it a coefficient there; over the
+        // rationals it is a variable like any other call.
+        let expression = parse(&sum(30, |k| {
+            format!("root(1-10*x^2+x^4,3)^{}*x^({}*ep)", k % 3, k % 2 + 1)
+        }));
+        let view = expression.as_view();
+        let field =
+            AlgebraicExtension::new(parse("a^4-10*a^2+1").to_polynomial::<_, u16>(&Q, None));
+        let empty = Arc::new(Vec::<PolyVariable>::new());
+        assert!(
+            view.to_polynomial_expanded::<_, u32>(&field, Some(&empty), true)
+                .is_err()
+        );
+        assert!(
+            view.to_polynomial_expanded::<_, u32>(&Q, Some(&empty), true)
+                .is_ok()
+        );
+
+        let (fast, full) =
+            fast_and_full(|| view.to_polynomial_impl::<_, u32>(&field, &empty).unwrap());
+        assert_eq!(fast.variables(), full.variables());
+        assert_eq!(fast, full);
+        // the root is a coefficient of the field, not a variable
+        assert!(fast.variables().iter().all(
+            |v| !matches!(v, PolyVariable::Function(s, _) if *s == crate::transcendental::root())
+        ));
+
+        let (fast, full) = fast_and_full(|| {
+            view.to_factorized_rational_polynomial_impl::<_, _, u32>(&field, &field, &empty)
+                .unwrap()
+        });
+        assert_same_factorized(&fast, &full, "quartic field");
     }
 }
