@@ -739,7 +739,7 @@ impl AtomView<'_> {
                     terms.push(x.canonical_string_sign_fix(settings));
                 }
 
-                Atom::mul_many(&terms)
+                Atom::product(&terms)
             }
             AtomView::Add(a) => {
                 let mut terms = vec![];
@@ -747,7 +747,7 @@ impl AtomView<'_> {
                     terms.push(x.canonical_string_sign_fix(settings));
                 }
 
-                Atom::add_many(&terms)
+                Atom::sum(&terms)
             }
         }
     }

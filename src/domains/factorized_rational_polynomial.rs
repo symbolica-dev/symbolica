@@ -821,7 +821,7 @@ where
     /// cancelled once.
     /// The variable maps are unified as in [`Self::unify_variables_list`].
     /// Returns `None` if there are no summands.
-    pub fn add_many(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
+    pub fn sum(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
         let mut terms = terms.into_iter().collect::<Vec<_>>();
         let first_zero = terms.iter().position(|t| t.is_zero());
         if let Some(zero) = first_zero
@@ -882,7 +882,7 @@ where
         }
 
         let numerators = groups.into_iter().map(|group| {
-            let mut numerator = MultivariatePolynomial::add_many(group.numerators).unwrap();
+            let mut numerator = MultivariatePolynomial::sum(group.numerators).unwrap();
             numerator = numerator.mul_coeff(ring.quot_rem(&denom_coeff, &group.denom_coeff).0);
             for (d, p) in &denominators {
                 let q = group
@@ -896,7 +896,7 @@ where
             }
             numerator
         });
-        let mut numerator = MultivariatePolynomial::add_many(numerators).unwrap();
+        let mut numerator = MultivariatePolynomial::sum(numerators).unwrap();
 
         if numerator.is_zero() {
             return Some(FactorizedRationalPolynomial {

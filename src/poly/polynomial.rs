@@ -2744,7 +2744,7 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     /// merged in one pass, instead of merging every summand into a growing sum.
     /// The variable maps are unified as in [`Self::unify_variables_list`].
     /// Returns `None` if there are no summands.
-    pub fn add_many(polys: impl IntoIterator<Item = Self>) -> Option<Self> {
+    pub fn sum(polys: impl IntoIterator<Item = Self>) -> Option<Self> {
         let mut polys = polys.into_iter().collect::<Vec<_>>();
         if polys.len() <= 2 {
             let last = polys.pop()?;

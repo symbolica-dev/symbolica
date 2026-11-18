@@ -1677,7 +1677,7 @@ impl AtomView<'_> {
                     vars = term.variables().clone();
                     terms.push(term);
                 }
-                Ok(MultivariatePolynomial::add_many(terms)
+                Ok(MultivariatePolynomial::sum(terms)
                     .unwrap_or_else(|| MultivariatePolynomial::new(field, None, var_map.clone())))
             }
         }
@@ -2071,7 +2071,7 @@ impl AtomView<'_> {
                     vars = term.numerator.variables().clone();
                     terms.push(term);
                 }
-                Ok(RationalPolynomial::add_many(terms)
+                Ok(RationalPolynomial::sum(terms)
                     .unwrap_or_else(|| RationalPolynomial::new(out_field, var_map.clone())))
             }
         }
@@ -2285,7 +2285,7 @@ impl AtomView<'_> {
                     terms.push(term);
                 }
                 Ok(
-                    FactorizedRationalPolynomial::add_many(terms).unwrap_or_else(|| {
+                    FactorizedRationalPolynomial::sum(terms).unwrap_or_else(|| {
                         FactorizedRationalPolynomial::new(out_field, var_map.clone())
                     }),
                 )
@@ -3682,7 +3682,7 @@ mod bulk_sum_tests {
             );
             assert_eq!(bulk, reference, "{source}");
             assert_eq!(
-                RationalPolynomial::add_many(terms).unwrap(),
+                RationalPolynomial::sum(terms).unwrap(),
                 reference,
                 "{source}"
             );
@@ -3703,7 +3703,7 @@ mod bulk_sum_tests {
                 .as_view()
                 .to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &empty)
                 .unwrap();
-            for result in [bulk, FactorizedRationalPolynomial::add_many(terms).unwrap()] {
+            for result in [bulk, FactorizedRationalPolynomial::sum(terms).unwrap()] {
                 assert_eq!(
                     result.numerator.variables(),
                     reference.numerator.variables(),
@@ -3774,7 +3774,7 @@ mod bulk_sum_tests {
             .unwrap();
         assert_eq!(bulk.variables(), reference.variables());
         assert_eq!(bulk, reference);
-        assert_eq!(MultivariatePolynomial::add_many(terms).unwrap(), reference);
+        assert_eq!(MultivariatePolynomial::sum(terms).unwrap(), reference);
     }
 
     #[test]
@@ -3793,7 +3793,7 @@ mod bulk_sum_tests {
         for t in &rationals[1..] {
             reference = &reference + t;
         }
-        let bulk = RationalPolynomial::add_many(rationals).unwrap();
+        let bulk = RationalPolynomial::sum(rationals).unwrap();
         assert_eq!(bulk.to_expression(), reference.to_expression());
 
         let factorized = parts
@@ -3809,7 +3809,7 @@ mod bulk_sum_tests {
         for t in &factorized[1..] {
             reference = &reference + t;
         }
-        let bulk = FactorizedRationalPolynomial::add_many(factorized).unwrap();
+        let bulk = FactorizedRationalPolynomial::sum(factorized).unwrap();
         assert_eq!(bulk.to_expression(), reference.to_expression());
 
         let polynomials = ["x^2+1", "y-x", "z*x+3", "w"]
@@ -3820,10 +3820,10 @@ mod bulk_sum_tests {
         for t in &polynomials[1..] {
             reference = &reference + t;
         }
-        let bulk = MultivariatePolynomial::add_many(polynomials).unwrap();
+        let bulk = MultivariatePolynomial::sum(polynomials).unwrap();
         assert_eq!(bulk.to_expression(), reference.to_expression());
 
-        assert!(MultivariatePolynomial::<_, u16>::add_many(Vec::<MultivariatePolynomial<Q, u16>>::new()).is_none());
+        assert!(MultivariatePolynomial::<_, u16>::sum(Vec::<MultivariatePolynomial<Q, u16>>::new()).is_none());
     }
 
     #[test]

@@ -231,7 +231,7 @@ impl Ring for AtomField {
             return first;
         };
         // Apply custom normalization once to the complete n-ary sum.
-        self.normalize(Atom::add_many([first, second].into_iter().chain(elements)))
+        self.normalize(Atom::sum([first, second].into_iter().chain(elements)))
     }
 
     fn one(&self) -> Self::Element {
@@ -249,7 +249,7 @@ impl Ring for AtomField {
         let Some(second) = elements.next() else {
             return first;
         };
-        self.normalize(Atom::mul_many([first, second].into_iter().chain(elements)))
+        self.normalize(Atom::product([first, second].into_iter().chain(elements)))
     }
 
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {

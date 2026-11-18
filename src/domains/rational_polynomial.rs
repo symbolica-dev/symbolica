@@ -1212,7 +1212,7 @@ where
     /// instead of adding every summand to a growing sum.
     /// The variable maps are unified as in [`Self::unify_variables_list`].
     /// Returns `None` if there are no summands.
-    pub fn add_many(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
+    pub fn sum(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
         let mut terms = terms.into_iter().collect::<Vec<_>>();
         if terms.len() <= 2 {
             let last = terms.pop()?;
@@ -1248,7 +1248,7 @@ where
                     };
                 }
                 let ring = denominator.ring().clone();
-                let numerator = MultivariatePolynomial::add_many(numerators).unwrap();
+                let numerator = MultivariatePolynomial::sum(numerators).unwrap();
                 RationalPolynomial::from_num_den(numerator, denominator, &ring, true)
             })
             .collect::<Vec<_>>();

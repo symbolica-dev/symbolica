@@ -4783,7 +4783,7 @@ impl Atom {
     /// Add the atoms in `args`, using a fast n-way merge sort.
     ///
     /// This method should be preferred over repeated addition when adding many atoms.
-    pub fn add_many<'a, I, T>(args: I) -> Atom
+    pub fn sum<'a, I, T>(args: I) -> Atom
     where
         I: IntoIterator<Item = T>,
         T: Into<AtomOrView<'a>>,
@@ -4799,7 +4799,7 @@ impl Atom {
     /// Multiply the atoms in `args`.
     ///
     /// This method should be preferred over repeated multiplication when multiplying many atoms.
-    pub fn mul_many<'a, I, T>(args: I) -> Atom
+    pub fn product<'a, I, T>(args: I) -> Atom
     where
         I: IntoIterator<Item = T>,
         T: Into<AtomOrView<'a>>,
@@ -4816,15 +4816,35 @@ impl Atom {
         });
         out
     }
+
+    /// Add the atoms in `args`, using a fast n-way merge sort.
+    #[deprecated(note = "Use `Atom::sum` instead.")]
+    pub fn add_many<'a, I, T>(args: I) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
+    {
+        Atom::sum(args)
+    }
+
+    /// Multiply the atoms in `args`.
+    #[deprecated(note = "Use `Atom::product` instead.")]
+    pub fn mul_many<'a, I, T>(args: I) -> Atom
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<AtomOrView<'a>>,
+    {
+        Atom::product(args)
+    }
 }
 
 impl<'a, T> std::iter::FromIterator<T> for Atom
 where
     T: Into<AtomOrView<'a>>,
 {
-    /// Add atoms from an iterator using [`Atom::add_many`].
+    /// Add atoms from an iterator using [`Atom::sum`].
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Atom::add_many(iter)
+        Atom::sum(iter)
     }
 }
 
@@ -4832,9 +4852,9 @@ impl<'a, T> std::iter::Sum<T> for Atom
 where
     T: Into<AtomOrView<'a>>,
 {
-    /// Add atoms from an iterator using [`Atom::add_many`].
+    /// Add atoms from an iterator using [`Atom::sum`].
     fn sum<I: Iterator<Item = T>>(iter: I) -> Self {
-        Atom::add_many(iter)
+        Atom::sum(iter)
     }
 }
 
@@ -4842,9 +4862,9 @@ impl<'a, T> std::iter::Product<T> for Atom
 where
     T: Into<AtomOrView<'a>>,
 {
-    /// Multiply atoms from an iterator using [`Atom::mul_many`].
+    /// Multiply atoms from an iterator using [`Atom::product`].
     fn product<I: Iterator<Item = T>>(iter: I) -> Self {
-        Atom::mul_many(iter)
+        Atom::product(iter)
     }
 }
 

@@ -259,7 +259,7 @@ impl<F: Ring> Series<F> {
     /// The result uses a common ramification grid and is known up to the smallest
     /// absolute order of the inputs. Coefficients are moved into one batch per
     /// power and summed with [`Ring::sum`]. In particular, symbolic
-    /// coefficients use [`Atom::add_many`] instead of repeated binary merges.
+    /// coefficients use [`Atom::sum`] instead of repeated binary merges.
     ///
     /// # Panics
     ///
@@ -1700,7 +1700,7 @@ mod tests {
         let coefficients = (0..129)
             .map(|i| crate::function!(symbol!("series_sum_c"), i))
             .collect::<Vec<_>>();
-        let expected = Atom::add_many(&coefficients);
+        let expected = Atom::sum(&coefficients);
         let kernel = parse!("series_sum_x^-2+sqrt(series_sum_x)-3*series_sum_x^2");
         let partials = coefficients
             .iter()
@@ -1710,7 +1710,7 @@ mod tests {
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        let expression = Atom::add_many(coefficients.iter().map(|c| c * &kernel));
+        let expression = Atom::sum(coefficients.iter().map(|c| c * &kernel));
         for result in [
             Series::sum(partials),
             expression.series(x, 0, SeriesDepth::absolute(2)).unwrap(),
