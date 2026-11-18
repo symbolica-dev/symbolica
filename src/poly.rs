@@ -1633,13 +1633,17 @@ impl AtomView<'_> {
                 Ok(r)
             }
             AtomView::Add(a) => {
-                let mut r = MultivariatePolynomial::new(field, None, var_map.clone());
+                // Convert each term in the variables found so far, and add all
+                // of them at once instead of accumulating a growing sum.
+                let mut vars = var_map.clone();
+                let mut terms = Vec::with_capacity(a.get_nargs());
                 for arg in a {
-                    let mut arg_r = arg.to_polynomial_impl(field, &r.variables())?;
-                    r.unify_variables(&mut arg_r);
-                    r = &r + &arg_r;
+                    let term = arg.to_polynomial_impl(field, &vars)?;
+                    vars = term.variables().clone();
+                    terms.push(term);
                 }
-                Ok(r)
+                Ok(MultivariatePolynomial::add_many(terms)
+                    .unwrap_or_else(|| MultivariatePolynomial::new(field, None, var_map.clone())))
             }
         }
     }
@@ -2023,17 +2027,17 @@ impl AtomView<'_> {
                 Ok(r)
             }
             AtomView::Add(a) => {
-                let mut r = RationalPolynomial::new(out_field, var_map.clone());
+                // Convert each term in the variables found so far, and add all
+                // of them at once instead of accumulating a growing sum.
+                let mut vars = var_map.clone();
+                let mut terms = Vec::with_capacity(a.get_nargs());
                 for arg in a {
-                    let mut arg_r = arg.to_rational_polynomial_impl(
-                        field,
-                        out_field,
-                        &r.numerator.variables(),
-                    )?;
-                    r.unify_variables(&mut arg_r);
-                    r = &r + &arg_r;
+                    let term = arg.to_rational_polynomial_impl(field, out_field, &vars)?;
+                    vars = term.numerator.variables().clone();
+                    terms.push(term);
                 }
-                Ok(r)
+                Ok(RationalPolynomial::add_many(terms)
+                    .unwrap_or_else(|| RationalPolynomial::new(out_field, var_map.clone())))
             }
         }
     }
@@ -2235,17 +2239,21 @@ impl AtomView<'_> {
                 Ok(r)
             }
             AtomView::Add(a) => {
-                let mut r = FactorizedRationalPolynomial::new(out_field, var_map.clone());
+                // Convert each term in the variables found so far, and add all
+                // of them at once instead of accumulating a growing sum.
+                let mut vars = var_map.clone();
+                let mut terms = Vec::with_capacity(a.get_nargs());
                 for arg in a {
-                    let mut arg_r = arg.to_factorized_rational_polynomial_impl(
-                        field,
-                        out_field,
-                        &r.numerator.variables(),
-                    )?;
-                    r.unify_variables(&mut arg_r);
-                    r = &r + &arg_r;
+                    let term =
+                        arg.to_factorized_rational_polynomial_impl(field, out_field, &vars)?;
+                    vars = term.numerator.variables().clone();
+                    terms.push(term);
                 }
-                Ok(r)
+                Ok(
+                    FactorizedRationalPolynomial::add_many(terms).unwrap_or_else(|| {
+                        FactorizedRationalPolynomial::new(out_field, var_map.clone())
+                    }),
+                )
             }
         }
     }
@@ -2725,6 +2733,74 @@ impl<R: Ring, E: PositiveExponent> RationalPolynomial<R, E> {
         let mut pow_h = workspace.new_atom();
         pow_h.to_pow(poly.as_view(), workspace.new_num(-1).as_view());
         mul.extend(pow_h.as_view());
+
+        let mut norm = workspace.new_atom();
+        out.as_view().normalize(workspace, &mut norm);
+        std::mem::swap(norm.deref_mut(), out);
+    }
+}
+
+impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
+    /// Convert the rational function to an expression: the numerator and its
+    /// scalar factor, divided by the scalar denominator and every denominator
+    /// factor raised to its multiplicity. Occurring variables must have
+    /// expression representations; temporary variables cannot be converted.
+    pub fn to_expression(&self) -> Atom
+    where
+        R::Element: CoefficientToExpression<R>,
+    {
+        let mut out = Atom::default();
+        self.to_expression_into(&mut out);
+        out
+    }
+
+    /// Replace `out` with the rational function's normalized expression.
+    /// Temporary variables must first be mapped to ordinary expression variables.
+    pub fn to_expression_into(&self, out: &mut Atom)
+    where
+        R::Element: CoefficientToExpression<R>,
+    {
+        Workspace::get_local().with(|ws| self.to_expression_with_map(ws, &HashMap::default(), out));
+    }
+
+    /// Convert from a factorized rational polynomial to an atom. The `map` maps
+    /// all temporary variables back to atoms.
+    pub(crate) fn to_expression_with_map(
+        &self,
+        workspace: &Workspace,
+        map: &HashMap<PolyVariable, AtomView>,
+        out: &mut Atom,
+    ) where
+        R::Element: CoefficientToExpression<R>,
+    {
+        let ring = self.numerator.ring();
+        let mul = out.to_mul();
+
+        let mut part = workspace.new_atom();
+        if !ring.is_one(&self.numer_coeff) {
+            self.numer_coeff.coefficient_to_expression(ring, &mut part);
+            mul.extend(part.as_view());
+        }
+
+        self.numerator
+            .to_expression_with_map(workspace, map, &mut part);
+        mul.extend(part.as_view());
+
+        let mut pow_h = workspace.new_atom();
+        if !ring.is_one(&self.denom_coeff) {
+            self.denom_coeff.coefficient_to_expression(ring, &mut part);
+            pow_h.to_pow(part.as_view(), workspace.new_num(-1).as_view());
+            mul.extend(pow_h.as_view());
+        }
+
+        for (denominator, power) in &self.denominators {
+            denominator.to_expression_with_map(workspace, map, &mut part);
+            pow_h.to_pow(
+                part.as_view(),
+                workspace.new_num(-(*power as i64)).as_view(),
+            );
+            mul.extend(pow_h.as_view());
+        }
 
         let mut norm = workspace.new_atom();
         out.as_view().normalize(workspace, &mut norm);
@@ -3438,5 +3514,282 @@ mod opaque_fast_path_tests {
                 .unwrap()
         });
         assert_same_factorized(&fast, &full, "quartic field");
+    }
+}
+
+#[cfg(test)]
+mod bulk_sum_tests {
+    use std::sync::Arc;
+
+    use crate::atom::{Atom, AtomCore, AtomView};
+    use crate::domains::algebraic::AlgebraicExtension;
+    use crate::domains::factorized_rational_polynomial::FactorizedRationalPolynomial;
+    use crate::domains::integer::Z;
+    use crate::domains::rational::Q;
+    use crate::domains::rational_polynomial::RationalPolynomial;
+    use crate::poly::PolyVariable;
+    use crate::poly::polynomial::MultivariatePolynomial;
+
+    fn parse(source: &str) -> Atom {
+        Atom::parse(source, "bulk_sum_tests", Default::default()).unwrap()
+    }
+
+    fn sorted_denominators<R: crate::domains::Ring, E: crate::poly::PositiveExponent>(
+        f: &FactorizedRationalPolynomial<R, E>,
+    ) -> Vec<(String, usize)> {
+        let mut d = f
+            .denominators
+            .iter()
+            .map(|(d, p)| (format!("{d}"), *p))
+            .collect::<Vec<_>>();
+        d.sort();
+        d
+    }
+
+    /// The terms of a sum, converted in the variables found so far, as the
+    /// conversion routines do before adding them.
+    fn convert_terms<T>(
+        expression: &Atom,
+        mut convert: impl FnMut(AtomView<'_>, &Arc<Vec<PolyVariable>>) -> T,
+        variables: impl Fn(&T) -> Arc<Vec<PolyVariable>>,
+    ) -> Vec<T> {
+        let AtomView::Add(sum) = expression.as_view() else {
+            panic!("not a sum: {expression}");
+        };
+        let mut vars = Arc::new(vec![]);
+        sum.iter()
+            .map(|term| {
+                let t = convert(term, &vars);
+                vars = variables(&t);
+                t
+            })
+            .collect()
+    }
+
+    /// Sums with polynomial terms, repeated and distinct denominators, scalar
+    /// denominators, cancellations and opaque factors. Each is a sum with many
+    /// terms, so that the conversion routines take the general route.
+    fn sums() -> Vec<String> {
+        let many =
+            |n: usize, f: &dyn Fn(usize) -> String| (0..n).map(f).collect::<Vec<_>>().join("+");
+        vec![
+            many(40, &|k| format!("{}*x^{}*y^{}", k + 1, k % 5, k % 3)) + "+1/(x+1)",
+            many(40, &|k| format!("{}*x^{}/(x+1)", k + 1, k % 4)) + "+y",
+            many(30, &|k| {
+                format!("x^{}/(x+{})^{}", k % 3, k % 4 + 1, k % 2 + 1)
+            }),
+            many(30, &|k| {
+                format!("{}/({}*x+{})", k + 1, k % 3 + 2, 2 * (k % 3 + 2))
+            }),
+            many(20, &|k| {
+                format!("x^{k}/(x^2-1)-x^{k}/((x-1)*(x+1))+y^{}", k % 3)
+            }),
+            "x/(x+1)+1/(x+1)+x^2/(x-1)-1/(x-1)".to_string(),
+            // cancels to zero only after adding the rational functions
+            "x/(x+1)+1/(x+1)-1+y/(y+2)+2/(y+2)-1+z/(2*z+6)+3/(2*z+6)-1/2".to_string(),
+            many(20, &|k| {
+                format!("f({})/(x+y)+x^({}*ep)/(x-y)^2", k % 3, k % 2 + 1)
+            }),
+            many(20, &|k| {
+                format!("{}/(x+1)+{}*z/(y+1)+w^{}", k + 1, k % 3, k)
+            }),
+        ]
+    }
+
+    #[test]
+    fn conversions_add_terms_like_a_growing_sum() {
+        for source in sums() {
+            let expression = parse(&source);
+            let empty = Arc::new(Vec::<PolyVariable>::new());
+
+            let terms = convert_terms(
+                &expression,
+                |t, v| {
+                    t.to_rational_polynomial_impl::<_, _, u16>(&Q, &Z, v)
+                        .unwrap()
+                },
+                |t| t.numerator.variables().clone(),
+            );
+            let mut reference = RationalPolynomial::new(&Z, empty.clone());
+            for t in &terms {
+                reference = &reference + t;
+            }
+            let bulk = expression
+                .as_view()
+                .to_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &empty)
+                .unwrap();
+            assert_eq!(
+                bulk.numerator.variables(),
+                reference.numerator.variables(),
+                "{source}"
+            );
+            assert_eq!(bulk, reference, "{source}");
+            assert_eq!(
+                RationalPolynomial::add_many(terms).unwrap(),
+                reference,
+                "{source}"
+            );
+
+            let terms = convert_terms(
+                &expression,
+                |t, v| {
+                    t.to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, v)
+                        .unwrap()
+                },
+                |t| t.numerator.variables().clone(),
+            );
+            let mut reference = FactorizedRationalPolynomial::new(&Z, empty.clone());
+            for t in &terms {
+                reference = &reference + t;
+            }
+            let bulk = expression
+                .as_view()
+                .to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &empty)
+                .unwrap();
+            for result in [bulk, FactorizedRationalPolynomial::add_many(terms).unwrap()] {
+                assert_eq!(
+                    result.numerator.variables(),
+                    reference.numerator.variables(),
+                    "{source}"
+                );
+                assert_eq!(result.numerator, reference.numerator, "{source}");
+                assert_eq!(result.numer_coeff, reference.numer_coeff, "{source}");
+                assert_eq!(result.denom_coeff, reference.denom_coeff, "{source}");
+                assert_eq!(
+                    sorted_denominators(&result),
+                    sorted_denominators(&reference),
+                    "{source}"
+                );
+            }
+
+            // over the Gaussian rationals as well
+            let field = AlgebraicExtension::complex(Q);
+            let gaussian = parse(&format!("𝑖*({source})")).expand();
+            let terms = convert_terms(
+                &gaussian,
+                |t, v| {
+                    t.to_factorized_rational_polynomial_impl::<_, _, u16>(&field, &field, v)
+                        .unwrap()
+                },
+                |t| t.numerator.variables().clone(),
+            );
+            let mut reference = FactorizedRationalPolynomial::new(&field, empty.clone());
+            for t in &terms {
+                reference = &reference + t;
+            }
+            let bulk = gaussian
+                .as_view()
+                .to_factorized_rational_polynomial_impl::<_, _, u16>(&field, &field, &empty)
+                .unwrap();
+            assert_eq!(bulk.numerator, reference.numerator, "{source}");
+            assert_eq!(bulk.numer_coeff, reference.numer_coeff, "{source}");
+            assert_eq!(bulk.denom_coeff, reference.denom_coeff, "{source}");
+            assert_eq!(
+                sorted_denominators(&bulk),
+                sorted_denominators(&reference),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn polynomial_conversion_adds_terms_like_a_growing_sum() {
+        // a term with a negative power takes the general route of the sum
+        let source = (0..50)
+            .map(|k| format!("{}*x^{}*f({})", k + 1, k % 6, k % 4))
+            .collect::<Vec<_>>()
+            .join("+")
+            + "+(x+y)^2+x^(1/2)";
+        let expression = parse(&source);
+        let empty = Arc::new(Vec::<PolyVariable>::new());
+        let terms = convert_terms(
+            &expression,
+            |t, v| t.to_polynomial_impl::<_, u16>(&Q, v).unwrap(),
+            |t| t.variables().clone(),
+        );
+        let mut reference = MultivariatePolynomial::new(&Q, None, empty.clone());
+        for t in &terms {
+            reference = &reference + t;
+        }
+        let bulk = expression
+            .as_view()
+            .to_polynomial_impl::<_, u16>(&Q, &empty)
+            .unwrap();
+        assert_eq!(bulk.variables(), reference.variables());
+        assert_eq!(bulk, reference);
+        assert_eq!(MultivariatePolynomial::add_many(terms).unwrap(), reference);
+    }
+
+    #[test]
+    fn bulk_sums_unify_unrelated_variable_maps() {
+        let parts = ["x^2+1", "y-x", "z*x+3", "1/(y+1)", "x/(z+x)", "w"];
+        let rationals = parts
+            .iter()
+            .map(|p| {
+                parse(p)
+                    .as_view()
+                    .to_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &Arc::new(vec![]))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut reference = rationals[0].clone();
+        for t in &rationals[1..] {
+            reference = &reference + t;
+        }
+        let bulk = RationalPolynomial::add_many(rationals).unwrap();
+        assert_eq!(bulk.to_expression(), reference.to_expression());
+
+        let factorized = parts
+            .iter()
+            .map(|p| {
+                parse(p)
+                    .as_view()
+                    .to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &Arc::new(vec![]))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut reference = factorized[0].clone();
+        for t in &factorized[1..] {
+            reference = &reference + t;
+        }
+        let bulk = FactorizedRationalPolynomial::add_many(factorized).unwrap();
+        assert_eq!(bulk.to_expression(), reference.to_expression());
+
+        let polynomials = ["x^2+1", "y-x", "z*x+3", "w"]
+            .iter()
+            .map(|p| parse(p).to_polynomial::<_, u16>(&Q, None))
+            .collect::<Vec<_>>();
+        let mut reference = polynomials[0].clone();
+        for t in &polynomials[1..] {
+            reference = &reference + t;
+        }
+        let bulk = MultivariatePolynomial::add_many(polynomials).unwrap();
+        assert_eq!(bulk.to_expression(), reference.to_expression());
+
+        assert!(MultivariatePolynomial::<_, u16>::add_many(Vec::<MultivariatePolynomial<Q, u16>>::new()).is_none());
+    }
+
+    #[test]
+    fn factorized_rational_polynomials_convert_to_expressions() {
+        for source in [
+            "0",
+            "3/4",
+            "-2*x^2*y+4*x",
+            "(3*x+6)/(2*(x-1)^2*(y+1))",
+            "-x/(4*(x^2+1)^3)",
+            "f(x)^2/(x+f(x))+x^(1/2)",
+        ] {
+            let expression = parse(source);
+            let converted = expression
+                .as_view()
+                .to_factorized_rational_polynomial_impl::<_, _, u16>(&Q, &Z, &Arc::new(vec![]))
+                .unwrap();
+            let roundtrip = converted.to_expression();
+            assert_eq!(
+                (roundtrip - &expression).expand().as_view().together(),
+                Atom::num(0),
+                "{source} -> {converted}"
+            );
+        }
     }
 }

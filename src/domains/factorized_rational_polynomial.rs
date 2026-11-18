@@ -788,6 +788,149 @@ where
         }
     }
 
+    /// Unify the variable maps of all rational functions in the slice, such that
+    /// all numerators and denominator factors share the same variable map.
+    /// See [`MultivariatePolynomial::unify_variables_list`] for which variable
+    /// map is chosen. Normalizations that depend on the variable order are restored.
+    pub fn unify_variables_list(polys: &mut [Self]) {
+        let Some(vars) = MultivariatePolynomial::<R, E>::unified_variable_map(
+            polys.iter().map(|p| p.numerator.variables()),
+        ) else {
+            return;
+        };
+
+        for p in polys {
+            if p.numerator.variables() == &vars {
+                continue;
+            }
+            let old_vars = p.numerator.variables().clone();
+            p.numerator.embed_in_variable_map(&vars);
+            for (d, _) in &mut p.denominators {
+                d.embed_in_variable_map(&vars);
+            }
+            if !Self::preserves_term_order(&old_vars, &vars) {
+                p.renormalize();
+            }
+        }
+    }
+
+    /// Add all rational functions at once, instead of adding every summand to a
+    /// growing sum. The numerators of summands with the same denominator are added
+    /// in one pass. Each such sum is brought to the common factorized denominator
+    /// once, all of them are added in one pass, and the denominator factors are
+    /// cancelled once.
+    /// The variable maps are unified as in [`Self::unify_variables_list`].
+    /// Returns `None` if there are no summands.
+    pub fn add_many(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut terms = terms.into_iter().collect::<Vec<_>>();
+        let first_zero = terms.iter().position(|t| t.is_zero());
+        if let Some(zero) = first_zero
+            && terms.iter().all(|t| t.is_zero())
+        {
+            return Some(terms.swap_remove(zero));
+        }
+        terms.retain(|t| !t.is_zero());
+        if terms.len() <= 2 {
+            let last = terms.pop()?;
+            return Some(match terms.pop() {
+                Some(first) => &first + &last,
+                None => last,
+            });
+        }
+
+        Self::unify_variables_list(&mut terms);
+        let ring = terms[0].numerator.ring().clone();
+
+        type Factors<R, E> = Vec<(MultivariatePolynomial<R, E>, usize)>;
+        struct Group<R: Ring, E: PositiveExponent> {
+            denominators: Factors<R, E>,
+            denom_coeff: R::Element,
+            numerators: Vec<MultivariatePolynomial<R, E>>,
+        }
+
+        let mut groups: Vec<Group<R, E>> = vec![];
+        for term in terms {
+            let numerator = term.numerator.mul_coeff(term.numer_coeff);
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|g| g.denom_coeff == term.denom_coeff && g.denominators == term.denominators)
+            {
+                group.numerators.push(numerator);
+            } else {
+                groups.push(Group {
+                    denominators: term.denominators,
+                    denom_coeff: term.denom_coeff,
+                    numerators: vec![numerator],
+                });
+            }
+        }
+
+        // the common denominator: every factor with its highest multiplicity,
+        // and the lcm of the scalar denominators
+        let mut denominators: Factors<R, E> = vec![];
+        let mut denom_coeff = ring.one();
+        for group in &groups {
+            for (d, p) in &group.denominators {
+                if let Some((_, q)) = denominators.iter_mut().find(|(d2, _)| d2 == d) {
+                    *q = (*q).max(*p);
+                } else {
+                    denominators.push((d.clone(), *p));
+                }
+            }
+            let g = ring.gcd(&denom_coeff, &group.denom_coeff);
+            ring.mul_assign(&mut denom_coeff, &ring.quot_rem(&group.denom_coeff, &g).0);
+        }
+
+        let numerators = groups.into_iter().map(|group| {
+            let mut numerator = MultivariatePolynomial::add_many(group.numerators).unwrap();
+            numerator = numerator.mul_coeff(ring.quot_rem(&denom_coeff, &group.denom_coeff).0);
+            for (d, p) in &denominators {
+                let q = group
+                    .denominators
+                    .iter()
+                    .find(|(d2, _)| d2 == d)
+                    .map_or(0, |(_, q)| *q);
+                if *p > q {
+                    numerator = numerator * &d.pow(*p - q);
+                }
+            }
+            numerator
+        });
+        let mut numerator = MultivariatePolynomial::add_many(numerators).unwrap();
+
+        if numerator.is_zero() {
+            return Some(FactorizedRationalPolynomial {
+                numerator,
+                numer_coeff: ring.zero(),
+                denom_coeff: ring.one(),
+                denominators: vec![],
+            });
+        }
+
+        for (d, p) in &mut denominators {
+            while *p > 0 {
+                if let Some(q) = numerator.try_div(d) {
+                    numerator = q;
+                    *p -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        denominators.retain(|(_, p)| *p > 0);
+
+        // normalize the numerator and cancel the scalar factors
+        let mut r = FactorizedRationalPolynomial::from_num_den(numerator, vec![], &ring, false);
+        let g = ring.gcd(&r.numer_coeff, &denom_coeff);
+        if !ring.is_one(&g) {
+            r.numer_coeff = ring.quot_rem(&r.numer_coeff, &g).0;
+            denom_coeff = ring.quot_rem(&denom_coeff, &g).0;
+        }
+        r.denom_coeff = denom_coeff;
+        r.denominators = denominators;
+        Some(r)
+    }
+
     /// Check if rewriting a polynomial in the variables `old` into the variables `new`,
     /// which contain all variables of `old`, keeps the variables in the same relative order.
     /// If so, the term order and therefore the leading coefficients are unchanged.

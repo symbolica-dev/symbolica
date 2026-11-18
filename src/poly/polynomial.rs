@@ -2740,6 +2740,34 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         Self::fill_coefficient_list(poly, coefficients, exponents)
     }
 
+    /// Add all polynomials at once. The terms of all summands are sorted and
+    /// merged in one pass, instead of merging every summand into a growing sum.
+    /// The variable maps are unified as in [`Self::unify_variables_list`].
+    /// Returns `None` if there are no summands.
+    pub fn add_many(polys: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut polys = polys.into_iter().collect::<Vec<_>>();
+        if polys.len() <= 2 {
+            let last = polys.pop()?;
+            return Some(match polys.pop() {
+                Some(first) => first + last,
+                None => last,
+            });
+        }
+
+        Self::unify_variables_list(&mut polys);
+        let nterms = polys.iter().map(|p| p.nterms()).sum::<usize>();
+        let mut polys = polys.into_iter();
+        let mut sum = polys.next().unwrap();
+        sum.coefficients.reserve(nterms - sum.nterms());
+        sum.exponents.reserve((nterms - sum.nterms()) * sum.nvars());
+        for p in polys {
+            sum.coefficients.extend(p.coefficients);
+            sum.exponents.extend(p.exponents);
+        }
+        sum.sort_terms(true);
+        Some(sum)
+    }
+
     /// Fill an empty polynomial, preserving its context.
     fn fill_coefficient_list(
         mut poly: Self,
