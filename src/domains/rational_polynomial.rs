@@ -1202,6 +1202,72 @@ where
     }
 }
 
+impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> RationalPolynomial<R, E>
+where
+    RationalPolynomial<R, E>: FromNumeratorAndDenominator<R, R, E>,
+{
+    /// Add all rational functions at once. The numerators of summands with the
+    /// same denominator are added in one pass and reduced with one gcd, and the
+    /// sums for distinct denominators are added pairwise in a balanced tree,
+    /// instead of adding every summand to a growing sum.
+    /// The variable maps are unified as in [`Self::unify_variables_list`].
+    /// Returns `None` if there are no summands.
+    pub fn add_many(terms: impl IntoIterator<Item = Self>) -> Option<Self> {
+        let mut terms = terms.into_iter().collect::<Vec<_>>();
+        if terms.len() <= 2 {
+            let last = terms.pop()?;
+            return Some(match terms.pop() {
+                Some(first) => &first + &last,
+                None => last,
+            });
+        }
+
+        Self::unify_variables_list(&mut terms);
+
+        // Denominators are normalized, so equal denominators compare equal.
+        let mut groups: Vec<(
+            MultivariatePolynomial<R, E>,
+            Vec<MultivariatePolynomial<R, E>>,
+        )> = vec![];
+        for term in terms {
+            if let Some((_, numerators)) = groups.iter_mut().find(|(d, _)| *d == term.denominator) {
+                numerators.push(term.numerator);
+            } else {
+                groups.push((term.denominator, vec![term.numerator]));
+            }
+        }
+
+        let mut sums = groups
+            .into_iter()
+            .map(|(denominator, numerators)| {
+                if numerators.len() == 1 {
+                    let numerator = numerators.into_iter().next().unwrap();
+                    return RationalPolynomial {
+                        numerator,
+                        denominator,
+                    };
+                }
+                let ring = denominator.ring().clone();
+                let numerator = MultivariatePolynomial::add_many(numerators).unwrap();
+                RationalPolynomial::from_num_den(numerator, denominator, &ring, true)
+            })
+            .collect::<Vec<_>>();
+
+        while sums.len() > 1 {
+            let mut next = Vec::with_capacity(sums.len().div_ceil(2));
+            let mut sums_iter = sums.into_iter();
+            while let Some(a) = sums_iter.next() {
+                next.push(match sums_iter.next() {
+                    Some(b) => &a + &b,
+                    None => a,
+                });
+            }
+            sums = next;
+        }
+        sums.pop()
+    }
+}
+
 impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> Sub for RationalPolynomial<R, E>
 where
     RationalPolynomial<R, E>: FromNumeratorAndDenominator<R, R, E>,
