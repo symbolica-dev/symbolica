@@ -685,20 +685,18 @@ impl<F: Ring> SparseMatrix<F> {
 
         //update ncols
         self.ncols += col_pos.len() as u32;
+        if col_pos.is_empty() {
+            return;
+        }
 
-        //update col_idcs, row by row
-        for pair in self.row_ptrs.windows(2) {
-            let mut col_pos_it: u32 = 0;
-            for pos in pair[0]..pair[1] {
-                //advance iterator as long *it <= col_idx at pos
-                while (col_pos_it as usize) < col_pos.len()
-                    && col_pos[col_pos_it as usize] <= self.col_idcs[pos]
-                {
-                    col_pos_it += 1;
-                }
-                //shift the current col_idx by the number of new columns that are inserted before it
-                self.col_idcs[pos] += col_pos_it;
-            }
+        //shift every col_idx by the number of new columns that are inserted before it (at or
+        //before its position); a binary search per entry, so the cost is O(nnz log(new columns))
+        //instead of a scan of the new columns for every row
+        let shift = |col: &mut u32| *col += col_pos.partition_point(|&p| p <= *col) as u32;
+        if self.col_idcs.len() >= 1 << 16 {
+            self.col_idcs.par_iter_mut().for_each(shift);
+        } else {
+            self.col_idcs.iter_mut().for_each(shift);
         }
     }
 
@@ -3158,6 +3156,55 @@ mod tests {
         let mat = SparseMatrix::from_triplets(2, 2, vec![(0, 0, 1.into())], Q);
 
         assert!(matches!(mat.inv(), Err(SparseMatrixError::Singular)));
+    }
+
+    /// `add_cols` (a binary search per entry, in parallel for large matrices) shifts the column
+    /// indices exactly as a scan of the new columns for every row.
+    #[test]
+    fn add_cols_matches_the_row_scan() {
+        use crate::domains::finite_field::{FiniteFieldCore, Zp64};
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let field = Zp64::new(13);
+        let mut rng = StdRng::seed_from_u64(5);
+        for (nrows, ncols, density) in [(50, 40, 0.3), (400, 2_000, 0.1)] {
+            let mut values = vec![];
+            let mut cols = vec![];
+            let mut ptrs = vec![0];
+            for _ in 0..nrows {
+                for c in 0..ncols {
+                    if rng.random_bool(density) {
+                        values.push(field.to_element(rng.random_range(1..13)));
+                        cols.push(c as u32);
+                    }
+                }
+                ptrs.push(values.len());
+            }
+            let mut matrix = SparseMatrix::from_csr(
+                nrows as u32,
+                ncols as u32,
+                values,
+                ptrs.clone(),
+                cols.clone(),
+                field.clone(),
+            );
+            let mut new_cols: Vec<u32> = (0..rng.random_range(1..300))
+                .map(|_| rng.random_range(0..=ncols as u32))
+                .collect();
+            new_cols.sort_unstable();
+            let mut expected = cols.clone();
+            for pair in ptrs.windows(2) {
+                let mut it = 0;
+                for pos in pair[0]..pair[1] {
+                    while it < new_cols.len() && new_cols[it] <= cols[pos] {
+                        it += 1;
+                    }
+                    expected[pos] += it as u32;
+                }
+            }
+            matrix.add_cols(&new_cols);
+            assert_eq!(matrix.col_idcs(), &expected);
+            assert_eq!(matrix.ncols() as usize, ncols + new_cols.len());
+        }
     }
 
     #[test]
