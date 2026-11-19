@@ -436,6 +436,50 @@ impl<F: Ring> Series<F> {
         }
     }
 
+    /// Constructs a constant series with infinite precision, for a nonzero constant that is
+    /// known exactly. Must be added or multiplied with another finite series.
+    #[inline]
+    fn constant_inf_prec(&self, coeff: F::Element) -> Self {
+        Self {
+            coefficients: vec![coeff],
+            field: self.field.clone(),
+            variable: self.variable.clone(),
+            expansion_point: self.expansion_point.clone(),
+            shift: 0,
+            order: i64::MAX as usize, // considered infinity
+            ramification: 1,
+        }
+    }
+
+    /// Constructs a series with a single term that is known exactly, with infinite precision.
+    /// Must be added or multiplied with another finite series.
+    #[inline]
+    fn monomial_inf_prec(&self, coeff: F::Element, exponent: Rational) -> Self {
+        let mut monomial = self.monomial(coeff, exponent);
+        monomial.order = i64::MAX as usize; // considered infinity
+        monomial
+    }
+
+    /// Return the powers `self, self^2, ..., self^n` of a series without a constant term.
+    ///
+    /// A function of `self` is known up to the absolute order of `self`, so the powers
+    /// are truncated at that order and their higher terms are never computed. The
+    /// powers stop early when one vanishes below that order, as all higher powers do too.
+    fn truncated_powers(&self, n: usize) -> Vec<Self> {
+        let max_order = self.absolute_order();
+        let mut powers = Vec::with_capacity(n);
+        let mut power = self.clone();
+        for i in 1..=n {
+            let next = (i < n && !power.is_zero()).then(|| power.mul_up_to(self, Some(&max_order)));
+            powers.push(power);
+            match next {
+                Some(next) => power = next,
+                None => break,
+            }
+        }
+        powers
+    }
+
     /// Constructs a series with a single term.
     #[inline]
     pub fn monomial(&self, coeff: F::Element, exponent: Rational) -> Self {
@@ -1193,6 +1237,15 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
 
     #[inline]
     fn mul(self, rhs: &'a Series<F>) -> Self::Output {
+        self.mul_up_to(rhs, None)
+    }
+}
+
+impl<F: Ring> Series<F> {
+    /// Multiply two series. If `max_order` is given, the product is truncated at
+    /// that absolute order and its terms at or above it are not computed, which saves
+    /// work when the product only contributes to a result that is known to a lower order.
+    fn mul_up_to(&self, rhs: &Series<F>, max_order: Option<&Rational>) -> Series<F> {
         assert_eq!(self.field, rhs.field);
         assert_eq!(self.variable, rhs.variable);
 
@@ -1212,6 +1265,18 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
                 .min(rhs.order.saturating_mul(r_d_o)),
             ramification: r,
         };
+
+        if let Some(max_order) = max_order {
+            // the number of grid points from the shift up to `max_order`
+            let end =
+                (max_order * &Rational::from(r as i64)).ceil() - Integer::from(res.shift as i64);
+            let end = if end.is_negative() {
+                0
+            } else {
+                end.to_i64().map_or(usize::MAX, |e| e as usize)
+            };
+            res.order = res.order.min(end);
+        }
 
         if self.is_zero() || rhs.is_zero() {
             // A zero product inherits the truncation endpoint. Keep the
@@ -1346,10 +1411,10 @@ impl Series<AtomField> {
     }
 
     /// Extract powers of `x` from an expression that comes from simplifying an exponential with logs
-    /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`.
+    /// i.e.: `exp(c + 3 log(x^5)) = exp(c)*x^15`. The result is exact and has infinite precision.
     fn extract_exp_log(&self, e: AtomView, s: AtomView) -> Result<Self, SeriesError> {
         if !e.contains(s) {
-            return Ok(self.constant(e.to_owned()));
+            return Ok(self.constant_inf_prec(e.to_owned()));
         }
 
         match e {
@@ -1360,7 +1425,7 @@ impl Series<AtomField> {
                     if let AtomView::Num(n) = exp {
                         if let CoefficientView::Natural(n, d, ni, _di) = n.get_coeff_view() {
                             if ni == 0 {
-                                Ok(self.monomial(self.field.one(), (n, d).into()))
+                                Ok(self.monomial_inf_prec(self.field.one(), (n, d).into()))
                             } else {
                                 Err(SeriesError::UnsupportedComplexExponent {
                                     expression: e.to_owned(),
@@ -1382,7 +1447,7 @@ impl Series<AtomField> {
                     })
                 }
             }
-            AtomView::Var(_) => Ok(self.monomial(self.field.one(), (1, 1).into())),
+            AtomView::Var(_) => Ok(self.monomial_inf_prec(self.field.one(), (1, 1).into())),
             AtomView::Mul(m) => {
                 let mut shift_series = self.one_inf_prec();
                 for a in m {
@@ -1427,23 +1492,17 @@ impl Series<AtomField> {
         // construct the constant term, log(x) in the argument will be turned into x
         let e = FunctionBuilder::new(Symbol::EXP).add_arg(&c).finish();
 
-        // split the true constant part and the x-dependent part
+        // split the true constant part and the x-dependent part. The constant part is exact,
+        // so that the result is known up to the absolute order of the series.
         let var = self.variable.to_atom() - &self.expansion_point;
-        let shift_series = self.extract_exp_log(e.as_view(), var.as_view())?; // FIXME: needs to be inf prec!
+        let shift_series = self.extract_exp_log(e.as_view(), var.as_view())?;
 
         let p = self.clone().remove_constant();
 
         let mut terms = Vec::with_capacity(self.order + 1);
         terms.push(self.one_inf_prec());
-        let mut sp = p.clone();
-        for i in 1..=self.order {
-            let s = sp
-                .clone()
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            terms.push(s);
+        for (i, sp) in (1..).zip(p.truncated_powers(self.order)) {
+            terms.push(sp.div_coeff(&Atom::num(Integer::factorial(i))));
         }
 
         Ok(Series::sum(terms) * &shift_series)
@@ -1468,12 +1527,8 @@ impl Series<AtomField> {
 
         let mut terms = Vec::with_capacity(self.order + 1);
         terms.push(self.constant(FunctionBuilder::new(Symbol::LOG).add_arg(&c).finish()));
-        let mut sp = p.clone();
-        for i in 1..=self.order {
-            let s = sp.clone().div_coeff(&Atom::num(i as i64));
-
-            sp = sp * &p;
-
+        for (i, sp) in (1..).zip(p.truncated_powers(self.order)) {
+            let s = sp.div_coeff(&Atom::num(i));
             terms.push(if i % 2 == 0 { s.neg() } else { s });
         }
 
@@ -1515,10 +1570,14 @@ impl Series<AtomField> {
 
         let p = self.clone().remove_constant();
 
+        // The constant term is exact, so that the result is known up to the
+        // absolute order of the series.
         let mut terms = Vec::with_capacity(self.order + 1);
-        terms.push(self.constant(FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish()));
-        let mut sp = p.clone();
-        for i in 1..=self.order {
+        let constant = FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish();
+        if !constant.is_zero() {
+            terms.push(self.constant_inf_prec(constant));
+        }
+        for (i, sp) in (1..).zip(p.truncated_powers(self.order)) {
             let mut b = if i % 2 == 1 {
                 FunctionBuilder::new(Symbol::COS).add_arg(&c).finish()
             } else {
@@ -1529,14 +1588,10 @@ impl Series<AtomField> {
                 b = b.neg();
             }
 
-            let s = sp
-                .clone()
-                .mul_coeff(&b)
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            terms.push(s);
+            terms.push(
+                sp.mul_coeff(&b)
+                    .div_coeff(&Atom::num(Integer::factorial(i))),
+            );
         }
 
         Ok(Series::sum(terms))
@@ -1578,10 +1633,14 @@ impl Series<AtomField> {
 
         let p = self.clone().remove_constant();
 
+        // The constant term is exact, so that the result is known up to the
+        // absolute order of the series.
         let mut terms = Vec::with_capacity(self.order + 1);
-        terms.push(self.constant(FunctionBuilder::new(Symbol::COS).add_arg(&c).finish()));
-        let mut sp = p.clone();
-        for i in 1..=self.order {
+        let constant = FunctionBuilder::new(Symbol::COS).add_arg(&c).finish();
+        if !constant.is_zero() {
+            terms.push(self.constant_inf_prec(constant));
+        }
+        for (i, sp) in (1..).zip(p.truncated_powers(self.order)) {
             let mut b = if i % 2 == 1 {
                 FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish()
             } else {
@@ -1592,14 +1651,10 @@ impl Series<AtomField> {
                 b = b.neg();
             }
 
-            let s = sp
-                .clone()
-                .mul_coeff(&b)
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            sp = sp * &p;
-
-            terms.push(s);
+            terms.push(
+                sp.mul_coeff(&b)
+                    .div_coeff(&Atom::num(Integer::factorial(i))),
+            );
         }
 
         Ok(Series::sum(terms))
@@ -1639,24 +1694,19 @@ impl Series<AtomField> {
         let p = Rational::from((base.shift as i64, base.ramification as i64)) * &pow;
         let mut terms = Vec::with_capacity(order + 1);
         terms.push(base.one());
-        let mut x = base.one();
 
         // normalize the series to 1 + ...
         let cc = base.div_coeff(&c).mul_exp_units(-shift) - terms[0].one();
 
         let mut num = Rational::one();
 
-        for i in 1..=order {
+        for (i, x) in (1..).zip(cc.truncated_powers(order)) {
             num = &num * &(&pow - &(i as i64 - 1).into());
 
-            x = x * &cc;
-
-            let p = x
-                .clone()
-                .mul_coeff(&Atom::num(num.clone()))
-                .div_coeff(&Atom::num(Integer::factorial(i as u32)));
-
-            terms.push(p);
+            terms.push(
+                x.mul_coeff(&Atom::num(num.clone()))
+                    .div_coeff(&Atom::num(Integer::factorial(i))),
+            );
         }
 
         let mut r = Series::sum(terms);
@@ -2157,6 +2207,146 @@ mod puiseux_tests {
             assert_eq!(s.coefficient(1.into()), Some(Atom::num(4)));
             assert_eq!(s.coefficient(2.into()), Some(Atom::num(1)));
             assert_eq!(s.coefficient((1, 3).into()), Some(Atom::Zero));
+        }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use std::sync::Arc;
+
+    use crate::{
+        atom::{Atom, AtomCore},
+        parse,
+        poly::series::{Series, SeriesDepth},
+        symbol,
+    };
+
+    #[test]
+    fn functions_keep_the_absolute_order_of_a_series_without_constant_term() {
+        use crate::domains::atom::AtomField;
+
+        let x = symbol!("series_order::x");
+        let field = AtomField {
+            statistical_zero_test: false,
+            ..AtomField::new()
+        };
+        let info = Series::new(&field, None, Arc::new(x.into()), Atom::num(0), 6.into());
+        // x + a*x^2 + O(x^7)
+        let s = info.monomial(Atom::num(1), 1.into())
+            + info.monomial(parse!("series_order::a"), 2.into());
+        assert_eq!(s.absolute_order(), 7);
+
+        for (f, result) in [
+            ("exp", s.exp().unwrap()),
+            ("sin", s.sin().unwrap()),
+            ("cos", s.cos().unwrap()),
+        ] {
+            // the constant term of the function is exact, so it does not limit the order
+            assert_eq!(result.absolute_order(), 7, "{f}");
+            let expected =
+                parse!(format!("{f}(series_order::x+series_order::a*series_order::x^2)").as_str())
+                    .series(x, 0, SeriesDepth::absolute(6))
+                    .unwrap();
+            assert_eq!(
+                result.to_atom().expand(),
+                expected.to_atom().expand(),
+                "{f}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_powers_match_truncated_full_powers() {
+        let x = symbol!("series_order::x");
+        let p = parse!(
+            "series_order::a*series_order::x+series_order::b*series_order::x^2+series_order::x^(5/2)"
+        )
+        .series(x, 0, SeriesDepth::absolute(6))
+        .unwrap();
+        let max_order = p.absolute_order();
+        assert_eq!(max_order, 7);
+
+        let powers = p.truncated_powers(10);
+        // p^7 vanishes below x^7, and the higher powers are not computed
+        assert_eq!(powers.len(), 7);
+        assert!(powers.last().unwrap().is_zero());
+
+        let mut full = p.clone();
+        for (i, power) in powers.iter().enumerate() {
+            if i > 0 {
+                full = &full * &p;
+            }
+            let mut expected = full.clone();
+            expected.truncate_absolute_order(max_order.clone());
+            assert_eq!(
+                power.to_atom().expand(),
+                expected.to_atom().expand(),
+                "p^{}",
+                i + 1
+            );
+            if !power.is_zero() {
+                assert_eq!(power.absolute_order(), max_order, "p^{}", i + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn reciprocal_with_symbolic_coefficients_matches_recurrence() {
+        // The powers in the reciprocal used to be computed far beyond the order of
+        // the result, which made the unexpanded coefficients grow exponentially faster.
+        let x = symbol!("series_order::x");
+        let depth = 14;
+        let s = parse!(
+            "1/(1-series_order::a*series_order::x-series_order::b*series_order::x^2-series_order::c*series_order::x^3)"
+        )
+        .series(x, 0, SeriesDepth::absolute(depth))
+        .unwrap();
+
+        // g_n = a g_{n-1} + b g_{n-2} + c g_{n-3}
+        let f = ["a", "b", "c"].map(|v| parse!(format!("series_order::{v}").as_str()));
+        let mut g = vec![Atom::num(1)];
+        for n in 1..=depth as usize {
+            let terms = (1..=3.min(n))
+                .map(|k| &f[k - 1] * &g[n - k])
+                .collect::<Vec<_>>();
+            g.push(Atom::sum(terms).expand());
+        }
+        for (n, gn) in g.iter().enumerate() {
+            let coefficient = s.coefficient((n as i64).into()).unwrap();
+            assert_eq!(coefficient.expand(), *gn, "x^{n}");
+        }
+    }
+
+    #[test]
+    fn powers_of_laurent_series_keep_their_relative_order() {
+        // The powers in rpow are truncated at the absolute order of the normalized
+        // series 1 + cc, which is the relative order of the base, not its absolute order.
+        let x = symbol!("series_order::x");
+        let base = parse!("series_order::x^-1+series_order::a+series_order::b*series_order::x")
+            .series(x, 0, SeriesDepth::absolute(6))
+            .unwrap();
+        for (power, equivalent) in [
+            (
+                (-1, 1),
+                "series_order::x/(1+series_order::a*series_order::x+series_order::b*series_order::x^2)",
+            ),
+            (
+                (1, 2),
+                "series_order::x^(-1/2)*(1+series_order::a*series_order::x+series_order::b*series_order::x^2)^(1/2)",
+            ),
+        ] {
+            let result = base.rpow(power.into()).unwrap();
+            assert_eq!(result.relative_order(), base.relative_order(), "{power:?}");
+            let mut expected = parse!(equivalent)
+                .series(x, 0, SeriesDepth::absolute(10))
+                .unwrap();
+            expected.truncate_absolute_order(result.absolute_order());
+            assert_eq!(
+                result.to_atom().expand(),
+                expected.to_atom().expand(),
+                "{power:?}"
+            );
         }
     }
 }
