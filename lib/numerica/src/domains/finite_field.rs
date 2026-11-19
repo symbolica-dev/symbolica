@@ -3254,7 +3254,7 @@ where
                 Integer::Double(DoubleInteger::new(16641139526367750375)),
             ];
             witnesses_3.as_slice()
-        } else if n < u64::MAX {
+        } else {
             // shortest SPRP basis from Jim Sinclair for testing primality of u64
             witnesses_4 = [
                 Integer::Single(2),
@@ -3266,8 +3266,6 @@ where
                 Integer::Single(1795265022),
             ];
             witnesses_4.as_slice()
-        } else {
-            unreachable!()
         };
 
         self.is_prime_field_with_witnesses(&n, d, s, w)
@@ -5053,6 +5051,17 @@ mod test {
     fn is_prime_field_rejects_large_composites() {
         let r = FiniteField::<Integer>::new(Integer::from_str("179769313486231590772930519078902473361797697894230657273430081157732675805500963132708477322407536021120113879871393357658789768814416622492847430639474124377767893424865485276302219601246094119453082952085005768838150682342462881473913110540827237163350510684586298239947245938479716304835356329624224137219").unwrap());
         assert!(!r.is_prime_field(40));
+    }
+
+    #[test]
+    fn is_prime_near_u64_max() {
+        // u64::MAX = 3 * 5 * 17 * 257 * 641 * 65537 * 6700417
+        assert!(!Integer::from(u64::MAX).is_prime(0));
+        assert!(!Zp64::new(u64::MAX).is_prime_field(0));
+        // the largest prime below 2^64
+        assert!(Integer::from(u64::MAX - 58).is_prime(0));
+        assert!(!Integer::from(u64::MAX - 2).is_prime(0));
+        assert!(Integer::from(u64::MAX as u128 + 14).is_prime(24));
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //! assert_eq!(mat.fmt_mma(), "{{{1,1}->10,{1,3}->7,{2,2}->13},{2,3}}");
 
 use std::{
-    collections::HashSet,
+    cmp::Reverse,
+    collections::{BinaryHeap, HashSet},
     fmt::Display,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
     sync::Mutex,
@@ -35,6 +36,9 @@ use crate::{
     printer::{PrintOptions, PrintState},
     tensors::matrix::Matrix,
 };
+
+mod parallel;
+pub use parallel::{ParallelOptions, ParallelStats, Provisional, RowOutcome};
 
 /// A sparse vector in a compressed format (compressed sparse row style).
 ///
@@ -681,20 +685,18 @@ impl<F: Ring> SparseMatrix<F> {
 
         //update ncols
         self.ncols += col_pos.len() as u32;
+        if col_pos.is_empty() {
+            return;
+        }
 
-        //update col_idcs, row by row
-        for pair in self.row_ptrs.windows(2) {
-            let mut col_pos_it: u32 = 0;
-            for pos in pair[0]..pair[1] {
-                //advance iterator as long *it <= col_idx at pos
-                while (col_pos_it as usize) < col_pos.len()
-                    && col_pos[col_pos_it as usize] <= self.col_idcs[pos]
-                {
-                    col_pos_it += 1;
-                }
-                //shift the current col_idx by the number of new columns that are inserted before it
-                self.col_idcs[pos] += col_pos_it;
-            }
+        //shift every col_idx by the number of new columns that are inserted before it (at or
+        //before its position); a binary search per entry, so the cost is O(nnz log(new columns))
+        //instead of a scan of the new columns for every row
+        let shift = |col: &mut u32| *col += col_pos.partition_point(|&p| p <= *col) as u32;
+        if self.col_idcs.len() >= 1 << 16 {
+            self.col_idcs.par_iter_mut().for_each(shift);
+        } else {
+            self.col_idcs.iter_mut().for_each(shift);
         }
     }
 
@@ -1536,6 +1538,12 @@ pub enum LuLMode {
 }
 
 /// Scratch data used internally by the SparseForwardSolver algorithm
+///
+/// The dense row and the `touched` flags span all columns, but they are only ever
+/// visited at touched positions: the indices of the touched columns are kept in
+/// `heap` (forward solving, which needs them in increasing order while new ones keep
+/// arriving) or in `list` (gathering). The cost of processing a row is therefore
+/// proportional to the number of entries it touches, not to the number of columns.
 #[derive(Clone, Debug)]
 struct Scratch<F: Field> {
     /// Stores the row that we are currently working on in dense form.
@@ -1543,6 +1551,13 @@ struct Scratch<F: Field> {
 
     /// Remembers which columns we have touched in the current forward solving step.
     touched: Vec<bool>,
+
+    /// Min-heap of the touched columns that still have to be visited in the current
+    /// forward solving step. Every column is pushed at most once per step.
+    heap: BinaryHeap<Reverse<u32>>,
+
+    /// List of column indices (e.g. the touched columns to be gathered into a new row).
+    list: Vec<u32>,
 }
 
 impl<F: Field> Scratch<F> {
@@ -1551,6 +1566,8 @@ impl<F: Field> Scratch<F> {
         Self {
             dense_row: vec![field.zero(); ncols as usize],
             touched: vec![false; ncols as usize],
+            heap: BinaryHeap::new(),
+            list: Vec::new(),
         }
     }
 }
@@ -1581,6 +1598,10 @@ pub struct SparseRowReducer<F: Field> {
     /// Whether to keep the L matrix, just record the pattern or don't record anything at all
     mode: LuLMode,
 
+    /// Whether L keeps a row for every linearly dependent input row (see
+    /// [`SparseRowReducer::set_retain_dependent_l`]).
+    retain_dependent_l: bool,
+
     /// Collection of some internal scratch data
     scratch: Scratch<F>,
 }
@@ -1596,6 +1617,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, field),
             pivots: vec![None; ncols as usize],
             mode: mode,
+            retain_dependent_l: true,
         }
     }
 
@@ -1627,6 +1649,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1664,6 +1687,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1698,6 +1722,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1727,6 +1752,7 @@ impl<F: Field> SparseRowReducer<F> {
             l: SparseMatrix::new(0, 0, mat.field().clone()),
             pivots: vec![None; mat.ncols() as usize],
             mode: mode,
+            retain_dependent_l: true,
             scratch: Scratch::new(mat.ncols(), mat.field()),
         };
 
@@ -1759,6 +1785,7 @@ impl<F: Field> SparseRowReducer<F> {
             u,
             pivots,
             mode: LuLMode::None,
+            retain_dependent_l: true,
         }
     }
 
@@ -1776,6 +1803,40 @@ impl<F: Field> SparseRowReducer<F> {
     /// I.e. there is a pivot on column `j` and row `pivots()[j]` and no pivot present if `None`.
     pub fn pivots(&self) -> &Vec<Option<u32>> {
         &self.pivots
+    }
+
+    /// Return the number of stored entries of U, including the pivot entries.
+    pub fn u_nnz(&self) -> usize {
+        self.u.values.len()
+    }
+
+    /// Return the number of stored entries of L: the size of its pattern in
+    /// [`LuLMode::Full`] and [`LuLMode::Pattern`], and 0 in [`LuLMode::None`].
+    pub fn l_entries(&self) -> usize {
+        self.l.col_idcs.len()
+    }
+
+    /// Choose whether L keeps a row for every linearly dependent input row (the default).
+    ///
+    /// When `retain` is `false`, the L entries (the pattern and, in [`LuLMode::Full`], the values)
+    /// computed while eliminating an input row that turns out to be linearly dependent are
+    /// discarded, and no L row is recorded for it. L then has exactly one row per row of U:
+    /// row `i` of L expresses the `i`-th linearly independent input row in terms of the rows
+    /// `0..=i` of U, i.e. L is the square lower triangular factor of the independent input rows.
+    ///
+    /// This bounds the memory of L by the independent rows. With the default, every dependent
+    /// row stores the pivot rows it was reduced with, which dominates the memory when most input
+    /// rows are dependent, as in Laporta-style reductions of integration-by-parts identities.
+    ///
+    /// The setting applies to rows added afterwards and has no effect in [`LuLMode::None`].
+    pub fn set_retain_dependent_l(&mut self, retain: bool) {
+        self.retain_dependent_l = retain;
+    }
+
+    /// Return whether L keeps a row for every linearly dependent input row, see
+    /// [`Self::set_retain_dependent_l`].
+    pub fn retains_dependent_l(&self) -> bool {
+        self.retain_dependent_l
     }
 
     /// Adds a new row to the system and processes it in the next forward solving step.
@@ -1985,60 +2046,58 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         //prepare the scratch (copy sparse row into dense representation)
-        for (val, col_idx) in values.iter().zip(col_idcs.iter()) {
-            self.scratch.dense_row[*col_idx as usize] = val.clone();
-            self.scratch.touched[*col_idx as usize] = true;
-        }
+        self.scatter_input_row(values, col_idcs);
 
         let n = self.u.ncols as usize;
 
         //gaussian reduction until we find a pivot (or dense_row is zero)
-        while pivot_col < n {
-            if self.scratch.touched[pivot_col] {
-                if self.u.field.is_zero(&self.scratch.dense_row[pivot_col]) {
-                    //accidental zero, remove from touched
-                    self.scratch.touched[pivot_col] = false;
-                    //step
-                    pivot_col += 1;
-                    continue;
-                }
-
-                if let Some(pivot_row) = self.pivots[pivot_col] {
-                    //subtract the pivot row
-                    let start = self.u.row_ptrs[pivot_row as usize];
-                    let end = self.u.row_ptrs[pivot_row as usize + 1];
-                    let pivot_val = self.scratch.dense_row[pivot_col].clone();
-                    Self::scatter_with_touched(
-                        &mut self.scratch.dense_row,
-                        &self.u.field.neg(pivot_val.clone()),
-                        &self.u.values[start..end],
-                        &self.u.col_idcs[start..end],
-                        &self.u.field,
-                        &mut self.scratch.touched,
-                    );
-
-                    debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[pivot_col]));
-                    self.scratch.touched[pivot_col] = false;
-
-                    //also update L if wanted
-                    match self.mode {
-                        LuLMode::Full => {
-                            self.l.col_idcs.push(pivot_row);
-                            self.l.values.push(pivot_val);
-                        }
-                        LuLMode::Pattern => {
-                            self.l.col_idcs.push(pivot_row);
-                        }
-                        LuLMode::None => (), //nothing to be done
-                    }
-                } else {
-                    //found a pivot, we are done
-                    break;
-                }
+        //The touched columns are visited in increasing order. Subtracting the pivot row of
+        //column `col` only touches columns to the right of `col` (every row of U starts at
+        //its pivot), so no column is visited twice and the order is that of a dense scan.
+        pivot_col = n;
+        while let Some(Reverse(col)) = self.scratch.heap.pop() {
+            let col = col as usize;
+            debug_assert!(self.scratch.touched[col]);
+            if self.u.field.is_zero(&self.scratch.dense_row[col]) {
+                //accidental zero, remove from touched
+                self.scratch.touched[col] = false;
+                continue;
             }
 
-            //step
-            pivot_col += 1;
+            if let Some(pivot_row) = self.pivots[col] {
+                //subtract the pivot row
+                let start = self.u.row_ptrs[pivot_row as usize];
+                let end = self.u.row_ptrs[pivot_row as usize + 1];
+                let pivot_val = self.scratch.dense_row[col].clone();
+                Self::scatter_with_heap(
+                    &mut self.scratch.dense_row,
+                    &self.u.field.neg(pivot_val.clone()),
+                    &self.u.values[start..end],
+                    &self.u.col_idcs[start..end],
+                    &self.u.field,
+                    &mut self.scratch.touched,
+                    &mut self.scratch.heap,
+                );
+
+                debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[col]));
+                self.scratch.touched[col] = false;
+
+                //also update L if wanted
+                match self.mode {
+                    LuLMode::Full => {
+                        self.l.col_idcs.push(pivot_row);
+                        self.l.values.push(pivot_val);
+                    }
+                    LuLMode::Pattern => {
+                        self.l.col_idcs.push(pivot_row);
+                    }
+                    LuLMode::None => (), //nothing to be done
+                }
+            } else {
+                //found a pivot, we are done
+                pivot_col = col;
+                break;
+            }
         }
 
         if pivot_col < n {
@@ -2066,50 +2125,24 @@ impl<F: Field> SparseRowReducer<F> {
 
             self.u.nrows += 1;
 
+            //the entries of the new row: the pivot and the touched columns still in the heap,
+            //which all lie to the right of the pivot
+            self.scratch.list.clear();
+            self.scratch.list.push(pivot_col as u32);
+            self.scratch
+                .list
+                .extend(self.scratch.heap.drain().map(|Reverse(col)| col));
+            self.scratch.list[1..].sort_unstable();
+
             //normalize and copy the dense row into U
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
-            for i in pivot_col..n {
-                if self.scratch.touched[i] {
-                    //need to check for accidental zeroes
-                    let val = &mut self.scratch.dense_row[i];
-                    if !self.u.field.is_zero(val) {
-                        self.u.col_idcs.push(i as u32);
-                        if self.u.field.is_one(&leading_coeff_inv) {
-                            self.u.values.push(val.clone());
-                        } else {
-                            self.u
-                                .values
-                                .push(self.u.field.mul(&leading_coeff_inv, val));
-                        }
-                        //clean up scratch
-                        *val = self.u.field.zero();
-                    }
-
-                    //clean up scratch
-                    self.scratch.touched[i] = false;
-                }
-            }
-
-            //finish the row
-            self.u.row_ptrs.push(self.u.col_idcs.len());
+            self.gather_list_into_u(&leading_coeff_inv);
 
             return Some(pivot_col as u32);
         }
 
         //else: need to finish L
-        match self.mode {
-            LuLMode::Full => {
-                //finish the row
-                self.l.row_ptrs.push(self.l.col_idcs.len());
-                self.l.nrows += 1;
-            }
-            LuLMode::Pattern => {
-                //finish the row
-                self.l.row_ptrs.push(self.l.col_idcs.len());
-                self.l.nrows += 1;
-            }
-            LuLMode::None => (), //nothing to be done
-        }
+        self.finish_dependent_l_row();
 
         //row is linearly dependent
         None
@@ -2189,55 +2222,59 @@ impl<F: Field> SparseRowReducer<F> {
         }
 
         //prepare the scratch (copy sparse row into dense representation)
-        for (val, col_idx) in values.iter().zip(col_idcs.iter()) {
-            self.scratch.dense_row[*col_idx as usize] = val.clone();
-            self.scratch.touched[*col_idx as usize] = true;
-        }
+        self.scatter_input_row(values, col_idcs);
 
         let n = self.u.ncols as usize;
 
-        //gaussian reduction until we find a pivot (or dense_row is zero)
+        //gaussian reduction against all present pivots
+        //The touched columns are visited in increasing order (see `forward_solve_row`).
+        //Entries on columns without a pivot are final once visited and collected in order.
         pivot_col = n;
-        for col in col_idcs[0] as usize..n {
-            if self.scratch.touched[col] {
-                if self.u.field.is_zero(&self.scratch.dense_row[col]) {
-                    //accidental zero, remove from touched
-                    self.scratch.touched[col] = false;
-                    continue;
-                }
+        self.scratch.list.clear();
+        while let Some(Reverse(col)) = self.scratch.heap.pop() {
+            let col = col as usize;
+            debug_assert!(self.scratch.touched[col]);
+            if self.u.field.is_zero(&self.scratch.dense_row[col]) {
+                //accidental zero, remove from touched
+                self.scratch.touched[col] = false;
+                continue;
+            }
 
-                if let Some(pivot_row) = self.pivots[col] {
-                    //subtract the pivot row
-                    let start = self.u.row_ptrs[pivot_row as usize];
-                    let end = self.u.row_ptrs[pivot_row as usize + 1];
-                    let pivot_val = self.scratch.dense_row[col].clone();
-                    Self::scatter_with_touched(
-                        &mut self.scratch.dense_row,
-                        &self.u.field.neg(pivot_val.clone()),
-                        &self.u.values[start..end],
-                        &self.u.col_idcs[start..end],
-                        &self.u.field,
-                        &mut self.scratch.touched,
-                    );
+            if let Some(pivot_row) = self.pivots[col] {
+                //subtract the pivot row
+                let start = self.u.row_ptrs[pivot_row as usize];
+                let end = self.u.row_ptrs[pivot_row as usize + 1];
+                let pivot_val = self.scratch.dense_row[col].clone();
+                Self::scatter_with_heap(
+                    &mut self.scratch.dense_row,
+                    &self.u.field.neg(pivot_val.clone()),
+                    &self.u.values[start..end],
+                    &self.u.col_idcs[start..end],
+                    &self.u.field,
+                    &mut self.scratch.touched,
+                    &mut self.scratch.heap,
+                );
 
-                    debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[col]));
-                    self.scratch.touched[col] = false;
+                debug_assert!(self.u.field.is_zero(&self.scratch.dense_row[col]));
+                self.scratch.touched[col] = false;
 
-                    //also update L if wanted
-                    match self.mode {
-                        LuLMode::Full => {
-                            self.l.col_idcs.push(pivot_row);
-                            self.l.values.push(pivot_val);
-                        }
-                        LuLMode::Pattern => {
-                            self.l.col_idcs.push(pivot_row);
-                        }
-                        LuLMode::None => (), //nothing to be done
+                //also update L if wanted
+                match self.mode {
+                    LuLMode::Full => {
+                        self.l.col_idcs.push(pivot_row);
+                        self.l.values.push(pivot_val);
                     }
-                } else if pivot_col == n {
+                    LuLMode::Pattern => {
+                        self.l.col_idcs.push(pivot_row);
+                    }
+                    LuLMode::None => (), //nothing to be done
+                }
+            } else {
+                if pivot_col == n {
                     //found a pivot, but we still continue
                     pivot_col = col;
                 }
+                self.scratch.list.push(col as u32);
             }
         }
 
@@ -2266,38 +2303,30 @@ impl<F: Field> SparseRowReducer<F> {
 
             self.u.nrows += 1;
 
-            //normalize and copy the dense row into U
+            //normalize and copy the dense row into U (`list` holds its columns in order)
             let leading_coeff_inv = self.u.field.inv(&leading_coeff);
-            for i in pivot_col..n {
-                if self.scratch.touched[i] {
-                    //need to check for accidental zeroes
-                    let val = &mut self.scratch.dense_row[i];
-                    if !self.u.field.is_zero(val) {
-                        self.u.col_idcs.push(i as u32);
-                        if self.u.field.is_one(&leading_coeff_inv) {
-                            self.u.values.push(val.clone());
-                        } else {
-                            self.u
-                                .values
-                                .push(self.u.field.mul(&leading_coeff_inv, val));
-                        }
-                        //clean up scratch
-                        *val = self.u.field.zero();
-                    }
-
-                    //clean up scratch
-                    self.scratch.touched[i] = false;
-                }
-            }
-
-            //finish the row
-            self.u.row_ptrs.push(self.u.col_idcs.len());
+            self.gather_list_into_u(&leading_coeff_inv);
 
             return Some(pivot_col as u32);
         }
 
         //else: need to finish L
+        self.finish_dependent_l_row();
+
+        //row is linearly dependent
+        None
+    }
+
+    /// Finish the L row of an input row that turned out to be linearly dependent: either record
+    /// it, or drop the entries pushed while eliminating it (see `set_retain_dependent_l`).
+    fn finish_dependent_l_row(&mut self) {
         match self.mode {
+            LuLMode::Full | LuLMode::Pattern if !self.retain_dependent_l => {
+                //drop the slice of the dependent row
+                let start = *self.l.row_ptrs.last().unwrap();
+                self.l.col_idcs.truncate(start);
+                self.l.values.truncate(start);
+            }
             LuLMode::Full => {
                 //finish the row
                 self.l.row_ptrs.push(self.l.col_idcs.len());
@@ -2310,9 +2339,49 @@ impl<F: Field> SparseRowReducer<F> {
             }
             LuLMode::None => (), //nothing to be done
         }
+    }
 
-        //row is linearly dependent
-        None
+    /// Copy a new input row into the dense scratch row and queue its columns for elimination.
+    ///
+    /// The scratch must be clean on entry. A repeated column index overwrites the earlier value.
+    fn scatter_input_row(&mut self, values: &[F::Element], col_idcs: &[u32]) {
+        debug_assert!(self.scratch.heap.is_empty());
+        for (val, col_idx) in values.iter().zip(col_idcs.iter()) {
+            self.scratch.dense_row[*col_idx as usize] = val.clone();
+            if !self.scratch.touched[*col_idx as usize] {
+                self.scratch.touched[*col_idx as usize] = true;
+                self.scratch.heap.push(Reverse(*col_idx));
+            }
+        }
+    }
+
+    /// Append the scratch entries at the (increasing) columns in `scratch.list`, multiplied by
+    /// `leading_coeff_inv`, as a new row of U, skipping accidental zeros, and clean up the scratch.
+    fn gather_list_into_u(&mut self, leading_coeff_inv: &F::Element) {
+        let is_one = self.u.field.is_one(leading_coeff_inv);
+        for &i in &self.scratch.list {
+            let i = i as usize;
+            debug_assert!(self.scratch.touched[i]);
+            //need to check for accidental zeroes
+            let val = &mut self.scratch.dense_row[i];
+            if !self.u.field.is_zero(val) {
+                self.u.col_idcs.push(i as u32);
+                if is_one {
+                    self.u.values.push(val.clone());
+                } else {
+                    self.u.values.push(self.u.field.mul(leading_coeff_inv, val));
+                }
+                //clean up scratch
+                *val = self.u.field.zero();
+            }
+
+            //clean up scratch
+            self.scratch.touched[i] = false;
+        }
+        self.scratch.list.clear();
+
+        //finish the row
+        self.u.row_ptrs.push(self.u.col_idcs.len());
     }
 
     /// Apply a back substitution step to the given row.
@@ -2325,15 +2394,18 @@ impl<F: Field> SparseRowReducer<F> {
         new_u: &mut SparseMatrix<F>,
         new_pivots: &[Option<u32>],
     ) -> usize {
-        let n = self.scratch.dense_row.len();
         let row_begin = self.u.row_ptrs[row as usize];
         let row_end = self.u.row_ptrs[row as usize + 1];
 
-        // scatter input row into dense scratch
+        // scatter input row into dense scratch, recording the touched columns
+        self.scratch.list.clear();
         for px in row_begin..row_end {
             let j = self.u.col_idcs[px] as usize;
             self.scratch.dense_row[j] = self.u.values[px].clone();
-            self.scratch.touched[j] = true;
+            if !self.scratch.touched[j] {
+                self.scratch.touched[j] = true;
+                self.scratch.list.push(j as u32);
+            }
         }
 
         // subtract already back-substituted pivot rows
@@ -2355,13 +2427,14 @@ impl<F: Field> SparseRowReducer<F> {
 
             let qx_begin = new_u.row_ptrs[new_pivot_row as usize];
             let qx_end = new_u.row_ptrs[new_pivot_row as usize + 1];
-            Self::scatter_with_touched(
+            Self::scatter_with_list(
                 &mut self.scratch.dense_row,
                 &neg_coeff,
                 &new_u.values[qx_begin..qx_end],
                 &new_u.col_idcs[qx_begin..qx_end],
                 &self.u.field,
                 &mut self.scratch.touched,
+                &mut self.scratch.list,
             );
             // the entry on the pivot col better be zero!
             self.scratch.touched[j] = false;
@@ -2372,9 +2445,11 @@ impl<F: Field> SparseRowReducer<F> {
         debug_assert!(self.scratch.touched[pivot_col]);
         debug_assert!(self.u.field.is_one(&self.scratch.dense_row[pivot_col]));
 
-        // gather into new_u
+        // gather into new_u, visiting only the touched columns (all at or right of the pivot)
+        self.scratch.list.sort_unstable();
         new_u.nrows += 1;
-        for i in pivot_col..n {
+        for &i in &self.scratch.list {
+            let i = i as usize;
             if self.scratch.touched[i] {
                 //need to check for accidental zeroes
                 let val = &mut self.scratch.dense_row[i];
@@ -2389,6 +2464,7 @@ impl<F: Field> SparseRowReducer<F> {
                 self.scratch.touched[i] = false;
             }
         }
+        self.scratch.list.clear();
         new_u.row_ptrs.push(new_u.col_idcs.len());
 
         pivot_col
@@ -2417,24 +2493,57 @@ impl<F: Field> SparseRowReducer<F> {
 
     /// Compute x = x + beta * sparse_row, writing it directly into x.
     ///
-    /// This version also records the touched entries of x in `touched`.
+    /// This version also records the touched entries of x in `touched` and pushes every
+    /// newly touched column onto the min-heap `heap`.
     /// # Arguments
     /// * `x` - the vector x into which we scatter.
     /// * `beta` - the scalar which we multiply into the sparse row
     /// * `values` - he non-zero values of the sparse row on the RHS of the equation.
     /// * `col_idcs` - he column indices of the non-zero values of the sparse row on the RHS of the equation.
     /// * `field` - the field to be used for the arithmetics.
-    fn scatter_with_touched(
+    fn scatter_with_heap(
         x: &mut Vec<F::Element>,
         beta: &F::Element,
         values: &[F::Element],
         col_idcs: &[u32],
         field: &F,
         touched: &mut Vec<bool>,
+        heap: &mut BinaryHeap<Reverse<u32>>,
     ) {
         for (val, col) in values.iter().zip(col_idcs.iter()) {
             x[*col as usize] = field.add(&field.mul(beta, &val), &x[*col as usize]);
-            touched[*col as usize] = true;
+            if !touched[*col as usize] {
+                touched[*col as usize] = true;
+                heap.push(Reverse(*col));
+            }
+        }
+    }
+
+    /// Compute x = x + beta * sparse_row, writing it directly into x.
+    ///
+    /// This version also records the touched entries of x in `touched` and appends every
+    /// newly touched column to `list`.
+    /// # Arguments
+    /// * `x` - the vector x into which we scatter.
+    /// * `beta` - the scalar which we multiply into the sparse row
+    /// * `values` - he non-zero values of the sparse row on the RHS of the equation.
+    /// * `col_idcs` - he column indices of the non-zero values of the sparse row on the RHS of the equation.
+    /// * `field` - the field to be used for the arithmetics.
+    fn scatter_with_list(
+        x: &mut Vec<F::Element>,
+        beta: &F::Element,
+        values: &[F::Element],
+        col_idcs: &[u32],
+        field: &F,
+        touched: &mut Vec<bool>,
+        list: &mut Vec<u32>,
+    ) {
+        for (val, col) in values.iter().zip(col_idcs.iter()) {
+            x[*col as usize] = field.add(&field.mul(beta, &val), &x[*col as usize]);
+            if !touched[*col as usize] {
+                touched[*col as usize] = true;
+                list.push(*col);
+            }
         }
     }
 
@@ -2580,15 +2689,18 @@ where
         out_mat: &mut SparseMatrix<F>,
         scratch: &mut Scratch<F>,
     ) -> usize {
-        let n = scratch.dense_row.len();
         let row_begin = self.u.row_ptrs[row as usize];
         let row_end = self.u.row_ptrs[row as usize + 1];
 
-        // scatter input row into dense scratch
+        // scatter input row into dense scratch, recording the touched columns
+        scratch.list.clear();
         for px in row_begin..row_end {
             let j = self.u.col_idcs[px] as usize;
             scratch.dense_row[j] = self.u.values[px].clone();
-            scratch.touched[j] = true;
+            if !scratch.touched[j] {
+                scratch.touched[j] = true;
+                scratch.list.push(j as u32);
+            }
         }
 
         // subtract already back-substituted pivot rows
@@ -2610,13 +2722,14 @@ where
 
             let qx_begin = new_u.row_ptrs[new_pivot_row as usize];
             let qx_end = new_u.row_ptrs[new_pivot_row as usize + 1];
-            Self::scatter_with_touched(
+            Self::scatter_with_list(
                 &mut scratch.dense_row,
                 &neg_coeff,
                 &new_u.values[qx_begin..qx_end],
                 &new_u.col_idcs[qx_begin..qx_end],
                 &self.u.field,
                 &mut scratch.touched,
+                &mut scratch.list,
             );
             scratch.touched[j] = false;
             debug_assert!(self.u.field.is_zero(&scratch.dense_row[j]));
@@ -2626,9 +2739,11 @@ where
         debug_assert!(scratch.touched[pivot_col]);
         debug_assert!(self.u.field.is_one(&scratch.dense_row[pivot_col]));
 
-        // gather into out_mat
+        // gather into out_mat, visiting only the touched columns (all at or right of the pivot)
+        scratch.list.sort_unstable();
         out_mat.nrows += 1;
-        for i in pivot_col..n {
+        for &i in &scratch.list {
+            let i = i as usize;
             if scratch.touched[i] {
                 //need to check for accidental zeroes
                 let val = &mut scratch.dense_row[i];
@@ -2642,6 +2757,7 @@ where
                 scratch.touched[i] = false;
             }
         }
+        scratch.list.clear();
         out_mat.row_ptrs.push(out_mat.col_idcs.len());
 
         pivot_col
@@ -2650,7 +2766,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::domains::{SelfRing, Set, rational::Q};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    use crate::domains::{
+        Field, Ring, RingOps, SelfRing, Set,
+        finite_field::{FiniteFieldCore, Zp64},
+        rational::Q,
+    };
 
     use crate::tensors::{
         matrix::Matrix,
@@ -3036,6 +3158,55 @@ mod tests {
         assert!(matches!(mat.inv(), Err(SparseMatrixError::Singular)));
     }
 
+    /// `add_cols` (a binary search per entry, in parallel for large matrices) shifts the column
+    /// indices exactly as a scan of the new columns for every row.
+    #[test]
+    fn add_cols_matches_the_row_scan() {
+        use crate::domains::finite_field::{FiniteFieldCore, Zp64};
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+        let field = Zp64::new(13);
+        let mut rng = StdRng::seed_from_u64(5);
+        for (nrows, ncols, density) in [(50, 40, 0.3), (400, 2_000, 0.1)] {
+            let mut values = vec![];
+            let mut cols = vec![];
+            let mut ptrs = vec![0];
+            for _ in 0..nrows {
+                for c in 0..ncols {
+                    if rng.random_bool(density) {
+                        values.push(field.to_element(rng.random_range(1..13)));
+                        cols.push(c as u32);
+                    }
+                }
+                ptrs.push(values.len());
+            }
+            let mut matrix = SparseMatrix::from_csr(
+                nrows as u32,
+                ncols as u32,
+                values,
+                ptrs.clone(),
+                cols.clone(),
+                field.clone(),
+            );
+            let mut new_cols: Vec<u32> = (0..rng.random_range(1..300))
+                .map(|_| rng.random_range(0..=ncols as u32))
+                .collect();
+            new_cols.sort_unstable();
+            let mut expected = cols.clone();
+            for pair in ptrs.windows(2) {
+                let mut it = 0;
+                for pos in pair[0]..pair[1] {
+                    while it < new_cols.len() && new_cols[it] <= cols[pos] {
+                        it += 1;
+                    }
+                    expected[pos] += it as u32;
+                }
+            }
+            matrix.add_cols(&new_cols);
+            assert_eq!(matrix.col_idcs(), &expected);
+            assert_eq!(matrix.ncols() as usize, ncols + new_cols.len());
+        }
+    }
+
     #[test]
     fn row_iter() {
         // sparse 5x5 matrix triplets
@@ -3065,5 +3236,430 @@ mod tests {
 
         assert_eq!(count_entries, 9);
         assert_eq!(count_rows, 5);
+    }
+
+    type El = <Zp64 as Set>::Element;
+
+    /// Sparse rows as `(column, value)` lists.
+    type Rows = Vec<Vec<(u32, El)>>;
+
+    /// Straightforward dense left-looking elimination with the semantics of
+    /// `SparseRowReducer::add_row` (`back_subs == false`) and
+    /// `SparseRowReducer::add_row_with_back_subs` (`back_subs == true`) in `LuLMode::Full`.
+    struct DenseReference {
+        field: Zp64,
+        ncols: usize,
+        u: Rows,
+        l: Rows,
+        pivots: Vec<Option<u32>>,
+    }
+
+    impl DenseReference {
+        fn new(ncols: usize, field: Zp64) -> Self {
+            Self {
+                field,
+                ncols,
+                u: vec![],
+                l: vec![],
+                pivots: vec![None; ncols],
+            }
+        }
+
+        fn add_row(&mut self, row: &[(u32, El)], back_subs: bool) -> Option<u32> {
+            let f = &self.field;
+            if self.u.len() == self.ncols || row.is_empty() {
+                return None;
+            }
+            let rank = self.u.len() as u32;
+            let direct = if back_subs {
+                row.iter().all(|(c, _)| self.pivots[*c as usize].is_none())
+            } else {
+                self.pivots[row[0].0 as usize].is_none()
+            };
+            if direct {
+                let inv = f.inv(&row[0].1);
+                self.u
+                    .push(row.iter().map(|(c, v)| (*c, f.mul(v, &inv))).collect());
+                self.l.push(vec![(rank, row[0].1.clone())]);
+                self.pivots[row[0].0 as usize] = Some(rank);
+                return Some(row[0].0);
+            }
+
+            let mut x = vec![f.zero(); self.ncols];
+            for (c, v) in row {
+                x[*c as usize] = v.clone();
+            }
+            let mut l_row = vec![];
+            let mut pivot_col = None;
+            for col in row[0].0 as usize..self.ncols {
+                if f.is_zero(&x[col]) {
+                    continue;
+                }
+                if let Some(p) = self.pivots[col] {
+                    let factor = x[col].clone();
+                    for (c, v) in &self.u[p as usize] {
+                        x[*c as usize] = f.sub(&x[*c as usize], &f.mul(&factor, v));
+                    }
+                    assert!(f.is_zero(&x[col]));
+                    l_row.push((p, factor));
+                } else if pivot_col.is_none() {
+                    pivot_col = Some(col);
+                    if !back_subs {
+                        break;
+                    }
+                }
+            }
+
+            match pivot_col {
+                Some(pc) => {
+                    let lead = x[pc].clone();
+                    let inv = f.inv(&lead);
+                    l_row.push((rank, lead));
+                    self.l.push(l_row);
+                    self.u.push(
+                        (pc..self.ncols)
+                            .filter(|c| !f.is_zero(&x[*c]))
+                            .map(|c| (c as u32, f.mul(&x[c], &inv)))
+                            .collect(),
+                    );
+                    self.pivots[pc] = Some(rank);
+                    Some(pc as u32)
+                }
+                None => {
+                    self.l.push(l_row);
+                    None
+                }
+            }
+        }
+
+        /// The serial `back_substitute` semantics: rows by decreasing pivot column, each row
+        /// reduced by the already processed rows at its original columns.
+        fn back_substitute(&self) -> (Rows, Vec<Option<u32>>) {
+            let f = &self.field;
+            let mut new_u: Rows = vec![];
+            let mut new_pivots = vec![None; self.ncols];
+            for row in self.pivots.iter().rev().filter_map(|r| *r) {
+                let mut x = vec![f.zero(); self.ncols];
+                for (c, v) in &self.u[row as usize] {
+                    x[*c as usize] = v.clone();
+                }
+                for (j, _) in &self.u[row as usize] {
+                    let j = *j as usize;
+                    if f.is_zero(&x[j]) {
+                        continue;
+                    }
+                    if let Some(q) = new_pivots[j] {
+                        let factor: El = x[j].clone();
+                        for (c, v) in &new_u[q as usize] {
+                            x[*c as usize] = f.sub(&x[*c as usize], &f.mul(&factor, v));
+                        }
+                    }
+                }
+                let pc = self.u[row as usize][0].0 as usize;
+                new_pivots[pc] = Some(new_u.len() as u32);
+                new_u.push(
+                    (pc..self.ncols)
+                        .filter(|c| !f.is_zero(&x[*c]))
+                        .map(|c| (c as u32, x[c].clone()))
+                        .collect(),
+                );
+            }
+            (new_u, new_pivots)
+        }
+    }
+
+    fn csr_rows(m: &SparseMatrix<Zp64>) -> Rows {
+        m.row_ptrs
+            .windows(2)
+            .map(|w| {
+                (w[0]..w[1])
+                    .map(|i| (m.col_idcs[i], m.values[i].clone()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn pattern_rows(m: &SparseMatrix<Zp64>) -> Vec<Vec<u32>> {
+        m.row_ptrs
+            .windows(2)
+            .map(|w| m.col_idcs[w[0]..w[1]].to_vec())
+            .collect()
+    }
+
+    /// Random sparse rows over a small prime field (so that accidental cancellations are
+    /// frequent), with a share of rows that are combinations of earlier rows.
+    fn random_rows(rng: &mut StdRng, field: &Zp64, nrows: usize, ncols: usize) -> Rows {
+        let mut rows: Rows = vec![];
+        for _ in 0..nrows {
+            let mut dense = vec![field.zero(); ncols];
+            if !rows.is_empty() && rng.random_bool(0.3) {
+                for _ in 0..rng.random_range(1..=3) {
+                    let other = &rows[rng.random_range(0..rows.len())];
+                    let factor = field.to_element(rng.random_range(1..field.get_prime()));
+                    for (c, v) in other {
+                        dense[*c as usize] = field.add(&dense[*c as usize], &field.mul(&factor, v));
+                    }
+                }
+            } else {
+                let density = rng.random_range(0.05..0.5);
+                for d in dense.iter_mut() {
+                    if rng.random_bool(density) {
+                        *d = field.to_element(rng.random_range(0..field.get_prime()));
+                    }
+                }
+            }
+            rows.push(
+                dense
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, v)| !field.is_zero(v))
+                    .map(|(c, v)| (c as u32, v))
+                    .collect(),
+            );
+        }
+        rows
+    }
+
+    fn split(row: &[(u32, El)]) -> (Vec<El>, Vec<u32>) {
+        (
+            row.iter().map(|(_, v)| v.clone()).collect(),
+            row.iter().map(|(c, _)| *c).collect(),
+        )
+    }
+
+    #[test]
+    fn sparse_row_reducer_matches_dense_reference() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_5a11);
+        for prime in [3, 5, 13, 2305843009213693951] {
+            let field = Zp64::new(prime);
+            for _ in 0..60 {
+                let ncols = rng.random_range(1..40);
+                let nrows = rng.random_range(1..60);
+                let rows = random_rows(&mut rng, &field, nrows, ncols);
+                for back_subs in [false, true] {
+                    let mut reference = DenseReference::new(ncols, field.clone());
+                    let mut full =
+                        SparseRowReducer::new(ncols as u32, field.clone(), LuLMode::Full);
+                    let mut pattern =
+                        SparseRowReducer::new(ncols as u32, field.clone(), LuLMode::Pattern);
+                    let mut none =
+                        SparseRowReducer::new(ncols as u32, field.clone(), LuLMode::None);
+                    for row in &rows {
+                        let expected = reference.add_row(row, back_subs);
+                        let (values, col_idcs) = split(row);
+                        for reducer in [&mut full, &mut pattern, &mut none] {
+                            let got = if back_subs {
+                                reducer.add_row_with_back_subs(&values, &col_idcs)
+                            } else {
+                                reducer.add_row(&values, &col_idcs)
+                            };
+                            assert_eq!(got, expected);
+                        }
+                    }
+                    for reducer in [&full, &pattern, &none] {
+                        assert_eq!(reducer.pivots(), &reference.pivots);
+                        assert_eq!(csr_rows(reducer.u()), reference.u);
+                        assert!(reducer.scratch.touched.iter().all(|t| !t));
+                        assert!(reducer.scratch.dense_row.iter().all(|v| field.is_zero(v)));
+                    }
+                    assert_eq!(csr_rows(full.l()), reference.l);
+                    assert_eq!(
+                        pattern_rows(pattern.l()),
+                        reference
+                            .l
+                            .iter()
+                            .map(|r| r.iter().map(|(c, _)| *c).collect::<Vec<_>>())
+                            .collect::<Vec<_>>()
+                    );
+                    assert!(pattern.l().values.is_empty());
+                    assert_eq!(none.l().col_idcs.len(), 0);
+
+                    let (rref, rref_pivots) = reference.back_substitute();
+                    let mut parallel = full.clone();
+                    full.back_substitute();
+                    assert_eq!(csr_rows(full.u()), rref);
+                    assert_eq!(full.pivots(), &rref_pivots);
+                    parallel.back_substitute_parallel();
+                    for (col, row) in rref_pivots.iter().enumerate() {
+                        match (row, parallel.pivots()[col]) {
+                            (Some(a), Some(b)) => {
+                                assert_eq!(csr_rows(parallel.u())[b as usize], rref[*a as usize])
+                            }
+                            (None, None) => (),
+                            _ => panic!("pivot sets differ"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_row_reducer_add_cols_matches_final_column_space() {
+        let mut rng = StdRng::seed_from_u64(0xc015);
+        let field = Zp64::new(13);
+        for _ in 0..60 {
+            let ncols = rng.random_range(2..40);
+            let nrows = rng.random_range(1..60);
+            let rows = random_rows(&mut rng, &field, nrows, ncols);
+
+            // reveal the columns in random batches, each inserted with one `add_cols` call;
+            // a row is added (in order) once all of its columns are present
+            let reveal: Vec<usize> = (0..ncols).map(|_| rng.random_range(0..4)).collect();
+            // both reducers carry a permanent empty last column, so that the full-rank
+            // shortcut of a partially revealed system never skips an L row
+            let mut reducer = SparseRowReducer::new(1, field.clone(), LuLMode::Pattern);
+            let mut reference =
+                SparseRowReducer::new(ncols as u32 + 1, field.clone(), LuLMode::Pattern);
+            let mut present: Vec<usize> = vec![];
+            let mut row_iter = rows.iter().peekable();
+            for batch in 0..4 {
+                let new: Vec<usize> = (0..ncols).filter(|c| reveal[*c] == batch).collect();
+                // positions relative to the current (sorted) column set
+                let positions: Vec<u32> = new
+                    .iter()
+                    .map(|c| present.iter().filter(|p| *p < c).count() as u32)
+                    .collect();
+                reducer.add_cols(&positions);
+                present.extend(new);
+                present.sort_unstable();
+                while let Some(row) = row_iter.peek() {
+                    if row.iter().any(|(c, _)| reveal[*c as usize] > batch) {
+                        break;
+                    }
+                    let (values, col_idcs) = split(row);
+                    let local: Vec<u32> = col_idcs
+                        .iter()
+                        .map(|c| present.binary_search(&(*c as usize)).unwrap() as u32)
+                        .collect();
+                    assert_eq!(
+                        reducer
+                            .add_row(&values, &local)
+                            .map(|p| present[p as usize] as u32),
+                        reference.add_row(&values, &col_idcs)
+                    );
+                    row_iter.next();
+                }
+            }
+            assert!(row_iter.next().is_none());
+            assert_eq!(present, (0..ncols).collect::<Vec<_>>());
+            assert_eq!(reducer.u().ncols(), ncols as u32 + 1);
+            assert_eq!(reducer.pivots(), reference.pivots());
+            assert_eq!(reducer.u(), reference.u());
+            assert_eq!(reducer.l(), reference.l());
+        }
+    }
+
+    #[test]
+    fn dropping_dependent_l_rows_keeps_the_factorisation_of_the_independent_rows() {
+        let mut rng = StdRng::seed_from_u64(0xd20b);
+        let field = Zp64::new(13);
+        for _ in 0..60 {
+            let ncols = rng.random_range(1..40u32);
+            let nrows = rng.random_range(1..80);
+            // random rows; about half of them are combinations of earlier rows
+            let mut rows: Vec<Vec<<Zp64 as Set>::Element>> = vec![];
+            for _ in 0..nrows {
+                let mut dense = vec![field.zero(); ncols as usize];
+                if !rows.is_empty() && rng.random_bool(0.5) {
+                    for _ in 0..rng.random_range(1..=3) {
+                        let other = rows[rng.random_range(0..rows.len())].clone();
+                        let factor = field.to_element(rng.random_range(1..13));
+                        for (d, o) in dense.iter_mut().zip(&other) {
+                            *d = field.add(&*d, &field.mul(&factor, o));
+                        }
+                    }
+                } else {
+                    for d in dense.iter_mut() {
+                        if rng.random_bool(0.2) {
+                            *d = field.to_element(rng.random_range(0..13));
+                        }
+                    }
+                }
+                rows.push(dense);
+            }
+
+            for back_subs in [false, true] {
+                for mode in [LuLMode::Full, LuLMode::Pattern] {
+                    let mut keep = SparseRowReducer::new(ncols, field.clone(), mode);
+                    let mut drop = SparseRowReducer::new(ncols, field.clone(), mode);
+                    drop.set_retain_dependent_l(false);
+                    assert!(keep.retains_dependent_l() && !drop.retains_dependent_l());
+
+                    let mut independent = SparseMatrix::new(0, ncols, field.clone());
+                    let mut kept_l_rows = vec![];
+                    for row in &rows {
+                        let (col_idcs, values): (Vec<u32>, Vec<_>) = row
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, v)| !field.is_zero(v))
+                            .map(|(c, v)| (c as u32, v.clone()))
+                            .unzip();
+                        let (a, b) = if back_subs {
+                            (
+                                keep.add_row_with_back_subs(&values, &col_idcs),
+                                drop.add_row_with_back_subs(&values, &col_idcs),
+                            )
+                        } else {
+                            (
+                                keep.add_row(&values, &col_idcs),
+                                drop.add_row(&values, &col_idcs),
+                            )
+                        };
+                        assert_eq!(a, b);
+                        if a.is_some() {
+                            kept_l_rows.push(keep.l().nrows() - 1);
+                            independent.add_row(values, col_idcs);
+                            // the L row of an accepted row is the last one in both modes
+                            assert_eq!(drop.l().nrows(), drop.u().nrows());
+                        }
+                    }
+
+                    assert_eq!(keep.pivots(), drop.pivots());
+                    assert_eq!(keep.u(), drop.u());
+                    assert_eq!(drop.u_nnz(), drop.u().nvalues());
+
+                    // L of the dropping reducer = rows of the kept L that belong to accepted rows
+                    let l = drop.l();
+                    assert_eq!(l.nrows(), drop.u().nrows());
+                    assert_eq!(l.ncols(), drop.u().nrows());
+                    let mut expected_entries = 0;
+                    for (i, &k) in kept_l_rows.iter().enumerate() {
+                        let kl = keep.l();
+                        let (ks, ke) = (kl.row_ptrs[k as usize], kl.row_ptrs[k as usize + 1]);
+                        let (ds, de) = (l.row_ptrs[i], l.row_ptrs[i + 1]);
+                        assert_eq!(kl.col_idcs[ks..ke], l.col_idcs[ds..de]);
+                        if mode == LuLMode::Full {
+                            assert_eq!(kl.values[ks..ke], l.values[ds..de]);
+                        }
+                        expected_entries += ke - ks;
+                    }
+                    assert_eq!(drop.l_entries(), expected_entries);
+                    assert!(drop.l_entries() <= keep.l_entries());
+
+                    if mode == LuLMode::Full {
+                        // L * U reproduces exactly the independent input rows
+                        assert_eq!(&(drop.l() * drop.u()), &independent);
+                    } else {
+                        assert!(l.values.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_dependent_l_rows_has_no_effect_without_l() {
+        let field = Zp64::new(13);
+        let one = field.one();
+        let mut reducer = SparseRowReducer::new(2, field.clone(), LuLMode::None);
+        reducer.set_retain_dependent_l(false);
+        assert_eq!(
+            reducer.add_row(&[one.clone(), one.clone()], &[0, 1]),
+            Some(0)
+        );
+        assert_eq!(reducer.add_row(&[one.clone(), one.clone()], &[0, 1]), None);
+        assert_eq!(reducer.l_entries(), 0);
+        assert_eq!(reducer.u_nnz(), 2);
     }
 }
