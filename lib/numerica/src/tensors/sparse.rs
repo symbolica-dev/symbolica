@@ -37,6 +37,9 @@ use crate::{
     tensors::matrix::Matrix,
 };
 
+mod parallel;
+pub use parallel::{ParallelOptions, ParallelStats, Provisional, RowOutcome};
+
 /// A sparse vector in a compressed format (compressed sparse row style).
 ///
 /// We keep the column indices sorted at all times.
