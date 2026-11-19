@@ -1230,22 +1230,31 @@ impl<'a, F: Ring> Mul<&'a Series<F>> for &Series<F> {
             .min(res.order);
         res.coefficients = vec![self.field.zero(); len];
 
+        // Compute each output coefficient from all of its products at once, so that
+        // domains such as `AtomField` can add them in one bulk operation instead of
+        // growing the coefficient one product at a time.
+        let lhs_nonzero = NonZeroMask::new(&self.field, &self.coefficients);
         let rhs_nonzero = NonZeroMask::new(&self.field, &rhs.coefficients);
-        for (offset, c1) in (0..res.order).step_by(r_d_s).zip(&self.coefficients) {
-            if self.field.is_zero(c1) {
+        let lhs_last = self.coefficients.len() - 1;
+        let rhs_span = (rhs.coefficients.len() - 1) * r_d_o;
+        for (k, coefficient) in res.coefficients.iter_mut().enumerate() {
+            // The pairs (i, j) with i * r_d_s + j * r_d_o = k.
+            let i_min = k.saturating_sub(rhs_span).div_ceil(r_d_s);
+            let i_max = (k / r_d_s).min(lhs_last);
+            if i_min > i_max {
                 continue;
             }
 
-            for (e2, (index, c2)) in (offset..res.order)
-                .step_by(r_d_o)
-                .zip(&rhs.coefficients)
-                .enumerate()
-            {
-                if !rhs_nonzero.is_zero(e2) {
-                    self.field
-                        .add_mul_assign(&mut res.coefficients[index], c1, c2);
+            let products = (i_min..=i_max).filter_map(|i| {
+                let rest = k - i * r_d_s;
+                if rest % r_d_o != 0 {
+                    return None;
                 }
-            }
+                let j = rest / r_d_o;
+                (!lhs_nonzero.is_zero(i) && !rhs_nonzero.is_zero(j))
+                    .then(|| (&self.coefficients[i], &rhs.coefficients[j]))
+            });
+            self.field.add_mul_assign_many(coefficient, products);
         }
 
         res.truncate();
@@ -1424,7 +1433,8 @@ impl Series<AtomField> {
 
         let p = self.clone().remove_constant();
 
-        let mut r = self.one_inf_prec();
+        let mut terms = Vec::with_capacity(self.order + 1);
+        terms.push(self.one_inf_prec());
         let mut sp = p.clone();
         for i in 1..=self.order {
             let s = sp
@@ -1433,10 +1443,10 @@ impl Series<AtomField> {
 
             sp = sp * &p;
 
-            r = r + s;
+            terms.push(s);
         }
 
-        Ok(r * &shift_series)
+        Ok(Series::sum(terms) * &shift_series)
     }
 
     /// Expand the logarithm using the leading monomial and the remaining
@@ -1456,21 +1466,18 @@ impl Series<AtomField> {
             .mul_exp_units(-self.shift)
             - self.one();
 
-        let mut e = self.constant(FunctionBuilder::new(Symbol::LOG).add_arg(&c).finish());
+        let mut terms = Vec::with_capacity(self.order + 1);
+        terms.push(self.constant(FunctionBuilder::new(Symbol::LOG).add_arg(&c).finish()));
         let mut sp = p.clone();
         for i in 1..=self.order {
             let s = sp.clone().div_coeff(&Atom::num(i as i64));
 
             sp = sp * &p;
 
-            if i % 2 == 0 {
-                e = e - s;
-            } else {
-                e = e + s;
-            }
+            terms.push(if i % 2 == 0 { s.neg() } else { s });
         }
 
-        Ok(e)
+        Ok(Series::sum(terms))
     }
 
     /// Expand the sine of this series to the available order. Returns an error
@@ -1508,7 +1515,8 @@ impl Series<AtomField> {
 
         let p = self.clone().remove_constant();
 
-        let mut e = self.constant(FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish());
+        let mut terms = Vec::with_capacity(self.order + 1);
+        terms.push(self.constant(FunctionBuilder::new(Symbol::SIN).add_arg(&c).finish()));
         let mut sp = p.clone();
         for i in 1..=self.order {
             let mut b = if i % 2 == 1 {
@@ -1528,10 +1536,10 @@ impl Series<AtomField> {
 
             sp = sp * &p;
 
-            e = e + s;
+            terms.push(s);
         }
 
-        Ok(e)
+        Ok(Series::sum(terms))
     }
 
     /// Expand the cosine of this series to the available order. Returns an error
@@ -1570,7 +1578,8 @@ impl Series<AtomField> {
 
         let p = self.clone().remove_constant();
 
-        let mut e = self.constant(FunctionBuilder::new(Symbol::COS).add_arg(&c).finish());
+        let mut terms = Vec::with_capacity(self.order + 1);
+        terms.push(self.constant(FunctionBuilder::new(Symbol::COS).add_arg(&c).finish()));
         let mut sp = p.clone();
         for i in 1..=self.order {
             let mut b = if i % 2 == 1 {
@@ -1590,10 +1599,10 @@ impl Series<AtomField> {
 
             sp = sp * &p;
 
-            e = e + s;
+            terms.push(s);
         }
 
-        Ok(e)
+        Ok(Series::sum(terms))
     }
 
     /// Take the series to the power of another series.
@@ -1628,11 +1637,12 @@ impl Series<AtomField> {
         let order = base.order;
         let shift = base.shift;
         let p = Rational::from((base.shift as i64, base.ramification as i64)) * &pow;
-        let mut r = base.one();
+        let mut terms = Vec::with_capacity(order + 1);
+        terms.push(base.one());
         let mut x = base.one();
 
         // normalize the series to 1 + ...
-        let cc = base.div_coeff(&c).mul_exp_units(-shift) - r.one();
+        let cc = base.div_coeff(&c).mul_exp_units(-shift) - terms[0].one();
 
         let mut num = Rational::one();
 
@@ -1646,9 +1656,10 @@ impl Series<AtomField> {
                 .mul_coeff(&Atom::num(num.clone()))
                 .div_coeff(&Atom::num(Integer::factorial(i as u32)));
 
-            r = r + p;
+            terms.push(p);
         }
 
+        let mut r = Series::sum(terms);
         r.change_ramification(p.denominator().to_i64().unwrap() as usize);
 
         let shift = p.numerator().to_i64().unwrap() as isize
@@ -1674,12 +1685,14 @@ impl Series<AtomField> {
         }
 
         let v = self.variable.to_atom() - &self.expansion_point;
-        for (e, c) in self.coefficients.iter().enumerate() {
-            let p = self.get_exponent(e);
-            if !c.is_zero() {
-                *out = &*out + &(v.pow(p) * c);
-            }
-        }
+        let terms = self
+            .coefficients
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_zero())
+            .map(|(e, c)| v.pow(self.get_exponent(e)) * c)
+            .collect::<Vec<_>>();
+        *out = Atom::sum(terms);
     }
 }
 

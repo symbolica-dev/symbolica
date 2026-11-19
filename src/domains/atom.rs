@@ -102,6 +102,38 @@ impl AtomField {
     }
 }
 
+impl AtomField {
+    /// Add (or subtract) all products to `accumulator` at once. Repeated addition
+    /// would copy the growing accumulator for every product.
+    fn add_products<'a, I>(&self, accumulator: &mut Atom, products: I, negate: bool)
+    where
+        I: IntoIterator<Item = (&'a Atom, &'a Atom)>,
+    {
+        let mut products = products.into_iter();
+        let Some((b, c)) = products.next() else {
+            return;
+        };
+        let Some((d, e)) = products.next() else {
+            if negate {
+                self.sub_mul_assign(accumulator, b, c);
+            } else {
+                self.add_mul_assign(accumulator, b, c);
+            }
+            return;
+        };
+
+        let mut terms = Vec::with_capacity(products.size_hint().0 + 3);
+        if !matches!(accumulator.as_view(), AtomView::Num(n) if n.is_zero()) {
+            terms.push(std::mem::take(accumulator));
+        }
+        for (b, c) in [(b, c), (d, e)].into_iter().chain(products) {
+            let p = self.mul(b, c);
+            terms.push(if negate { -p } else { p });
+        }
+        *accumulator = self.normalize(Atom::sum(terms));
+    }
+}
+
 impl std::fmt::Display for AtomField {
     fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Ok(())
@@ -250,6 +282,26 @@ impl Ring for AtomField {
             return first;
         };
         self.normalize(Atom::product([first, second].into_iter().chain(elements)))
+    }
+
+    /// Add all products to the accumulator with one n-ary [`Atom::sum`], applying
+    /// custom normalization once to the result instead of after every product.
+    fn add_mul_assign_many<'a, I>(&self, accumulator: &mut Self::Element, products: I)
+    where
+        Self::Element: 'a,
+        I: IntoIterator<Item = (&'a Self::Element, &'a Self::Element)>,
+    {
+        self.add_products(accumulator, products, false);
+    }
+
+    /// Subtract all products from the accumulator with one n-ary [`Atom::sum`], applying
+    /// custom normalization once to the result instead of after every product.
+    fn sub_mul_assign_many<'a, I>(&self, accumulator: &mut Self::Element, products: I)
+    where
+        Self::Element: 'a,
+        I: IntoIterator<Item = (&'a Self::Element, &'a Self::Element)>,
+    {
+        self.add_products(accumulator, products, true);
     }
 
     fn pow(&self, b: &Self::Element, e: u64) -> Self::Element {
