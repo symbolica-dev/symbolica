@@ -424,6 +424,16 @@ impl AtomView<'_> {
         }
     }
 
+    /// Series expand in `x` around `expansion_point` to depth `depth`.
+    ///
+    /// Every subexpression is expanded to the same relative order, which the
+    /// expansion of a sum maintains by expanding its terms deeper when they cancel.
+    /// For an absolute depth, the relative order that the result needs then follows
+    /// from its valuation: a pole of order `p` needs `p` more terms and a zero fewer.
+    /// The valuation is bounded from the structure of the expression, or found with
+    /// a cheap expansion to relative order one if the expression may have a pole.
+    /// If the result still falls short, for example because a cancellation in a
+    /// product was missed, the expansion is repeated deeper.
     pub(crate) fn series(
         &self,
         x: &Indeterminate,
@@ -437,57 +447,586 @@ impl AtomView<'_> {
 
         let _taylor_cache = TaylorCacheScope::new();
 
-        // heuristic current depth
-        let mut current_depth = if order.is_negative() || order.is_zero() {
-            Rational::one()
-        } else {
-            order.clone()
-        };
-
         // Preserve unresolved symbolic coefficients during expansion. Negative
         // exponents below retry only when the trailing coefficient is proven zero.
         let field = AtomField {
             statistical_zero_test: false,
             ..Default::default()
         };
-
-        loop {
-            let info = Series::new(
+        let variable: Arc<PolyVariable> = Arc::new(x.clone().into());
+        let info = |relative_order: &Rational| {
+            Series::new(
                 &field,
                 None,
-                Arc::new(x.clone().into()),
+                variable.clone(),
                 expansion_point.to_owned(),
-                &current_depth + &(1.into(), current_depth.denominator()).into(),
-            );
+                relative_order.clone(),
+            )
+        };
 
-            let mut series = self.series_impl(x, expansion_point, &info)?;
-            if !depth.is_absolute() && series.relative_order() >= *order {
+        // Keep the relative order positive and on the grid of the requested depth.
+        let denominator = Rational::from(order.denominator());
+        let grid_step = Rational::from((1.into(), order.denominator()));
+        let on_grid = |relative_order: Rational| {
+            let units = (relative_order * &denominator).ceil().max(Integer::one());
+            Rational::from(units) / &denominator
+        };
+
+        // The absolute order that the result must reach, or its relative order.
+        let target = if depth.is_absolute() {
+            order + &grid_step
+        } else {
+            order.clone()
+        };
+
+        // The relative order to start from when the valuation is unknown. An expansion
+        // to a lower order may fail where this one succeeds, for example when the
+        // leading terms of the argument of `exp` cancel, so it is also the fallback.
+        let fallback_order = order.clone().max(Rational::one()) + &grid_step;
+
+        let mut relative_order = if !depth.is_absolute() {
+            target.clone()
+        } else if let Some((valuation, _)) = self
+            .valuation_bound(x, expansion_point)
+            .filter(|(valuation, exact)| *exact || !valuation.is_negative())
+        {
+            on_grid(&target - &valuation)
+        } else {
+            // The expression may have a pole. Find its valuation with a cheap expansion.
+            let probe_order = Rational::one();
+            match self.series_impl(x, expansion_point, &info(&probe_order)) {
+                Ok(mut probe) if probe.absolute_order() >= target => {
+                    probe.truncate_absolute_order(target);
+                    return Ok(probe);
+                }
+                Ok(probe) if !probe.is_zero() => {
+                    // The relative order of the probe shows whether the expansion loses
+                    // relative order to cancellations that it does not compensate.
+                    let loss = (&probe_order - &probe.relative_order()).max(Rational::zero());
+                    on_grid(&target - &probe.get_trailing_exponent() + &loss)
+                }
+                // The leading terms cancel, so that the valuation is unknown.
+                _ => fallback_order.clone(),
+            }
+        };
+
+        let mut retried = false;
+        let mut zero_tested = false;
+        loop {
+            let mut series = match self.series_impl(x, expansion_point, &info(&relative_order)) {
+                Ok(series) => series,
+                // An error may be caused by a too low order, as for the probe.
+                Err(_) if relative_order < fallback_order => {
+                    relative_order = fallback_order.clone();
+                    retried = true;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if !depth.is_absolute() && !series.is_zero() && series.relative_order() >= *order {
                 series.truncate_relative_order(order.clone());
                 break Ok(series);
             } else if depth.is_absolute() && series.absolute_order() > *order {
-                series.truncate_absolute_order(order + &(1.into(), order.denominator()).into());
+                series.truncate_absolute_order(target);
                 break Ok(series);
+            }
+
+            let shortfall = if depth.is_absolute() {
+                &target - &series.absolute_order()
+            } else if !series.is_zero() {
+                &target - &series.relative_order()
             } else {
                 // An empty truncation alone does not prove the input zero.
                 // Check the exact stored coefficients before retrying a
-                // relative expansion whose leading term may not exist.
-                if !depth.is_absolute()
-                    && series.is_zero()
-                    && self
+                // relative expansion whose leading term may not exist. The test
+                // is expensive and does not depend on the order, so it is done
+                // once, when an expansion to the fallback order is still empty.
+                if !zero_tested && relative_order >= fallback_order {
+                    zero_tested = true;
+                    if self
                         .check_zero_with(
                             &crate::atom::ZeroTestSettings::new()
                                 .treat_floats_as_exact(true)
                                 .numerical_samples(0),
                         )
                         .is_true()
-                {
-                    return Atom::Zero.as_view().series(x, expansion_point, depth);
+                    {
+                        return Ok(info(&target));
+                    }
                 }
-                // increase the expansion depth
-                // TODO: find better heuristic
-                current_depth = &current_depth * &2.into();
+
+                // An expansion that is still empty this deep is most likely zero.
+                if relative_order >= 1000 {
+                    series.truncate_relative_order(order.clone());
+                    break Ok(series);
+                }
+                relative_order.clone()
+            };
+
+            // Expanding deeper by the shortfall normally suffices. If it did not,
+            // for example when the expansion was empty, at least double the order.
+            let next = on_grid(&relative_order + &shortfall);
+            relative_order = if retried {
+                next.max(&relative_order * &2.into())
+            } else {
+                next
+            };
+            retried = true;
+        }
+    }
+
+    /// Find a lower bound on the valuation of the series of `self` in `x` around
+    /// `expansion_point` from the structure of the expression, and whether it is
+    /// exact. Return `None` when the expression may have a pole that the structure
+    /// does not bound, such as the inverse of a sum whose leading terms may cancel
+    /// or a function with a custom series expansion.
+    fn valuation_bound(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+    ) -> Option<(Rational, bool)> {
+        match self.valuation_bound_impl(x, expansion_point) {
+            ValuationBound::Constant => Some((Rational::zero(), true)),
+            ValuationBound::Bound(valuation, exact) => Some((valuation, exact)),
+            ValuationBound::Unknown => None,
+        }
+    }
+
+    /// Bound the valuation as [Self::valuation_bound] does, in a single pass over the
+    /// expression that also finds the subexpressions without `x`.
+    fn valuation_bound_impl(&self, x: &Indeterminate, expansion_point: AtomView) -> ValuationBound {
+        if *x == *self {
+            let valuation = if expansion_point.is_zero() {
+                Rational::one()
+            } else {
+                Rational::zero()
+            };
+            return ValuationBound::Bound(valuation, true);
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => ValuationBound::Constant,
+            AtomView::Mul(args) => {
+                let mut valuation = Rational::zero();
+                let mut exact = true;
+                let mut constant = true;
+                for arg in args {
+                    match arg.valuation_bound_impl(x, expansion_point) {
+                        ValuationBound::Constant => {}
+                        ValuationBound::Bound(v, e) => {
+                            valuation += &v;
+                            exact &= e;
+                            constant = false;
+                        }
+                        ValuationBound::Unknown => return ValuationBound::Unknown,
+                    }
+                }
+                if constant {
+                    ValuationBound::Constant
+                } else {
+                    ValuationBound::Bound(valuation, exact)
+                }
+            }
+            AtomView::Add(args) => {
+                let mut constant = true;
+                let lowest = lowest_valuation_bound(args.iter().map(|arg| {
+                    let bound = arg.valuation_bound_impl(x, expansion_point);
+                    constant &= matches!(bound, ValuationBound::Constant);
+                    bound.into_option()
+                }));
+                match lowest {
+                    _ if constant => ValuationBound::Constant,
+                    Some(Some((v, exact))) => ValuationBound::Bound(v, exact),
+                    _ => ValuationBound::Unknown,
+                }
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+                let base_bound = base.valuation_bound_impl(x, expansion_point);
+                if let AtomView::Num(n) = exp {
+                    let (v, exact) = match base_bound {
+                        ValuationBound::Constant => return ValuationBound::Constant,
+                        ValuationBound::Bound(v, exact) => (v, exact),
+                        ValuationBound::Unknown => return ValuationBound::Unknown,
+                    };
+                    let CoefficientView::Natural(n, d, 0, _) = n.get_coeff_view() else {
+                        return ValuationBound::Unknown;
+                    };
+                    // a negative power of a base that may vanish faster may have a pole
+                    if n > 0 || exact {
+                        ValuationBound::Bound(v * &Rational::from((n, d)), exact)
+                    } else {
+                        ValuationBound::Unknown
+                    }
+                } else {
+                    match (base_bound, exp.valuation_bound_impl(x, expansion_point)) {
+                        (ValuationBound::Constant, ValuationBound::Constant) => {
+                            ValuationBound::Constant
+                        }
+                        // the exponential of a series without poles is nonzero
+                        (ValuationBound::Constant, ValuationBound::Bound(v, _))
+                            if !v.is_negative() && !exp.contains_symbol(Symbol::LOG) =>
+                        {
+                            ValuationBound::Bound(Rational::zero(), true)
+                        }
+                        _ => ValuationBound::Unknown,
+                    }
+                }
+            }
+            AtomView::Fun(f) => {
+                // A function of arguments without poles has none.
+                let mut constant =
+                    !matches!(x, Indeterminate::Symbol(s, _) if *s == f.get_symbol());
+                let mut pole = false;
+                let mut first_argument = None;
+                for arg in f {
+                    let (v, e) = match arg.valuation_bound_impl(x, expansion_point) {
+                        ValuationBound::Constant => (Rational::zero(), true),
+                        ValuationBound::Bound(v, e) => {
+                            constant = false;
+                            pole |= v.is_negative();
+                            (v, e)
+                        }
+                        ValuationBound::Unknown => {
+                            constant = false;
+                            pole = true;
+                            (Rational::zero(), false)
+                        }
+                    };
+                    if first_argument.is_none() {
+                        first_argument = Some((v, e));
+                    }
+                }
+
+                if constant {
+                    return ValuationBound::Constant;
+                }
+
+                if f.get_symbol_id() == Symbol::LOG_ID {
+                    // log(1+y) = y + ... if y vanishes, and the logarithm has no poles
+                    if let Some(AtomView::Add(args)) = f.iter().next()
+                        && args.iter().any(|arg| arg.is_one())
+                        && let Some(Some((v, exact))) = lowest_valuation_bound(
+                            args.iter()
+                                .filter(|arg| !arg.is_one())
+                                .map(|arg| arg.valuation_bound(x, expansion_point)),
+                        )
+                        && v > 0
+                    {
+                        return ValuationBound::Bound(v, exact);
+                    }
+                    return ValuationBound::Bound(Rational::zero(), false);
+                }
+
+                if pole || f.get_symbol().get_series_function().is_some() {
+                    return ValuationBound::Unknown;
+                }
+
+                // sin(x) = x + ..., cos(x) = 1 + ...
+                match (f.get_symbol_id(), first_argument) {
+                    (Symbol::SIN_ID, Some((v, exact))) if v > 0 => ValuationBound::Bound(v, exact),
+                    (Symbol::COS_ID, Some((v, _))) if v > 0 => {
+                        ValuationBound::Bound(Rational::zero(), true)
+                    }
+                    _ => ValuationBound::Bound(Rational::zero(), false),
+                }
             }
         }
+    }
+
+    /// Series expand `self` like [Self::series_impl], but return `None` for a constant
+    /// that does not depend on `x`, which has no truncation error.
+    fn series_impl_or_exact(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Result<Option<Series<AtomField>>, SeriesError> {
+        if self.contains_indeterminate(x) {
+            self.series_impl(x, expansion_point, info).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Series expand in `x` around `expansion_point` to the relative order of `info`.
+    ///
+    /// Unless the result is empty, its relative order is at least that of `info`:
+    /// sums whose leading terms cancel expand their terms deeper, and functions
+    /// whose arguments lose relative order are expanded again. Higher orders that
+    /// the result cannot use are not computed where this is cheap to avoid.
+    pub(crate) fn series_impl(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Result<Series<AtomField>, SeriesError> {
+        if !self.contains_indeterminate(x) {
+            return Ok(info.constant(self.to_owned()));
+        }
+
+        if *x == *self {
+            // The constant term is exact, which keeps the relative order of differences
+            // such as `x^2-p^2` that cancel it.
+            let variable = info.monomial(info.get_field().one(), Rational::one());
+            if expansion_point.is_zero() {
+                return Ok(variable);
+            }
+            return Ok(Series::sum([
+                info.constant_inf_prec(expansion_point.to_owned()),
+                variable,
+            ]));
+        }
+
+        match self {
+            AtomView::Num(_) | AtomView::Var(_) => Ok(info.constant(self.to_owned())),
+            AtomView::Fun(_) => {
+                let series = self.series_function(x, expansion_point, info)?;
+                let shortfall = info.relative_order() - series.relative_order();
+                if series.is_zero() || shortfall <= 0 {
+                    return Ok(series);
+                }
+
+                // A function such as `log(1+x)` whose constant term vanishes has a
+                // lower relative order than its arguments. Expand them deeper.
+                let mut series = self.series_function(
+                    x,
+                    expansion_point,
+                    &with_relative_order(info, &(info.relative_order() + &shortfall)),
+                )?;
+                limit_relative_order(&mut series, info);
+                Ok(series)
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+
+                let mut base_series = base.series_impl(x, expansion_point, info)?;
+
+                if let AtomView::Num(n) = exp {
+                    if let CoefficientView::Natural(n, d, ni, _) = n.get_coeff_view() {
+                        if ni != 0 {
+                            return Err(SeriesError::UnsupportedComplexExponent {
+                                expression: self.to_owned(),
+                            });
+                        }
+
+                        if n < 0 {
+                            // in case of 1/0, grow the expansion depth of the base series
+                            // it could be that the base series is exactly zero,
+                            // to prevent an infinite loop, we stop the loop at ep^-1000.
+                            // Start from at least one, as doubling zero does not grow.
+                            let mut current_depth = info.relative_order().max(Rational::one());
+
+                            // Remove exact cancellations before choosing the leading power.
+                            // Unresolved function coefficients must survive.
+                            base_series.normalize_trailing_coefficient();
+                            while base_series.is_zero() && current_depth < 1000 {
+                                current_depth = &current_depth * &2.into();
+                                let info = Series::new(
+                                    info.get_field(),
+                                    None,
+                                    info.get_variable().clone(),
+                                    info.get_expansion_point().clone(),
+                                    &current_depth
+                                        + &(1.into(), current_depth.denominator()).into(),
+                                );
+
+                                base_series = base.series_impl(x, expansion_point, &info)?;
+                                base_series.normalize_trailing_coefficient();
+                            }
+                        }
+
+                        // The power has the relative order of its base. Only a positive
+                        // integer power, which may still cancel against other terms, keeps
+                        // the extra terms of a base that is known further.
+                        if n < 0 || d != 1 {
+                            limit_relative_order(&mut base_series, info);
+                        }
+
+                        base_series.rpow((n, d).into())
+                    } else {
+                        Err(SeriesError::UnsupportedLargeExponent {
+                            expression: self.to_owned(),
+                        })
+                    }
+                } else {
+                    let e = exp.series_impl(x, expansion_point, info)?;
+
+                    // c^e = exp(log(c)*e) for a base c that does not depend on x,
+                    // without expanding the logarithm of the constant series
+                    let mut exponent = if !base.contains_indeterminate(x) && !base.is_zero() {
+                        if matches!(base, AtomView::Var(v) if v.get_symbol() == Symbol::E) {
+                            e
+                        } else {
+                            e.mul_coeff(&FunctionBuilder::new(Symbol::LOG).add_arg(base).finish())
+                        }
+                    } else {
+                        &base_series.log()? * &e
+                    };
+
+                    // The exponential of a series without poles is nonzero, so its relative
+                    // order is the absolute order of its argument without the constant term.
+                    if !exponent.get_trailing_exponent().is_negative() {
+                        exponent.truncate_absolute_order(info.absolute_order());
+                    }
+                    exponent.exp()
+                }
+            }
+            AtomView::Mul(args) => {
+                let mut iter = args.iter();
+                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
+                for arg in iter {
+                    series = &series * &arg.series_impl(x, expansion_point, info)?;
+                }
+
+                Ok(series)
+            }
+            AtomView::Add(args) => {
+                // The sum is needed up to its valuation plus the relative order, so a term
+                // with a higher valuation than the lowest one is needed to a lower relative
+                // order. Terms without `x` are exact, so that they do not limit the order.
+                let term_infos = self.term_infos(x, expansion_point, info);
+                let mut terms = Vec::with_capacity(args.get_nargs());
+                let mut exact = Vec::with_capacity(args.get_nargs());
+                for (arg, term_info) in args.iter().zip(&term_infos) {
+                    let term_info = term_info.as_ref().unwrap_or(info);
+                    let term = arg.series_impl_or_exact(x, expansion_point, term_info)?;
+                    exact.push(term.is_none());
+                    terms.push(term.unwrap_or_else(|| info.constant_inf_prec(arg.to_owned())));
+                }
+
+                // If the leading terms cancel, the sum is known to a lower relative order
+                // than its terms. Then expand the terms that limit its absolute order
+                // deeper. One retry normally suffices, as the valuation is then known.
+                let relative_order = info.relative_order();
+                for retry in 0.. {
+                    // Without a cancellation of the lowest terms, or a term that is known
+                    // to a lower relative order, the sum keeps the relative order.
+                    let lowest = terms
+                        .iter()
+                        .filter(|t| !t.is_zero())
+                        .map(|t| t.get_trailing_exponent())
+                        .min();
+                    let may_fall_short = lowest.is_some_and(|lowest| {
+                        let required = &lowest + &relative_order;
+                        terms
+                            .iter()
+                            .filter(|t| !t.is_zero() && t.get_trailing_exponent() == lowest)
+                            .count()
+                            > 1
+                            || terms
+                                .iter()
+                                .zip(&exact)
+                                .any(|(t, e)| !e && t.absolute_order() < required)
+                    });
+                    if !may_fall_short || retry == 2 {
+                        let mut sum = Series::sum(terms);
+                        if retry > 0 {
+                            limit_relative_order(&mut sum, info);
+                        }
+                        return Ok(sum);
+                    }
+
+                    let mut sum = Series::sum(terms.clone());
+                    if !sum.is_zero() && sum.relative_order() >= relative_order {
+                        if retry > 0 {
+                            limit_relative_order(&mut sum, info);
+                        }
+                        return Ok(sum);
+                    }
+
+                    // If all terms cancel, the valuation is at least the absolute order.
+                    let required = if sum.is_zero() {
+                        sum.absolute_order() + &relative_order
+                    } else {
+                        sum.get_trailing_exponent() + &relative_order
+                    };
+                    for ((term, arg), exact) in terms.iter_mut().zip(args).zip(&exact) {
+                        if *exact || term.absolute_order() >= required {
+                            continue;
+                        }
+
+                        // Without a known valuation, assume that the absolute order of the
+                        // term grows with its relative order.
+                        let term_order = if term.is_zero() {
+                            &relative_order + &required - &term.absolute_order()
+                        } else {
+                            &required - &term.get_trailing_exponent()
+                        };
+                        *term = arg.series_impl(
+                            x,
+                            expansion_point,
+                            &with_relative_order(info, &term_order),
+                        )?;
+                    }
+                }
+                unreachable!()
+            }
+        }
+    }
+
+    /// For the terms of the sum `self`, return the expansion settings for the relative
+    /// order that each term needs, or `None` if it needs the relative order of `info`.
+    ///
+    /// The valuation of a term is bounded from below by its structure, or found with an
+    /// expansion to relative order one if its structure allows a pole. A term needs the
+    /// relative order of the sum plus the difference between the lowest valuation and
+    /// its own. If the lowest terms cancel, the expansion of the sum expands the terms
+    /// that fall short deeper.
+    fn term_infos(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Vec<Option<Series<AtomField>>> {
+        let AtomView::Add(args) = self else {
+            unreachable!("not a sum");
+        };
+
+        let relative_order = info.relative_order();
+        if relative_order <= 1 {
+            return vec![None; args.get_nargs()];
+        }
+
+        // The exact valuation of every term, or a lower bound if it is unknown.
+        let probe_info = with_relative_order(info, &Rational::one());
+        let valuations = args
+            .iter()
+            .map(|arg| {
+                let bound = arg.valuation_bound(x, expansion_point);
+                if let Some((v, true)) = bound {
+                    return Some((v, true));
+                }
+                match arg.series_impl(x, expansion_point, &probe_info) {
+                    Ok(s) if !s.is_zero() => Some((s.get_trailing_exponent(), true)),
+                    _ => bound,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // The valuation of the sum, unless its lowest terms cancel
+        let Some(lowest) = valuations
+            .iter()
+            .flatten()
+            .filter(|(_, exact)| *exact)
+            .map(|(v, _)| v)
+            .min()
+            .cloned()
+        else {
+            return vec![None; args.get_nargs()];
+        };
+
+        valuations
+            .iter()
+            .map(|v| {
+                let (v, _) = v.as_ref().filter(|(v, _)| *v > lowest)?;
+                // Keep a positive relative order, so that the term still bounds the order
+                // of the sum.
+                let term_order = (&relative_order + &lowest - v)
+                    .max(Rational::from((1, info.get_ramification() as i64)));
+                Some(with_relative_order(info, &term_order))
+            })
+            .collect()
     }
 
     /// Expand a function `f` with a single argument that depends on `x`, around the constant
@@ -608,213 +1147,343 @@ impl AtomView<'_> {
         Some(series)
     }
 
-    /// Series expand in `x` around `expansion_point` to depth `depth`.
-    pub(crate) fn series_impl(
+    /// Expand `self`, an argument of a function with a custom series whose expansion is
+    /// `series`, deeper until its terms beyond the constant term are known to the
+    /// relative order of `info`. The custom series may subtract the constant term, such
+    /// as the pole of `gamma` at `-k`, and expand the truncated rest as if it were exact.
+    /// Return whether the argument was expanded again.
+    fn expand_beyond_constant_term(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+        series: &mut Series<AtomField>,
+    ) -> Result<bool, SeriesError> {
+        if !self.contains_indeterminate(x)
+            || series.is_zero()
+            || !series.get_trailing_exponent().is_zero()
+        {
+            return Ok(false);
+        }
+
+        let relative_order = info.relative_order();
+        let mut depth = relative_order.clone().max(Rational::one());
+        let mut expanded = false;
+        loop {
+            // the lowest power of the terms beyond the constant term
+            let rest = series
+                .terms()
+                .find(|(e, c)| *e > 0 && !c.is_zero())
+                .map(|(e, _)| e);
+            depth = match rest {
+                Some(v) if series.absolute_order() >= &v + &relative_order => break,
+                _ if depth >= 1000 => break,
+                Some(v) => (&v + &relative_order).max(&depth + &Rational::one()),
+                None => &depth * &2.into(),
+            };
+            *series = self.series_impl(x, expansion_point, &with_relative_order(info, &depth))?;
+            expanded = true;
+        }
+        Ok(expanded)
+    }
+
+    /// Series expand a function, see [Self::series_impl].
+    fn series_function(
         &self,
         x: &Indeterminate,
         expansion_point: AtomView,
         info: &Series<AtomField>,
     ) -> Result<Series<AtomField>, SeriesError> {
-        if !self.contains_indeterminate(x) {
-            return Ok(info.constant(self.to_owned()));
+        let AtomView::Fun(f) = self else {
+            unreachable!("not a function");
+        };
+
+        let symbol = f.get_symbol();
+
+        // The logarithm and functions with a custom series expansion, which may have
+        // poles, need the leading term of their arguments. Expand an argument whose
+        // terms all cancel deeper, as for the base of a negative power.
+        let needs_leading_term =
+            f.get_symbol_id() == Symbol::LOG_ID || symbol.get_series_function().is_some();
+
+        // log(1+y) = y + ... needs y up to its valuation plus the relative order.
+        let deeper_info;
+        let info = if f.get_symbol_id() == Symbol::LOG_ID
+            && let Some((valuation, _)) = self.valuation_bound(x, expansion_point)
+            && valuation > 0
+        {
+            deeper_info = with_relative_order(info, &(info.relative_order() + &valuation));
+            &deeper_info
+        } else {
+            info
+        };
+
+        let mut args_series = Vec::with_capacity(f.get_nargs());
+        for arg in f {
+            let mut arg_series = arg.series_impl(x, expansion_point, info)?;
+            if needs_leading_term && arg_series.is_zero() && arg.contains_indeterminate(x) {
+                // Start from at least one, as doubling zero does not grow.
+                let mut current_depth = info.relative_order().max(Rational::one());
+                while arg_series.is_zero() && current_depth < 1000 {
+                    current_depth = &current_depth * &2.into();
+                    arg_series = arg.series_impl(
+                        x,
+                        expansion_point,
+                        &with_relative_order(info, &current_depth),
+                    )?;
+                    arg_series.normalize_trailing_coefficient();
+                }
+                limit_relative_order(&mut arg_series, info);
+            }
+            args_series.push(arg_series);
         }
 
-        if *x == *self {
-            return Ok(info.shifted_variable(expansion_point.to_owned()));
+        if args_series.is_empty() {
+            return Ok(info.constant(f.to_owned().into()));
         }
 
-        // TODO: optimize, appending a monomial using addition is slow
-        match self {
-            AtomView::Num(_) | AtomView::Var(_) => Ok(info.constant(self.to_owned())),
-            AtomView::Fun(f) => {
-                let mut args_series = Vec::with_capacity(f.get_nargs());
-                for arg in f {
-                    args_series.push(arg.series_impl(x, expansion_point, info)?);
+        if symbol == Symbol::IF && f.iter().skip(1).any(|arg| arg.contains_indeterminate(x)) {
+            return Err(SeriesError::NonConstantIf {
+                expression: self.to_owned(),
+            });
+        }
+
+        // An argument without terms that is known up to a negative order may or may not
+        // have a pole, so it is not filled in: f(0) is not the value of the function.
+        if !f.get_symbol().is_fixed_builtin()
+            && args_series
+                .iter()
+                .any(|x| !x.is_zero() && x.get_trailing_exponent().is_negative())
+        {
+            // fill in the expanded arguments, perhaps the leading negative exponent will be popped out,
+            // in which case we can proceed
+            let mut f_eval = FunctionBuilder::new(f.get_symbol());
+            for c in &args_series {
+                f_eval = f_eval.add_arg(c.to_atom());
+            }
+            let a = f_eval.finish();
+
+            if !matches!(a, Atom::Fun(_)) {
+                return a.as_view().series_impl(x, expansion_point, info);
+            }
+        }
+
+        match f.get_symbol_id() {
+            Symbol::COS_ID | Symbol::SIN_ID => {
+                let mut arg = args_series.swap_remove(0);
+                // If the function does not vanish at the constant term of the argument,
+                // the result is nonzero and the argument is needed only up to the
+                // relative order of the expansion.
+                let valuation = arg.get_trailing_exponent();
+                if !valuation.is_negative() {
+                    let constant = if valuation.is_zero() {
+                        arg.get_trailing_coefficient()
+                    } else {
+                        Atom::Zero
+                    };
+                    if !FunctionBuilder::new(symbol)
+                        .add_arg(&constant)
+                        .finish()
+                        .is_zero()
+                    {
+                        arg.truncate_absolute_order(info.absolute_order());
+                    }
                 }
 
-                if args_series.is_empty() {
-                    return Ok(info.constant(f.to_owned().into()));
+                if f.get_symbol_id() == Symbol::COS_ID {
+                    arg.cos()
+                } else {
+                    arg.sin()
                 }
-
-                let symbol = f.get_symbol();
-
-                if symbol == Symbol::IF && f.iter().skip(1).any(|arg| arg.contains_indeterminate(x))
+            }
+            Symbol::LOG_ID => args_series[0].log(),
+            _ => {
+                if let Some(custom_series) = symbol.get_series_function()
+                    && let Some((singular, regularized)) = {
+                        // A custom series may subtract the constant term of an argument,
+                        // such as the pole of gamma at -k, and treat the truncated rest as
+                        // exact, so the rest must be known to the relative order.
+                        let mut parts = custom_series(&args_series);
+                        let mut expanded = false;
+                        if parts.is_some() {
+                            for (arg, arg_series) in f.iter().zip(&mut args_series) {
+                                expanded |= arg.expand_beyond_constant_term(
+                                    x,
+                                    expansion_point,
+                                    info,
+                                    arg_series,
+                                )?;
+                            }
+                        }
+                        if expanded {
+                            parts = custom_series(&args_series);
+                        }
+                        parts
+                    }
                 {
-                    return Err(SeriesError::NonConstantIf {
+                    // Both parts keep the relative order of the expansion, and so does
+                    // their product.
+                    let singular_series =
+                        singular.as_view().series_impl(x, expansion_point, info)?;
+                    let regularized_series =
+                        regularized
+                            .as_view()
+                            .series_impl(x, expansion_point, info)?;
+                    return Ok(&singular_series * &regularized_series);
+                }
+
+                // TODO: also check for log(x)
+                if args_series
+                    .iter()
+                    .any(|x| x.get_trailing_exponent().is_negative())
+                {
+                    return Err(SeriesError::FunctionArgumentPole {
                         expression: self.to_owned(),
                     });
                 }
 
-                if !f.get_symbol().is_fixed_builtin()
-                    && args_series
-                        .iter()
-                        .any(|x| x.get_trailing_exponent().is_negative())
-                {
-                    // fill in the expanded arguments, perhaps the leading negative exponent will be popped out,
-                    // in which case we can proceed
-                    let mut f_eval = FunctionBuilder::new(f.get_symbol());
-                    for c in &args_series {
-                        f_eval = f_eval.add_arg(c.to_atom());
-                    }
-                    let a = f_eval.finish();
-
-                    if !matches!(a, Atom::Fun(_)) {
-                        return a.as_view().series_impl(x, expansion_point, info);
-                    }
+                if let Some(series) = Self::function_taylor_series(*f, &args_series, x) {
+                    return Ok(series);
                 }
 
-                match f.get_symbol_id() {
-                    Symbol::COS_ID => args_series[0].cos(),
-                    Symbol::SIN_ID => args_series[0].sin(),
-                    Symbol::LOG_ID => args_series[0].log(),
-                    _ => {
-                        if let Some(custom_series) = &f.get_symbol().get_series_function()
-                            && let Some((singular, regularized)) = custom_series(&args_series)
-                        {
-                            let singular_series =
-                                singular.as_view().series_impl(x, expansion_point, info)?;
-                            // TODO: expand deeper?
-                            let regularized_series =
-                                regularized
-                                    .as_view()
-                                    .series_impl(x, expansion_point, info)?;
-                            return Ok(&singular_series * &regularized_series);
-                        }
-
-                        // TODO: also check for log(x)
-                        if args_series
-                            .iter()
-                            .any(|x| x.get_trailing_exponent().is_negative())
-                        {
-                            return Err(SeriesError::FunctionArgumentPole {
-                                expression: self.to_owned(),
-                            });
-                        }
-
-                        if let Some(series) = Self::function_taylor_series(*f, &args_series, x) {
-                            return Ok(series);
-                        }
-
-                        let mut f_eval = FunctionBuilder::new(f.get_symbol());
-                        for c in &args_series {
-                            f_eval = f_eval.add_arg(c.to_atom());
-                        }
-                        let a = f_eval.finish();
-
-                        let constant = a
-                            .replace(Pattern::Literal(Atom::from(x.clone())))
-                            .with(Pattern::Literal(expansion_point.to_owned()));
-
-                        // TODO: depth is an overestimate
-                        let order = info.absolute_order();
-                        let depth = order.numerator().to_i64().unwrap() as u32
-                            * order.denominator().to_i64().unwrap() as u32;
-
-                        let mut result = info.constant(constant.clone());
-
-                        // TODO: do not allow series expansion in IF if it is not a constant!
-
-                        let mut d = a.clone();
-                        for i in 1..=depth {
-                            // Collect repeated calls before differentiating again, to prevent exponential growth.
-                            d = d.as_view().derivative(x).collect_symbol::<i32>(symbol);
-
-                            if d.is_zero() {
-                                break;
-                            }
-
-                            let rep = d
-                                .replace(Pattern::Literal(Atom::from(x.clone())))
-                                .with(Pattern::Literal(expansion_point.to_owned()));
-
-                            result = &result
-                                + &info
-                                    .monomial(info.get_field().one(), i.into())
-                                    .mul_coeff(&rep)
-                                    .div_coeff(&Atom::num(Integer::factorial(i)));
-                        }
-
-                        Ok(result)
-                    }
+                let mut f_eval = FunctionBuilder::new(f.get_symbol());
+                for c in &args_series {
+                    f_eval = f_eval.add_arg(c.to_atom());
                 }
-            }
-            AtomView::Pow(p) => {
-                let (base, exp) = p.get_base_exp();
+                let a = f_eval.finish();
 
-                let mut base_series = base.series_impl(x, expansion_point, info)?;
+                let constant = a
+                    .replace(Pattern::Literal(Atom::from(x.clone())))
+                    .with(Pattern::Literal(expansion_point.to_owned()));
 
-                if let AtomView::Num(n) = exp {
-                    if let CoefficientView::Natural(n, d, ni, _) = n.get_coeff_view() {
-                        if ni != 0 {
-                            return Err(SeriesError::UnsupportedComplexExponent {
-                                expression: self.to_owned(),
-                            });
-                        }
-
-                        if n < 0 {
-                            // in case of 1/0, grow the expansion depth of the base series
-                            // it could be that the base series is exactly zero,
-                            // to prevent an infinite loop, we stop the loop at ep^-1000
-                            let mut current_depth = info.relative_order();
-
-                            // Remove exact cancellations before choosing the leading power.
-                            // Unresolved function coefficients must survive.
-                            base_series.normalize_trailing_coefficient();
-                            while base_series.is_zero() && current_depth < 1000 {
-                                current_depth = &current_depth * &2.into();
-                                let info = Series::new(
-                                    info.get_field(),
-                                    None,
-                                    info.get_variable().clone(),
-                                    info.get_expansion_point().clone(),
-                                    &current_depth
-                                        + &(1.into(), current_depth.denominator()).into(),
-                                );
-
-                                base_series = base.series_impl(x, expansion_point, &info)?;
-                                base_series.normalize_trailing_coefficient();
-                            }
-                        }
-
-                        base_series.rpow((n, d).into())
-                    } else {
-                        Err(SeriesError::UnsupportedLargeExponent {
-                            expression: self.to_owned(),
-                        })
-                    }
-                } else {
-                    let e = exp.series_impl(x, expansion_point, info)?;
-
-                    // c^e = exp(log(c)*e) for a base c that does not depend on x,
-                    // without expanding the logarithm of the constant series
-                    if !base.contains_indeterminate(x) && !base.is_zero() {
-                        if matches!(base, AtomView::Var(v) if v.get_symbol() == Symbol::E) {
-                            return e.exp();
-                        }
-                        let log_base = FunctionBuilder::new(Symbol::LOG).add_arg(base).finish();
-                        return e.mul_coeff(&log_base).exp();
-                    }
-
-                    base_series.pow(&e)
-                }
-            }
-            AtomView::Mul(args) => {
-                let mut iter = args.iter();
-                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
-                for arg in iter {
-                    series = &series * &arg.series_impl(x, expansion_point, info)?;
-                }
-
-                Ok(series)
-            }
-            AtomView::Add(args) => {
-                let series = args
+                // The Taylor expansion is known up to the lowest absolute order of the
+                // arguments that depend on `x`. It is needed up to the relative order of
+                // the expansion beyond its valuation, which is found on the way. Search
+                // for the valuation only up to the relative order.
+                let argument_order = f
                     .iter()
-                    .map(|arg| arg.series_impl(x, expansion_point, info))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Series::sum(series))
+                    .zip(&args_series)
+                    .filter(|(arg, _)| arg.contains_indeterminate(x))
+                    .map(|(_, s)| s.absolute_order())
+                    .min()
+                    .unwrap();
+                let order_for_valuation = |valuation: Option<u32>| {
+                    let v = Rational::from(valuation.unwrap_or(0));
+                    argument_order.clone().min(info.absolute_order() + &v)
+                };
+                let mut valuation = (!constant.is_zero()).then_some(0);
+                let mut order = order_for_valuation(valuation);
+
+                let mut terms = vec![];
+                if !constant.is_zero() {
+                    terms.push(info.constant(constant));
+                }
+
+                // TODO: do not allow series expansion in IF if it is not a constant!
+
+                let mut d = a;
+                let mut i = 1u32;
+                // Keep searching for the valuation up to the order of the arguments, as
+                // otherwise atan(x) at relative order one would come out empty.
+                while order > i || (valuation.is_none() && argument_order > i) {
+                    // Collect repeated calls before differentiating again, to prevent exponential growth.
+                    d = d.as_view().derivative(x).collect_symbol::<i32>(symbol);
+
+                    if d.is_zero() {
+                        break;
+                    }
+
+                    let rep = d
+                        .replace(Pattern::Literal(Atom::from(x.clone())))
+                        .with(Pattern::Literal(expansion_point.to_owned()));
+
+                    if !rep.is_zero() {
+                        if valuation.is_none() {
+                            valuation = Some(i);
+                            order = order_for_valuation(valuation);
+                        }
+
+                        terms.push(
+                            info.monomial(info.get_field().one(), i.into())
+                                .mul_coeff(&rep)
+                                .div_coeff(&Atom::num(Integer::factorial(i))),
+                        );
+                    }
+                    i += 1;
+                }
+
+                // An empty series that carries the order of the result.
+                terms.push(Series::new(
+                    info.get_field(),
+                    None,
+                    info.get_variable(),
+                    info.get_expansion_point(),
+                    order.clone(),
+                ));
+                let result = Series::sum(terms);
+                Ok(result)
             }
         }
+    }
+}
+
+/// A lower bound on the valuation of a series, found from the structure of its expression.
+enum ValuationBound {
+    /// The expression does not depend on the variable.
+    Constant,
+    /// The lowest exponent is at least the valuation, and equal to it if it is exact.
+    Bound(Rational, bool),
+    /// The expression may have a pole that its structure does not bound.
+    Unknown,
+}
+
+impl ValuationBound {
+    /// Get the bound as `(valuation, exact)`, or `None` if it is unknown.
+    fn into_option(self) -> Option<(Rational, bool)> {
+        match self {
+            ValuationBound::Constant => Some((Rational::zero(), true)),
+            ValuationBound::Bound(v, exact) => Some((v, exact)),
+            ValuationBound::Unknown => None,
+        }
+    }
+}
+
+/// Combine valuation bounds of terms into a bound for their sum: the lowest bound,
+/// which is exact if a single exact term has it. Return `None` if a bound is `None`,
+/// and `Some(None)` for an empty sum.
+fn lowest_valuation_bound(
+    bounds: impl Iterator<Item = Option<(Rational, bool)>>,
+) -> Option<Option<(Rational, bool)>> {
+    let mut lowest: Option<(Rational, bool)> = None;
+    for bound in bounds {
+        let (v, e) = bound?;
+        match &mut lowest {
+            Some((l, exact)) if v == *l => *exact = false,
+            Some((l, _)) if v > *l => {}
+            _ => lowest = Some((v, e)),
+        }
+    }
+    Some(lowest)
+}
+
+/// Return a copy of `info` with at least the relative order `relative_order`,
+/// rounded up to the grid of `info`.
+fn with_relative_order(info: &Series<AtomField>, relative_order: &Rational) -> Series<AtomField> {
+    let ramification = Integer::from(info.get_ramification() as i64);
+    let units = (relative_order * &Rational::from(&ramification)).ceil();
+    Series::new(
+        info.get_field(),
+        None,
+        info.get_variable(),
+        info.get_expansion_point(),
+        Rational::from((units, ramification)),
+    )
+}
+
+/// Truncate a nonempty `series` to the relative order of `info`, if it is known further.
+fn limit_relative_order(series: &mut Series<AtomField>, info: &Series<AtomField>) {
+    if !series.is_zero() && series.relative_order() > info.relative_order() {
+        series.truncate_relative_order(info.relative_order());
     }
 }
 
@@ -1316,6 +1985,33 @@ mod test {
     }
 
     #[test]
+    fn series_function_of_argument_known_to_negative_order() {
+        // At a low order the argument cancels to O(v1^-1). That is not a pole, so
+        // f(0) = 0 is not the value of the function.
+        let v1 = symbol!("v1");
+        let _ = symbol!(
+            "series_negative_order_argument::f",
+            norm = |input, out| {
+                if let AtomView::Fun(f) = input
+                    && f.get_nargs() == 1
+                    && f.iter().next().unwrap().is_zero()
+                {
+                    **out = Atom::Zero;
+                }
+            }
+        );
+
+        let t = parse!("series_negative_order_argument::f((atan(v1)-v1)/v1^3)")
+            .series(v1, 0, 0)
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!("series_negative_order_argument::f(-1/3)")
+        );
+        assert_eq!(t.absolute_order(), 1);
+    }
+
+    #[test]
     fn series_function_with_argument_dependent_normalization() {
         // f(y) for a symbol y normalizes to y^2, so that a Taylor expansion in a fresh
         // variable would not expand f
@@ -1518,5 +2214,172 @@ mod test {
         assert_eq!(add.absolute_order(), (5, 1));
         let mul = &r * &t2;
         assert_eq!(mul.absolute_order(), (11, 1));
+    }
+
+    #[test]
+    fn series_cancelling_function_argument_keeps_its_precision() {
+        // The leading terms of the argument cancel, so that it must be expanded deeper
+        // before the custom series of gamma takes its inverse.
+        let x = symbol!("series_cancelling_argument_x");
+        for (text, equivalent) in [
+            (
+                "gamma(exp(series_cancelling_argument_x)-1-series_cancelling_argument_x)",
+                "gamma(exp(series_cancelling_argument_x)-series_cancelling_argument_x)/(exp(series_cancelling_argument_x)-1-series_cancelling_argument_x)",
+            ),
+            (
+                "gamma(2*series_cancelling_argument_x^2+1-cos(series_cancelling_argument_x))",
+                "gamma(2*series_cancelling_argument_x^2+2-cos(series_cancelling_argument_x))/(2*series_cancelling_argument_x^2+1-cos(series_cancelling_argument_x))",
+            ),
+        ] {
+            let result = parse!(text).series(x, 0, 3).unwrap();
+            let expected = parse!(equivalent).series(x, 0, 3).unwrap();
+            assert_eq!(result.absolute_order(), expected.absolute_order(), "{text}");
+            assert_eq!(
+                (result.to_atom() - expected.to_atom()).expand(),
+                Atom::Zero,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn series_function_with_shifted_pole_keeps_its_precision() {
+        // The custom series subtracts the pole from the truncated argument, so the rest
+        // must be known to the relative order. The equivalent forms have no pole in a
+        // function argument: gamma(a) = gamma(a+2)/(a*(a+1)), tan(pi/2+y) = -cos(y)/sin(y).
+        let v1 = symbol!("v1");
+        for (text, equivalent, depth) in [
+            (
+                "gamma(exp(v1)-2)",
+                "gamma(exp(v1))/((exp(v1)-2)*(exp(v1)-1))",
+                SeriesDepth::absolute(-1),
+            ),
+            (
+                "gamma(exp(v1)-2)",
+                "gamma(exp(v1))/((exp(v1)-2)*(exp(v1)-1))",
+                SeriesDepth::absolute(2),
+            ),
+            (
+                "gamma(cos(v1)-2)",
+                "gamma(cos(v1))/((cos(v1)-2)*(cos(v1)-1))",
+                SeriesDepth::absolute(3),
+            ),
+            (
+                "gamma(cos(v1)-2)",
+                "gamma(cos(v1))/((cos(v1)-2)*(cos(v1)-1))",
+                SeriesDepth::relative(2),
+            ),
+            (
+                "tan(pi/2*cos(v1))",
+                "-cos(pi/2*(cos(v1)-1))/sin(pi/2*(cos(v1)-1))",
+                SeriesDepth::absolute(2),
+            ),
+        ] {
+            let result = parse!(text).series(v1, 0, depth.clone()).unwrap();
+            let expected = parse!(equivalent).series(v1, 0, depth).unwrap();
+            assert_eq!(result.absolute_order(), expected.absolute_order(), "{text}");
+            assert_eq!(
+                (result.to_atom() - expected.to_atom()).expand(),
+                Atom::Zero,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn series_to_low_depth_with_cancellations() {
+        // An expansion to relative order one is empty or fails for these, so the
+        // order to start from is not known from it.
+        let v1 = symbol!("v1");
+        let y = parse!("y");
+        for (text, point, depth, expected) in [
+            ("(1-cos(v1))/(exp(v1)-1)^3", Atom::Zero, -1, "1/2*v1^-1"),
+            ("(exp(v1)-1)/v1^3", Atom::Zero, -2, "v1^-2"),
+            ("atan(v1)/v1^3", Atom::Zero, -2, "v1^-2"),
+            ("(v1-sin(v1))/v1^5", Atom::Zero, -1, "1/6*v1^-2"),
+            ("(v1-sin(v1))/v1^3+(1-cos(v1))^2/v1^4", Atom::Zero, -2, "0"),
+            ("log(v1/y)/(v1-y)^2", y.clone(), -1, "1/(y*(v1-y))"),
+            (
+                "exp(1/v1^2-1/sin(v1)^2)",
+                Atom::Zero,
+                2,
+                "exp(-1/3)-1/15*exp(-1/3)*v1^2",
+            ),
+        ] {
+            let result = parse!(text).series(v1, point, depth).unwrap();
+            assert!(result.absolute_order() > depth, "{text}");
+            assert_eq!(
+                (result.to_atom() - parse!(expected)).expand(),
+                Atom::Zero,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn series_function_of_vanishing_puiseux_argument() {
+        let x = symbol!("series_vanishing_puiseux_x");
+        let exp = parse!("exp(series_vanishing_puiseux_x^(3/2))-1")
+            .series(x, 0, 0)
+            .unwrap();
+        assert!(exp.is_zero());
+        assert_eq!(exp.absolute_order(), (3, 2));
+
+        let cos = parse!("1-cos(series_vanishing_puiseux_x^(3/2))")
+            .series(x, 0, 1)
+            .unwrap();
+        // the cancelling sum is expanded deeper, up to the leading term x^3/2
+        assert!(cos.is_zero());
+        assert_eq!(cos.absolute_order(), 3);
+
+        let quotient =
+            parse!("(exp(series_vanishing_puiseux_x^(3/2))-1)/series_vanishing_puiseux_x^(3/2)")
+                .series(x, 0, 2)
+                .unwrap();
+        assert_eq!(
+            quotient.to_atom(),
+            parse!("1+series_vanishing_puiseux_x^(3/2)/2")
+        );
+    }
+
+    #[test]
+    fn series_relative_depth_finds_the_leading_term() {
+        let x = symbol!("series_relative_leading_x");
+        let t = parse!("log(exp(series_relative_leading_x^3))")
+            .series(x, 0, SeriesDepth::relative(1))
+            .unwrap();
+        assert_eq!(t.to_atom(), parse!("series_relative_leading_x^3"));
+        assert_eq!(t.absolute_order(), 4);
+
+        let t = parse!("log(1+series_relative_leading_x^2)")
+            .series(x, 0, SeriesDepth::relative(3))
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!("series_relative_leading_x^2-series_relative_leading_x^4/2")
+        );
+        assert_eq!(t.relative_order(), 3);
+    }
+
+    #[test]
+    fn series_sum_with_different_valuations() {
+        let x = symbol!("series_valuations_x");
+        let input = parse!(
+            "gamma(1+series_valuations_x)/series_valuations_x+exp(series_valuations_x)/series_valuations_x^2+series_valuations_x^3*atan(series_valuations_x)"
+        );
+        let result = input.series(x, 0, 4).unwrap();
+        assert_eq!(result.absolute_order(), 5);
+        let gamma = parse!("gamma(1+series_valuations_x)")
+            .series(x, 0, 5)
+            .unwrap()
+            .to_atom();
+        let expected = (gamma / parse!("series_valuations_x")
+            + parse!(
+                "series_valuations_x^-2+series_valuations_x^-1+1/2+series_valuations_x/6+series_valuations_x^2/24+series_valuations_x^3/120+series_valuations_x^4/720+series_valuations_x^4"
+            ))
+        .expand();
+        let mut expected = expected.series(x, 0, 4).unwrap();
+        expected.truncate_absolute_order(5.into());
+        assert_eq!((result.to_atom() - expected.to_atom()).expand(), Atom::Zero);
     }
 }

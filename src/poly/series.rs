@@ -439,7 +439,7 @@ impl<F: Ring> Series<F> {
     /// Constructs a constant series with infinite precision, for a nonzero constant that is
     /// known exactly. Must be added or multiplied with another finite series.
     #[inline]
-    fn constant_inf_prec(&self, coeff: F::Element) -> Self {
+    pub(crate) fn constant_inf_prec(&self, coeff: F::Element) -> Self {
         Self {
             coefficients: vec![coeff],
             field: self.field.clone(),
@@ -1472,15 +1472,18 @@ impl Series<AtomField> {
             });
         }
 
-        if self.order == 0 {
-            return Ok(self.one_inf_prec()
-                + Series::new(
+        // exp(O(x^a)) = 1 + O(x^a)
+        if self.is_zero() {
+            return Ok(Series::sum([
+                self.one_inf_prec(),
+                Series::new(
                     &self.field,
                     Some(1),
                     self.variable.clone(),
                     self.expansion_point.clone(),
-                    (self.shift as i64, 1).into(),
-                ));
+                    self.absolute_order(),
+                ),
+            ]));
         }
 
         let c = if self.shift == 0 && self.order > 0 {
@@ -1554,7 +1557,7 @@ impl Series<AtomField> {
     /// Expand the logarithm using the leading monomial and the remaining
     /// positive-order terms. Returns an error if no leading coefficient is known.
     pub fn log(&self) -> Result<Self, SeriesError> {
-        if self.order == 0 {
+        if self.is_zero() {
             return Err(SeriesError::MissingLogCoefficient);
         }
 
@@ -1587,13 +1590,14 @@ impl Series<AtomField> {
             });
         }
 
-        if self.order == 0 {
+        // sin(O(x^a)) = O(x^a)
+        if self.is_zero() {
             return Ok(Series::new(
                 &self.field,
                 Some(1),
                 self.variable.clone(),
                 self.expansion_point.clone(),
-                (self.shift as i64, 1).into(),
+                self.absolute_order(),
             ));
         }
 
@@ -1649,15 +1653,18 @@ impl Series<AtomField> {
             });
         }
 
-        if self.order == 0 {
-            return Ok(self.one_inf_prec()
-                + Series::new(
+        // cos(O(x^a)) = 1 + O(x^(2a))
+        if self.is_zero() {
+            return Ok(Series::sum([
+                self.one_inf_prec(),
+                Series::new(
                     &self.field,
                     Some(1),
                     self.variable.clone(),
                     self.expansion_point.clone(),
-                    (self.shift as i64 * 2, 1).into(),
-                ));
+                    self.absolute_order() * &Rational::from(2),
+                ),
+            ]));
         }
 
         let c = if self.shift == 0 {
