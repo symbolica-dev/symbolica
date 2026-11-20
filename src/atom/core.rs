@@ -750,6 +750,47 @@ pub trait AtomCore: private::Sealed + Sized {
             .series(x, expansion_point.as_atom_view(), depth)
     }
 
+    /// Series expand in `x` around `expansion_point` to depth `depth`, for an expression
+    /// whose expansion starts at `x^(-pole_order)` or higher.
+    ///
+    /// [AtomCore::series] finds the order of the leading term of an expression that may
+    /// have a pole with an additional expansion to a low order, and expands deeper when
+    /// the pole is deeper than expected. Giving the order of the pole skips both. A pole
+    /// that is too deep wastes work, and one that is too shallow is corrected by expanding
+    /// again. The pole order does not affect the result, and it is ignored for a relative
+    /// depth.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use symbolica::prelude::*;
+    /// let expr = parse!("1/(exp(x)-1)^2");
+    /// let series = expr.series_with_pole_order(symbol!("x"), 0, 0, 2).unwrap();
+    /// assert_eq!(series.to_atom(), parse!("x^-2 - x^-1 + 5/12"));
+    /// ```
+    fn series_with_pole_order<'a, 'b, T, V, D, P>(
+        &self,
+        x: V,
+        expansion_point: T,
+        depth: D,
+        pole_order: P,
+    ) -> Result<Series<AtomField>, SeriesError>
+    where
+        T: Into<AtomOrView<'b>>,
+        V: Into<BorrowedOrOwned<'a, Indeterminate>>,
+        D: Into<SeriesDepth>,
+        P: Into<Rational>,
+    {
+        let expansion_point = expansion_point.into();
+        let x = x.into();
+        self.as_atom_view().series_with_pole_order(
+            x.borrow(),
+            expansion_point.as_atom_view(),
+            depth.into(),
+            Some(pole_order.into()),
+        )
+    }
+
     /// Find the root of a function in `x` numerically over the reals using Newton's method.
     /// The iteration stops once the Newton step is smaller than `prec` in absolute value,
     /// independent of the overall scale of the function. This does not certify the root.

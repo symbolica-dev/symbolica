@@ -425,20 +425,32 @@ impl AtomView<'_> {
     }
 
     /// Series expand in `x` around `expansion_point` to depth `depth`.
-    ///
-    /// Every subexpression is expanded to the same relative order, which the
-    /// expansion of a sum maintains by expanding its terms deeper when they cancel.
-    /// For an absolute depth, the relative order that the result needs then follows
-    /// from its valuation: a pole of order `p` needs `p` more terms and a zero fewer.
-    /// The valuation is bounded from the structure of the expression, or found with
-    /// a cheap expansion to relative order one if the expression may have a pole.
-    /// If the result still falls short, for example because a cancellation in a
-    /// product was missed, the expansion is repeated deeper.
     pub(crate) fn series(
         &self,
         x: &Indeterminate,
         expansion_point: AtomView,
         depth: SeriesDepth,
+    ) -> Result<Series<AtomField>, SeriesError> {
+        self.series_with_pole_order(x, expansion_point, depth, None)
+    }
+
+    /// Series expand in `x` around `expansion_point` to depth `depth`.
+    ///
+    /// Every subexpression is expanded to the same relative order, which the
+    /// expansion of a sum maintains by expanding its terms deeper when they cancel.
+    /// For an absolute depth, the relative order that the result needs then follows
+    /// from its valuation: a pole of order `p` needs `p` more terms and a zero fewer.
+    /// The valuation is `-pole_order` when it is given. Otherwise it is bounded from
+    /// the structure of the expression, or found with a cheap expansion to relative
+    /// order one if the expression may have a pole. If the result still falls short,
+    /// for example because a cancellation in a product was missed, the expansion is
+    /// repeated deeper. The pole order is ignored for a relative depth.
+    pub(crate) fn series_with_pole_order(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        depth: SeriesDepth,
+        pole_order: Option<Rational>,
     ) -> Result<Series<AtomField>, SeriesError> {
         let order = depth.order();
         if !depth.is_absolute() && (order.is_negative() || order.is_zero()) {
@@ -486,6 +498,8 @@ impl AtomView<'_> {
 
         let mut relative_order = if !depth.is_absolute() {
             target.clone()
+        } else if let Some(pole_order) = pole_order {
+            on_grid(&target + &pole_order)
         } else if let Some((valuation, _)) = self
             .valuation_bound(x, expansion_point)
             .filter(|(valuation, exact)| *exact || !valuation.is_negative())
@@ -2214,6 +2228,39 @@ mod test {
         assert_eq!(add.absolute_order(), (5, 1));
         let mul = &r * &t2;
         assert_eq!(mul.absolute_order(), (11, 1));
+    }
+
+    #[test]
+    fn series_pole_order_does_not_change_the_result() {
+        let x = symbol!("series_pole_order_x");
+        for (text, depth) in [
+            (
+                "1/(exp(series_pole_order_x)-1)^3*sin(series_pole_order_x)^2/(1-cos(series_pole_order_x))",
+                6,
+            ),
+            (
+                "1/(series_pole_order_x^5*(exp(series_pole_order_x)-1-series_pole_order_x-series_pole_order_x^2/2-series_pole_order_x^3/6))",
+                2,
+            ),
+            (
+                "gamma(series_pole_order_x)*gamma(-series_pole_order_x)/series_pole_order_x",
+                1,
+            ),
+            (
+                "(series_pole_order_x-sin(series_pole_order_x))/series_pole_order_x^3",
+                5,
+            ),
+        ] {
+            let input = parse!(text);
+            let expected = input.series(x, 0, depth).unwrap();
+            for pole_order in [-2, 0, 1, 3, 10] {
+                let result = input
+                    .series_with_pole_order(x, 0, depth, pole_order)
+                    .unwrap();
+                assert_eq!(result.to_atom(), expected.to_atom(), "{text}, {pole_order}");
+                assert_eq!(result.absolute_order(), expected.absolute_order());
+            }
+        }
     }
 
     #[test]
