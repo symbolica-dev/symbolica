@@ -5505,7 +5505,7 @@ mod tests {
         assert_eq!(
             parse!("gamma(x)").series(x, 0, 3).unwrap().to_atom(),
             parse!(
-                "-euler_gamma+1/2*x*(euler_gamma^2+1/6*𝜋^2)+1/6*x^2*(-euler_gamma*(euler_gamma^2+1/6*𝜋^2)+polygamma(2,1)-1/3*𝜋^2*euler_gamma)+1/24*x^3*(-2*euler_gamma*polygamma(2,1)-euler_gamma*(polygamma(2,1)-1/3*𝜋^2*euler_gamma)-euler_gamma*(-euler_gamma*(euler_gamma^2+1/6*𝜋^2)+polygamma(2,1)-1/3*𝜋^2*euler_gamma)+1/6*𝜋^2*(euler_gamma^2+1/6*𝜋^2)+11/90*𝜋^4)+1/x"
+                "-euler_gamma+1/2*x*(euler_gamma^2+1/6*𝜋^2)+1/6*x^2*(-2*zeta(3)-euler_gamma^3-1/2*𝜋^2*euler_gamma)+1/24*x^3*(8*euler_gamma*zeta(3)+euler_gamma^4+𝜋^2*euler_gamma^2+3/20*𝜋^4)+1/x"
             )
         );
         assert_eq!(

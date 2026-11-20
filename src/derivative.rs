@@ -1,12 +1,18 @@
 use std::{
+    cell::RefCell,
     ops::{Add, DerefMut, Div, Mul, Sub},
     sync::Arc,
 };
 
+use ahash::HashMap;
+
 use numerica::printer::PrintOptions;
 
 use crate::{
-    atom::{Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol},
+    atom::{
+        Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol,
+        representation::FunView,
+    },
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
     error,
@@ -17,6 +23,50 @@ use crate::{
     },
     state::Workspace,
 };
+
+/// The Taylor coefficients `f^(k)(c)/k!` of a function at a point that have been computed,
+/// the last derivative `f^(k)(y)` they were computed from, and the values at the point
+/// of the functions of `y` that occur in the derivatives.
+struct TaylorCoefficients {
+    derivative: Atom,
+    coefficients: Vec<Atom>,
+    values: HashMap<Atom, Atom>,
+}
+
+thread_local! {
+    /// The Taylor coefficients of functions computed during a call of [AtomView::series], keyed
+    /// by the function of the variable `y` and the point. They are shared by functions that
+    /// occur several times and by the expansions at a higher depth.
+    static TAYLOR_CACHE: RefCell<Option<HashMap<(Atom, Atom), TaylorCoefficients>>> =
+        const { RefCell::new(None) };
+}
+
+/// Enables [TAYLOR_CACHE] until it is dropped, unless an outer scope already enabled it.
+struct TaylorCacheScope {
+    owner: bool,
+}
+
+impl TaylorCacheScope {
+    fn new() -> Self {
+        let owner = TAYLOR_CACHE.with_borrow_mut(|cache| {
+            if cache.is_none() {
+                *cache = Some(HashMap::default());
+                true
+            } else {
+                false
+            }
+        });
+        Self { owner }
+    }
+}
+
+impl Drop for TaylorCacheScope {
+    fn drop(&mut self) {
+        if self.owner {
+            TAYLOR_CACHE.with_borrow_mut(|cache| *cache = None);
+        }
+    }
+}
 
 impl AtomView<'_> {
     /// Take a derivative of the expression with respect to `x`.
@@ -385,6 +435,8 @@ impl AtomView<'_> {
             return Err(SeriesError::NonPositiveRelativeDepth { depth });
         }
 
+        let _taylor_cache = TaylorCacheScope::new();
+
         // heuristic current depth
         let mut current_depth = if order.is_negative() || order.is_zero() {
             Rational::one()
@@ -436,6 +488,124 @@ impl AtomView<'_> {
                 current_depth = &current_depth * &2.into();
             }
         }
+    }
+
+    /// Expand a function `f` with a single argument that depends on `x`, around the constant
+    /// term `c` of the series of that argument: `f(c + p) = sum_k f^(k)(c)/k! p^k`.
+    ///
+    /// The derivatives `f^(k)(y)` are taken with respect to a fresh variable `y`, so that
+    /// they do not contain the derivatives of the argument, and only as many as the powers
+    /// of `p` below the order of the argument require. The coefficients `f^(k)(c)/k!` are
+    /// shared within a call of [AtomView::series].
+    ///
+    /// The derivatives are not collected in `f`, as derivatives of the collected products
+    /// nest and grow exponentially (`gamma`), and they are not expanded, as that grows the
+    /// powers of sums exponentially (`atan`).
+    ///
+    /// Returns `None` when the function has several arguments that depend on `x`, when the
+    /// constant term is unknown or depends on `x`, for `if`, `conj` and `abs`, and when
+    /// `f` of the fresh variable does not normalize to a call of `f`.
+    fn function_taylor_series(
+        f: FunView,
+        args_series: &[Series<AtomField>],
+        x: &Indeterminate,
+    ) -> Option<Series<AtomField>> {
+        // conj and abs are not holomorphic: the old path lets their normalization act on the
+        // expanded argument (conj(x) = x for a real x), which a fresh variable cannot do.
+        if [Symbol::IF, Symbol::CONJ, Symbol::ABS].contains(&f.get_symbol()) {
+            return None;
+        }
+
+        let mut dependent = f
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.contains_indeterminate(x));
+        let (index, _) = dependent.next()?;
+        if dependent.next().is_some() {
+            return None;
+        }
+
+        let arg = &args_series[index];
+        if arg
+            .terms()
+            .any(|(_, c)| c.as_view().contains_indeterminate(x))
+        {
+            return None;
+        }
+        let constant = arg.coefficient(Rational::zero())?;
+
+        let y = Indeterminate::from(crate::symbol!("symbolica::series_taylor_variable"));
+        if f.iter().any(|a| a.contains_indeterminate(&y)) {
+            return None;
+        }
+        let y_atom = Atom::from(y.clone());
+
+        let mut f_y = FunctionBuilder::new(f.get_symbol());
+        for (i, a) in f.iter().enumerate() {
+            f_y = if i == index {
+                f_y.add_arg(&y_atom)
+            } else {
+                f_y.add_arg(a)
+            };
+        }
+        let key = (f_y.finish(), constant);
+
+        // The normalization of f must not depend on the form of the argument.
+        if !matches!(key.0.as_view(), AtomView::Fun(g) if g.get_symbol() == f.get_symbol()) {
+            return None;
+        }
+
+        // Take the entry out of the cache while it is extended, so that the cache is not
+        // borrowed while the derivatives are normalized.
+        let mut taylor = TAYLOR_CACHE
+            .with_borrow_mut(|cache| cache.as_mut().and_then(|cache| cache.remove(&key)))
+            .unwrap_or_else(|| TaylorCoefficients {
+                derivative: key.0.clone(),
+                coefficients: vec![],
+                values: HashMap::default(),
+            });
+
+        let series = arg.compose_taylor(|k| {
+            while taylor.coefficients.len() <= k {
+                let i = taylor.coefficients.len();
+                if i > 0 && !taylor.derivative.is_zero() {
+                    // Distribute numbers over sums, such as the 1/2 in the derivative of
+                    // bessel_j, as nested sums double in size with every derivative.
+                    taylor.derivative = taylor.derivative.as_view().derivative(&y).expand_num();
+                }
+
+                // Substitute y = c. The derivatives repeat the same functions of y, such as
+                // polygamma(k, y), in many terms, so these are evaluated only once.
+                let values = &mut taylor.values;
+                let value = taylor.derivative.replace_map(|term, _, out| {
+                    if term == y_atom.as_view() {
+                        **out = key.1.clone();
+                    } else if matches!(term, AtomView::Fun(_)) && term.contains_indeterminate(&y) {
+                        **out = values
+                            .entry(term.to_owned())
+                            .or_insert_with(|| {
+                                term.replace(Pattern::Literal(y_atom.clone()))
+                                    .with(Pattern::Literal(key.1.clone()))
+                            })
+                            .clone();
+                    }
+                });
+                taylor.coefficients.push(if i > 1 {
+                    value / Atom::num(Integer::factorial(i as u32))
+                } else {
+                    value
+                });
+            }
+            taylor.coefficients[k].clone()
+        });
+
+        TAYLOR_CACHE.with_borrow_mut(|cache| {
+            if let Some(cache) = cache {
+                cache.insert(key, taylor);
+            }
+        });
+
+        Some(series)
     }
 
     /// Series expand in `x` around `expansion_point` to depth `depth`.
@@ -519,6 +689,10 @@ impl AtomView<'_> {
                             return Err(SeriesError::FunctionArgumentPole {
                                 expression: self.to_owned(),
                             });
+                        }
+
+                        if let Some(series) = Self::function_taylor_series(*f, &args_series, x) {
+                            return Ok(series);
                         }
 
                         let mut f_eval = FunctionBuilder::new(f.get_symbol());
@@ -610,6 +784,17 @@ impl AtomView<'_> {
                     }
                 } else {
                     let e = exp.series_impl(x, expansion_point, info)?;
+
+                    // c^e = exp(log(c)*e) for a base c that does not depend on x,
+                    // without expanding the logarithm of the constant series
+                    if !base.contains_indeterminate(x) && !base.is_zero() {
+                        if matches!(base, AtomView::Var(v) if v.get_symbol() == Symbol::E) {
+                            return e.exp();
+                        }
+                        let log_base = FunctionBuilder::new(Symbol::LOG).add_arg(base).finish();
+                        return e.mul_coeff(&log_base).exp();
+                    }
+
                     base_series.pow(&e)
                 }
             }
@@ -1060,6 +1245,101 @@ mod test {
             "1+(-2+v1)*der(1,series_derivative_keeps_function_unevaluated::f,2)+1/2*(-2+v1)^2*der(2,series_derivative_keeps_function_unevaluated::f,2)"
         );
         assert_eq!(t, res);
+    }
+
+    #[test]
+    fn series_function_taylor_coefficients() {
+        let v1 = symbol!("v1");
+
+        // the derivatives of gamma are taken at the constant term of the argument
+        let t = parse!("gamma(1-2*v1+v1^2)")
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
+            .unwrap();
+        assert_eq!(t.absolute_order(), (3, 1));
+        let g = Atom::var(crate::transcendental::euler_gamma());
+        let pi = Atom::var(crate::atom::Symbol::PI);
+        let res = Atom::num(1) + Atom::num(2) * &g * v1 - Atom::var(v1).pow(Atom::num(2)) * &g
+            + Atom::num(2)
+                * Atom::var(v1).pow(Atom::num(2))
+                * (g.clone().pow(Atom::num(2)) + pi.pow(Atom::num(2)) / 6);
+        assert_eq!((t.to_atom() - res).expand(), Atom::num(0));
+
+        // the numbers in the derivatives of bessel_j are distributed
+        let t = parse!("bessel_j(0,v1)")
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(10))
+            .unwrap()
+            .to_atom();
+        assert_eq!(
+            t,
+            parse!("1-1/4*v1^2+1/64*v1^4-1/2304*v1^6+1/147456*v1^8-1/14745600*v1^10")
+        );
+    }
+
+    #[test]
+    fn series_function_of_puiseux_series() {
+        let v1 = symbol!("v1");
+        let t = parse!("atan(v1^(1/2)+v1)")
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(2))
+            .unwrap()
+            .to_atom();
+        assert_eq!(t, parse!("v1^(1/2)+v1-1/3*v1^(3/2)-v1^2-4/5*v1^(5/2)"));
+    }
+
+    #[test]
+    fn series_conj_and_abs_of_real_variable() {
+        // conj and abs simplify on the expanded argument, which a Taylor expansion
+        // in a fresh, non-real variable cannot do
+        let x = symbol!("series_conj_real_x"; Real);
+        let t = parse!("atan(series_conj_real_x)*conj(atan(series_conj_real_x))")
+            .series(x, 0, 6)
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!("series_conj_real_x^2-2/3*series_conj_real_x^4+23/45*series_conj_real_x^6")
+        );
+
+        let t = parse!("conj(sin(series_conj_real_x))")
+            .series(x, 0, 5)
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!("series_conj_real_x-1/6*series_conj_real_x^3+1/120*series_conj_real_x^5")
+        );
+
+        let t = parse!("abs(cosh(series_conj_real_x))")
+            .series(x, 0, 4)
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!("1+1/2*series_conj_real_x^2+1/24*series_conj_real_x^4")
+        );
+    }
+
+    #[test]
+    fn series_function_with_argument_dependent_normalization() {
+        // f(y) for a symbol y normalizes to y^2, so that a Taylor expansion in a fresh
+        // variable would not expand f
+        let v1 = symbol!("v1");
+        let _ = symbol!(
+            "series_argument_norm::f",
+            norm = |input, out| {
+                if let AtomView::Fun(f) = input
+                    && let [AtomView::Var(_)] = f.iter().collect::<Vec<_>>().as_slice()
+                {
+                    **out = f.iter().next().unwrap().to_owned().pow(Atom::num(2));
+                }
+            }
+        );
+
+        let t = parse!("series_argument_norm::f(1+v1)")
+            .series(v1, 0, 2)
+            .unwrap();
+        assert_eq!(
+            t.to_atom(),
+            parse!(
+                "series_argument_norm::f(1)+v1*der(1,series_argument_norm::f,1)+1/2*v1^2*der(2,series_argument_norm::f,1)"
+            )
+        );
     }
 
     #[test]

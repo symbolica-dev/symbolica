@@ -1508,6 +1508,49 @@ impl Series<AtomField> {
         Ok(Series::sum(terms) * &shift_series)
     }
 
+    /// Compose a function `f` with this series, which must not have a pole, using the
+    /// Taylor expansion of `f` around the constant term `c` of the series:
+    /// `f(c + p) = sum_k a_k p^k`, where `p` is the series without its constant term and
+    /// `a_k = f^(k)(c)/k!`.
+    ///
+    /// `taylor_coefficient(k)` must return `a_k`. It is called for increasing `k`, and only
+    /// for the powers `p^k` that have terms below the absolute order of the series, i.e.
+    /// for `k * v < order` with `v` the lowest exponent of `p`. `a_0` is treated as exact,
+    /// so the result is known up to the absolute order of the series.
+    pub(crate) fn compose_taylor(&self, mut taylor_coefficient: impl FnMut(usize) -> Atom) -> Self {
+        let p = if self.coefficients.is_empty() {
+            self.clone()
+        } else {
+            self.clone().remove_constant()
+        };
+
+        // the number of powers of p that have terms below the absolute order, which is
+        // at most the number of grid points below it
+        let n = if p.is_zero() {
+            1
+        } else {
+            let k = (p.absolute_order() / p.get_trailing_exponent()).ceil() - Integer::one();
+            let grid = p.shift as usize + p.order;
+            k.to_i64().map_or(grid, |k| (k.max(1) as usize).min(grid))
+        };
+
+        let mut terms = Vec::with_capacity(n + 1);
+        let constant = taylor_coefficient(0);
+        if !constant.is_zero() {
+            terms.push(self.constant_inf_prec(constant));
+        }
+        for (k, pk) in (1..).zip(p.truncated_powers(n)) {
+            if pk.is_zero() {
+                // keep the order of the empty remainder
+                terms.push(pk);
+            } else {
+                terms.push(pk.mul_coeff(&taylor_coefficient(k)));
+            }
+        }
+
+        Series::sum(terms)
+    }
+
     /// Expand the logarithm using the leading monomial and the remaining
     /// positive-order terms. Returns an error if no leading coefficient is known.
     pub fn log(&self) -> Result<Self, SeriesError> {
