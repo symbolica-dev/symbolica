@@ -764,6 +764,24 @@ impl<F: Ring> Series<F> {
         self
     }
 
+    /// Multiply the series by the exact monomial `(x-p)^exponent`, which keeps the
+    /// relative order and the coefficients.
+    pub(crate) fn mul_monomial(mut self, exponent: &Rational) -> Self {
+        let d = exponent.denominator().to_i64().unwrap() as usize;
+        let n = exponent.numerator().to_i64().unwrap() as isize;
+
+        let ramification = self.ramification;
+        let len = self.coefficients.len();
+        self.change_ramification(d);
+        // drop the zeros that the finer grid appends after the last coefficient
+        let stride = self.ramification / ramification;
+        self.coefficients
+            .truncate(len.saturating_sub(1) * stride + 1);
+
+        self.shift += n * (self.ramification / d) as isize;
+        self
+    }
+
     /// Multiply every stored coefficient by `coeff`, preserving the truncation
     /// information.
     pub fn mul_coeff(mut self, coeff: &F::Element) -> Self {

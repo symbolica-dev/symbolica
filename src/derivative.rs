@@ -4,14 +4,14 @@ use std::{
     sync::Arc,
 };
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 
 use numerica::printer::PrintOptions;
 
 use crate::{
     atom::{
         Atom, AtomCore, AtomView, FunctionBuilder, Indeterminate, InlineVar, Symbol,
-        representation::FunView,
+        representation::{AddView, FunView},
     },
     coefficient::{Coefficient, CoefficientView},
     domains::{Ring, atom::AtomField, integer::Integer, rational::Rational},
@@ -33,38 +33,130 @@ struct TaylorCoefficients {
     values: HashMap<Atom, Atom>,
 }
 
-thread_local! {
-    /// The Taylor coefficients of functions computed during a call of [AtomView::series], keyed
-    /// by the function of the variable `y` and the point. They are shared by functions that
-    /// occur several times and by the expansions at a higher depth.
-    static TAYLOR_CACHE: RefCell<Option<HashMap<(Atom, Atom), TaylorCoefficients>>> =
-        const { RefCell::new(None) };
+/// The caches of a call of [AtomView::series].
+struct SeriesCache {
+    /// The variable of the expansion.
+    x: Indeterminate,
+    /// The point of the expansion.
+    expansion_point: Atom,
+    /// The expression that is expanded.
+    expression: Atom,
+    /// The valuation bounds of the terms of the expression, if it is a sum. The driver
+    /// needs them to choose the order of the expansion, and the expansion of the sum
+    /// to choose the orders of its terms.
+    term_bounds: Option<Vec<Option<(Rational, bool)>>>,
+    hash_state: ahash::RandomState,
+    /// The Taylor coefficients of functions, keyed by the function of the variable `y`
+    /// and the point. They are shared by functions that occur several times and by
+    /// the expansions to a higher order.
+    taylor: HashMap<(Atom, Atom), TaylorCoefficients>,
+    /// The hashes of the subexpressions with `x` that occur more than once.
+    repeated: HashSet<u64>,
+    /// The expansions of the repeated subexpressions, keyed by their hash and the
+    /// relative order of the expansion, which determine the expansion.
+    expansions: HashMap<(u64, Rational), Vec<(Atom, Series<AtomField>)>>,
 }
 
-/// Enables [TAYLOR_CACHE] until it is dropped, unless an outer scope already enabled it.
-struct TaylorCacheScope {
-    owner: bool,
-}
+impl SeriesCache {
+    /// Create the caches for the expansion of `e` in `x` around `expansion_point`.
+    fn new(e: AtomView, x: &Indeterminate, expansion_point: AtomView) -> Self {
+        let mut cache = SeriesCache {
+            x: x.clone(),
+            expansion_point: expansion_point.to_owned(),
+            expression: e.to_owned(),
+            term_bounds: None,
+            hash_state: crate::utils::thread_local_hash_state(),
+            taylor: HashMap::default(),
+            repeated: HashSet::default(),
+            expansions: HashMap::default(),
+        };
+        cache.find_repeated(e, &mut HashSet::default());
+        cache
+    }
 
-impl TaylorCacheScope {
-    fn new() -> Self {
-        let owner = TAYLOR_CACHE.with_borrow_mut(|cache| {
-            if cache.is_none() {
-                *cache = Some(HashMap::default());
-                true
-            } else {
-                false
+    /// Record the hashes of the subexpressions of `e` with `x` that were `seen` before.
+    fn find_repeated(&mut self, e: AtomView, seen: &mut HashSet<u64>) {
+        if matches!(e, AtomView::Num(_) | AtomView::Var(_)) || !e.contains_indeterminate(&self.x) {
+            return;
+        }
+
+        let hash = self.hash_state.hash_one(e);
+        if !seen.insert(hash) {
+            // the subexpressions were visited at the first occurrence
+            self.repeated.insert(hash);
+            return;
+        }
+
+        match e {
+            AtomView::Fun(f) => f.iter().for_each(|a| self.find_repeated(a, seen)),
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+                self.find_repeated(base, seen);
+                self.find_repeated(exp, seen);
             }
-        });
-        Self { owner }
+            AtomView::Mul(m) => m.iter().for_each(|a| self.find_repeated(a, seen)),
+            AtomView::Add(a) => a.iter().for_each(|a| self.find_repeated(a, seen)),
+            AtomView::Num(_) | AtomView::Var(_) => {}
+        }
+    }
+
+    /// Get the valuation bounds of the terms of `e`, if it is the expression that is
+    /// expanded and the bounds were found.
+    fn term_bounds(
+        &self,
+        e: AtomView,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+    ) -> Option<Vec<Option<(Rational, bool)>>> {
+        if *x != self.x || expansion_point != self.expansion_point || e != self.expression.as_view()
+        {
+            return None;
+        }
+        self.term_bounds.clone()
+    }
+
+    /// Get the key of the expansion of `e` with the settings `info`, if `e` is repeated.
+    fn key(
+        &self,
+        e: AtomView,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Option<(u64, Rational)> {
+        if self.repeated.is_empty() || *x != self.x || expansion_point != self.expansion_point {
+            return None;
+        }
+
+        let hash = self.hash_state.hash_one(e);
+        self.repeated
+            .contains(&hash)
+            .then(|| (hash, info.relative_order()))
     }
 }
 
-impl Drop for TaylorCacheScope {
+thread_local! {
+    /// The caches of the call of [AtomView::series] in progress.
+    static SERIES_CACHE: RefCell<Option<SeriesCache>> = const { RefCell::new(None) };
+}
+
+/// Enables [SERIES_CACHE] until it is dropped. A previous cache, of an outer call of
+/// [AtomView::series] that may expand in another variable, is restored afterwards.
+struct SeriesCacheScope {
+    previous: Option<SeriesCache>,
+}
+
+impl SeriesCacheScope {
+    fn new(e: AtomView, x: &Indeterminate, expansion_point: AtomView) -> Self {
+        let cache = SeriesCache::new(e, x, expansion_point);
+        let previous = SERIES_CACHE.with_borrow_mut(|c| c.replace(cache));
+        Self { previous }
+    }
+}
+
+impl Drop for SeriesCacheScope {
     fn drop(&mut self) {
-        if self.owner {
-            TAYLOR_CACHE.with_borrow_mut(|cache| *cache = None);
-        }
+        let previous = self.previous.take();
+        SERIES_CACHE.with_borrow_mut(|c| *c = previous);
     }
 }
 
@@ -457,7 +549,7 @@ impl AtomView<'_> {
             return Err(SeriesError::NonPositiveRelativeDepth { depth });
         }
 
-        let _taylor_cache = TaylorCacheScope::new();
+        let _cache = SeriesCacheScope::new(*self, x, expansion_point);
 
         // Preserve unresolved symbolic coefficients during expansion. Negative
         // exponents below retry only when the trailing coefficient is proven zero.
@@ -501,7 +593,7 @@ impl AtomView<'_> {
         } else if let Some(pole_order) = pole_order {
             on_grid(&target + &pole_order)
         } else if let Some((valuation, _)) = self
-            .valuation_bound(x, expansion_point)
+            .root_valuation_bound(x, expansion_point)
             .filter(|(valuation, exact)| *exact || !valuation.is_negative())
         {
             on_grid(&target - &valuation)
@@ -606,6 +698,35 @@ impl AtomView<'_> {
         }
     }
 
+    /// Find [Self::valuation_bound] of the expression that [Self::series_with_pole_order]
+    /// expands. If it is a sum, the bounds of its terms are kept for [Self::term_infos].
+    fn root_valuation_bound(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+    ) -> Option<(Rational, bool)> {
+        let AtomView::Add(args) = self else {
+            return self.valuation_bound(x, expansion_point);
+        };
+
+        let bounds = args
+            .iter()
+            .map(|arg| arg.valuation_bound_impl(x, expansion_point))
+            .collect::<Vec<_>>();
+        let bound = sum_valuation_bound(bounds.iter().cloned());
+        SERIES_CACHE.with_borrow_mut(|cache| {
+            if let Some(cache) = cache {
+                cache.term_bounds = Some(
+                    bounds
+                        .into_iter()
+                        .map(ValuationBound::into_option)
+                        .collect(),
+                );
+            }
+        });
+        bound.into_option()
+    }
+
     /// Bound the valuation as [Self::valuation_bound] does, in a single pass over the
     /// expression that also finds the subexpressions without `x`.
     fn valuation_bound_impl(&self, x: &Indeterminate, expansion_point: AtomView) -> ValuationBound {
@@ -641,19 +762,10 @@ impl AtomView<'_> {
                     ValuationBound::Bound(valuation, exact)
                 }
             }
-            AtomView::Add(args) => {
-                let mut constant = true;
-                let lowest = lowest_valuation_bound(args.iter().map(|arg| {
-                    let bound = arg.valuation_bound_impl(x, expansion_point);
-                    constant &= matches!(bound, ValuationBound::Constant);
-                    bound.into_option()
-                }));
-                match lowest {
-                    _ if constant => ValuationBound::Constant,
-                    Some(Some((v, exact))) => ValuationBound::Bound(v, exact),
-                    _ => ValuationBound::Unknown,
-                }
-            }
+            AtomView::Add(args) => sum_valuation_bound(
+                args.iter()
+                    .map(|arg| arg.valuation_bound_impl(x, expansion_point)),
+            ),
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
                 let base_bound = base.valuation_bound_impl(x, expansion_point);
@@ -748,21 +860,6 @@ impl AtomView<'_> {
         }
     }
 
-    /// Series expand `self` like [Self::series_impl], but return `None` for a constant
-    /// that does not depend on `x`, which has no truncation error.
-    fn series_impl_or_exact(
-        &self,
-        x: &Indeterminate,
-        expansion_point: AtomView,
-        info: &Series<AtomField>,
-    ) -> Result<Option<Series<AtomField>>, SeriesError> {
-        if self.contains_indeterminate(x) {
-            self.series_impl(x, expansion_point, info).map(Some)
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Series expand in `x` around `expansion_point` to the relative order of `info`.
     ///
     /// Unless the result is empty, its relative order is at least that of `info`:
@@ -792,6 +889,42 @@ impl AtomView<'_> {
             ]));
         }
 
+        // A subexpression that occurs more than once is expanded once per order.
+        let cached = SERIES_CACHE.with_borrow(|cache| {
+            let cache = cache.as_ref()?;
+            let key = cache.key(*self, x, expansion_point, info)?;
+            let series = cache
+                .expansions
+                .get(&key)
+                .and_then(|e| e.iter().find(|(a, _)| a.as_view() == *self))
+                .map(|(_, s)| s.clone());
+            Some((key, series))
+        });
+
+        match cached {
+            Some((_, Some(series))) => Ok(series),
+            Some((key, None)) => {
+                let series = self.series_expand(x, expansion_point, info)?;
+                SERIES_CACHE.with_borrow_mut(|cache| {
+                    if let Some(cache) = cache {
+                        let e = cache.expansions.entry(key).or_default();
+                        e.push((self.to_owned(), series.clone()));
+                    }
+                });
+                Ok(series)
+            }
+            None => self.series_expand(x, expansion_point, info),
+        }
+    }
+
+    /// Series expand an expression that depends on `x` and is not `x`, see
+    /// [Self::series_impl].
+    fn series_expand(
+        &self,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Result<Series<AtomField>, SeriesError> {
         match self {
             AtomView::Num(_) | AtomView::Var(_) => Ok(info.constant(self.to_owned())),
             AtomView::Fun(_) => {
@@ -813,6 +946,15 @@ impl AtomView<'_> {
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
+
+                // a power of `x` is a monomial at expansion point zero
+                if *x == base
+                    && expansion_point.is_zero()
+                    && let AtomView::Num(n) = exp
+                    && let CoefficientView::Natural(n, d, 0, _) = n.get_coeff_view()
+                {
+                    return Ok(info.monomial(info.get_field().one(), (n, d).into()));
+                }
 
                 let mut base_series = base.series_impl(x, expansion_point, info)?;
 
@@ -864,18 +1006,20 @@ impl AtomView<'_> {
                         })
                     }
                 } else {
-                    let e = exp.series_impl(x, expansion_point, info)?;
-
                     // c^e = exp(log(c)*e) for a base c that does not depend on x,
-                    // without expanding the logarithm of the constant series
+                    // without expanding the logarithm of the constant series, and
+                    // b^c = exp(log(b)*c) for an exponent c that does not depend on x
                     let mut exponent = if !base.contains_indeterminate(x) && !base.is_zero() {
+                        let e = exp.series_impl(x, expansion_point, info)?;
                         if matches!(base, AtomView::Var(v) if v.get_symbol() == Symbol::E) {
                             e
                         } else {
                             e.mul_coeff(&FunctionBuilder::new(Symbol::LOG).add_arg(base).finish())
                         }
+                    } else if !exp.contains_indeterminate(x) {
+                        base_series.log()?.mul_coeff(&exp.to_owned())
                     } else {
-                        &base_series.log()? * &e
+                        &base_series.log()? * &exp.series_impl(x, expansion_point, info)?
                     };
 
                     // The exponential of a series without poles is nonzero, so its relative
@@ -887,26 +1031,83 @@ impl AtomView<'_> {
                 }
             }
             AtomView::Mul(args) => {
-                let mut iter = args.iter();
-                let mut series = iter.next().unwrap().series_impl(x, expansion_point, info)?;
-                for arg in iter {
-                    series = &series * &arg.series_impl(x, expansion_point, info)?;
+                // At expansion point zero, a power of `x` only shifts the exponents
+                // of the product of the other factors.
+                let monomial_exponent = |arg: AtomView| -> Option<Rational> {
+                    if *x == arg {
+                        return Some(Rational::one());
+                    }
+                    if let AtomView::Pow(p) = arg
+                        && let (base, AtomView::Num(n)) = p.get_base_exp()
+                        && *x == base
+                        && let CoefficientView::Natural(n, d, 0, _) = n.get_coeff_view()
+                    {
+                        return Some((n, d).into());
+                    }
+                    None
+                };
+                let shift_monomials = expansion_point.is_zero()
+                    && args.iter().any(|arg| {
+                        arg.contains_indeterminate(x) && monomial_exponent(arg).is_none()
+                    });
+
+                // A factor without `x` is multiplied into the coefficients of the
+                // product of the factors before it, which gives the same coefficients
+                // as a product with a constant series. Leading factors without `x`
+                // are multiplied into the first series.
+                let mut series: Option<Series<AtomField>> = None;
+                let mut leading = vec![];
+                let mut shift = Rational::zero();
+                for arg in args.iter() {
+                    if !arg.contains_indeterminate(x) {
+                        match series {
+                            Some(s) => series = Some(s.mul_coeff(&arg.to_owned())),
+                            None => leading.push(arg),
+                        }
+                        continue;
+                    }
+
+                    if shift_monomials && let Some(e) = monomial_exponent(arg) {
+                        shift += &e;
+                        continue;
+                    }
+
+                    let mut s = arg.series_impl(x, expansion_point, info)?;
+                    if !leading.is_empty() {
+                        s = s.mul_coeff(&Atom::product(leading.drain(..)));
+                    }
+                    series = Some(match series {
+                        Some(prev) => &prev * &s,
+                        None => s,
+                    });
                 }
 
-                Ok(series)
+                // A product with `x` that is not `x` has a factor with `x` that is
+                // expanded as a series, as a monomial is only shifted if there is one.
+                let series = series.unwrap();
+                Ok(if shift.is_zero() {
+                    series
+                } else {
+                    series.mul_monomial(&shift)
+                })
             }
             AtomView::Add(args) => {
                 // The sum is needed up to its valuation plus the relative order, so a term
                 // with a higher valuation than the lowest one is needed to a lower relative
                 // order. Terms without `x` are exact, so that they do not limit the order.
                 let term_infos = self.term_infos(x, expansion_point, info);
+                let mut shared = SharedFactors::new(*args, x);
                 let mut terms = Vec::with_capacity(args.get_nargs());
                 let mut exact = Vec::with_capacity(args.get_nargs());
-                for (arg, term_info) in args.iter().zip(&term_infos) {
+                for (i, (arg, term_info)) in args.iter().zip(&term_infos).enumerate() {
                     let term_info = term_info.as_ref().unwrap_or(info);
-                    let term = arg.series_impl_or_exact(x, expansion_point, term_info)?;
-                    exact.push(term.is_none());
-                    terms.push(term.unwrap_or_else(|| info.constant_inf_prec(arg.to_owned())));
+                    if !arg.contains_indeterminate(x) {
+                        exact.push(true);
+                        terms.push(info.constant_inf_prec(arg.to_owned()));
+                        continue;
+                    }
+                    exact.push(false);
+                    terms.push(shared.expand(i, arg, x, expansion_point, term_info)?);
                 }
 
                 // If the leading terms cancel, the sum is known to a lower relative order
@@ -955,7 +1156,9 @@ impl AtomView<'_> {
                     } else {
                         sum.get_trailing_exponent() + &relative_order
                     };
-                    for ((term, arg), exact) in terms.iter_mut().zip(args).zip(&exact) {
+                    for (i, ((term, arg), exact)) in
+                        terms.iter_mut().zip(args).zip(&exact).enumerate()
+                    {
                         if *exact || term.absolute_order() >= required {
                             continue;
                         }
@@ -967,7 +1170,9 @@ impl AtomView<'_> {
                         } else {
                             &required - &term.get_trailing_exponent()
                         };
-                        *term = arg.series_impl(
+                        *term = shared.expand(
+                            i,
+                            arg,
                             x,
                             expansion_point,
                             &with_relative_order(info, &term_order),
@@ -1003,11 +1208,20 @@ impl AtomView<'_> {
         }
 
         // The exact valuation of every term, or a lower bound if it is unknown.
+        let bounds = SERIES_CACHE.with_borrow(|cache| {
+            cache
+                .as_ref()
+                .and_then(|cache| cache.term_bounds(*self, x, expansion_point))
+        });
         let probe_info = with_relative_order(info, &Rational::one());
         let valuations = args
             .iter()
-            .map(|arg| {
-                let bound = arg.valuation_bound(x, expansion_point);
+            .enumerate()
+            .map(|(i, arg)| {
+                let bound = match &bounds {
+                    Some(bounds) => bounds[i].clone(),
+                    None => arg.valuation_bound(x, expansion_point),
+                };
                 if let Some((v, true)) = bound {
                     return Some((v, true));
                 }
@@ -1110,8 +1324,8 @@ impl AtomView<'_> {
 
         // Take the entry out of the cache while it is extended, so that the cache is not
         // borrowed while the derivatives are normalized.
-        let mut taylor = TAYLOR_CACHE
-            .with_borrow_mut(|cache| cache.as_mut().and_then(|cache| cache.remove(&key)))
+        let mut taylor = SERIES_CACHE
+            .with_borrow_mut(|cache| cache.as_mut().and_then(|cache| cache.taylor.remove(&key)))
             .unwrap_or_else(|| TaylorCoefficients {
                 derivative: key.0.clone(),
                 coefficients: vec![],
@@ -1152,9 +1366,9 @@ impl AtomView<'_> {
             taylor.coefficients[k].clone()
         });
 
-        TAYLOR_CACHE.with_borrow_mut(|cache| {
+        SERIES_CACHE.with_borrow_mut(|cache| {
             if let Some(cache) = cache {
-                cache.insert(key, taylor);
+                cache.taylor.insert(key, taylor);
             }
         });
 
@@ -1441,7 +1655,96 @@ impl AtomView<'_> {
     }
 }
 
+/// The terms of a sum that differ only in their factors without `x` share the
+/// expansion of their factors with `x`: `c_1*g + c_2*g` expands `g` once. Each term
+/// multiplies it by its own factors without `x`, so that the coefficients of terms that
+/// cancel, such as `a*y + b*y - a*y - b*y`, stay syntactically equal.
+struct SharedFactors {
+    /// For every term, its group of terms with the same factors with `x` and the
+    /// product of its factors without `x`, if it shares its factors with another term.
+    groups: Vec<Option<(usize, Option<Atom>)>>,
+    /// The product of the factors with `x` of every group.
+    factors: Vec<Atom>,
+    /// The expansions of the factors with `x`, per group and relative order.
+    expansions: HashMap<(usize, Rational), Series<AtomField>>,
+}
+
+impl SharedFactors {
+    /// Find the terms of the sum `args` that share their factors with `x`.
+    fn new(args: AddView, x: &Indeterminate) -> Self {
+        // the factors with `x` and the factors without `x` of every term
+        let mut members: HashMap<Vec<AtomView>, Vec<usize>> = HashMap::default();
+        let mut constants = Vec::with_capacity(args.get_nargs());
+        for (i, arg) in args.iter().enumerate() {
+            let (factors, constant) = match arg {
+                AtomView::Mul(m) => m.iter().partition(|a| a.contains_indeterminate(x)),
+                _ if arg.contains_indeterminate(x) => (vec![arg], vec![]),
+                _ => (vec![], vec![]),
+            };
+            if !factors.is_empty() {
+                members.entry(factors).or_default().push(i);
+            }
+            constants.push(constant);
+        }
+
+        let mut groups = vec![None; args.get_nargs()];
+        let mut factors = vec![];
+        for (shared, terms) in members {
+            if terms.len() < 2 {
+                continue;
+            }
+
+            for i in terms {
+                let constant = std::mem::take(&mut constants[i]);
+                let constant = (!constant.is_empty()).then(|| Atom::product(constant));
+                groups[i] = Some((factors.len(), constant));
+            }
+            factors.push(Atom::product(shared));
+        }
+
+        SharedFactors {
+            groups,
+            factors,
+            expansions: HashMap::default(),
+        }
+    }
+
+    /// Series expand the term `arg` with index `i` of the sum to the relative order
+    /// of `info`.
+    fn expand(
+        &mut self,
+        i: usize,
+        arg: AtomView,
+        x: &Indeterminate,
+        expansion_point: AtomView,
+        info: &Series<AtomField>,
+    ) -> Result<Series<AtomField>, SeriesError> {
+        let Some((group, constant)) = &self.groups[i] else {
+            return arg.series_impl(x, expansion_point, info);
+        };
+
+        let key = (*group, info.relative_order());
+        let series = match self.expansions.get(&key) {
+            Some(series) => series.clone(),
+            None => {
+                let series =
+                    self.factors[*group]
+                        .as_view()
+                        .series_impl(x, expansion_point, info)?;
+                self.expansions.insert(key, series.clone());
+                series
+            }
+        };
+
+        Ok(match constant {
+            Some(constant) => series.mul_coeff(constant),
+            None => series,
+        })
+    }
+}
+
 /// A lower bound on the valuation of a series, found from the structure of its expression.
+#[derive(Clone)]
 enum ValuationBound {
     /// The expression does not depend on the variable.
     Constant,
@@ -1459,6 +1762,20 @@ impl ValuationBound {
             ValuationBound::Bound(v, exact) => Some((v, exact)),
             ValuationBound::Unknown => None,
         }
+    }
+}
+
+/// Combine the valuation bounds of the terms of a sum into a bound for the sum.
+fn sum_valuation_bound(bounds: impl Iterator<Item = ValuationBound>) -> ValuationBound {
+    let mut constant = true;
+    let lowest = lowest_valuation_bound(bounds.map(|bound| {
+        constant &= matches!(bound, ValuationBound::Constant);
+        bound.into_option()
+    }));
+    match lowest {
+        _ if constant => ValuationBound::Constant,
+        Some(Some((v, exact))) => ValuationBound::Bound(v, exact),
+        _ => ValuationBound::Unknown,
     }
 }
 
@@ -1754,7 +2071,7 @@ mod test {
     use crate::{
         atom::{Atom, AtomCore, AtomView},
         parse,
-        poly::series::SeriesDepth,
+        poly::series::{Series, SeriesDepth},
         symbol,
     };
 
@@ -2050,6 +2367,91 @@ mod test {
                 "series_argument_norm::f(1)+v1*der(1,series_argument_norm::f,1)+1/2*v1^2*der(2,series_argument_norm::f,1)"
             )
         );
+    }
+
+    #[test]
+    fn series_repeated_subexpressions() {
+        let v1 = symbol!("v1");
+        let terms = [
+            "a*exp(v1+v1^2)/(1+v1)",
+            "b*exp(v1+v1^2)/(1+v1)^2",
+            "exp(v1+v1^2)*sin(v1)/v1^2",
+        ]
+        .map(|t| parse!(t));
+
+        let whole = Atom::sum(&terms)
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(5))
+            .unwrap();
+        let parts = Series::sum(terms.map(|t| {
+            t.series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(5))
+                .unwrap()
+        }));
+
+        assert_eq!((whole.to_atom() - parts.to_atom()).expand(), Atom::Zero);
+        assert_eq!(whole.absolute_order(), parts.absolute_order());
+    }
+
+    #[test]
+    fn series_grouped_terms() {
+        let v1 = symbol!("v1");
+        let t = parse!("a*exp(v1)*sin(v1)+b*sin(v1)*exp(v1)+c*v1^2+d*v1^2+e")
+            .series(v1, Atom::num(0).as_view(), SeriesDepth::absolute(4))
+            .unwrap();
+
+        let res = parse!("(a+b)*(v1+v1^2+1/3*v1^3)+(c+d)*v1^2+e");
+        assert!((t.to_atom() - res).expand().is_zero());
+        assert_eq!(t.absolute_order(), (5, 1));
+    }
+
+    #[test]
+    fn series_grouped_terms_that_cancel() {
+        // The terms with exp(y*v1) and with 1+y*v1 cancel in their first orders. Each
+        // term keeps its own constant factor, so that a*y+b*y-a*y-b*y normalizes to 0
+        // and the leading terms are found.
+        let v1 = symbol!("v1");
+        let t = parse!("a*exp(y*v1)+b*exp(y*v1)-a*(1+y*v1)-b*(1+y*v1)")
+            .series(v1, 0, SeriesDepth::relative(3))
+            .unwrap();
+        let res = parse!("(a+b)*(y^2/2*v1^2+y^3/6*v1^3+y^4/24*v1^4)");
+        assert!((t.to_atom() - res).expand().is_zero());
+        assert_eq!(t.absolute_order(), 5);
+
+        let t = parse!("a*exp(y*v1)+b*exp(y*v1)-a*exp(y*v1+v1^9)-b*exp(y*v1+v1^9)")
+            .series(v1, 0, SeriesDepth::relative(2))
+            .unwrap();
+        let res = parse!("-(a+b)*(v1^9+y*v1^10)");
+        assert!((t.to_atom() - res).expand().is_zero());
+        assert_eq!(t.absolute_order(), 11);
+
+        // a function of such a sum needs its leading term
+        let t = parse!(
+            "log(a*exp(y*v1)+b*exp(y*v1)-a*(1+y*v1)-b*(1+y*v1))-log(v1^2*(a/2*y^2+b/2*y^2))"
+        )
+        .series(v1, 0, 2)
+        .unwrap();
+        assert_eq!(t.absolute_order(), 3);
+        let res = parse!("y/3*v1+y^2/36*v1^2");
+        assert!((t.to_atom() - res).together().is_zero());
+        let a = parse!("a*exp(y*v1)/v1^2+b*exp(y*v1)/v1^2-a*(1+y*v1)/v1^2-b*(1+y*v1)/v1^2");
+        let t = crate::function!(crate::atom::Symbol::SIN, a)
+            .series(v1, 0, 2)
+            .unwrap();
+        assert_eq!(t.absolute_order(), 3);
+    }
+
+    #[test]
+    fn series_linear_function() {
+        // lin(1+v1) normalizes to lin(1)+lin(v1), so that the Taylor coefficients must
+        // be taken at the point of the argument of lin(v1).
+        let v1 = symbol!("v1");
+        let _ = symbol!("series_linear_function::lin"; Linear);
+        let t = parse!("series_linear_function::lin(1+v1)")
+            .series(v1, 1, 2)
+            .unwrap();
+        let res = parse!(
+            "2*series_linear_function::lin(1)+(v1-1)*der(1,series_linear_function::lin,1)+1/2*(v1-1)^2*der(2,series_linear_function::lin,1)"
+        );
+        assert!((t.to_atom() - res).expand().is_zero());
     }
 
     #[test]
