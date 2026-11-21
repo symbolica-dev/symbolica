@@ -1010,7 +1010,21 @@ impl AtomView<'_> {
                     // without expanding the logarithm of the constant series, and
                     // b^c = exp(log(b)*c) for an exponent c that does not depend on x
                     let mut exponent = if !base.contains_indeterminate(x) && !base.is_zero() {
-                        let e = exp.series_impl(x, expansion_point, info)?;
+                        let mut e = exp.series_impl(x, expansion_point, info)?;
+                        // An exponent without terms that is known up to a negative order
+                        // may or may not have a pole. Expand it deeper.
+                        let mut current_depth = info.relative_order().max(Rational::one());
+                        while e.is_zero()
+                            && e.absolute_order().is_negative()
+                            && current_depth < 1000
+                        {
+                            current_depth = &current_depth * &2.into();
+                            e = exp.series_impl(
+                                x,
+                                expansion_point,
+                                &with_relative_order(info, &current_depth),
+                            )?;
+                        }
                         if matches!(base, AtomView::Var(v) if v.get_symbol() == Symbol::E) {
                             e
                         } else {
@@ -1248,10 +1262,10 @@ impl AtomView<'_> {
             .iter()
             .map(|v| {
                 let (v, _) = v.as_ref().filter(|(v, _)| *v > lowest)?;
-                // Keep a positive relative order, so that the term still bounds the order
-                // of the sum.
-                let term_order = (&relative_order + &lowest - v)
-                    .max(Rational::from((1, info.get_ramification() as i64)));
+                // Keep at least the relative order of the probe, which is known to give
+                // the term with its leading coefficient. A lower order may leave a sum in
+                // the argument of exp, sin or cos with only a negative absolute order.
+                let term_order = (&relative_order + &lowest - v).max(Rational::one());
                 Some(with_relative_order(info, &term_order))
             })
             .collect()
@@ -1387,9 +1401,12 @@ impl AtomView<'_> {
         info: &Series<AtomField>,
         series: &mut Series<AtomField>,
     ) -> Result<bool, SeriesError> {
+        // An argument without a constant term, such as that of gamma at its pole 0 or of
+        // polylog, is also used as if it were exact, so it too must be known to the
+        // relative order.
         if !self.contains_indeterminate(x)
             || series.is_zero()
-            || !series.get_trailing_exponent().is_zero()
+            || series.get_trailing_exponent().is_negative()
         {
             return Ok(false);
         }
@@ -1403,10 +1420,11 @@ impl AtomView<'_> {
                 .terms()
                 .find(|(e, c)| *e > 0 && !c.is_zero())
                 .map(|(e, _)| e);
+            let trailing = series.get_trailing_exponent().max(Rational::zero());
             depth = match rest {
                 Some(v) if series.absolute_order() >= &v + &relative_order => break,
                 _ if depth >= 1000 => break,
-                Some(v) => (&v + &relative_order).max(&depth + &Rational::one()),
+                Some(v) => (&v + &relative_order - &trailing).max(&depth + &Rational::one()),
                 None => &depth * &2.into(),
             };
             *series = self.series_impl(x, expansion_point, &with_relative_order(info, &depth))?;
@@ -1446,13 +1464,19 @@ impl AtomView<'_> {
             info
         };
 
+        // Any other function needs an argument without terms deeper only if it is known
+        // up to a negative order, as it may or may not have a pole.
+        let needs_deeper = |s: &Series<AtomField>| {
+            s.is_zero() && (needs_leading_term || s.absolute_order().is_negative())
+        };
+
         let mut args_series = Vec::with_capacity(f.get_nargs());
         for arg in f {
             let mut arg_series = arg.series_impl(x, expansion_point, info)?;
-            if needs_leading_term && arg_series.is_zero() && arg.contains_indeterminate(x) {
+            if needs_deeper(&arg_series) && arg.contains_indeterminate(x) {
                 // Start from at least one, as doubling zero does not grow.
                 let mut current_depth = info.relative_order().max(Rational::one());
-                while arg_series.is_zero() && current_depth < 1000 {
+                while needs_deeper(&arg_series) && current_depth < 1000 {
                     current_depth = &current_depth * &2.into();
                     arg_series = arg.series_impl(
                         x,
@@ -2808,6 +2832,79 @@ mod test {
             parse!("series_relative_leading_x^2-series_relative_leading_x^4/2")
         );
         assert_eq!(t.relative_order(), 3);
+    }
+
+    #[test]
+    fn series_low_order_term_with_cancelling_argument() {
+        // The cos and exp terms have a higher valuation than the pole, so they are needed
+        // to a lower relative order than the sum, but their arguments only cancel their
+        // poles at the relative order at which their valuation was found.
+        let v1 = symbol!("v1");
+        for (text, depth, pole_order, expected) in [
+            (
+                "1/v1^4+cos(1/v1^2-1/sin(v1)^2)",
+                SeriesDepth::absolute((-3, 4)),
+                None,
+                "v1^-4",
+            ),
+            (
+                "1/v1^4+cos(1/v1^2-1/sin(v1)^2)",
+                SeriesDepth::relative((9, 4)),
+                None,
+                "v1^-4",
+            ),
+            (
+                "v1^(-7/2)+exp(1/v1^2-1/sin(v1)^2)",
+                SeriesDepth::absolute((-1, 2)),
+                None,
+                "v1^(-7/2)",
+            ),
+            (
+                "1/v1^2+exp(1/v1-1/sin(v1))",
+                SeriesDepth::absolute((3, 4)),
+                Some(-1),
+                "v1^-2+1",
+            ),
+            // the argument only has its constant term after the cancellation of 9 orders
+            (
+                "atan((sin(v1)-v1+v1^3/6-v1^5/120+v1^7/5040)/v1^9)",
+                SeriesDepth::absolute(0),
+                None,
+                "atan(1/362880)",
+            ),
+            (
+                "2^((sin(v1)-v1+v1^3/6-v1^5/120+v1^7/5040)/v1^9)",
+                SeriesDepth::absolute(0),
+                None,
+                "2^(1/362880)",
+            ),
+        ] {
+            let input = parse!(text);
+            let result = match pole_order {
+                Some(p) => input.series_with_pole_order(v1, 0, depth.clone(), p),
+                None => input.series(v1, 0, depth.clone()),
+            }
+            .unwrap();
+            assert_eq!(result.to_atom(), parse!(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn series_custom_function_of_argument_without_constant_term() {
+        // The argument loses relative order to cancellations. The custom series of polylog,
+        // and those of gamma, cot and polygamma at their pole 0, use the truncated argument
+        // as if it were exact, so it must be known to the relative order.
+        let v1 = symbol!("v1");
+        let z = "(sin(v1)-v1+v1^3/6-v1^5/120+v1^6)";
+        for (text, depth, expected) in [
+            (format!("polylog(2,{z})"), 7, "v1^6-v1^7/5040"),
+            (format!("gamma({z})"), -5, "v1^-6+v1^-5/5040"),
+            (format!("cot({z})"), -5, "v1^-6+v1^-5/5040"),
+            (format!("polygamma(0,{z})"), -5, "-v1^-6-v1^-5/5040"),
+        ] {
+            let result = parse!(text.as_str()).series(v1, 0, depth).unwrap();
+            assert_eq!(result.to_atom(), parse!(expected), "{text}");
+        }
     }
 
     #[test]
