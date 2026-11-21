@@ -1424,6 +1424,11 @@ impl AtomView<'_> {
             depth = match rest {
                 Some(v) if series.absolute_order() >= &v + &relative_order => break,
                 _ if depth >= 1000 => break,
+                // Only the constant term was found. The argument may be exactly constant
+                // without being recognized as such, as sin(x)^2+cos(x)^2-2 is, so give up
+                // after 64 more orders than requested and use the argument as exact, as
+                // the custom series did before this search.
+                None if depth >= &relative_order + &Rational::from(64) => break,
                 Some(v) => (&v + &relative_order - &trailing).max(&depth + &Rational::one()),
                 None => &depth * &2.into(),
             };

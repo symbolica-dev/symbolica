@@ -757,8 +757,9 @@ pub trait AtomCore: private::Sealed + Sized {
     /// have a pole with an additional expansion to a low order, and expands deeper when
     /// the pole is deeper than expected. Giving the order of the pole skips both. A pole
     /// that is too deep wastes work, and one that is too shallow is corrected by expanding
-    /// again. The pole order does not affect the result, and it is ignored for a relative
-    /// depth.
+    /// again. The pole order does not change the coefficients up to the requested depth,
+    /// but the result may be known to a different order beyond it. The pole order is
+    /// ignored for a relative depth.
     ///
     /// # Example
     ///
