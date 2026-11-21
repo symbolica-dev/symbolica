@@ -1217,6 +1217,113 @@ impl<F: Field> PartialFractionRing<F> {
         }
     }
 
+    /// The sum of nonzero elements. The layout of the sum, the union of the
+    /// layouts of the summands, is built once. Coefficients that own heap data,
+    /// such as rational numbers or rational functions, are expensive to add, so
+    /// every coefficient of the sum is the [Ring::sum] of its terms, which uses
+    /// the bulk sum of the coefficient field. Other coefficients, such as
+    /// those of finite fields, are added in place.
+    fn sum_nonzero(&self, elements: Vec<PartialFraction<F>>) -> PartialFraction<F> {
+        // The highest power of every factor, and then the offset of its block
+        // in the sum.
+        let mut offsets = vec![0; self.basis.len()];
+        let mut poly = 0;
+        for a in &elements {
+            poly = poly.max(a.poly);
+            for c in &a.chains {
+                let e = &mut offsets[c.factor as usize];
+                *e = (*e).max(c.exponent);
+            }
+        }
+        let mut chains = vec![];
+        let mut len = poly;
+        for (factor, offset) in offsets.iter_mut().enumerate() {
+            if *offset > 0 {
+                let c = Chain {
+                    factor: factor as u32,
+                    exponent: *offset,
+                    offset: len as u32,
+                };
+                *offset = c.offset;
+                len += self.chain_len(&c);
+                chains.push(c);
+            }
+        }
+        // The blocks `(start, len)` of the sum that hold the polynomial part
+        // and the factor blocks of a summand, in storage order.
+        let blocks = |poly: usize, chains: &[Chain]| {
+            let mut blocks = SmallVec::<[(usize, usize); 8]>::new();
+            blocks.push((0, poly));
+            blocks.extend(
+                chains
+                    .iter()
+                    .map(|c| (offsets[c.factor as usize] as usize, self.chain_len(c))),
+            );
+            blocks
+        };
+
+        if !std::mem::needs_drop::<F::Element>() {
+            let mut coefficients = vec![self.field.zero(); len];
+            for a in &elements {
+                let mut terms = a.coefficients.iter();
+                for (start, len) in blocks(a.poly, &a.chains) {
+                    for (r, c) in coefficients[start..start + len]
+                        .iter_mut()
+                        .zip(terms.by_ref())
+                    {
+                        self.field.add_assign(r, c);
+                    }
+                }
+            }
+            let mut result = PartialFraction {
+                poly,
+                chains,
+                coefficients,
+            };
+            self.normalize(&mut result);
+            return result;
+        }
+
+        // Sort all coefficients by their position in the sum.
+        let mut starts = vec![0; len + 1];
+        for a in &elements {
+            for (start, len) in blocks(a.poly, &a.chains) {
+                for s in &mut starts[start + 1..start + len + 1] {
+                    *s += 1;
+                }
+            }
+        }
+        for i in 0..len {
+            starts[i + 1] += starts[i];
+        }
+        let mut next = starts.clone();
+        let mut terms: Vec<Option<F::Element>> = (0..starts[len]).map(|_| None).collect();
+        for a in elements {
+            let mut coefficients = a.coefficients.into_iter();
+            for (start, len) in blocks(a.poly, &a.chains) {
+                for (n, c) in next[start..start + len]
+                    .iter_mut()
+                    .zip(coefficients.by_ref())
+                {
+                    terms[*n] = Some(c);
+                    *n += 1;
+                }
+            }
+        }
+
+        let mut terms = terms.into_iter().map(|c| c.unwrap());
+        let mut result = PartialFraction {
+            poly,
+            chains,
+            coefficients: starts
+                .windows(2)
+                .map(|w| self.field.sum(terms.by_ref().take(w[1] - w[0])))
+                .collect(),
+        };
+        self.normalize(&mut result);
+        result
+    }
+
     /// Accumulate products directly, without building a complete temporary
     /// product and then scanning it once more for add/sub-multiply.
     fn add_product_assign(
@@ -2388,6 +2495,20 @@ impl<F: Field> Ring for PartialFractionRing<F> {
 
     fn one(&self) -> Self::Element {
         self.element_from_dense(vec![self.field.one()])
+    }
+
+    /// Add all elements at once: the layout of the sum is allocated once, and
+    /// every coefficient is the [Ring::sum] of its terms in the coefficient
+    /// field.
+    fn sum<I>(&self, elements: I) -> Self::Element
+    where
+        I: IntoIterator<Item = Self::Element>,
+    {
+        let mut elements: Vec<_> = elements.into_iter().filter(|a| !a.is_zero()).collect();
+        if elements.len() < 2 {
+            return elements.pop().unwrap_or_default();
+        }
+        self.sum_nonzero(elements)
     }
 
     fn nth(&self, n: Integer) -> Self::Element {

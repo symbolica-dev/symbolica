@@ -111,6 +111,39 @@ fn arithmetic_agrees_with_rational_polynomials_over_q() {
 }
 
 #[test]
+fn sum_agrees_with_repeated_addition() {
+    let ring = seeded_q_ring();
+    let mut rng = StdRng::seed_from_u64(3);
+    for n in [0, 1, 2, 3, 10, 40] {
+        let mut terms: Vec<_> = (0..n)
+            .map(|_| sparse_sample(&ring, &mut rng, &q_policy()))
+            .collect();
+        // Zero summands and summands that cancel the highest poles.
+        if n >= 3 {
+            terms.push(ring.zero());
+            terms.push(ring.neg(&terms[0]));
+            terms.push(ring.neg(&terms[2]));
+        }
+        let expected = terms
+            .iter()
+            .fold(to_q_rational(&ring, &ring.zero()), |s, t| {
+                &s + &to_q_rational(&ring, t)
+            });
+        let sum = ring.sum(terms.clone());
+        assert_eq!(to_q_rational(&ring, &sum), expected);
+        let mut folded = ring.zero();
+        for t in &terms {
+            ring.add_assign(&mut folded, t);
+        }
+        assert_eq!(sum, folded);
+    }
+
+    // Complete cancellation gives the canonical zero.
+    let a = sparse_sample(&ring, &mut rng, &q_policy());
+    assert!(ring.sum([a.clone(), ring.neg(&a), ring.zero()]).is_zero());
+}
+
+#[test]
 fn arithmetic_agrees_with_rational_polynomials_over_zp() {
     let x = variable();
     let field = Zp64::new(1_000_000_007);
