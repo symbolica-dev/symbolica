@@ -20,6 +20,11 @@
 //! - `kinematic`: as `dimension`, but with poles `d - i y - i^2` whose roots
 //!   depend on `y`, so that partial fractioning creates denominators in `y`.
 //!
+//! - `basis`: rings with `k` linear factors `x - i` over Zp and Q: creating
+//!   the basis, importing fresh fractions whose denominators are products of
+//!   three basis factors (on a ring whose denominator cache is empty), and
+//!   short sums and products of such elements.
+//!
 //! Fixture construction and validation (all representations agree) are
 //! outside the timed regions.
 
@@ -35,11 +40,15 @@ use symbolica::{
         finite_field::{FiniteFieldCore, Zp64},
         integer::{IntegerRing, Z},
         partial_fraction::{PartialFraction, PartialFractionRing},
+        rational::Q,
         rational_polynomial::{
             FromNumeratorAndDenominator, RationalPolynomial, RationalPolynomialField,
         },
     },
-    poly::{PolyVariable, polynomial::MultivariatePolynomial, univariate::UnivariatePolynomial},
+    poly::{
+        LexOrder, PolyVariable, factor::Factorize, polynomial::MultivariatePolynomial,
+        univariate::UnivariatePolynomial,
+    },
     symbol,
 };
 
@@ -570,6 +579,138 @@ mod nested {
     }
 }
 
+mod basis {
+    use super::*;
+
+    pub const SIZES: &[usize] = &[16, 256, 1024];
+    const IMPORTS: usize = 256;
+
+    type Poly<F> = UnivariatePolynomial<F>;
+
+    pub struct Fixture<F: Field> {
+        field: F,
+        variable: Arc<PolyVariable>,
+        factors: Vec<Poly<F>>,
+        /// Fractions `(a + b x) / (f_i f_j f_k)` for random basis factors.
+        fractions: Vec<(Poly<F>, Poly<F>)>,
+    }
+
+    impl<F: Field> Fixture<F>
+    where
+        MultivariatePolynomial<F, u16, LexOrder>: Factorize,
+    {
+        pub fn new(field: F, k: usize) -> Self {
+            let variable: Arc<PolyVariable> = Arc::new(symbol!("pf_bench_basis_x").into());
+            let poly = |c: &[i64]| {
+                Poly::from_coefficients(
+                    &field,
+                    c.iter().map(|&c| field.nth(c.into())).collect(),
+                    variable.clone(),
+                )
+            };
+            let factors: Vec<_> = (1..=k as i64).map(|i| poly(&[-i, 1])).collect();
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            let mut next = |bound: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % bound as u64) as usize
+            };
+            let fractions = (0..IMPORTS)
+                .map(|_| {
+                    let numerator = poly(&[1 + next(10) as i64, next(10) as i64]);
+                    let mut denominator = poly(&[1]);
+                    for _ in 0..3 {
+                        denominator = &denominator * &factors[next(k)];
+                    }
+                    (numerator, denominator)
+                })
+                .collect();
+            Self {
+                field,
+                variable,
+                factors,
+                fractions,
+            }
+        }
+
+        /// A ring with the basis factors and an empty denominator cache.
+        pub fn ring(&self) -> PartialFractionRing<F> {
+            PartialFractionRing::with_basis(
+                self.field.clone(),
+                self.variable.clone(),
+                &self.factors,
+            )
+            .unwrap()
+        }
+
+        /// A factorizing ring with the basis factors and an empty denominator cache.
+        pub fn factorizing_ring(&self) -> PartialFractionRing<F> {
+            let ring = PartialFractionRing::new(self.field.clone(), self.variable.clone(), &[]);
+            for f in &self.factors {
+                ring.inv(&ring.element_from_polynomial(f));
+            }
+            ring
+        }
+
+        pub fn import(&self, ring: &PartialFractionRing<F>) -> Vec<PartialFraction<F>> {
+            self.fractions
+                .iter()
+                .map(|(n, d)| ring.try_from_fraction(n, d).unwrap())
+                .collect()
+        }
+
+        /// The sums of consecutive elements.
+        pub fn sums(
+            ring: &PartialFractionRing<F>,
+            elements: &[PartialFraction<F>],
+        ) -> Vec<PartialFraction<F>> {
+            elements
+                .windows(2)
+                .map(|w| ring.sum(w.iter().cloned()))
+                .collect()
+        }
+
+        /// The products of consecutive elements.
+        pub fn products(
+            ring: &PartialFractionRing<F>,
+            elements: &[PartialFraction<F>],
+        ) -> Vec<PartialFraction<F>> {
+            elements
+                .windows(2)
+                .map(|w| ring.mul(&w[0], &w[1]))
+                .collect()
+        }
+
+        pub fn validate(&self) {
+            let ring = self.ring();
+            let elements = self.import(&ring);
+            assert_eq!(self.import(&self.factorizing_ring()), elements);
+            // Compare values at x = -3, which is not a pole.
+            let x = self.field.nth((-3).into());
+            let value = |a: &PartialFraction<F>| ring.evaluate(a, &x).unwrap();
+            let fractions: Vec<_> = self
+                .fractions
+                .iter()
+                .map(|(n, d)| {
+                    let at = |p: &Poly<F>| value(&ring.element_from_polynomial(p));
+                    self.field.div(&at(n), &at(d))
+                })
+                .collect();
+            for (i, (s, p)) in Self::sums(&ring, &elements)
+                .iter()
+                .zip(Self::products(&ring, &elements))
+                .enumerate()
+            {
+                let (a, b) = (&fractions[i], &fractions[i + 1]);
+                assert_eq!(value(&elements[i]), *a);
+                assert_eq!(value(s), self.field.add(a, b));
+                assert_eq!(value(&p), self.field.mul(a, b));
+            }
+        }
+    }
+}
+
 fn main() {
     for &case in zp::CASES {
         zp::validate(case);
@@ -577,8 +718,61 @@ fn main() {
     for &case in nested::DIMENSION.iter().chain(nested::KINEMATIC) {
         nested::validate(case);
     }
+    basis::Fixture::new(Zp64::new(PRIME), 16).validate();
+    basis::Fixture::new(Q, 16).validate();
     divan::main();
 }
+
+/// The benchmarks of a large basis over the field `$field`.
+macro_rules! basis_benchmarks {
+    ($group:ident, $field:expr) => {
+        #[divan::bench_group(sample_count = 10, sample_size = 1, skip_ext_time)]
+        mod $group {
+            use super::{basis::*, *};
+
+            #[divan::bench(args = SIZES)]
+            fn create(bencher: divan::Bencher, k: usize) {
+                let f = Fixture::new($field, k);
+                bencher.bench_local(|| f.ring());
+            }
+
+            #[divan::bench(args = SIZES)]
+            fn import(bencher: divan::Bencher, k: usize) {
+                let f = Fixture::new($field, k);
+                bencher
+                    .with_inputs(|| f.ring())
+                    .bench_local_refs(|ring| f.import(ring));
+            }
+
+            #[divan::bench(args = SIZES)]
+            fn import_factorizing(bencher: divan::Bencher, k: usize) {
+                let f = Fixture::new($field, k);
+                bencher
+                    .with_inputs(|| f.factorizing_ring())
+                    .bench_local_refs(|ring| f.import(ring));
+            }
+
+            #[divan::bench(args = SIZES)]
+            fn sum_pairs(bencher: divan::Bencher, k: usize) {
+                let f = Fixture::new($field, k);
+                let ring = f.ring();
+                let elements = f.import(&ring);
+                bencher.bench_local(|| Fixture::sums(&ring, black_box(&elements)));
+            }
+
+            #[divan::bench(args = SIZES)]
+            fn mul_pairs(bencher: divan::Bencher, k: usize) {
+                let f = Fixture::new($field, k);
+                let ring = f.ring();
+                let elements = f.import(&ring);
+                bencher.bench_local(|| Fixture::products(&ring, black_box(&elements)));
+            }
+        }
+    };
+}
+
+basis_benchmarks!(basis_zp, Zp64::new(PRIME));
+basis_benchmarks!(basis_q, Q);
 
 #[divan::bench_group(sample_count = 10, sample_size = 1, skip_ext_time)]
 mod zp_elimination {
