@@ -118,11 +118,24 @@ type RootMultiset = Vec<RootMultisetEntry>;
 /// Intervals over which a real root is known to exist.
 #[derive(Clone)]
 struct RealProjection {
-    poly: Arc<UnivariatePolynomial<Q>>,
-    intervals: Vec<(Rational, Rational)>,
+    /// The isolating intervals of the real roots, together with the square-free factor
+    /// that each root is a root of.
+    intervals: Vec<((Rational, Rational), Arc<UnivariatePolynomial<Q>>)>,
 }
 
-/// A projected real root, consisting of a polynomial and an interval.
+impl RealProjection {
+    fn new(projection: &UnivariatePolynomial<Q>) -> Self {
+        RealProjection {
+            intervals: projection
+                .isolate_real_root_intervals_with_factors()
+                .into_iter()
+                .map(|(lower, upper, _, factor)| ((lower, upper), factor))
+                .collect(),
+        }
+    }
+}
+
+/// A projected real root, consisting of a square-free polynomial and an isolating interval.
 struct ProjectedRealRoot {
     poly: Arc<UnivariatePolynomial<Q>>,
     interval: (Rational, Rational),
@@ -1332,17 +1345,8 @@ impl UnivariatePolynomial<RationalField> {
                 let projection = projection_cache
                     .entry(poly.coefficients.clone())
                     .or_insert_with(|| {
-                        Self::real_projection_polynomial(poly).map(|projection| {
-                            let intervals = projection
-                                .isolate_real_root_intervals()
-                                .into_iter()
-                                .map(|(lower, upper, _)| (lower, upper))
-                                .collect();
-                            RealProjection {
-                                poly: Arc::new(projection),
-                                intervals,
-                            }
-                        })
+                        Self::real_projection_polynomial(poly)
+                            .map(|projection| RealProjection::new(&projection))
                     })
                     .as_ref()?;
 
@@ -1635,16 +1639,7 @@ impl UnivariatePolynomial<RationalField> {
     /// Compute an exact real projection for one root in tests.
     fn compute_projected_real_root(root: &IsolatedRoot) -> Option<ProjectedRealRoot> {
         let poly = &root.poly;
-        let projection = Self::real_projection_polynomial(poly)?;
-        let intervals = projection
-            .isolate_real_root_intervals()
-            .into_iter()
-            .map(|(lower, upper, _)| (lower, upper))
-            .collect();
-        let projection = RealProjection {
-            poly: Arc::new(projection),
-            intervals,
-        };
+        let projection = RealProjection::new(&Self::real_projection_polynomial(poly)?);
         let mut root = root.clone();
         Self::projected_real_root(&mut root, &projection)
     }
@@ -1661,31 +1656,37 @@ impl UnivariatePolynomial<RationalField> {
             let mut candidates = intervals
                 .iter()
                 .enumerate()
-                .filter(|(_, interval)| {
+                .filter(|(_, (interval, _))| {
                     Self::rational_intervals_intersect(interval, &root_interval)
                 })
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>();
 
             if candidates.len() == 1 {
-                return Some(ProjectedRealRoot {
-                    poly: projection.poly.clone(),
-                    interval: intervals.swap_remove(candidates[0]),
-                });
+                let (interval, poly) = intervals.swap_remove(candidates[0]);
+                return Some(ProjectedRealRoot { poly, interval });
             }
 
             if candidates.is_empty() {
                 candidates.extend(0..intervals.len());
             }
 
-            let poly_complex = (*root.poly).clone();
-            let derivative = poly_complex.derivative();
-            let _ = Self::refine_root_disk_with_newton(&poly_complex, &derivative, root);
+            // Only refine the complex root if it is not narrower than every candidate interval.
+            // A Newton step squares the radius, so refining an already precise root while the
+            // candidate intervals are still wide makes its rational center grow very rapidly.
+            let root_width = &root_interval.1 - &root_interval.0;
+            if candidates.iter().all(|&i| {
+                let (interval, _) = &intervals[i];
+                &interval.1 - &interval.0 <= root_width
+            }) {
+                let poly_complex = (*root.poly).clone();
+                let derivative = poly_complex.derivative();
+                let _ = Self::refine_root_disk_with_newton(&poly_complex, &derivative, root);
+            }
 
             for i in candidates {
-                projection
-                    .poly
-                    .refine_real_root_interval_once(&mut intervals[i]);
+                let (interval, factor) = &mut intervals[i];
+                factor.refine_real_root_interval_once(interval);
             }
         }
 
@@ -1870,6 +1871,7 @@ impl UnivariatePolynomial<RationalField> {
             candidate_radii.push(quadratic_radius);
         }
         candidate_radii.push(half_radius);
+
         let shifted_ball = Self::shift_var_complex_ball(poly, &new_center, 128);
         let mut exact_shifted = None;
 
@@ -2031,24 +2033,24 @@ impl UnivariatePolynomial<RationalField> {
     }
 
     /// Bisect one real-root interval while retaining the sign change.
+    ///
+    /// The polynomial must be square free and the interval must be an isolating interval
+    /// of one of its roots: either a point, or an open interval that contains exactly one root.
+    /// The endpoints of an open interval may be roots as well, for example when a neighboring
+    /// root was isolated exactly.
     fn refine_real_root_interval_once(&self, interval: &mut (Rational, Rational)) {
         if interval.0 == interval.1 {
             return;
         }
 
+        // the sign directly to the right of the left endpoint
         let left_value = self.evaluate(&interval.0);
-        if left_value.is_zero() {
-            interval.1 = interval.0.clone();
-            return;
-        }
+        let left_is_negative = if left_value.is_zero() {
+            self.derivative().evaluate(&interval.0).is_negative()
+        } else {
+            left_value.is_negative()
+        };
 
-        let right_value = self.evaluate(&interval.1);
-        if right_value.is_zero() {
-            interval.0 = interval.1.clone();
-            return;
-        }
-
-        let left_is_negative = left_value.is_negative();
         let mid = (&interval.0 + &interval.1) / Rational::from(2);
         let mid_value = self.evaluate(&mid);
         if mid_value.is_zero() {
@@ -2182,6 +2184,17 @@ impl UnivariatePolynomial<RationalField> {
     /// Isolate the distinct real roots as rational intervals, together with
     /// their multiplicities.
     pub fn isolate_real_root_intervals(&self) -> Vec<(Rational, Rational, usize)> {
+        self.isolate_real_root_intervals_with_factors()
+            .into_iter()
+            .map(|(lower, upper, pow, _)| (lower, upper, pow))
+            .collect()
+    }
+
+    /// Isolate the distinct real roots as rational intervals, together with
+    /// their multiplicities and the square-free factor they are a root of.
+    pub(crate) fn isolate_real_root_intervals_with_factors(
+        &self,
+    ) -> Vec<(Rational, Rational, usize, Arc<UnivariatePolynomial<Q>>)> {
         let c = self.content();
 
         let stripped = self.map_coeff(
@@ -2193,7 +2206,7 @@ impl UnivariatePolynomial<RationalField> {
             Z,
         );
 
-        stripped.isolate_real_root_intervals()
+        stripped.isolate_real_root_intervals_with_factors()
     }
 
     /// Approximate the single root of the polynomial in the interval (lower, higher) with a given tolerance
@@ -2248,9 +2261,11 @@ impl UnivariatePolynomial<RationalField> {
         other: &Self,
         mut other_interval: (Rational, Rational),
     ) -> ((Rational, Rational), (Rational, Rational)) {
-        if !(interval.0 >= other_interval.0 && interval.0 < other_interval.1
-            || interval.1 > other_interval.0 && interval.1 <= other_interval.1)
-        {
+        // Intervals that only share an endpoint are disjoint. This also covers
+        // point intervals, which overlap an interval if they lie strictly inside of it.
+        let overlap = |a: &(Rational, Rational), b: &(Rational, Rational)| a.0 < b.1 && b.0 < a.1;
+
+        if !overlap(&interval, &other_interval) {
             return (interval, other_interval);
         }
 
@@ -2265,14 +2280,14 @@ impl UnivariatePolynomial<RationalField> {
             Ordering::Equal => other.derivative().evaluate(&other_interval.0).is_negative(),
         };
 
-        while interval.0 >= other_interval.0 && interval.0 < other_interval.1
-            || interval.1 > other_interval.0 && interval.1 <= other_interval.1
-        {
+        while overlap(&interval, &other_interval) {
             if interval.0 != interval.1 {
                 let mid = (&interval.0 + &interval.1) / &(2, 1).into();
                 let mid_val = self.evaluate(&mid);
 
-                if mid_val.is_negative() == left_bound_neg {
+                if mid_val.is_zero() {
+                    interval = (mid.clone(), mid);
+                } else if mid_val.is_negative() == left_bound_neg {
                     interval.0 = mid;
                 } else {
                     interval.1 = mid;
@@ -2283,7 +2298,9 @@ impl UnivariatePolynomial<RationalField> {
                 let mid = (&other_interval.0 + &other_interval.1) / &(2, 1).into();
                 let mid_val = other.evaluate(&mid);
 
-                if mid_val.is_negative() == other_left_bound_neg {
+                if mid_val.is_zero() {
+                    other_interval = (mid.clone(), mid);
+                } else if mid_val.is_negative() == other_left_bound_neg {
                     other_interval.0 = mid;
                 } else {
                     other_interval.1 = mid;
@@ -2374,7 +2391,8 @@ impl UnivariatePolynomial<ExactComplexField> {
         roots: &mut [IsolatedRoot],
         axis: CoordinateAxis,
     ) {
-        for (lower, upper, _) in axis_polynomial.isolate_real_root_intervals() {
+        for (lower, upper, _, factor) in axis_polynomial.isolate_real_root_intervals_with_factors()
+        {
             let mut interval = (lower, upper);
             let mut identified = false;
             for _ in 0..4096 {
@@ -2389,7 +2407,7 @@ impl UnivariatePolynomial<ExactComplexField> {
                 if identified {
                     break;
                 }
-                axis_polynomial.refine_real_root_interval_once(&mut interval);
+                factor.refine_real_root_interval_once(&mut interval);
             }
             assert!(
                 identified,

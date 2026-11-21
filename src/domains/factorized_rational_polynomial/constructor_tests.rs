@@ -362,3 +362,48 @@ fn factored_exponent_multiplication_is_checked() {
     let _ =
         FactorizedRationalPolynomial::from_num_den(base.one(), vec![(base, usize::MAX)], &Z, true);
 }
+
+#[test]
+fn unify_variables_renormalizes_permuted_denominators() {
+    let to_poly = |e: &str, vars: &[&str]| {
+        let vars = std::sync::Arc::new(
+            vars.iter()
+                .map(|v| crate::poly::PolyVariable::from(symbol!(*v)))
+                .collect::<Vec<_>>(),
+        );
+        parse!(e).to_polynomial::<_, u16>(&Z, Some(vars))
+    };
+
+    // 3/(x-y) in the variables [x, y], where x-y has a positive leading coefficient
+    let mut a = FactorizedRationalPolynomial::from_num_den(
+        to_poly("3", &["x", "y"]),
+        vec![(to_poly("x-y", &["x", "y"]), 1)],
+        &Z,
+        false,
+    );
+    let mut b = FactorizedRationalPolynomial::from_num_den(
+        to_poly("z", &["y", "x", "z"]),
+        vec![],
+        &Z,
+        false,
+    );
+    let expected = materialize(a.clone());
+
+    // `b` contains all variables, so `a` adopts the variable order [y, x, z]
+    a.unify_variables(&mut b);
+    assert_eq!(a.numerator.variables(), b.numerator.variables());
+    assert_eq!(
+        a.get_variables()[0],
+        crate::poly::PolyVariable::from(symbol!("y"))
+    );
+
+    for (d, _) in &a.denominators {
+        assert!(!d.lcoeff().is_negative());
+    }
+    assert!(!a.numerator.lcoeff().is_negative());
+
+    let mut actual = materialize(a);
+    let mut expected = expected;
+    actual.unify_variables(&mut expected);
+    assert_eq!(actual, expected);
+}

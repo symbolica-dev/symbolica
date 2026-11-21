@@ -772,6 +772,13 @@ pub(super) enum Instr {
     Join(usize, usize, usize, usize),
 }
 
+impl Instr {
+    /// Return whether the instruction calls a function through a symbol that is not a fixed built-in.
+    pub(super) fn uses_symbolic_state(&self) -> bool {
+        matches!(self, Instr::BuiltinFun(_, symbol, _) if !symbol.is_fixed_builtin())
+    }
+}
+
 /// The phase of an operation in a complex evaluator.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "bincode", derive(bincode::Encode, bincode::Decode))]

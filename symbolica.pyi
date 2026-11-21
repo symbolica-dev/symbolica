@@ -1309,6 +1309,32 @@ def set_namespace(namespace: str) -> None:
         The namespace to set for subsequently created symbols.
     """
 
+def set_mathml_font_size(size: float | None) -> None:
+    """
+    Set the font size of all MathML output, in CSS pixels.
+
+    Applies to outputs displayed afterwards, unless they set their own `font_size`.
+    `None` restores the default of 21 pixels, which a notebook may also override
+    with the CSS custom property `--symbolica-math-font-size`.
+
+    Examples
+    --------
+    >>> from symbolica import *
+    >>> set_mathml_font_size(16)
+    >>> E('x^2 + y')  # displayed at 16 pixels in a notebook
+
+    Parameters
+    ----------
+    size: float | None
+        The font size in CSS pixels, between 1 and 1000, or `None` for the default.
+    """
+
+def get_mathml_font_size() -> float | None:
+    """
+    Get the font size of MathML output in CSS pixels, set with `set_mathml_font_size`,
+    or `None` for the default.
+    """
+
 def set_library_key(key: str) -> None:
     """
     Set the Symbolica library key for this Python package.
@@ -2212,10 +2238,15 @@ class MathMLViewer:
 
     Reuses popup pagination, inspection/back, keyboard zoom and notebook display.
     Responsive layouts and in-place expansion are optional source capabilities.
+    page() includes the resolved font_size in CSS pixels, or None for the default,
+    which a host page may set with the CSS property --symbolica-math-font-size.
     """
     def __init__(self, source: MathMLPageSource, page_size: int = 25, *,
                  layout_count: int = 1, supports_expansion: bool = False,
-                 _automatic_product_preview: bool = False) -> None: ...
+                 font_size: float | None = None,
+                 _automatic_product_preview: bool = False) -> None:
+        """Create a viewer. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels."""
     def close(self) -> None:
         """Release the retained source, widget and cached pages."""
         ...
@@ -2975,13 +3006,6 @@ class Expression:
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> dict[str, Any]:
         """Return native MathML with optional live zoom and pagination."""
 
-    def mathml_viewer(self, page_size: int | None = None) -> MathMLViewer:
-        """Create a bounded viewer without importing notebook or widget packages.
-
-        None permits a compact product to extend the initial 25-factor preview
-        within the output budget. An explicit size remains the maximum.
-        """
-
     def _repr_html_(self) -> str:
         """
         Convert the expression into an HTML representation.
@@ -3090,7 +3114,7 @@ class Expression:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -3152,13 +3176,18 @@ class Expression:
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
         *,
         mathml: bool = True,
-        page_size: int = 25,
+        page_size: int | None = None,
+        font_size: float | None = None,
     ) -> FormattedOutput:
         """
         Display native MathML with bounded pagination. Use mathml=False for the
         highlighted text view. Install symbolica[notebook] for zoom and live navigation.
-        page_size (1–500) sets the initial preview and popup page size. Nested detail adapts
-        to the available width. Paged output uses a short text
+        page_size (1–500) sets the initial preview and popup page size. The default,
+        None, shows 25 items and lets a compact product extend that preview when it
+        fits, as in automatic display. font_size sets the MathML font size in CSS
+        pixels (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages, for
+        example to connect a custom frontend. Nested detail adapts to the available width. Paged output uses a short text
         summary; max_terms controls the legacy text view and small expressions.
         Custom printers receive PrintMode.MathML and return bounded MathML fragments,
         or None for the standard renderer. Fragments are atomic for paging;
@@ -3194,7 +3223,7 @@ class Expression:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7186,7 +7215,7 @@ class Transformer:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7433,8 +7462,6 @@ class Series:
         Convert the series into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -7526,7 +7553,7 @@ class Series:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -7590,11 +7617,16 @@ class Series:
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
         *,
         mathml: bool = True,
-        page_size: int = 25,
+        page_size: int | None = None,
+        font_size: float | None = None,
     ) -> FormattedOutput:
         """
         Convert the series into a rich display object, with tunable settings.
         Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
         str(...) continues to return plain text.
 
         Parameters
@@ -7626,7 +7658,7 @@ class Series:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -8077,8 +8109,6 @@ class Polynomial:
         Convert the polynomial into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -8179,7 +8209,7 @@ class Polynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -8213,7 +8243,7 @@ class Polynomial:
         symmetric_representation_for_finite_field: bool = False,
         explicit_rational_polynomial: bool = False,
         number_thousands_separator: str | None = None,
-        multiplication_operator: str = "*",
+        multiplication_operator: str = "·",
         double_star_for_exponentiation: bool = False,
         function_brackets: tuple[str, str] = ("(", ")"),
         num_exp_as_superscript: bool = True,
@@ -8224,11 +8254,16 @@ class Polynomial:
         custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
         *,
         mathml: bool = True,
-        page_size: int = 25,
+        page_size: int | None = None,
+        font_size: float | None = None,
     ) -> FormattedOutput:
         """
         Convert the polynomial into a rich display object, with tunable settings.
         Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
         str(...) continues to return plain text.
 
         Parameters
@@ -8260,7 +8295,7 @@ class Polynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -9024,8 +9059,92 @@ class NumberFieldPolynomial:
         Convert the polynomial into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
+    def formatted(
+        self,
+        max_terms: int | None = None,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = None,
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "·",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+        *,
+        mathml: bool = True,
+        page_size: int | None = None,
+        font_size: float | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the polynomial into a rich display object, with tunable settings.
+        Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
+        str(...) continues to return plain text.
+
+        Parameters
+        ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -9124,7 +9243,7 @@ class NumberFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -9700,8 +9819,92 @@ class FiniteFieldPolynomial:
         Convert the polynomial into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
+    def formatted(
+        self,
+        max_terms: int | None = None,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = None,
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "·",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+        *,
+        mathml: bool = True,
+        page_size: int | None = None,
+        font_size: float | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the polynomial into a rich display object, with tunable settings.
+        Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
+        str(...) continues to return plain text.
+
+        Parameters
+        ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -9800,7 +10003,7 @@ class FiniteFieldPolynomial:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -10399,8 +10602,92 @@ class RationalPolynomial:
         Convert the rational polynomial into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
+    def formatted(
+        self,
+        max_terms: int | None = None,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = None,
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "·",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+        *,
+        mathml: bool = True,
+        page_size: int | None = None,
+        font_size: float | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the rational polynomial into a rich display object, with tunable settings.
+        Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
+        str(...) continues to return plain text.
+
+        Parameters
+        ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -10720,8 +11007,92 @@ class FiniteFieldRationalPolynomial:
         Convert the rational polynomial into an HTML representation.
         """
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a native pager without importing notebook or widget packages."""
+    def formatted(
+        self,
+        max_terms: int | None = None,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        terms_on_new_line: bool = False,
+        color_top_level_sum: bool = True,
+        color_builtin_symbols: bool = True,
+        bracket_level_colors: Sequence[int] | None = None,
+        print_ring: bool = True,
+        symmetric_representation_for_finite_field: bool = False,
+        explicit_rational_polynomial: bool = False,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "·",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+        *,
+        mathml: bool = True,
+        page_size: int | None = None,
+        font_size: float | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the rational polynomial into a rich display object, with tunable settings.
+        Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the initial preview and popup page size; None
+        shows 25 terms. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
+        str(...) continues to return plain text.
+
+        Parameters
+        ----------
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        terms_on_new_line: bool
+            Whether wrapped output should place terms on separate lines.
+        color_top_level_sum: bool
+            Whether top-level sums should be colorized.
+        color_builtin_symbols: bool
+            Whether built-in symbols should be colorized.
+        bracket_level_colors: Sequence[int] | None
+            The colors assigned to successive nested bracket levels.
+        print_ring: bool
+            Whether the coefficient ring should be included in the printed output.
+        symmetric_representation_for_finite_field: bool
+            Whether finite-field elements should be printed using symmetric representatives.
+        explicit_rational_polynomial: bool
+            Whether rational polynomials should be printed explicitly as numerator and denominator.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
+
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
     def _display_(self) -> Any:
@@ -11111,7 +11482,7 @@ class Matrix:
         number_thousands_separator: str | None
             The separator inserted between groups of digits in printed integers.
         multiplication_operator: str
-            The string used to print multiplication.
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
         double_star_for_exponentiation: bool
             Whether exponentiation should be printed as `**` instead of `^`.
         function_brackets: tuple[str, str]
@@ -11170,8 +11541,72 @@ class Matrix:
     def _repr_html_(self) -> str:
         """Render bounded native MathML cells in a matrix layout."""
 
-    def mathml_viewer(self, page_size: int = 25) -> MathMLViewer:
-        """Create a pager for complete matrix rows and individual entry terms."""
+    def formatted(
+        self,
+        mode: PrintMode = PrintMode.Symbolica,
+        max_line_length: int | None = 80,
+        indentation: int = 4,
+        fill_indented_lines: bool = True,
+        pretty_matrix: bool = True,
+        number_thousands_separator: str | None = None,
+        multiplication_operator: str = "·",
+        double_star_for_exponentiation: bool = False,
+        function_brackets: tuple[str, str] = ("(", ")"),
+        num_exp_as_superscript: bool = True,
+        precision: int | None = None,
+        show_namespaces: bool = False,
+        hide_namespace: str | None = None,
+        include_attributes: bool = False,
+        max_terms: int | None = None,
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None = None,
+        *,
+        mathml: bool = True,
+        page_size: int | None = None,
+        font_size: float | None = None,
+    ) -> FormattedOutput:
+        """
+        Convert the matrix into a rich display object, with tunable settings.
+        Native MathML is used by default; mathml=False restores highlighted text.
+        page_size (1–500) sets the number of rows and of terms per entry in the
+        preview; None shows 25. font_size sets the MathML font size in CSS pixels
+        (1–1000); None uses set_mathml_font_size, or 21 pixels. Use
+        .mathml_viewer() on the result for a pager without notebook packages.
+
+        Parameters
+        ----------
+        mode: PrintMode
+            The mode that controls how the input is interpreted or formatted.
+        max_line_length: int | None
+            The preferred maximum line length before wrapping.
+        indentation: int
+            The number of spaces used for wrapped lines.
+        fill_indented_lines: bool
+            Whether wrapped lines should be padded to the configured indentation.
+        pretty_matrix: bool
+            Whether matrices should be printed in the pretty multi-line layout.
+        number_thousands_separator: str | None
+            The separator inserted between groups of digits in printed integers.
+        multiplication_operator: str
+            The string used to print multiplication. LaTeX and Typst use implicit multiplication.
+        double_star_for_exponentiation: bool
+            Whether exponentiation should be printed as `**` instead of `^`.
+        function_brackets: tuple[str, str]
+            The opening and closing brackets used when printing function arguments.
+        num_exp_as_superscript: bool
+            Whether small integer exponents should be printed as superscripts.
+        precision: int | None
+            The decimal precision used when printing numeric coefficients.
+        show_namespaces: bool
+            Whether namespaces should be included in the formatted output.
+        hide_namespace: str | None
+            A namespace prefix to omit from printed symbol names.
+        include_attributes: bool
+            Whether symbol attributes should be included in the printed output.
+        max_terms: int | None
+            The maximum number of terms to print before truncating the output.
+        custom_print_mode: dict[str, int | str | dict[str | int, Any]] | None
+            Custom print data passed through to custom print callbacks.
+        """
 
     def _repr_mimebundle_(self, include: list[str] | None = None, exclude: list[str] | None = None) -> Any:
         """Prefer the shared MathML pager in notebooks."""
@@ -11471,7 +11906,8 @@ class Evaluator:
         """
         Save the evaluator to a byte string that can be imported in another thread or machine.
         The external functions are not exported, so they need to be provided separately when importing.
-        Symbolica's symbolic state is included and restored automatically by `load`.
+        If the evaluator refers to functions or tags that are not built-in, Symbolica's symbolic
+        state is included and restored automatically by `load`.
         """
 
     def export_symjit(self, complex: bool = False) -> bytes:

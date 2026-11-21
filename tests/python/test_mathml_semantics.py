@@ -159,7 +159,7 @@ class MathMLSemanticsTests(unittest.TestCase):
             original = E(text)
             before = original.format()
             expected = original.expand()
-            viewer = original.mathml_viewer()
+            viewer = original.formatted().mathml_viewer()
             try:
                 page = viewer.page()
                 self.assertFalse(page["markers"], text)

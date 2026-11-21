@@ -29,7 +29,7 @@ JAVASCRIPT = JAVASCRIPT.replace(ANCHOR, """
 
 class ExpansionDetailBrowserTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.viewer = EXPRESSION.mathml_viewer()
+        self.viewer = EXPRESSION.formatted().mathml_viewer()
         self.playwright = await async_playwright().start()
         engine = os.environ.get("SYMBOLICA_TEST_BROWSER", "chromium")
         options = {"headless": True}
@@ -126,7 +126,7 @@ class ExpansionDetailBrowserTests(unittest.IsolatedAsyncioTestCase):
         for factored in (False, True):
             self.viewer.close()
             self.viewer = (EXPRESSION if factored else
-                           ((x + y + z + w) ** 20).expand()).mathml_viewer()
+                           ((x + y + z + w) ** 20).expand()).formatted().mathml_viewer()
             for theme in ('light', 'dark'):
                 await self.page.emulate_media(color_scheme=theme)
                 await self.page.evaluate("""initial => {
@@ -209,7 +209,7 @@ class ExpansionDetailBrowserTests(unittest.IsolatedAsyncioTestCase):
                     'transform:scale(0.8)', 'transform:scale(1.25)'):
             with self.subTest(css=css):
                 self.viewer.close()
-                self.viewer = EXPRESSION.mathml_viewer()
+                self.viewer = EXPRESSION.formatted().mathml_viewer()
                 # Scale the surrounding notebook container, not the viewer's
                 # own zoom control. Native scrollbars stay enabled throughout.
                 await self.page.evaluate("""css => {
@@ -258,7 +258,7 @@ class ExpansionDetailBrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_show_all_bypasses_height_target(self):
         self.viewer.close()
-        self.viewer = (((x + y + z + w) ** 5).expand() * (1 + a)).mathml_viewer()
+        self.viewer = (((x + y + z + w) ** 5).expand() * (1 + a)).formatted().mathml_viewer()
         await self.page.evaluate("""initial => {
           window.responses=[];
           window.pager=mount({el:document.querySelector('#host'),page:initial,send:async m=>{

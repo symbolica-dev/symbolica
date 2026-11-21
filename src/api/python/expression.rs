@@ -2025,7 +2025,7 @@ impl PythonTransformer {
     /// number_thousands_separator: str | None
     ///     The separator inserted between groups of digits in printed integers.
     /// multiplication_operator: str
-    ///     The string used to print multiplication.
+    ///     The string used to print multiplication. LaTeX and Typst use implicit multiplication.
     /// double_star_for_exponentiation: bool
     ///     Whether exponentiation should be printed as `**` instead of `^`.
     /// function_brackets: tuple[str, str]
@@ -4453,11 +4453,13 @@ impl PythonExpression {
 
     /// Convert the expression into a bounded native MathML representation.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        Ok(display::preview(&self.expr.as_view().render_mathml_page(
-            &display::default_options(),
-            0,
-            crate::printer::mathml::DEFAULT_PAGE_SIZE,
-        )))
+        Ok(display::preview(
+            &self.expr.as_view().render_mathml_page(
+                &display::default_options(),
+                &crate::printer::mathml::MathMlPageOptions::new(),
+            ),
+            None,
+        ))
     }
 
     /// Prefer native MathML, with live zoom and pagination.
@@ -4472,12 +4474,8 @@ impl PythonExpression {
             ._repr_mimebundle_(py, include, exclude)
     }
 
-    /// Create a bounded MathML viewer without importing notebook or widget packages.
-    /// Use its page(), handle_message(), and javascript() methods to connect a
-    /// custom frontend. The viewer retains the expression until close() is called.
-    /// With page_size=None, a compact product may extend the initial
-    /// 25-factor preview when it fits the output budget. An explicit size remains
-    /// the maximum number of items on a page.
+    /// Deprecated and undocumented: use `formatted(...).mathml_viewer()`, which
+    /// also accepts print options and `font_size`. Kept for compatibility.
     #[pyo3(signature = (page_size=None))]
     #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
     pub fn mathml_viewer(
@@ -4485,12 +4483,7 @@ impl PythonExpression {
         py: Python<'_>,
         page_size: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
-        let viewer = display::MathMLViewer::expression(slf, display::default_options(), None);
-        match page_size {
-            Some(size) => viewer.page_size(size),
-            None => viewer.automatic_product_preview(),
-        }
-        .into_python(py)
+        display::viewer(py, slf, display::default_options(), page_size, None)
     }
 
     /// Return native MathML or a live pager in marimo notebooks.
@@ -4505,8 +4498,7 @@ impl PythonExpression {
             .as_view()
             .render_mathml_page(
                 &display::default_options(),
-                0,
-                crate::printer::mathml::DEFAULT_PAGE_SIZE,
+                &crate::printer::mathml::MathMlPageOptions::new(),
             )
             .is_partial()
         {
@@ -4600,7 +4592,7 @@ impl PythonExpression {
     /// number_thousands_separator: str | None
     ///     The separator inserted between groups of digits in printed integers.
     /// multiplication_operator: str
-    ///     The string used to print multiplication.
+    ///     The string used to print multiplication. LaTeX and Typst use implicit multiplication.
     /// double_star_for_exponentiation: bool
     ///     Whether exponentiation should be printed as `**` instead of `^`.
     /// function_brackets: tuple[str, str]
@@ -4712,7 +4704,11 @@ impl PythonExpression {
     ///
     /// In notebooks, the returned object displays as native MathML. Large expressions
     /// use a bounded, live pager (`symbolica[notebook]`). `page_size` controls the
-    /// number of items per page (1–500). Paged output uses a short text summary;
+    /// number of items per page (1–500). The default, `None`, shows 25 items and
+    /// lets a compact product extend that preview when it fits, as in automatic
+    /// display. `font_size` sets the MathML font size in CSS pixels. Use
+    /// `.mathml_viewer()` on the result for a pager without notebook packages,
+    /// for example to connect a custom frontend. Paged output uses a short text summary;
     /// `max_terms` controls text in the legacy view and for complete small expressions.
     /// Set `mathml=False` to restore the highlighted text view. Non-Symbolica
     /// print modes retain their original text notation; `mode=PrintMode.MathML`
@@ -4745,7 +4741,7 @@ impl PythonExpression {
             show_namespaces = false,
             hide_namespace = None,
             include_attributes = false,
-            custom_print_mode = None, *, mathml = true, page_size = 25)
+            custom_print_mode = None, *, mathml = true, page_size = None, font_size = None)
         )]
     #[pyo3(
         text_signature = "($self, max_terms=100, mode=..., max_line_length=80, \
@@ -4757,7 +4753,7 @@ impl PythonExpression {
         multiplication_operator='\\u00b7', double_star_for_exponentiation=False, \
         function_brackets=('(', ')'), num_exp_as_superscript=True, precision=None, \
         show_namespaces=False, hide_namespace=None, include_attributes=False, \
-        custom_print_mode=None, *, mathml=True, page_size=25)"
+        custom_print_mode=None, *, mathml=True, page_size=None, font_size=None)"
     )]
     pub fn formatted(
         slf: Py<Self>,
@@ -4785,7 +4781,8 @@ impl PythonExpression {
         include_attributes: bool,
         custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
         mathml: bool,
-        page_size: usize,
+        page_size: Option<usize>,
+        font_size: Option<f64>,
     ) -> PyResult<PythonFormattedOutput> {
         if matches!(mode, PythonPrintMode::MathML)
             || (mathml && matches!(mode, PythonPrintMode::Symbolica))
@@ -4824,6 +4821,7 @@ impl PythonExpression {
                     ..PrintOptions::new()
                 },
                 page_size,
+                font_size,
             );
         }
 

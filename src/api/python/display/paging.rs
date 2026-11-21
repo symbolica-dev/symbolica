@@ -287,6 +287,8 @@ pub(super) struct PythonMathMLViewer {
     source: Option<Py<PyAny>>,
     layout_count: usize,
     supports_expansion: bool,
+    /// The viewer's own font size in CSS pixels, else the session-wide one.
+    font_size: Option<f64>,
     navigation: Navigation,
     cache: VecDeque<(CacheKey, Arc<Page>, usize)>,
     cache_bytes: usize,
@@ -948,13 +950,14 @@ impl PythonMathMLViewer {
 #[pymethods]
 impl PythonMathMLViewer {
     #[new]
-    #[pyo3(signature = (source, page_size=25, *, layout_count=1, supports_expansion=false, _automatic_product_preview=false))]
+    #[pyo3(signature = (source, page_size=25, *, layout_count=1, supports_expansion=false, font_size=None, _automatic_product_preview=false))]
     fn new(
         py: Python<'_>,
         source: Py<PyAny>,
         #[pyo3(from_py_with=page_size)] page_size: usize,
         #[pyo3(from_py_with=layout_count)] layout_count: usize,
         supports_expansion: bool,
+        font_size: Option<f64>,
         _automatic_product_preview: bool,
     ) -> PyResult<Self> {
         if !source
@@ -973,10 +976,12 @@ impl PythonMathMLViewer {
         if !(1..=8).contains(&layout_count) {
             return Err(invalid("layout_count must be between 1 and 8"));
         }
+        let font_size = super::font_size(font_size)?;
         Ok(Self {
             source: Some(source),
             layout_count,
             supports_expansion,
+            font_size,
             navigation: Navigation {
                 position: Position {
                     size: page_size,
@@ -1144,6 +1149,7 @@ impl PythonMathMLViewer {
         dict.set_item("page_size", self.navigation.position.size)?;
         dict.set_item("supports_expansion", self.supports_expansion)?;
         dict.set_item("can_collapse", self.can_collapse())?;
+        dict.set_item("font_size", super::resolved_font_size(self.font_size))?;
         self.last_page = Some(dict.clone().unbind());
         Ok(dict.unbind())
     }
@@ -1275,7 +1281,7 @@ impl PythonMathMLViewer {
     fn _repr_html_(&mut self, py: Python<'_>) -> PyResult<String> {
         let current = self.current_page(py, 0)?;
         let page = &current.value;
-        let html = super::scrollable_html(&page.html);
+        let html = super::scrollable_html(&page.html, self.font_size);
         if page.start == 0 && page.end == page.total && page.markers.is_empty() {
             return Ok(html);
         }

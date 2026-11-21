@@ -251,7 +251,7 @@ class MathMLPagingTests(unittest.TestCase):
     def test_real_expression_show_all_remains_bounded(self):
         for degree, allowed in [(80, True), (600, False)]:
             with self.subTest(degree=degree):
-                viewer = E(f"(1+pager_navigation_x)^{degree}").expand().mathml_viewer()
+                viewer = E(f"(1+pager_navigation_x)^{degree}").expand().formatted().mathml_viewer()
                 self.addCleanup(viewer.close)
                 compact = viewer.page()
                 preview = self.send(viewer, "preview", value=[], popup=True)
@@ -265,7 +265,7 @@ class MathMLPagingTests(unittest.TestCase):
 
     def test_rational_denominator_show_all_uses_child_paths_not_item_indices(self):
         poly = RationalPolynomial.parse('(1+x)^40/(1+y)^35', ['x', 'y'])
-        viewer = poly.mathml_viewer(page_size=7)
+        viewer = poly.formatted(page_size=7).mathml_viewer()
         self.addCleanup(viewer.close)
         self.assertEqual(viewer.page()["total"], 1)
         preview = self.send(viewer, "preview", value=[1], popup=True)
@@ -276,7 +276,7 @@ class MathMLPagingTests(unittest.TestCase):
 
     def test_matrix_cell_show_all_keeps_an_unrelated_row_tail(self):
         large = E('(1+pager_matrix_x)^20').expand()
-        viewer = Matrix.from_nested([[1, large], [2, 3]]).mathml_viewer(page_size=1)
+        viewer = Matrix.from_nested([[1, large], [2, 3]]).formatted(page_size=1).mathml_viewer()
         self.addCleanup(viewer.close)
         page = viewer.page()
         self.assertEqual([p for p, _ in page['markers']], [[1], []])

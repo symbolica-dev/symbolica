@@ -20,17 +20,11 @@ pub struct PythonMatrix {
 
 impl PythonMatrix {
     fn unify(&self, rhs: &PythonMatrix) -> (PythonMatrix, PythonMatrix) {
-        let mut zero = self.matrix.field().zero();
-
         let mut self_data = self.matrix.clone().into_vec();
-        let mut new_rhs_data = rhs.matrix.clone().into_vec();
-
-        for e in &mut self_data {
-            zero.unify_variables(e);
-        }
-        for e in &mut new_rhs_data {
-            zero.unify_variables(e);
-        }
+        let n_self = self_data.len();
+        self_data.extend(rhs.matrix.clone().into_vec());
+        RationalPolynomial::unify_variables_list(&mut self_data);
+        let new_rhs_data = self_data.split_off(n_self);
 
         (
             PythonMatrix {
@@ -58,16 +52,10 @@ impl PythonMatrix {
         &self,
         rhs: &PythonRationalPolynomial,
     ) -> (PythonMatrix, PythonRationalPolynomial) {
-        let mut zero = self.matrix.field().zero();
-
         let mut self_data = self.matrix.clone().into_vec();
-
-        for e in &mut self_data {
-            zero.unify_variables(e);
-        }
-
-        let mut new_rhs = rhs.poly.clone();
-        zero.unify_variables(&mut new_rhs);
+        self_data.push(rhs.poly.clone());
+        RationalPolynomial::unify_variables_list(&mut self_data);
+        let new_rhs = self_data.pop().unwrap();
 
         (
             PythonMatrix {
@@ -134,12 +122,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = diag.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut diag);
 
         let field = RationalPolynomialField::new(Z);
 
@@ -166,12 +149,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = entries.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut entries);
 
         let field = RationalPolynomialField::new(Z);
 
@@ -207,12 +185,7 @@ impl PythonMatrix {
             .collect::<PyResult<_>>()?;
 
         // unify the entries
-        let (first, rest) = entries.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for x in &mut *rest {
-                first.unify_variables(x);
-            }
-        }
+        RationalPolynomial::unify_variables_list(&mut entries);
 
         let field = RationalPolynomialField::new(Z);
 
@@ -491,7 +464,7 @@ impl PythonMatrix {
     /// number_thousands_separator: str | None
     ///     The separator inserted between groups of digits in printed integers.
     /// multiplication_operator: str
-    ///     The string used to print multiplication.
+    ///     The string used to print multiplication. LaTeX and Typst use implicit multiplication.
     /// double_star_for_exponentiation: bool
     ///     Whether exponentiation should be printed as `**` instead of `^`.
     /// function_brackets: tuple[str, str]
@@ -587,6 +560,95 @@ impl PythonMatrix {
         ))
     }
 
+    /// Convert the matrix into a rich display object, with tunable settings.
+    ///
+    /// In notebooks, the returned object displays as native MathML with paging,
+    /// while `str(...)` returns a short summary. Set `mathml=False` for highlighted
+    /// text with the settings of `format`. `page_size` (1–500) sets the number of
+    /// rows and the number of terms per entry in the preview, and `font_size` the
+    /// MathML font size in CSS pixels. Use `.mathml_viewer()` on the result for a
+    /// pager without notebook packages.
+    #[pyo3(signature =
+        (mode = PythonPrintMode::Symbolica,
+            max_line_length = Some(80),
+            indentation = 4,
+            fill_indented_lines = true,
+            pretty_matrix = true,
+            number_thousands_separator = None,
+            multiplication_operator = '·',
+            double_star_for_exponentiation = false,
+            function_brackets = ('(',')'),
+            num_exp_as_superscript = true,
+            precision = None,
+            show_namespaces = false,
+            hide_namespace = None,
+            include_attributes = false,
+            max_terms = None,
+            custom_print_mode = None, *, mathml = true, page_size = None, font_size = None)
+        )]
+    pub fn formatted(
+        &self,
+        mode: PythonPrintMode,
+        max_line_length: Option<usize>,
+        indentation: usize,
+        fill_indented_lines: bool,
+        pretty_matrix: bool,
+        number_thousands_separator: Option<char>,
+        multiplication_operator: char,
+        double_star_for_exponentiation: bool,
+        function_brackets: (char, char),
+        num_exp_as_superscript: bool,
+        precision: Option<usize>,
+        show_namespaces: bool,
+        hide_namespace: Option<&str>,
+        include_attributes: bool,
+        max_terms: Option<usize>,
+        custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+        mathml: bool,
+        page_size: Option<usize>,
+        font_size: Option<f64>,
+    ) -> PyResult<PythonFormattedOutput> {
+        let options = PrintOptions {
+            pretty_matrix,
+            ..display::print_options(
+                mode,
+                max_line_length,
+                indentation,
+                fill_indented_lines,
+                false,
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                number_thousands_separator,
+                multiplication_operator,
+                double_star_for_exponentiation,
+                function_brackets,
+                num_exp_as_superscript,
+                precision,
+                show_namespaces,
+                hide_namespace,
+                include_attributes,
+                max_terms,
+                custom_print_mode,
+            )
+        };
+        if display::uses_mathml(&options, mathml) {
+            let options = PrintOptions {
+                mode: PrintMode::MathML,
+                ..options
+            };
+            return display::matrix::formatted(self.clone(), options, page_size, font_size);
+        }
+        display::page_size(page_size)?;
+        display::font_size(font_size)?;
+        Ok(display::text_output(&options, |options| {
+            self.matrix.format_string(options, PrintState::new())
+        }))
+    }
+
     /// Convert the matrix into a LaTeX string.
     pub fn to_latex(&self) -> PyResult<String> {
         Ok(format!(
@@ -642,10 +704,11 @@ impl PythonMatrix {
 
     /// Render bounded native MathML cells in a matrix layout.
     pub fn _repr_html_(&self) -> PyResult<String> {
-        display::matrix::static_html(self)
+        display::matrix::static_html(self).map(|html| display::sized_html(html, None))
     }
 
-    /// Create a pager for complete matrix rows and individual entry terms.
+    /// Deprecated and undocumented: use `formatted(...).mathml_viewer()`, which
+    /// also accepts print options and `font_size`. Kept for compatibility.
     #[pyo3(signature = (page_size=25))]
     #[gen_stub(override_return_type(type_repr = "MathMLViewer"))]
     pub fn mathml_viewer(&self, py: Python<'_>, page_size: usize) -> PyResult<Py<PyAny>> {
@@ -660,12 +723,14 @@ impl PythonMatrix {
         include: Option<Vec<String>>,
         exclude: Option<Vec<String>>,
     ) -> PyResult<Py<PyAny>> {
-        display::matrix::formatted(self.clone())?._repr_mimebundle_(py, include, exclude)
+        display::matrix::formatted(self.clone(), display::default_options(), None, None)?
+            ._repr_mimebundle_(py, include, exclude)
     }
 
     /// Display a matrix with the shared pager in marimo.
     pub fn _display_(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        display::matrix::formatted(self.clone())?._display_(py)
+        display::matrix::formatted(self.clone(), display::default_options(), None, None)?
+            ._display_(py)
     }
 
     /// Convert the matrix into a LaTeX representation.

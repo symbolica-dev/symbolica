@@ -25,10 +25,7 @@ impl MathMLMarker {
     /// Insert this at the marker's zero-based index in `MathMLPage::markers`.
     /// Operators and fences belong outside the returned MathML.
     pub fn marker(index: usize) -> String {
-        format!(
-            "<mtext data-symbolica-marker=\"{index}\">[{}]</mtext>",
-            index as u128 + 1
-        )
+        crate::printer::mathml::MathMlMarker::token(index)
     }
 
     /// Construct the corresponding public Python object.
@@ -181,6 +178,7 @@ pub struct MathMLViewer {
     automatic_product_preview: bool,
     layout_count: usize,
     supports_expansion: bool,
+    font_size: Option<f64>,
 }
 
 impl MathMLViewer {
@@ -191,6 +189,7 @@ impl MathMLViewer {
             automatic_product_preview: false,
             layout_count: 1,
             supports_expansion: false,
+            font_size: None,
         }
     }
 
@@ -224,6 +223,13 @@ impl MathMLViewer {
         self
     }
 
+    /// Set the MathML font size in CSS pixels (1..=1000), checked by
+    /// `into_python`. `None` uses the session-wide size.
+    pub fn font_size(mut self, size: Option<f64>) -> Self {
+        self.font_size = size;
+        self
+    }
+
     pub fn into_python(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let source = Py::new(
             py,
@@ -238,6 +244,7 @@ impl MathMLViewer {
             self.layout_count,
             self.supports_expansion,
             self.automatic_product_preview,
+            self.font_size,
         )
     }
 }

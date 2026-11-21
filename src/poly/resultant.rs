@@ -1308,7 +1308,13 @@ mod test {
             .collect::<Vec<_>>();
         MultivariatePolynomial::unify_variables_list(&mut system);
 
-        let var = 0;
+        // eliminate v2
+        let v2 = crate::poly::PolyVariable::from(symbol!("v2"));
+        let var = system[0]
+            .get_vars_ref()
+            .iter()
+            .position(|v| *v == v2)
+            .unwrap();
         let a = system[0].to_univariate(var);
         let b = system[1].to_univariate(var);
 

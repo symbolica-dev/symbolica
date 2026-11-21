@@ -1,6 +1,8 @@
 //! Lazy notebook paging shared by Expression and FormattedOutput.
 use super::*;
-use crate::printer::mathml::{self, MathMlCursorCache, MathMlPage};
+use crate::printer::mathml::{
+    self, MathMlCursorCache, MathMlExpansion, MathMlLayout, MathMlPage, MathMlPageOptions,
+};
 
 pub(super) mod algebraic;
 mod html;
@@ -12,6 +14,80 @@ pub use provider::{MathMLPageRequest, MathMLPageSource, MathMLViewer};
 #[cfg(not(feature = "python_export"))]
 pub(super) use provider::{MathMLPageRequest, MathMLPageSource, MathMLViewer};
 mod paging;
+
+/// Convert the stable provider expansions to the native representation.
+pub(super) fn native_expansions(expansions: &[(Vec<usize>, usize)]) -> Vec<MathMlExpansion> {
+    expansions
+        .iter()
+        .map(|(path, count)| MathMlExpansion::new(path.clone(), *count))
+        .collect()
+}
+
+/// The CSS custom property that sets the MathML font size. Unset, the MathML
+/// root falls back to [`DEFAULT_FONT_SIZE`], so notebook CSS may also set it.
+const FONT_SIZE_PROPERTY: &str = "--symbolica-math-font-size";
+const DEFAULT_FONT_SIZE: f64 = 21.;
+/// The session-wide MathML font size in CSS pixels, set from Python.
+static FONT_SIZE: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
+/// Validate a MathML font size in CSS pixels.
+pub(super) fn font_size(size: Option<f64>) -> PyResult<Option<f64>> {
+    match size {
+        Some(size) if !(1. ..=1000.).contains(&size) => Err(exceptions::PyValueError::new_err(
+            "font_size must be between 1 and 1000 pixels",
+        )),
+        size => Ok(size),
+    }
+}
+
+/// The font size for one output: its own, else the session-wide one. `None`
+/// keeps the default, or a size set by the notebook through CSS.
+pub(super) fn resolved_font_size(size: Option<f64>) -> Option<f64> {
+    size.or_else(|| *FONT_SIZE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The inline declaration of the resolved font size, if any.
+fn font_size_declaration(size: Option<f64>) -> String {
+    resolved_font_size(size)
+        .map(|size| format!("{FONT_SIZE_PROPERTY}:{size}px;"))
+        .unwrap_or_default()
+}
+
+/// Apply the resolved font size to MathML without its own HTML container.
+pub(super) fn sized_html(html: String, size: Option<f64>) -> String {
+    let declaration = font_size_declaration(size);
+    if declaration.is_empty() {
+        html
+    } else {
+        format!("<span style=\"display:contents;{declaration}\">{html}</span>")
+    }
+}
+
+/// Set the font size of all MathML output, in CSS pixels.
+///
+/// Applies to outputs displayed afterwards, unless they set their own
+/// `font_size`. `None` restores the default of 21 pixels, which notebooks may
+/// also override with the CSS custom property `--symbolica-math-font-size`.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+#[pyo3(signature = (size))]
+pub(super) fn set_mathml_font_size(size: Option<f64>) -> PyResult<()> {
+    *FONT_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = font_size(size)?;
+    Ok(())
+}
+
+/// Get the font size of MathML output in CSS pixels, or `None` for the default.
+#[cfg_attr(
+    feature = "python_stubgen",
+    gen_stub_pyfunction(module = "symbolica.core")
+)]
+#[pyfunction]
+pub(super) fn get_mathml_font_size() -> Option<f64> {
+    *FONT_SIZE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 pub(super) fn default_options() -> PrintOptions {
     PrintOptions::new()
@@ -27,11 +103,12 @@ pub(super) fn with_math(format: impl FnOnce(&dyn Fn(&Atom) -> String) -> String)
     let text = format(&|atom| {
         let mut fragments = fragments.borrow_mut();
         let marker = format!("\u{e000}{}\u{e001}", fragments.len());
-        fragments.push(preview(&atom.as_view().render_mathml_page(
-            &default_options(),
-            0,
-            mathml::DEFAULT_PAGE_SIZE,
-        )));
+        fragments.push(preview(
+            &atom
+                .as_view()
+                .render_mathml_page(&default_options(), &MathMlPageOptions::new()),
+            None,
+        ));
         marker
     });
     let fragments = fragments.into_inner();
@@ -87,9 +164,8 @@ impl MathMLPageSource for PageSource {
                 "page_size must be between 1 and 500",
             ));
         }
-        if layout >= mathml::LAYOUTS.len() {
-            return Err(exceptions::PyValueError::new_err("Unknown layout"));
-        }
+        let layout = MathMlLayout::new(layout)
+            .ok_or_else(|| exceptions::PyValueError::new_err("Unknown layout"))?;
         let cursors = self.cursors.borrow_dependent();
         let atom = cursors
             .locate(path)
@@ -108,28 +184,31 @@ impl MathMLPageSource for PageSource {
         let mut render = |atom: AtomView<'_>, options: &PrintOptions, state: &PrintState| {
             renderer.as_mut().unwrap()(py, atom, options, state).map_err(|err| {
                 error = Some(err);
+                mathml::MathMlAborted
             })
         };
+        let expansions = native_expansions(expansions);
         let page = atom
-            .render_mathml_layout_cached(
+            .render_mathml_page_cached(
                 &self.options,
-                start,
-                size,
-                layout,
-                expansions,
+                &MathMlPageOptions::new()
+                    .start(start)
+                    .limit(size)
+                    .layout(layout)
+                    .expansions(&expansions),
                 cursors,
                 has_renderer.then_some(&mut render as &mut mathml::SemanticPrinter<'_>),
             )
-            .map_err(|()| error.unwrap())?;
+            .map_err(|mathml::MathMlAborted| error.unwrap())?;
         let (kind, unit) = match atom {
-            AtomView::Fun(_) if page.custom => ("Function", "expressions"),
+            AtomView::Fun(_) if page.opaque => ("Function", "expressions"),
             AtomView::Add(_) => ("Sum", "terms"),
             AtomView::Mul(_) => ("Product", "factors"),
             AtomView::Fun(_) => ("Function", "arguments"),
             AtomView::Pow(_) => ("Power", "expressions"),
             _ => ("Value", "expressions"),
         };
-        let mut result = MathMLPage::new(page.html, page.start, page.end, page.total);
+        let mut result = MathMLPage::new(page.html(), page.start, page.end, page.total);
         result.kind = kind.into();
         result.unit = unit.into();
         // A root omission cannot navigate anywhere new. It is emitted before
@@ -194,75 +273,199 @@ impl MathMLViewer {
             options,
             renderer,
         })
-        .layout_count(mathml::LAYOUTS.len())
+        .layout_count(MathMlLayout::COUNT)
         .supports_expansion(true)
     }
 }
 
+/// `size = None` lets a compact product extend the initial preview, as in
+/// automatic notebook display. An explicit size is the maximum page size.
 pub(super) fn viewer(
     py: Python<'_>,
     expression: Py<PythonExpression>,
     options: PrintOptions,
-    size: usize,
+    size: Option<usize>,
+    font_size: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
-    MathMLViewer::expression(expression, options, None)
-        .page_size(size)
-        .into_python(py)
+    let viewer = MathMLViewer::expression(expression, options, None);
+    match size {
+        Some(size) => viewer.page_size(size),
+        None => viewer.automatic_product_preview(),
+    }
+    .font_size(font_size)
+    .into_python(py)
+}
+
+/// Validate an optional page size, where `None` selects the default preview.
+pub(super) fn page_size(size: Option<usize>) -> PyResult<Option<usize>> {
+    match size {
+        Some(size) if !(1..=500).contains(&size) => Err(exceptions::PyValueError::new_err(
+            "page_size must be between 1 and 500",
+        )),
+        size => Ok(size),
+    }
+}
+
+/// The print options shared by the `format` and `formatted` methods.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn print_options(
+    mode: PythonPrintMode,
+    max_line_length: Option<usize>,
+    indentation: usize,
+    fill_indented_lines: bool,
+    terms_on_new_line: bool,
+    color_top_level_sum: bool,
+    color_builtin_symbols: bool,
+    bracket_level_colors: Option<[u8; 16]>,
+    print_ring: bool,
+    symmetric_representation_for_finite_field: bool,
+    explicit_rational_polynomial: bool,
+    number_thousands_separator: Option<char>,
+    multiplication_operator: char,
+    double_star_for_exponentiation: bool,
+    function_brackets: (char, char),
+    num_exp_as_superscript: bool,
+    precision: Option<usize>,
+    show_namespaces: bool,
+    hide_namespace: Option<&str>,
+    include_attributes: bool,
+    max_terms: Option<usize>,
+    custom_print_mode: Option<HashMap<String, PythonPrintUserData>>,
+) -> PrintOptions {
+    PrintOptions {
+        max_line_length,
+        indentation,
+        fill_indented_lines,
+        terms_on_new_line,
+        color_mode: ColorMode::Never,
+        color_top_level_sum,
+        color_builtin_symbols,
+        bracket_level_colors,
+        print_ring,
+        symmetric_representation_for_finite_field,
+        explicit_rational_polynomial,
+        number_thousands_separator,
+        multiplication_operator,
+        double_star_for_exponentiation,
+        function_brackets,
+        num_exp_as_superscript,
+        mode: mode.into(),
+        precision,
+        hide_all_namespaces: !show_namespaces,
+        hide_namespace: if show_namespaces {
+            hide_namespace.map(|s| std::borrow::Cow::Owned(s.to_owned()))
+        } else {
+            None
+        },
+        include_attributes,
+        max_terms,
+        custom_print_mode: custom_print_mode
+            .map(|m| m.into_iter().map(|(k, v)| (k, v.0)).collect())
+            .unwrap_or_default(),
+        ..PrintOptions::new()
+    }
+}
+
+/// Whether `formatted` renders native MathML: an explicit MathML mode, or the
+/// default Symbolica mode unless `mathml=False`.
+pub(super) fn uses_mathml(options: &PrintOptions, mathml: bool) -> bool {
+    options.mode.is_mathml() || (mathml && options.mode.is_symbolica())
+}
+
+/// The highlighted text output of `formatted`, for print modes other than
+/// MathML. `format` renders the value with the options it is given.
+pub(super) fn text_output(
+    options: &PrintOptions,
+    format: impl Fn(&PrintOptions) -> String,
+) -> PythonFormattedOutput {
+    let text = format(&PrintOptions {
+        color_mode: ColorMode::Never,
+        ..options.clone()
+    });
+    let colored = format(&PrintOptions {
+        color_mode: ColorMode::Always,
+        ..options.clone()
+    });
+    let latex = format(&PrintOptions {
+        max_line_length: options.max_line_length,
+        precision: options.precision,
+        hide_all_namespaces: options.hide_all_namespaces,
+        hide_namespace: options.hide_namespace.clone(),
+        include_attributes: options.include_attributes,
+        max_terms: options.max_terms,
+        custom_print_mode: options.custom_print_mode.clone(),
+        ..(*LATEX_PRINT_OPTIONS).clone()
+    });
+    PythonFormattedOutput::new(
+        text,
+        Some(crate::printer::AnsiHtmlFormatter::new(&colored).to_string()),
+        Some(format!("$${latex}$$")),
+    )
 }
 
 pub(super) fn is_mathml_viewer(value: &Bound<'_, PyAny>) -> bool {
     value.is_instance_of::<paging::PythonMathMLViewer>()
 }
 
-pub(super) fn scrollable_html(html: &str) -> String {
-    boxed_mathml(html, true)
+pub(super) fn scrollable_html(html: &str, font_size: Option<f64>) -> String {
+    boxed_mathml(html, true, font_size)
 }
 
-fn boxed_mathml(html: &str, scroll: bool) -> String {
+/// The font size of the HTML container, which also sizes its padding.
+fn container_font_size(size: Option<f64>) -> String {
+    format!(
+        "{}font-size:var({FONT_SIZE_PROPERTY},{DEFAULT_FONT_SIZE}px)",
+        font_size_declaration(size)
+    )
+}
+
+fn boxed_mathml(html: &str, scroll: bool, font_size: Option<f64>) -> String {
     let overflow = if scroll { "overflow-x:auto;" } else { "" };
+    let font_size = container_font_size(font_size);
     if let Some(html) = html::wrapping_mathml(html) {
         return format!(
-            "<span style=\"display:block;width:100%;max-width:100%;min-width:0;{overflow}\"><span style=\"display:block;padding:.6em .1em;font-size:21px\">{html}</span></span>"
+            "<span style=\"display:block;width:100%;max-width:100%;min-width:0;{overflow}\"><span style=\"display:block;padding:.6em .1em;{font_size}\">{html}</span></span>"
         );
     }
     // Keep the MathML root unconstrained. The inner HTML box includes room for
     // glyph ink outside its line box; only the outer box handles scrolling.
     format!(
-        "<span style=\"display:inline-block;max-width:100%;min-width:0;{overflow}vertical-align:middle\"><span style=\"display:block;width:max-content;padding:.3em .1em;font-size:21px\">{html}</span></span>"
+        "<span style=\"display:inline-block;max-width:100%;min-width:0;{overflow}vertical-align:middle\"><span style=\"display:block;width:max-content;padding:.3em .1em;{font_size}\">{html}</span></span>"
     )
 }
 
 /// Native MathML for algebraic containers, independent of notebook packages.
-pub(super) fn algebraic_fragment_html(fragment: &str) -> String {
+pub(super) fn algebraic_fragment_html(fragment: &str, font_size: Option<f64>) -> String {
     let html = mathml::document(fragment);
     let html = html::wrapping_mathml(&html).unwrap_or(html);
+    let font_size = container_font_size(font_size);
     // Flex MathML can have ink below its line box. Include that ink inside the
     // HTML scrollport, and give wrapping rows the container's available width.
     format!(
-        "<span style=\"display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto\"><span style=\"display:block;padding:.6em .1em;font-size:21px\">{html}</span></span>"
+        "<span style=\"display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto\"><span style=\"display:block;padding:.6em .1em;{font_size}\">{html}</span></span>"
     )
 }
 
 pub(super) fn algebraic_html(value: &impl mathml::AlgebraicMathMl) -> String {
     let page = value
-        .page(&default_options(), &[], 0, mathml::DEFAULT_PAGE_SIZE)
+        .page(&default_options(), &[], &MathMlPageOptions::new())
         .unwrap();
-    algebraic_fragment_html(&page.fragment())
+    algebraic_fragment_html(&page.fragment(), None)
 }
 
-pub(super) fn preview(page: &MathMlPage) -> String {
-    preview_with_scroll(page, true)
+pub(super) fn preview(page: &MathMlPage, font_size: Option<f64>) -> String {
+    preview_with_scroll(page, true, font_size)
 }
 
 /// A cell embedded in a larger result must not become its own scrollport.
 /// The containing result owns horizontal overflow, including math glyph ink.
 pub(super) fn embedded_preview(atom: AtomView<'_>) -> String {
-    let page = atom.render_mathml_page(&default_options(), 0, mathml::DEFAULT_PAGE_SIZE);
-    preview_with_scroll(&page, false)
+    let page = atom.render_mathml_page(&default_options(), &MathMlPageOptions::new());
+    preview_with_scroll(&page, false, None)
 }
 
-fn preview_with_scroll(page: &MathMlPage, scroll: bool) -> String {
-    let html = boxed_mathml(&page.html, scroll);
+fn preview_with_scroll(page: &MathMlPage, scroll: bool, font_size: Option<f64>) -> String {
+    let html = boxed_mathml(&page.html(), scroll, font_size);
     if page.is_partial() {
         format!(
             "<div>{}<p>Expression preview · items {}–{} of {}. Omitted subexpressions are marked ⋯. Use .formatted(page_size=25) in a live notebook with symbolica[notebook] to navigate.</p></div>",
@@ -280,13 +483,11 @@ pub(super) fn formatted(
     py: Python<'_>,
     expression: Py<PythonExpression>,
     options: PrintOptions,
-    size: usize,
+    size: Option<usize>,
+    font_size: Option<f64>,
 ) -> PyResult<PythonFormattedOutput> {
-    if !(1..=500).contains(&size) {
-        return Err(exceptions::PyValueError::new_err(
-            "page_size must be between 1 and 500",
-        ));
-    }
+    let size = page_size(size)?;
+    let font_size = self::font_size(font_size)?;
     let notebook_expression = expression.clone_ref(py);
     let notebook_options = options.clone();
     Ok(PythonFormattedOutput::lazy(move |_, backend| {
@@ -294,9 +495,12 @@ pub(super) fn formatted(
             return Ok(None);
         }
         let expression = &expression.get().expr;
-        let page = expression.as_view().render_mathml_page(&options, 0, size);
+        let page = expression.as_view().render_mathml_page(
+            &options,
+            &MathMlPageOptions::new().limit(size.unwrap_or(mathml::DEFAULT_PAGE_SIZE)),
+        );
         Ok(Some(match backend {
-            FormattedOutputBackend::Html => preview(&page),
+            FormattedOutputBackend::Html => preview(&page, font_size),
             FormattedOutputBackend::Text if page.is_partial() => format!(
                 "Symbolica expression preview (items 1–{} of {}; use .formatted(page_size=25) to navigate)",
                 page.end, page.total
@@ -315,24 +519,23 @@ pub(super) fn formatted(
     // Static output never constructs the live provider. Small expressions also
     // use the shared viewer when displayed in a notebook, for keyboard zoom.
     .with_notebook(move |py| {
-        viewer(py, notebook_expression.clone_ref(py), notebook_options.clone(), size)
+        viewer(
+            py,
+            notebook_expression.clone_ref(py),
+            notebook_options.clone(),
+            size,
+            font_size,
+        )
     }))
 }
 
+/// The automatic display of an expression, as `formatted()` with defaults.
 pub(super) fn formatted_preview(
     py: Python<'_>,
     expression: Py<PythonExpression>,
     options: PrintOptions,
 ) -> PyResult<PythonFormattedOutput> {
-    let owner = expression.clone_ref(py);
-    let preview_options = options.clone();
-    Ok(
-        formatted(py, expression, options, mathml::DEFAULT_PAGE_SIZE)?.with_notebook(move |py| {
-            MathMLViewer::expression(owner.clone_ref(py), preview_options.clone(), None)
-                .automatic_product_preview()
-                .into_python(py)
-        }),
-    )
+    formatted(py, expression, options, None, None)
 }
 
 fn paging_module(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
@@ -383,6 +586,8 @@ pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         class.setattr("__module__", m.name()?)?;
         m.add(name, class)?;
     }
+    m.add_function(wrap_pyfunction!(set_mathml_font_size, m)?)?;
+    m.add_function(wrap_pyfunction!(get_mathml_font_size, m)?)?;
     Ok(())
 }
 
@@ -392,6 +597,7 @@ pub(super) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// It retains the native expression and renders only bounded requested pages.
 /// Use one layout and disable expansion for a minimal adapter. No notebook
 /// dependencies are imported until the returned viewer is displayed.
+#[cfg(feature = "python_export")]
 pub fn mathml_viewer(
     py: Python<'_>,
     source: Py<PyAny>,
@@ -406,6 +612,7 @@ pub fn mathml_viewer(
         layout_count,
         supports_expansion,
         false,
+        None,
     )
 }
 
@@ -416,10 +623,12 @@ fn mathml_viewer_with_preview(
     layout_count: usize,
     supports_expansion: bool,
     automatic_product_preview: bool,
+    font_size: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item("layout_count", layout_count)?;
     kwargs.set_item("supports_expansion", supports_expansion)?;
+    kwargs.set_item("font_size", font_size)?;
     kwargs.set_item("_automatic_product_preview", automatic_product_preview)?;
     paging_module(py)?
         .getattr("MathMLViewer")?
@@ -452,19 +661,16 @@ mod tests {
                 let viewer = MathMLViewer::expression(owner.clone_ref(py), options.clone(), None)
                     .page_size(2)
                     .into_python(py)?;
-                for layout in 0..mathml::LAYOUTS.len() {
-                    let expected = owner.get().expr.as_view().render_mathml_layout(
+                for layout in MathMlLayout::all() {
+                    let expected = owner.get().expr.as_view().render_mathml_page(
                         &options,
-                        0,
-                        2,
-                        layout,
-                        &[],
+                        &MathMlPageOptions::new().limit(2).layout(layout),
                     );
-                    let actual = viewer.call_method1(py, "_render_page", (layout,))?;
+                    let actual = viewer.call_method1(py, "_render_page", (layout.index(),))?;
                     let actual = actual.bind(py).cast::<PyDict>()?;
                     assert_eq!(
                         actual.get_item("html")?.unwrap().extract::<String>()?,
-                        expected.html
+                        expected.html()
                     );
                     for (key, value) in [
                         ("start", expected.start),

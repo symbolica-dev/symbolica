@@ -23,6 +23,8 @@ impl Deref for Snapshot<'_> {
 
 struct Source<'a> {
     matrix: Snapshot<'a>,
+    /// Print options for the entries.
+    options: PrintOptions,
     cell_size: usize,
 }
 
@@ -79,26 +81,25 @@ impl Source<'_> {
                     .iter()
                     .filter_map(|(path, count)| {
                         path.strip_prefix(&[index])
-                            .map(|rest| (rest.to_vec(), *count))
+                            .map(|rest| MathMlExpansion::new(rest.to_vec(), *count))
                     })
                     .collect::<Vec<_>>();
                 let compact_size = (self.cell_size >> request.layout).max(1);
-                let size = expansions
-                    .iter()
-                    .filter(|(path, _)| path.is_empty())
-                    .map(|(_, count)| *count)
-                    .max()
+                let options = MathMlPageOptions::new().expansions(&expansions);
+                let size = options
+                    .expansion(&[])
                     .unwrap_or(compact_size)
                     .max(compact_size);
                 let page = self
                     .entry(index)?
-                    .page_expanded(&default_options(), &[], 0, size, &expansions)
+                    .page(&self.options, &[], &options.limit(size))
                     .unwrap();
+                let page_html = page.html();
                 // Small, complete values should not become omission buttons
                 // just because earlier rows used the detailed-expression budget.
                 // The shared provider still enforces the hard page-size limit.
-                let detailed = !page.markers.is_empty() || page.html.len() > 1024;
-                if (detailed && bytes + page.html.len() > HTML_BUDGET)
+                let detailed = !page.markers.is_empty() || page_html.len() > 1024;
+                if (detailed && bytes + page_html.len() > HTML_BUDGET)
                     || markers.len() + page.markers.len() > 900
                 {
                     let id = markers.len();
@@ -110,21 +111,16 @@ impl Source<'_> {
                     ));
                 } else {
                     if detailed {
-                        bytes += page.html.len();
+                        bytes += page_html.len();
                     }
                     let offset = markers.len();
-                    let mut html = page.html;
+                    let mut html = page_html;
                     // Descending replacement avoids renumbering an ID twice.
                     for id in (0..page.markers.len()).rev() {
-                        html = html
-                            .replace(
-                                &format!("data-symbolica-marker=\"{id}\""),
-                                &format!("data-symbolica-marker=\"{}\"", offset + id),
-                            )
-                            .replace(
-                                &format!(">[{}]</mtext>", id + 1),
-                                &format!(">[{}]</mtext>", offset + id + 1),
-                            );
+                        html = html.replace(
+                            &mathml::MathMlMarker::token(id),
+                            &mathml::MathMlMarker::token(offset + id),
+                        );
                     }
                     if static_output {
                         html = super::html::wrapping_mathml(&html).unwrap_or(html);
@@ -178,16 +174,18 @@ impl MathMLPageSource for Source<'static> {
         } else {
             request.size
         };
+        let expansions = native_expansions(request.expansions);
         let page = value
-            .page_expanded(
-                &default_options(),
+            .page(
+                &self.options,
                 path,
-                request.start,
-                size,
-                request.expansions,
+                &MathMlPageOptions::new()
+                    .start(request.start)
+                    .limit(size)
+                    .expansions(&expansions),
             )
             .ok_or_else(|| exceptions::PyValueError::new_err("Unknown matrix subexpression"))?;
-        let mut result = MathMLPage::new(page.html, page.start, page.end, page.total);
+        let mut result = MathMLPage::new(page.html(), page.start, page.end, page.total);
         let cols = self.matrix.matrix.ncols();
         result.kind = format!("Entry ({}, {})", entry / cols + 1, entry % cols + 1);
         result.unit = "terms".into();
@@ -204,35 +202,50 @@ impl MathMLPageSource for Source<'static> {
     }
 }
 
+/// Deprecated `Matrix.mathml_viewer()`: the viewer of `formatted()` with defaults.
 pub(in crate::api::python) fn viewer(
     py: Python<'_>,
     matrix: PythonMatrix,
     size: usize,
 ) -> PyResult<Py<PyAny>> {
-    shared_viewer(py, Arc::new(matrix), size)
+    shared_viewer(py, Arc::new(matrix), default_options(), size, None)
 }
 
-fn shared_viewer(py: Python<'_>, matrix: Arc<PythonMatrix>, size: usize) -> PyResult<Py<PyAny>> {
+fn shared_viewer(
+    py: Python<'_>,
+    matrix: Arc<PythonMatrix>,
+    options: PrintOptions,
+    size: usize,
+    font_size: Option<f64>,
+) -> PyResult<Py<PyAny>> {
     MathMLViewer::new(Source {
         matrix: Snapshot::Shared(matrix),
+        options,
         cell_size: size,
     })
     .page_size(size)
     .layout_count(LAYOUT_COUNT)
     .supports_expansion(true)
+    .font_size(font_size)
     .into_python(py)
 }
 
 pub(in crate::api::python) fn static_html(matrix: &PythonMatrix) -> PyResult<String> {
+    static_page(matrix, default_options(), 25)
+}
+
+/// The first `size` rows, with omitted entries and terms shown as an ellipsis.
+fn static_page(matrix: &PythonMatrix, options: PrintOptions, size: usize) -> PyResult<String> {
     let source = Source {
         matrix: Snapshot::Borrowed(matrix),
-        cell_size: 25,
+        options,
+        cell_size: size,
     };
     let page = source.matrix_page(
         &MathMLPageRequest {
             path: &[],
             start: 0,
-            size: 25,
+            size,
             layout: 0,
             expansions: &[],
         },
@@ -245,12 +258,25 @@ pub(in crate::api::python) fn static_html(matrix: &PythonMatrix) -> PyResult<Str
     Ok(html)
 }
 
-pub(in crate::api::python) fn formatted(matrix: PythonMatrix) -> PyResult<PythonFormattedOutput> {
+/// Native MathML for a matrix, with `options` for its entries. `size = None`
+/// selects the default of 25 rows and 25 terms per entry.
+pub(in crate::api::python) fn formatted(
+    matrix: PythonMatrix,
+    options: PrintOptions,
+    size: Option<usize>,
+    font_size: Option<f64>,
+) -> PyResult<PythonFormattedOutput> {
+    let size = super::page_size(size)?.unwrap_or(25);
+    let font_size = super::font_size(font_size)?;
     let matrix = Arc::new(matrix);
     let notebook = Arc::clone(&matrix);
+    let notebook_options = options.clone();
     Ok(PythonFormattedOutput::lazy(move |_, backend| {
         Ok(match backend {
-            FormattedOutputBackend::Html => Some(static_html(&matrix)?),
+            FormattedOutputBackend::Html => Some(super::sized_html(
+                static_page(&matrix, options.clone(), size)?,
+                font_size,
+            )),
             FormattedOutputBackend::Text => Some(format!(
                 "Matrix {}×{} (MathML preview)",
                 matrix.matrix.nrows(),
@@ -259,5 +285,13 @@ pub(in crate::api::python) fn formatted(matrix: PythonMatrix) -> PyResult<Python
             FormattedOutputBackend::Latex => None,
         })
     })
-    .with_notebook(move |py| shared_viewer(py, Arc::clone(&notebook), 25)))
+    .with_notebook(move |py| {
+        shared_viewer(
+            py,
+            Arc::clone(&notebook),
+            notebook_options.clone(),
+            size,
+            font_size,
+        )
+    }))
 }

@@ -25,7 +25,7 @@ def static_previews():
     from symbolica import E, S
     expression = E('(1+x)^100').expand()
     return [expression._repr_html_(), expression.formatted()._repr_html_(),
-            expression.mathml_viewer()._repr_html_(),
+            expression.formatted().mathml_viewer()._repr_html_(),
             expression.to_polynomial()._repr_html_(),
             E('exp(x)').series(S('x'), 0, 40)._repr_html_()]
 

@@ -11875,7 +11875,14 @@ mod tests {
         let mut inactive_left = left.clone();
         let mut inactive_right = right.clone();
         let mut inactive_expected = common_factor.clone();
-        let mut variable_template = parse!("y+1").to_polynomial::<IntegerRing, u16>(&Z, None);
+        // the inactive variable `y` follows the active variable
+        let mut variable_template = parse!("y+1").to_polynomial::<IntegerRing, u16>(
+            &Z,
+            Some(std::sync::Arc::new(vec![
+                common_factor.variables()[0].clone(),
+                crate::symbol!("y").into(),
+            ])),
+        );
         inactive_left.unify_variables(&mut variable_template);
         inactive_right.unify_variables(&mut variable_template);
         inactive_expected.unify_variables(&mut variable_template);

@@ -55,12 +55,12 @@ function render({ model, el }) {
     }
     /* The container scrolls; an inline MathML root must not get its own
        miniature scrollbars around fractions and tall delimiters. */
-    math { font-family:"STIX Two Math",math; font-size:21px; font-synthesis:none; }
+    math { font-family:"STIX Two Math",math; font-size:var(--symbolica-math-font-size,21px); font-synthesis:none; }
     /* MathML glyph ink can extend beyond its line box. Keep that space inside
        the zoomed content so fractions do not create a vertical scrollbar. */
     .math-content {
       width:fit-content; box-sizing:border-box; padding:.6em .1em;
-      font-size:21px; zoom:var(--expression-zoom,1);
+      font-size:var(--symbolica-math-font-size,21px); zoom:var(--expression-zoom,1);
     }
     .math-content > math { overflow:visible!important; }
     .math-flow { max-width:var(--symbolica-wrap-width,min(650px,80vw)); }
@@ -110,7 +110,7 @@ function render({ model, el }) {
     .preview.pinned .preview-math { max-height: min(55vh, 480px); }
     /* Math glyphs can extend beyond the inline line box. Leave room for that
        ink so a short preview doesn't acquire a tiny vertical scrollbar. */
-    .preview-math { overflow:auto; max-height:160px; font-size:21px; padding:6px 2px; }
+    .preview-math { overflow:auto; max-height:160px; font-size:var(--symbolica-math-font-size,21px); padding:6px 2px; }
     .preview-math > math { overflow:visible!important; }
     .preview-hint { margin-top:8px; color:var(--muted-foreground,var(--jp-ui-font-color2,#68716c)); font-size:12px; }
   </style>
@@ -160,6 +160,15 @@ function render({ model, el }) {
     else hidePreview();
   }
   const preview = root.querySelector('.preview');
+  // An explicit size overrides the default and any size inherited from the
+  // notebook's CSS. Layout below measures the resulting font.
+  function applyFontSize(size) {
+    for (const node of [math, preview]) {
+      if (Number.isFinite(size) && size > 0) {
+        node.style.setProperty('--symbolica-math-font-size', `${size}px`);
+      } else node.style.removeProperty('--symbolica-math-font-size');
+    }
+  }
   const previewHeading = root.querySelector('.preview-heading');
   const previewMath = root.querySelector('.preview-math');
   const previewControls = root.querySelector('.preview-controls');
@@ -1052,6 +1061,7 @@ function render({ model, el }) {
     }
     refitting = true;
     const base = model.get('page');
+    applyFontSize(base.font_size);
     if (preservePreview !== true) {
       if (expansion?.action === 'expand_all' && !base.error) showAllLayout = true;
       else if (!expansion || expansion.action === 'collapse') showAllLayout = false;

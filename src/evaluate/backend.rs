@@ -895,6 +895,14 @@ impl<T> JITCompiledEvaluator<T> {
     pub fn has_external_functions(&self) -> bool {
         !self.external_functions.is_empty()
     }
+
+    /// Return whether the external functions refer to symbolic data that depends on the
+    /// Symbolica state. See [`ExternalFunctionContainer::uses_symbolic_state`].
+    pub fn uses_symbolic_state(&self) -> bool {
+        self.external_functions
+            .iter()
+            .any(ExternalFunctionContainer::uses_symbolic_state)
+    }
 }
 
 #[cfg(feature = "serde")]

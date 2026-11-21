@@ -7,6 +7,8 @@ mod rational_division;
 mod batch_tests;
 #[cfg(test)]
 mod division_tests;
+#[cfg(test)]
+mod unify_tests;
 
 use ahash::{HashMap, HashMapExt};
 use std::cell::{Cell, RefCell, UnsafeCell};
@@ -1257,11 +1259,23 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
 
     /// Unify the variable maps of two polynomials, i.e.
     /// rewrite a polynomial in `x` and one in `y` to a
-    /// two polynomial in `x` and `y`.
+    /// two polynomial in `x` and `y`. Afterwards, both polynomials
+    /// share the same variable map.
     ///
-    /// The variable map will be inherited from
-    /// `self` and will be extended by variables occurring
-    /// in `other`.
+    /// The resulting variable map only depends on the two input maps and
+    /// not on the order of the arguments:
+    /// - if the maps are equal, nothing changes;
+    /// - if the variables of one polynomial are a strict superset of the
+    ///   variables of the other, the variable map of the former is used;
+    /// - otherwise, the longest common prefix of both maps is kept and the
+    ///   remaining variables are appended, sorted by [`PolyVariable`]'s ordering.
+    ///
+    /// Repeated unification of any number of polynomials therefore always
+    /// stabilizes.
+    ///
+    /// As a consequence, the variable indices of both `self` and `other` may change.
+    /// Look up variable indices after unification. To impose a specific
+    /// variable order, create all polynomials with the same (full) variable map.
     #[inline(always)]
     pub fn unify_variables(&mut self, other: &mut Self) {
         if self.variables() == other.variables() {
@@ -1280,76 +1294,324 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
     }
 
     fn unify_variables_impl(&mut self, other: &mut Self) {
-        let mut new_var_map = self.variables().as_ref().clone();
-        let mut new_var_pos_other = vec![0; other.nvars()];
-        for (pos, v) in new_var_pos_other.iter_mut().zip(other.variables().as_ref()) {
-            if let Some(p) = new_var_map.iter().position(|x| x == v) {
-                *pos = p;
-            } else {
-                *pos = new_var_map.len();
-                new_var_map.push(v.clone());
+        if let Some(positions) = other.variable_positions(self.get_vars_ref()) {
+            if other.nvars() < self.nvars() {
+                other.embed_in_variables(self.variables().clone(), &positions);
+                return;
             }
-        }
-
-        let mut newexp = vec![E::zero(); new_var_map.len() * self.nterms()];
-
-        for t in 0..self.nterms() {
-            newexp[t * new_var_map.len()..t * new_var_map.len() + self.nvars()]
-                .copy_from_slice(self.exponents(t));
-        }
-
-        self.set_variables(Arc::new(new_var_map));
-        self.exponents = newexp;
-
-        // check if term ordering remains unchanged
-        if new_var_pos_other.windows(2).all(|w| w[0] <= w[1]) {
-            let mut newexp = vec![E::zero(); self.nvars() * other.nterms()];
-
-            if other.nvars() > 0 {
-                for (d, t) in newexp
-                    .chunks_mut(self.nvars())
-                    .zip(other.exponents.chunks(other.nvars()))
-                {
-                    for (var, e) in t.iter().enumerate() {
-                        d[new_var_pos_other[var]] = *e;
-                    }
-                }
-            }
-
-            other.set_variables(self.variables().clone());
-            other.exponents = newexp;
+        } else if let Some(positions) = self.variable_positions(other.get_vars_ref()) {
+            self.embed_in_variables(other.variables().clone(), &positions);
             return;
         }
 
-        // reconstruct 'other' with correct monomial ordering
-        let mut newother = Self::new(
-            other.ring(),
-            other.nterms().into(),
-            self.variables().clone(),
-        );
-        let mut newexp = vec![E::zero(); self.nvars()];
-        for t in other.into_iter() {
-            for c in &mut newexp {
-                *c = E::zero();
-            }
-
-            for (var, e) in t.exponents.iter().enumerate() {
-                newexp[new_var_pos_other[var]] = *e;
-            }
-            newother.append_monomial_nonzero(t.coefficient.clone(), &newexp);
+        // the maps have to be merged or have the same variables in a different order
+        let vars = Self::merge_variable_maps(&[self.get_vars_ref(), other.get_vars_ref()]);
+        for p in [self, other] {
+            let positions = p.variable_positions(&vars).unwrap();
+            p.embed_in_variables(vars.clone(), &positions);
         }
-        *other = newother;
     }
 
-    /// Unify the variable maps of all polynomials in the slice.
-    pub fn unify_variables_list(polys: &mut [Self]) {
-        if polys.len() < 2 {
+    /// Merge variable maps, none of which has a variable set that is a strict superset
+    /// of another one. The longest common prefix of the maps is kept, followed by
+    /// the remaining variables sorted by [`PolyVariable`]'s ordering. The result
+    /// does not depend on the order of `maps`.
+    fn merge_variable_maps(maps: &[&[PolyVariable]]) -> Arc<Vec<PolyVariable>> {
+        let prefix_len = (0..)
+            .take_while(|&i| {
+                maps[0]
+                    .get(i)
+                    .is_some_and(|v| maps.iter().all(|m| m.get(i) == Some(v)))
+            })
+            .count();
+
+        let mut rest = maps
+            .iter()
+            .flat_map(|m| &m[prefix_len..])
+            .cloned()
+            .collect::<Vec<_>>();
+        rest.sort_unstable();
+        rest.dedup();
+
+        let mut vars = maps[0][..prefix_len].to_vec();
+        vars.extend(rest);
+        Arc::new(vars)
+    }
+
+    /// Get the positions of the variables of `self` in `vars` if all variables
+    /// of `self` occur in `vars`.
+    fn variable_positions(&self, vars: &[PolyVariable]) -> Option<Vec<usize>> {
+        self.get_vars_ref()
+            .iter()
+            .map(|v| vars.iter().position(|x| x == v))
+            .collect()
+    }
+
+    /// Rewrite `self` in the variables `vars`, where variable `i` of `self` is
+    /// at position `positions[i]` in `vars`.
+    fn embed_in_variables(&mut self, vars: Arc<Vec<PolyVariable>>, positions: &[usize]) {
+        let identity = positions.iter().enumerate().all(|(i, p)| i == *p);
+        if !identity || vars.len() != self.nvars() {
+            self.exponents = self.remap_exponents(positions, vars.len());
+        }
+        self.set_variables(vars);
+
+        // the term order may change if the variables are permuted
+        if self.nterms() > 1 && !positions.is_sorted() {
+            self.sort_terms(false);
+        }
+    }
+
+    /// Create an exponent list with `nvars` variables per term, where
+    /// variable `i` of `self` is moved to position `positions[i]`.
+    fn remap_exponents(&self, positions: &[usize], nvars: usize) -> Vec<E> {
+        debug_assert_eq!(positions.len(), self.nvars());
+        let mut newexp = vec![E::zero(); nvars * self.nterms()];
+        if self.nvars() > 0 {
+            for (d, t) in newexp.chunks_mut(nvars).zip(self.exponents_iter()) {
+                for (p, e) in positions.iter().zip(t) {
+                    d[*p] = *e;
+                }
+            }
+        }
+        newexp
+    }
+
+    /// Sort the terms of a polynomial whose exponents and coefficients are valid,
+    /// except that the terms may be out of order. If `merge` is `true`, equal monomials
+    /// are added and zero coefficients are removed afterwards.
+    fn sort_terms(&mut self, merge: bool) {
+        let nvars = self.nvars();
+        let nterms = self.coefficients.len();
+        assert_eq!(self.exponents.len(), nterms * nvars);
+
+        let exp = |i: usize| &self.exponents[i * nvars..(i + 1) * nvars];
+        if (1..nterms).all(|i| O::cmp(exp(i - 1), exp(i)).is_le()) {
+            if merge {
+                self.merge_sorted_terms();
+            }
             return;
         }
 
+        let mut perm = (0..nterms).collect::<Vec<_>>();
+        perm.sort_unstable_by(|&i, &j| O::cmp(exp(i), exp(j)));
+
+        // Move the coefficients out in sorted order and merge equal monomials in the same pass.
+        let ring = &self.context.ring;
+        let mut coefficients = std::mem::take(&mut self.coefficients);
+        let mut new_coefficients: Vec<F::Element> = Vec::with_capacity(nterms);
+        let mut new_exponents = Vec::with_capacity(self.exponents.len());
+        // SAFETY: `perm` is a permutation of `0..nterms`, so every coefficient is
+        // moved out exactly once. The length of `coefficients` is set to zero first,
+        // so that its elements are never dropped twice, even if a ring operation panics.
+        unsafe {
+            coefficients.set_len(0);
+            let src = coefficients.as_ptr();
+            for &i in &perm {
+                let c = std::ptr::read(src.add(i));
+                let e = exp(i);
+
+                if merge {
+                    if let Some(last) = new_coefficients.last_mut()
+                        && new_exponents[new_exponents.len() - nvars..] == *e
+                    {
+                        ring.add_assign(last, &c);
+                        if ring.is_zero(last) {
+                            new_coefficients.pop();
+                            new_exponents.truncate(new_exponents.len() - nvars);
+                        }
+                        continue;
+                    }
+
+                    if ring.is_zero(&c) {
+                        continue;
+                    }
+                }
+
+                new_coefficients.push(c);
+                new_exponents.extend_from_slice(e);
+            }
+        }
+
+        self.coefficients = new_coefficients;
+        self.exponents = new_exponents;
+
+        debug_assert!(
+            (1..self.nterms()).all(|i| O::cmp(self.exponents(i - 1), self.exponents(i)).is_lt())
+        );
+    }
+
+    /// Add equal adjacent monomials and remove zero coefficients in-place.
+    fn merge_sorted_terms(&mut self) {
+        let nvars = self.nvars();
+        let nterms = self.coefficients.len();
+        let ring = &self.context.ring;
+        let coefficients = &mut self.coefficients;
+        let exponents = &mut self.exponents;
+
+        let mut w = 0;
+        for r in 0..nterms {
+            if w > 0
+                && exponents[(w - 1) * nvars..w * nvars] == exponents[r * nvars..(r + 1) * nvars]
+            {
+                let (head, tail) = coefficients.split_at_mut(r);
+                ring.add_assign(&mut head[w - 1], &tail[0]);
+                continue;
+            }
+
+            if w > 0 && ring.is_zero(&coefficients[w - 1]) {
+                w -= 1;
+            }
+
+            if w != r {
+                coefficients.swap(w, r);
+                exponents.copy_within(r * nvars..(r + 1) * nvars, w * nvars);
+            }
+            w += 1;
+        }
+
+        if w > 0 && ring.is_zero(&coefficients[w - 1]) {
+            w -= 1;
+        }
+
+        coefficients.truncate(w);
+        exponents.truncate(w * nvars);
+    }
+
+    /// Unify the variable maps of all polynomials in the slice, such that
+    /// they all share the same variable map.
+    ///
+    /// The resulting variable map does not depend on the order of the polynomials.
+    /// Consider the maps whose variables are not a strict subset of the variables of another map.
+    /// If there is only one such map, it is used. Otherwise, their longest common prefix is kept
+    /// and the remaining variables are appended, sorted by [`PolyVariable`]'s ordering.
+    ///
+    /// For two polynomials, this yields the same map as [`Self::unify_variables`].
+    pub fn unify_variables_list(polys: &mut [Self]) {
+        let Some(vars) = Self::unified_variable_map(polys.iter().map(|p| p.variables())) else {
+            return;
+        };
+
+        for p in &mut *polys {
+            p.embed_in_variable_map(&vars);
+        }
+
+        // share the contexts
         let (first, rest) = polys.split_first_mut().unwrap();
-        for _ in 0..2 {
-            for p in &mut *rest {
+        for p in rest {
+            first.unify_variables(p);
+        }
+    }
+
+    /// Unify the variable maps of all referenced polynomials, in the same way as
+    /// [`Self::unify_variables_list`].
+    pub(crate) fn unify_variables_mut(polys: &mut [&mut Self]) {
+        let Some(vars) = Self::unified_variable_map(polys.iter().map(|p| p.variables())) else {
+            return;
+        };
+
+        for p in polys {
+            p.embed_in_variable_map(&vars);
+        }
+    }
+
+    /// Sort the variable map by [`PolyVariable`]'s ordering.
+    pub(crate) fn sort_variables(&mut self) {
+        if let Some(vars) = Self::sorted_variable_map(self.variables()) {
+            self.embed_in_variable_map(&vars);
+        }
+    }
+
+    /// Get the sorted variable map if `vars` is not sorted.
+    pub(crate) fn sorted_variable_map(
+        vars: &Arc<Vec<PolyVariable>>,
+    ) -> Option<Arc<Vec<PolyVariable>>> {
+        if vars.is_sorted() {
+            None
+        } else {
+            let mut vars = vars.as_ref().clone();
+            vars.sort_unstable();
+            Some(Arc::new(vars))
+        }
+    }
+
+    /// Get the variable map that [`Self::unify_variables_list`] yields for polynomials
+    /// with the variable maps `maps`. Returns `None` if `maps` is empty.
+    pub(crate) fn unified_variable_map<'a>(
+        maps: impl IntoIterator<Item = &'a Arc<Vec<PolyVariable>>>,
+    ) -> Option<Arc<Vec<PolyVariable>>> {
+        let mut maps = maps.into_iter();
+        let mut distinct = vec![maps.next()?];
+        for m in maps {
+            if !distinct.contains(&m) {
+                distinct.push(m);
+            }
+        }
+
+        if distinct.len() == 1 {
+            return Some(distinct[0].clone());
+        }
+
+        let is_strict_subset = |a: &[PolyVariable], b: &[PolyVariable]| {
+            a.len() < b.len() && a.iter().all(|v| b.contains(v))
+        };
+        let maximal = distinct
+            .iter()
+            .filter(|a| !distinct.iter().any(|b| is_strict_subset(a, b)))
+            .collect::<Vec<_>>();
+
+        if maximal.len() == 1 {
+            Some((*maximal[0]).clone())
+        } else {
+            let maximal = maximal.iter().map(|m| m.as_slice()).collect::<Vec<_>>();
+            Some(Self::merge_variable_maps(&maximal))
+        }
+    }
+
+    /// Rewrite `self` in the variable map `vars`, which must contain all variables of `self`.
+    pub(crate) fn embed_in_variable_map(&mut self, vars: &Arc<Vec<PolyVariable>>) {
+        if self.variables() != vars {
+            let positions = self
+                .variable_positions(vars)
+                .expect("The variable map does not contain all variables");
+            self.embed_in_variables(vars.clone(), &positions);
+        } else {
+            self.set_variables(vars.clone());
+        }
+    }
+
+    /// Unify the variable maps of all polynomials in the slice, such that they
+    /// all share a variable map that starts with `prefix`. Variables that do not occur
+    /// in `prefix` are appended, sorted by [`PolyVariable`]'s ordering.
+    ///
+    /// Use this function instead of [`Self::unify_variables_list`] when the variable
+    /// order matters, for example because it determines the monomial order.
+    pub fn unify_variables_list_with_prefix(polys: &mut [Self], prefix: &Arc<Vec<PolyVariable>>) {
+        let mut extra = vec![];
+        for p in &*polys {
+            for v in p.get_vars_ref() {
+                if !prefix.contains(v) && !extra.contains(v) {
+                    extra.push(v.clone());
+                }
+            }
+        }
+
+        let vars = if extra.is_empty() {
+            prefix.clone()
+        } else {
+            extra.sort_unstable();
+            let mut vars = prefix.as_ref().clone();
+            vars.extend(extra);
+            Arc::new(vars)
+        };
+
+        for p in &mut *polys {
+            p.embed_in_variable_map(&vars);
+        }
+
+        // share the contexts
+        if let Some((first, rest)) = polys.split_first_mut() {
+            for p in rest {
                 first.unify_variables(p);
             }
         }
@@ -1836,44 +2098,60 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
         }
 
         // Merge the two polynomials, which are assumed to be already sorted.
+        let nvars = self.nvars();
+        let (n, m) = (self.nterms(), other.nterms());
+        let mut new_coefficients = Vec::with_capacity(n + m);
+        let mut new_exponents: Vec<E> = Vec::with_capacity(nvars * (n + m));
+        // Write the exponents into uninitialized memory, which avoids the capacity check
+        // of `extend_from_slice` for every term.
+        let out = new_exponents.spare_capacity_mut().as_mut_ptr() as *mut E;
+        let mut len = 0;
+        let mut push_exponents = |e: &[E]| {
+            debug_assert!(len + e.len() <= nvars * (n + m));
+            // SAFETY: at most `n + m` slices of length `nvars` are written in total,
+            // as all slices are taken from the first `n * nvars` and `m * nvars`
+            // exponents of `self` and `other`.
+            unsafe { std::ptr::copy_nonoverlapping(e.as_ptr(), out.add(len), e.len()) };
+            len += e.len();
+        };
+        // Write the coefficients into uninitialized memory as well, since pushing
+        // reloads and stores the length around every (non-inlined) ring operation.
+        // If a ring operation panics, the written coefficients are leaked.
+        let coefficients_out: *mut F::Element = new_coefficients.as_mut_ptr();
+        let mut coefficients_len = 0;
+        let mut push_coefficient = |c: F::Element| {
+            debug_assert!(coefficients_len < n + m);
+            // SAFETY: at most `n + m` coefficients are written in total.
+            unsafe { std::ptr::write(coefficients_out.add(coefficients_len), c) };
+            coefficients_len += 1;
+        };
 
-        let mut new_coefficients = vec![self.ring().zero(); self.nterms() + other.nterms()];
-        let mut new_exponents: Vec<E> =
-            vec![E::zero(); self.nvars() * (self.nterms() + other.nterms())];
-        let mut new_nterms = 0;
+        let mut coeffs_self = mem::take(&mut self.coefficients).into_iter();
+        let mut coeffs_other = mem::take(&mut other.coefficients).into_iter();
+        let ring = &self.context.ring;
+
         let mut i = 0;
         let mut j = 0;
-
-        macro_rules! insert_monomial {
-            ($source:expr, $index:expr) => {
-                mem::swap(
-                    &mut new_coefficients[new_nterms],
-                    &mut $source.coefficients[$index],
-                );
-
-                new_exponents[new_nterms * $source.nvars()..(new_nterms + 1) * $source.nvars()]
-                    .clone_from_slice($source.exponents($index));
-                new_nterms += 1;
-            };
-        }
-
-        while i < self.nterms() && j < other.nterms() {
-            let c = O::cmp(self.exponents(i), other.exponents(j));
-            match c {
+        while i < n && j < m {
+            let e1 = &self.exponents[i * nvars..(i + 1) * nvars];
+            let e2 = &other.exponents[j * nvars..(j + 1) * nvars];
+            match O::cmp(e1, e2) {
                 Ordering::Less => {
-                    insert_monomial!(self, i);
+                    push_coefficient(coeffs_self.next().unwrap());
+                    push_exponents(e1);
                     i += 1;
                 }
                 Ordering::Greater => {
-                    insert_monomial!(other, j);
+                    push_coefficient(coeffs_other.next().unwrap());
+                    push_exponents(e2);
                     j += 1;
                 }
                 Ordering::Equal => {
-                    self.context
-                        .ring
-                        .add_assign(&mut self.coefficients[i], &other.coefficients[j]);
-                    if !self.context.ring.is_zero(&self.coefficients[i]) {
-                        insert_monomial!(self, i);
+                    let mut c = coeffs_self.next().unwrap();
+                    ring.add_assign(&mut c, &coeffs_other.next().unwrap());
+                    if !ring.is_zero(&c) {
+                        push_coefficient(c);
+                        push_exponents(e1);
                     }
                     i += 1;
                     j += 1;
@@ -1881,19 +2159,17 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add for MultivariatePolynomial<F, E
             }
         }
 
-        while i < self.nterms() {
-            insert_monomial!(self, i);
-            i += 1;
-        }
+        // SAFETY: the first `coefficients_len` coefficients are initialized.
+        unsafe { new_coefficients.set_len(coefficients_len) };
 
-        while j < other.nterms() {
-            insert_monomial!(other, j);
-            j += 1;
-        }
+        // at most one of the polynomials has terms left
+        new_coefficients.extend(coeffs_self);
+        push_exponents(&self.exponents[i * nvars..n * nvars]);
+        new_coefficients.extend(coeffs_other);
+        push_exponents(&other.exponents[j * nvars..m * nvars]);
 
-        new_coefficients.truncate(new_nterms);
-        new_exponents.truncate(self.nvars() * new_nterms);
-
+        // SAFETY: the first `len` exponents are initialized and `E` is `Copy`.
+        unsafe { new_exponents.set_len(len) };
         Self {
             coefficients: new_coefficients,
             exponents: new_exponents,
@@ -1926,42 +2202,56 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
         }
 
         // Merge the two polynomials, which are assumed to be already sorted.
-        let mut new_coefficients = vec![self.ring().zero(); self.nterms() + other.nterms()];
-        let mut new_exponents: Vec<E> =
-            vec![E::zero(); self.nvars() * (self.nterms() + other.nterms())];
-        let mut new_nterms = 0;
+        let nvars = self.nvars();
+        let (n, m) = (self.nterms(), other.nterms());
+        let mut new_coefficients = Vec::with_capacity(n + m);
+        let mut new_exponents: Vec<E> = Vec::with_capacity(nvars * (n + m));
+        // Write the exponents into uninitialized memory, which avoids the capacity check
+        // of `extend_from_slice` for every term.
+        let out = new_exponents.spare_capacity_mut().as_mut_ptr() as *mut E;
+        let mut len = 0;
+        let mut push_exponents = |e: &[E]| {
+            debug_assert!(len + e.len() <= nvars * (n + m));
+            // SAFETY: at most `n + m` slices of length `nvars` are written in total,
+            // as all slices are taken from the first `n * nvars` and `m * nvars`
+            // exponents of `self` and `other`.
+            unsafe { std::ptr::copy_nonoverlapping(e.as_ptr(), out.add(len), e.len()) };
+            len += e.len();
+        };
+        // Write the coefficients into uninitialized memory as well, since pushing
+        // reloads and stores the length around every (non-inlined) ring operation.
+        // If a ring operation panics, the written coefficients are leaked.
+        let coefficients_out: *mut F::Element = new_coefficients.as_mut_ptr();
+        let mut coefficients_len = 0;
+        let mut push_coefficient = |c: F::Element| {
+            debug_assert!(coefficients_len < n + m);
+            // SAFETY: at most `n + m` coefficients are written in total.
+            unsafe { std::ptr::write(coefficients_out.add(coefficients_len), c) };
+            coefficients_len += 1;
+        };
+        let ring = self.ring();
+
         let mut i = 0;
         let mut j = 0;
-
-        macro_rules! insert_monomial {
-            ($source:expr, $index:expr) => {
-                new_coefficients[new_nterms] = $source.coefficients[$index].clone();
-                new_exponents[new_nterms * $source.nvars()..(new_nterms + 1) * $source.nvars()]
-                    .clone_from_slice($source.exponents($index));
-                new_nterms += 1;
-            };
-        }
-
-        while i < self.nterms() && j < other.nterms() {
-            let c = O::cmp(self.exponents(i), other.exponents(j));
-            match c {
+        while i < n && j < m {
+            let e1 = &self.exponents[i * nvars..(i + 1) * nvars];
+            let e2 = &other.exponents[j * nvars..(j + 1) * nvars];
+            match O::cmp(e1, e2) {
                 Ordering::Less => {
-                    insert_monomial!(self, i);
+                    push_coefficient(self.coefficients[i].clone());
+                    push_exponents(e1);
                     i += 1;
                 }
                 Ordering::Greater => {
-                    insert_monomial!(other, j);
+                    push_coefficient(other.coefficients[j].clone());
+                    push_exponents(e2);
                     j += 1;
                 }
                 Ordering::Equal => {
-                    let coeff = self
-                        .ring()
-                        .add(&self.coefficients[i], &other.coefficients[j]);
-                    if !self.ring().is_zero(&coeff) {
-                        new_coefficients[new_nterms] = coeff;
-                        new_exponents[new_nterms * self.nvars()..(new_nterms + 1) * self.nvars()]
-                            .clone_from_slice(self.exponents(i));
-                        new_nterms += 1;
+                    let c = ring.add(&self.coefficients[i], &other.coefficients[j]);
+                    if !ring.is_zero(&c) {
+                        push_coefficient(c);
+                        push_exponents(e1);
                     }
                     i += 1;
                     j += 1;
@@ -1969,19 +2259,17 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> Add<&MultivariatePolynomial<F, E, O
             }
         }
 
-        while i < self.nterms() {
-            insert_monomial!(self, i);
-            i += 1;
-        }
+        // SAFETY: the first `coefficients_len` coefficients are initialized.
+        unsafe { new_coefficients.set_len(coefficients_len) };
 
-        while j < other.nterms() {
-            insert_monomial!(other, j);
-            j += 1;
-        }
+        // at most one of the polynomials has terms left
+        new_coefficients.extend_from_slice(&self.coefficients[i..]);
+        push_exponents(&self.exponents[i * nvars..n * nvars]);
+        new_coefficients.extend_from_slice(&other.coefficients[j..]);
+        push_exponents(&other.exponents[j * nvars..m * nvars]);
 
-        new_coefficients.truncate(new_nterms);
-        new_exponents.truncate(self.nvars() * new_nterms);
-
+        // SAFETY: the first `len` exponents are initialized and `E` is `Copy`.
+        unsafe { new_exponents.set_len(len) };
         MultivariatePolynomial {
             coefficients: new_coefficients,
             exponents: new_exponents,
@@ -2044,9 +2332,18 @@ impl<'a, F: Ring, E: Exponent> Mul<&'a MultivariatePolynomial<F, E, LexOrder>>
         }
 
         if self.variables() != rhs.variables() {
-            let mut c1 = self.clone();
-            let mut c2 = rhs.clone();
+            // Unify with the larger polynomial as base, so that its term order is
+            // preserved, and reuse the unified copy for the monomial case.
+            let (mut c1, mut c2) = if self.nterms() >= rhs.nterms() {
+                (self.clone(), rhs.clone())
+            } else {
+                (rhs.clone(), self.clone())
+            };
             c1.unify_variables(&mut c2);
+
+            if c2.nterms() == 1 {
+                return c1.mul_monomial(&c2.coefficients[0], &c2.exponents);
+            }
             return c1.mul(&c2);
         }
 
@@ -2438,33 +2735,21 @@ impl<F: Ring, E: Exponent, O: MonomialOrder> MultivariatePolynomial<F, E, O> {
         vars: Arc<Vec<PolyVariable>>,
         ring: &F,
     ) -> Self {
-        let poly = Self::new(ring, Some(coefficients.len()), vars);
+        let poly = Self::new(ring, None, vars);
         Self::fill_coefficient_list(poly, coefficients, exponents)
     }
 
     /// Fill an empty polynomial, preserving its context.
     fn fill_coefficient_list(
         mut poly: Self,
-        mut coefficients: Vec<F::Element>,
+        coefficients: Vec<F::Element>,
         exponents: Vec<E>,
     ) -> Self {
         debug_assert!(poly.coefficients.is_empty() && poly.exponents.is_empty());
-        let nterms = coefficients.len();
-        let nvars = poly.nvars();
-        assert_eq!(exponents.len(), nterms * nvars);
-        let mut indices = (0..nterms).collect::<Vec<_>>();
-        indices.sort_unstable_by(|&i, &j| {
-            O::cmp(
-                &exponents[i * nvars..(i + 1) * nvars],
-                &exponents[j * nvars..(j + 1) * nvars],
-            )
-        });
-
-        for i in indices {
-            let coefficient = std::mem::replace(&mut coefficients[i], poly.ring().zero());
-            poly.append_monomial_back(coefficient, &exponents[i * nvars..(i + 1) * nvars]);
-        }
-
+        assert_eq!(exponents.len(), coefficients.len() * poly.nvars());
+        poly.coefficients = coefficients;
+        poly.exponents = exponents;
+        poly.sort_terms(true);
         poly
     }
 }
@@ -2787,11 +3072,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
             exponent[n] = E::zero();
         }
 
-        Self::fill_coefficient_list(
-            self.zero_with_capacity(coefficients.len()),
-            coefficients,
-            exponents,
-        )
+        Self::fill_coefficient_list(self.zero(), coefficients, exponents)
     }
 
     /// Replace several variables by elements of the coefficient ring.
@@ -2840,9 +3121,9 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
                     .map(|&i| self.variables()[i].clone())
                     .collect(),
             );
-            Self::new(self.ring(), Some(self.nterms()), variables)
+            Self::new(self.ring(), None, variables)
         } else {
-            self.zero_with_capacity(self.nterms())
+            self.zero()
         };
         let mut coefficients = Vec::with_capacity(self.nterms());
         let mut exponents = Vec::with_capacity(self.nterms() * result.nvars());
@@ -3221,11 +3502,7 @@ impl<F: Ring, E: PositiveExponent> MultivariatePolynomial<F, E, LexOrder> {
                 exponents.extend_from_slice(&term_exponents);
             }
         }
-        Self::fill_coefficient_list(
-            self.zero_with_capacity(coefficients.len()),
-            coefficients,
-            exponents,
-        )
+        Self::fill_coefficient_list(self.zero(), coefficients, exponents)
     }
 
     /// Merge sorted coefficient polynomials after assigning each one a distinct
@@ -3999,8 +4276,11 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let quotient_degree = dividend_degree - div_degree;
         let mut quotient_coefficients = vec![self.ring().zero(); quotient_degree + 1];
+        // The degrees are processed from the top and only lower degrees are updated,
+        // so the coefficients can be popped instead of being replaced by a zero.
         for degree in (div_degree..=dividend_degree).rev() {
-            let coefficient = std::mem::replace(&mut coefficients[degree], self.ring().zero());
+            let coefficient = coefficients.pop().unwrap();
+            debug_assert_eq!(coefficients.len(), degree);
             if self.ring().is_zero(&coefficient) {
                 continue;
             }
@@ -6407,15 +6687,21 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
             return (quotient, zero_remainder);
         }
 
+        let mut quotient_terms = Vec::with_capacity(self.nterms());
+
         let mut coefficients = (0..total).map(|_| ring.zero()).collect::<Vec<_>>();
-        for (term, &index) in dividend_indices.iter().enumerate() {
-            coefficients[index as usize] =
-                std::mem::replace(&mut self.coefficients[term], ring.zero());
+        for (coefficient, &index) in std::mem::take(&mut self.coefficients)
+            .into_iter()
+            .zip(&dividend_indices)
+        {
+            coefficients[index as usize] = coefficient;
         }
 
-        let mut quotient_terms = Vec::with_capacity(self.nterms());
+        // The positions are processed from the top and only lower positions are updated,
+        // so the coefficients can be popped instead of being replaced by a zero.
         for position in (0..total).rev() {
-            let coefficient = std::mem::replace(&mut coefficients[position], ring.zero());
+            let coefficient = coefficients.pop().unwrap();
+            debug_assert_eq!(coefficients.len(), position);
             if ring.is_zero(&coefficient) {
                 continue;
             }
@@ -6517,16 +6803,24 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
         let mut m_cache = vec![E::zero(); div.nvars()];
         let mut c;
 
+        // The terms are consumed from the back, so the coefficients can be popped
+        // instead of being replaced by a zero placeholder.
+        let nterms = self.nterms();
+        let nvars = self.nvars();
+        let mut coefficients = std::mem::take(&mut self.coefficients);
+        let exponents_back = |k: usize| {
+            let index = nterms - k - 1;
+            &self.exponents[index * nvars..(index + 1) * nvars]
+        };
+
         let mut k = 0;
-        while !h.is_empty() || k < self.nterms() {
-            if k < self.nterms() && (h.is_empty() || self.exponents_back(k) >= h.peek().unwrap()) {
-                for (s, e) in m.iter_mut().zip(self.exponents_back(k)) {
+        while !h.is_empty() || k < nterms {
+            if k < nterms && (h.is_empty() || exponents_back(k) >= h.peek().unwrap()) {
+                for (s, e) in m.iter_mut().zip(exponents_back(k)) {
                     *s = *e;
                 }
 
-                let coefficient_index = self.nterms() - k - 1;
-                let zero = self.ring().zero();
-                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
+                c = coefficients.pop().unwrap();
                 k += 1;
             } else {
                 for (s, e) in m.iter_mut().zip(h.peek().unwrap().as_slice()) {
@@ -6801,16 +7095,16 @@ impl<F: Ring, E: Exponent> MultivariatePolynomial<F, E, LexOrder> {
 
         let mut q_exp = Vec::with_capacity(self.nterms());
 
-        let mut k = 0;
-        while !h.is_empty() || k < self.nterms() {
-            if k < self.nterms()
-                && (h.is_empty() || pack_a[self.nterms() - k - 1] >= *h.peek().unwrap())
-            {
-                m = pack_a[self.nterms() - k - 1];
+        // The terms are consumed from the back, so the coefficients can be popped
+        // instead of being replaced by a zero placeholder.
+        let nterms = self.nterms();
+        let mut coefficients = std::mem::take(&mut self.coefficients);
 
-                let coefficient_index = self.nterms() - k - 1;
-                let zero = self.ring().zero();
-                c = std::mem::replace(&mut self.coefficients[coefficient_index], zero);
+        let mut k = 0;
+        while !h.is_empty() || k < nterms {
+            if k < nterms && (h.is_empty() || pack_a[nterms - k - 1] >= *h.peek().unwrap()) {
+                m = pack_a[nterms - k - 1];
+                c = coefficients.pop().unwrap();
 
                 k += 1;
             } else {
@@ -9675,10 +9969,12 @@ mod test {
 
         let r = p1 * &p2 + p3;
 
-        assert_eq!(
-            r.get_vars_ref(),
-            &[symbol!("v1"), symbol!("v2"), symbol!("v4"), symbol!("v3")]
-        );
+        // the common prefix is kept and the other variables are sorted
+        let mut rest = [symbol!("v3"), symbol!("v4")];
+        rest.sort();
+        let mut expected = vec![symbol!("v1"), symbol!("v2")];
+        expected.extend(rest);
+        assert_eq!(r.get_vars_ref(), &expected);
     }
 
     #[test]

@@ -2,34 +2,64 @@ use super::*;
 use crate::evaluate::{ExportedConstantFunction, FunctionRegistrationOptions, InliningPolicy};
 use crate::state::StateMap;
 
-// The final byte versions the state-aware evaluator envelope.
-const SAVED_EVALUATOR_MAGIC: &[u8] = b"\xffSYMEVAL\x01";
+// A saved evaluator starts with the magic, a version byte, and a native code generation flag.
+// Version 1 is followed by the state. Version 2 is followed by a flag that says whether the
+// state follows, so evaluators without symbolic data do not store it.
+const SAVED_EVALUATOR_MAGIC: &[u8] = b"\xffSYMEVAL";
+const SAVED_EVALUATOR_VERSION: u8 = 2;
 
-fn encode_saved_evaluator<T: bincode::Encode>(evaluator: T) -> PyResult<Vec<u8>> {
+fn encode_saved_evaluator<T: bincode::Encode>(
+    evaluator: T,
+    include_state: bool,
+) -> PyResult<Vec<u8>> {
     let mut bytes = SAVED_EVALUATOR_MAGIC.to_vec();
+    bytes.push(SAVED_EVALUATOR_VERSION);
     bytes.push(u8::from(cfg!(feature = "native_code_generation")));
-    State::export(&mut bytes).map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    bytes.push(u8::from(include_state));
+    if include_state {
+        State::export(&mut bytes)
+            .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    }
     bincode::encode_into_std_write(evaluator, &mut bytes, bincode::config::standard())
         .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
     Ok(bytes)
 }
 
 fn decode_saved_evaluator<T: bincode::Decode<StateMap>>(bytes: &[u8]) -> PyResult<T> {
-    let Some((&native_code_generation, mut bytes)) = bytes
-        .strip_prefix(SAVED_EVALUATOR_MAGIC)
-        .and_then(|bytes| bytes.split_first())
+    let Some([version, native_code_generation, bytes @ ..]) =
+        bytes.strip_prefix(SAVED_EVALUATOR_MAGIC)
     else {
         return Err(exceptions::PyIOError::new_err(
             "Evaluator serialization format changed; recreate and save the evaluator again.",
         ));
     };
-    if native_code_generation != u8::from(cfg!(feature = "native_code_generation")) {
+    let (include_state, mut bytes) = match (*version, bytes) {
+        (1, bytes) => (true, bytes),
+        (SAVED_EVALUATOR_VERSION, [include_state @ (0 | 1), bytes @ ..]) => {
+            (*include_state == 1, bytes)
+        }
+        (SAVED_EVALUATOR_VERSION, _) => {
+            return Err(exceptions::PyIOError::new_err(
+                "Invalid state flag in the saved evaluator.",
+            ));
+        }
+        (version, _) => {
+            return Err(exceptions::PyIOError::new_err(format!(
+                "Unsupported evaluator serialization version {version}; recreate and save the evaluator again.",
+            )));
+        }
+    };
+    if *native_code_generation != u8::from(cfg!(feature = "native_code_generation")) {
         return Err(exceptions::PyIOError::new_err(
             "The saved evaluator requires a build with matching native code generation support.",
         ));
     }
-    let state_map = State::import(&mut bytes, None)
-        .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
+    let state_map = if include_state {
+        State::import(&mut bytes, None)
+            .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?
+    } else {
+        StateMap::default()
+    };
     let (evaluator, consumed) =
         bincode::decode_from_slice_with_context(bytes, bincode::config::standard(), state_map)
             .map_err(|error| exceptions::PyIOError::new_err(error.to_string()))?;
@@ -230,6 +260,35 @@ mod tests {
         assert_eq!(output, [9.]);
     }
 
+    fn python_evaluator(
+        evaluator: &ExpressionEvaluator<Complex<Rational>>,
+    ) -> PythonExpressionEvaluator {
+        PythonExpressionEvaluator {
+            rational_constants: evaluator.get_constants().to_vec(),
+            eval_complex: evaluator
+                .clone()
+                .map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
+            eval_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_real: None,
+            #[cfg(feature = "native_code_generation")]
+            jit_complex: None,
+            eval_double_float: None,
+            eval_double_float_complex: None,
+            eval_arb_prec: None,
+            eval_arb_prec_complex: None,
+            jit_compile: false,
+            #[cfg(feature = "native_code_generation")]
+            jit_settings: JITCompilationSettings::default(),
+        }
+    }
+
+    /// Return the version, native code generation flag, and state flag of a saved evaluator.
+    fn saved_evaluator_header(bytes: &[u8]) -> &[u8] {
+        let header = bytes.strip_prefix(SAVED_EVALUATOR_MAGIC).unwrap();
+        &header[..3]
+    }
+
     #[test]
     fn python_evaluator_save_load_restores_symbolic_hot_start() {
         let hot_start = Expression::Fun(
@@ -246,27 +305,19 @@ mod tests {
             .build()
             .unwrap();
         let expected = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
-        let original = PythonExpressionEvaluator {
-            rational_constants: evaluator.get_constants().to_vec(),
-            eval_complex: evaluator.map_coeff(&|c| Complex::new(c.re.to_f64(), c.im.to_f64())),
-            eval_real: None,
-            #[cfg(feature = "native_code_generation")]
-            jit_real: None,
-            #[cfg(feature = "native_code_generation")]
-            jit_complex: None,
-            eval_double_float: None,
-            eval_double_float_complex: None,
-            eval_arb_prec: None,
-            eval_arb_prec_complex: None,
-            jit_compile: false,
-            #[cfg(feature = "native_code_generation")]
-            jit_settings: JITCompilationSettings::default(),
-        };
+        let original = python_evaluator(&evaluator);
 
         Python::initialize();
         Python::attach(|py| -> PyResult<()> {
             let bytes = original.save(py)?;
-            assert!(bytes.as_bytes().starts_with(SAVED_EVALUATOR_MAGIC));
+            assert_eq!(
+                saved_evaluator_header(bytes.as_bytes()),
+                [
+                    SAVED_EVALUATOR_VERSION,
+                    u8::from(cfg!(feature = "native_code_generation")),
+                    1
+                ]
+            );
             let mut loaded = PythonExpressionEvaluator::load(
                 &py.get_type::<PythonExpressionEvaluator>(),
                 bytes,
@@ -297,6 +348,82 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn python_evaluator_save_omits_state_without_symbolic_data() {
+        // Built-in functions and constants are the same in every state.
+        let evaluator = parse!("x^2 + sin(x) + pi*x + exp(2)")
+            .evaluator(&[parse!("x")])
+            .build()
+            .unwrap();
+        assert!(
+            !evaluator
+                .clone()
+                .map_coeff(&|c| c.re.to_f64())
+                .export_instructions()
+                .constant_functions
+                .is_empty()
+        );
+        let expected = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
+        let original = python_evaluator(&evaluator);
+
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let bytes = original.save(py)?;
+            assert_eq!(
+                saved_evaluator_header(bytes.as_bytes()),
+                [
+                    SAVED_EVALUATOR_VERSION,
+                    u8::from(cfg!(feature = "native_code_generation")),
+                    0
+                ]
+            );
+            let mut loaded = PythonExpressionEvaluator::load(
+                &py.get_type::<PythonExpressionEvaluator>(),
+                bytes,
+            )?;
+            assert_eq!(
+                bincode::encode_to_vec(
+                    loaded.eval_complex.set_coeff(&loaded.rational_constants),
+                    bincode::config::standard(),
+                )
+                .unwrap(),
+                expected,
+            );
+            let mut output = [Complex::new(0., 0.)];
+            loaded
+                .eval_complex
+                .evaluate(&[Complex::new(2., 0.)], &mut output);
+            let x = 2f64;
+            let reference = x * x + x.sin() + std::f64::consts::PI * x + 2f64.exp();
+            assert!((output[0].re - reference).abs() < 1e-12);
+            assert_eq!(output[0].im, 0.);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn saved_evaluator_version_1_still_loads() {
+        let evaluator = parse!("x^2 + 1").evaluator(&[parse!("x")]).build().unwrap();
+        let payload = bincode::encode_to_vec(&evaluator, bincode::config::standard()).unwrap();
+
+        // Version 1 always stored the state without a flag.
+        let mut bytes = SAVED_EVALUATOR_MAGIC.to_vec();
+        bytes.extend([1, u8::from(cfg!(feature = "native_code_generation"))]);
+        State::export(&mut bytes).unwrap();
+        bytes.extend(&payload);
+
+        Python::initialize();
+        Python::attach(|_py| {
+            let decoded: ExpressionEvaluator<Complex<Rational>> =
+                decode_saved_evaluator(&bytes).unwrap();
+            assert_eq!(
+                bincode::encode_to_vec(&decoded, bincode::config::standard()).unwrap(),
+                payload
+            );
+        });
     }
 }
 
@@ -971,19 +1098,32 @@ impl PythonExpressionEvaluator {
 
     /// Save the evaluator to a byte string that can be imported in another thread or machine.
     /// The external functions are not exported, so they need to be provided separately when importing.
-    /// Symbolica's symbolic state is included and restored automatically by `load`.
+    /// If the evaluator refers to functions or tags that are not built-in, Symbolica's symbolic
+    /// state is included and restored automatically by `load`.
     fn save<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyBytes>> {
         let evaluator = self.eval_complex.set_coeff(&self.rational_constants);
+        let include_state = evaluator.uses_symbolic_state();
         #[cfg(not(feature = "native_code_generation"))]
-        let bytes = encode_saved_evaluator(evaluator)?;
+        let bytes = encode_saved_evaluator(evaluator, include_state)?;
         #[cfg(feature = "native_code_generation")]
-        let bytes = encode_saved_evaluator(&(
-            self.jit_compile,
-            &self.jit_settings,
-            evaluator,
-            &self.jit_real,
-            &self.jit_complex,
-        ))?;
+        let bytes = encode_saved_evaluator(
+            &(
+                self.jit_compile,
+                &self.jit_settings,
+                evaluator,
+                &self.jit_real,
+                &self.jit_complex,
+            ),
+            include_state
+                || self
+                    .jit_real
+                    .as_ref()
+                    .is_some_and(JITCompiledEvaluator::uses_symbolic_state)
+                || self
+                    .jit_complex
+                    .as_ref()
+                    .is_some_and(JITCompiledEvaluator::uses_symbolic_state),
+        )?;
         Ok(PyBytes::new(py, &bytes))
     }
 

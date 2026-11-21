@@ -8,7 +8,11 @@ import unittest
 from unittest.mock import patch
 from xml.etree import ElementTree
 
-from symbolica import E, S, Expression, FormattedOutput, MathMLViewer, PrintMode
+from symbolica import (
+    E, P, S, Expression, FiniteFieldRationalPolynomial, FormattedOutput, MathMLPage,
+    MathMLViewer, Matrix, PrintMode, RationalPolynomial,
+    get_mathml_font_size, set_mathml_font_size,
+)
 
 
 def mathml_value(html, variables):
@@ -140,7 +144,7 @@ class MathMLDisplayTests(unittest.TestCase):
             (scalar + imaginary * S("𝑖"), real_value + 3 * imag_value),
             (scalar - imaginary * S("𝑖"), real_value - 3 * imag_value),
         ]:
-            viewer = expression.mathml_viewer()
+            viewer = expression.formatted().mathml_viewer()
             try:
                 for html in [expression.format(mode=PrintMode.MathML), viewer.page()["html"]]:
                     with self.subTest(expression=str(expression)):
@@ -151,7 +155,7 @@ class MathMLDisplayTests(unittest.TestCase):
     def test_default_viewer_juxtaposes_symbolic_product_factors(self):
         expression = E("*".join(f"product_spacing::x{i}" for i in range(10)))
         original = bytes(expression.__getstate__())
-        viewer = expression.mathml_viewer()
+        viewer = expression.formatted().mathml_viewer()
         try:
             root = ElementTree.fromstring(viewer.page()["html"])
             operators = [
@@ -175,7 +179,7 @@ class MathMLDisplayTests(unittest.TestCase):
                 print={"mathml": f"<mn>{index + 2}</mn>"},
             )
         original = bytes(expression.__getstate__())
-        viewer = expression.mathml_viewer()
+        viewer = expression.formatted().mathml_viewer()
         try:
             root = ElementTree.fromstring(viewer.page()["html"])
             operators = [
@@ -205,7 +209,7 @@ class MathMLDisplayTests(unittest.TestCase):
             "(-2*x+y)^-3/7",
         ])]
         for expression in expressions:
-            viewer = expression.mathml_viewer()
+            viewer = expression.formatted().mathml_viewer()
             try:
                 page = viewer.page()
                 self.assertFalse(page["markers"])
@@ -224,7 +228,7 @@ class MathMLDisplayTests(unittest.TestCase):
         right = E("+".join(f"product_right_{i}" for i in range(12)))
         expression = left * right
         before = expression.format()
-        viewer = expression.mathml_viewer()
+        viewer = expression.formatted().mathml_viewer()
         try:
             page = viewer.page()
             self.assertFalse(page["markers"])
@@ -247,7 +251,7 @@ class MathMLDisplayTests(unittest.TestCase):
             return original_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", checked_import):
-            viewer = expression.mathml_viewer()
+            viewer = expression.formatted().mathml_viewer()
             self.assertIsInstance(viewer, MathMLViewer)
             page = json.loads(json.dumps(viewer.page()))
             self.assertEqual((page["start"], page["end"], page["total"]), (0, 25, 101))
@@ -267,7 +271,7 @@ class MathMLDisplayTests(unittest.TestCase):
     def test_worker_messages_page_forward_and_back_without_changing_expression(self):
         expression = E("(1+x)^100").expand()
         before = expression.format()
-        viewer = expression.mathml_viewer(page_size=10)
+        viewer = expression.formatted(page_size=10).mathml_viewer()
         field, first = viewer.handle_message({"action": "attach", "view": "worker"})
         self.assertEqual(field, "page")
         ranges = [(first["start"], first["end"])]
@@ -287,7 +291,7 @@ class MathMLDisplayTests(unittest.TestCase):
     def test_standalone_page_size_is_bounded(self):
         for size in (0, 501):
             with self.assertRaises(ValueError):
-                E("x").mathml_viewer(page_size=size)
+                E("x").formatted(page_size=size).mathml_viewer()
 
     def test_static_output_scrolls_html_ancestors_instead_of_math(self):
         for expression in [E("sin(1/x)"), E("sqrt(1+x^2)"), E("x+y+z")]:
@@ -327,6 +331,109 @@ class MathMLDisplayTests(unittest.TestCase):
         self.assertIn('data-symbolica-marker', html)
         self.assertIn('1–25 of 101', html)
         self.assertLess(len(MathDisplay(html).math), 30)
+
+    def test_font_size_is_set_per_output_or_for_the_session(self):
+        class Source:
+            def page(self, path, start, size, layout=0, expansions=()):
+                return MathMLPage("<math><mi>x</mi></math>", 0, 1, 1)
+
+        default = E("x+y").formatted()._repr_html_()
+        self.assertIsNone(get_mathml_font_size())
+        # Unset, notebook CSS may still override the default through the property.
+        self.assertIn("var(--symbolica-math-font-size,21px)", default)
+        self.assertNotIn("--symbolica-math-font-size:", default)
+        self.assertIsNone(E("x").formatted().mathml_viewer().page()["font_size"])
+
+        sized = E("x+y").formatted(font_size=30)
+        self.assertIn("--symbolica-math-font-size:30px;", sized._repr_html_())
+        self.assertEqual(sized.mathml_viewer().page()["font_size"], 30)
+        self.assertIn("--symbolica-math-font-size:12.5px;",
+                      P("x+1").formatted(font_size=12.5)._repr_html_())
+        viewer = MathMLViewer(Source(), font_size=40)
+        self.assertEqual(viewer.page()["font_size"], 40)
+        self.assertIn("--symbolica-math-font-size:40px;", viewer._repr_html_())
+
+        try:
+            set_mathml_font_size(16)
+            self.assertEqual(get_mathml_font_size(), 16)
+            for html in [E("z")._repr_html_(), E("z").formatted()._repr_html_(),
+                         P("x+1")._repr_html_(), Matrix.from_nested([[1, 2]])._repr_html_(),
+                         MathMLViewer(Source())._repr_html_()]:
+                self.assertIn("--symbolica-math-font-size:16px;", html)
+            self.assertEqual(E("z").formatted().mathml_viewer().page()["font_size"], 16)
+            # An output's own size takes precedence over the session's.
+            self.assertIn("--symbolica-math-font-size:30px;",
+                          E("z").formatted(font_size=30)._repr_html_())
+            self.assertEqual(viewer.page()["font_size"], 40)
+        finally:
+            set_mathml_font_size(None)
+        self.assertIsNone(get_mathml_font_size())
+        self.assertNotIn("--symbolica-math-font-size:", E("z")._repr_html_())
+
+        for size in (0, -1, 1001, float("nan"), float("inf")):
+            with self.subTest(size=size):
+                with self.assertRaises(ValueError):
+                    set_mathml_font_size(size)
+                with self.assertRaises(ValueError):
+                    E("x").formatted(font_size=size)
+                with self.assertRaises(ValueError):
+                    MathMLViewer(Source(), font_size=size)
+        self.assertIsNone(get_mathml_font_size())
+
+    def test_every_displayed_type_has_formatted_with_a_viewer(self):
+        values = {
+            "Expression": E("(1+x)^30").expand(),
+            "Series": E("exp(x)").series(S("x"), 0, 30),
+            "Polynomial": P("(1+x)^30"),
+            "FiniteFieldPolynomial": P("(1+x)^30", modulus=7),
+            "NumberFieldPolynomial": P("(1+x)^30").to_number_field(P("x^2+1")),
+            "RationalPolynomial": RationalPolynomial.parse("(1+x)^30/(1+y)", ["x", "y"]),
+            "FiniteFieldRationalPolynomial":
+                FiniteFieldRationalPolynomial.parse("(1+x)^30/(1+y)", ["x", "y"], 7),
+            "Matrix": Matrix.from_linear(40, 2, list(range(80))),
+        }
+        for name, value in values.items():
+            with self.subTest(type=name):
+                self.assertEqual(type(value).__name__, name)
+                output = value.formatted(page_size=7, font_size=18)
+                self.assertIn("<math", output._repr_html_())
+                self.assertIn("--symbolica-math-font-size:18px;", output._repr_html_())
+                viewer = output.mathml_viewer()
+                page = viewer.page()
+                self.assertEqual(page["page_size"], 7)
+                self.assertLessEqual(page["end"], 7)
+                self.assertEqual(page["font_size"], 18)
+                viewer.close()
+                default = value.formatted().mathml_viewer()
+                self.assertIsNone(default.page()["font_size"])
+                default.close()
+                self.assertNotIn("<math", value.formatted(mathml=False)._repr_html_())
+                for size in (0, 501):
+                    with self.assertRaises(ValueError):
+                        value.formatted(page_size=size)
+                with self.assertRaises(ValueError):
+                    value.formatted(font_size=0)
+
+    def test_matrix_entries_use_formatted_print_options(self):
+        x = S("matrix_options::x")
+        matrix = Matrix.from_nested([[2 * x]])
+        self.assertNotIn("matrix_options", matrix.formatted()._repr_html_())
+        shown = matrix.formatted(show_namespaces=True)
+        self.assertIn("matrix_options", shown._repr_html_())
+        viewer = shown.mathml_viewer()
+        self.assertIn("matrix_options", viewer.page()["html"])
+        viewer.close()
+
+    def test_deprecated_mathml_viewer_methods_match_formatted(self):
+        # Kept for compatibility, but no longer documented.
+        for value in [E("(1+x)^30").expand(), P("(1+x)^30"), Matrix.from_linear(40, 2, list(range(80)))]:
+            with self.subTest(type=type(value).__name__):
+                for size in (None, 7):
+                    old = value.mathml_viewer() if size is None else value.mathml_viewer(page_size=size)
+                    new = value.formatted(page_size=size).mathml_viewer()
+                    self.assertEqual(old.page(), new.page())
+                    old.close()
+                    new.close()
 
     def test_mathml_fragments_stay_embeddable_in_math(self):
         fragment = E("sin(1/x)").format(mode=PrintMode.MathML)

@@ -57,7 +57,7 @@ def measure(function, count):
 def benchmark(expression, tensor, count):
     # Explicit25 keeps initial item requests identical across versions and
     # makes the projected-product omission available for popup measurements.
-    make = (lambda: expression.paged(25)) if tensor else (lambda: expression.mathml_viewer(25))
+    make = (lambda: expression.paged(25)) if tensor else (lambda: expression.formatted(page_size=25).mathml_viewer())
     original_state = bytes(expression.__getstate__())
 
     def cold_page():

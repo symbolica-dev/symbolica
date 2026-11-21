@@ -116,16 +116,6 @@ impl<R: Ring, E: PositiveExponent> FactorizedRationalPolynomial<R, E> {
         self.numerator.get_vars_ref()
     }
 
-    /// Reconcile the variable lists of the two numerators and this value's
-    /// denominator factors, remapping their exponent vectors in place.
-    pub fn unify_variables(&mut self, other: &mut Self) {
-        self.numerator.unify_variables(&mut other.numerator);
-
-        for d in &mut self.denominators {
-            d.0.unify_variables(&mut other.numerator);
-        }
-    }
-
     /// Return whether the numerator is constant and no polynomial denominator
     /// factors remain.
     pub fn is_constant(&self) -> bool {
@@ -429,11 +419,9 @@ fn prepare_denominators<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExpone
     for (d, _) in dens.iter() {
         assert!(!d.is_zero(), "Zero denominator");
     }
-    for _ in 0..2 {
-        for (d, _) in dens.iter_mut() {
-            num.unify_variables(d);
-        }
-    }
+    let mut polys = vec![&mut *num];
+    polys.extend(dens.iter_mut().map(|(d, _)| d));
+    MultivariatePolynomial::unify_variables_mut(&mut polys);
     if num.is_zero() {
         dens.clear();
         return;
@@ -750,6 +738,82 @@ impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> FactorizedRatio
 where
     Self: FromNumeratorAndFactorizedDenominator<R, R, E>,
 {
+    /// Unify the variable maps of both rational functions, such that the numerators
+    /// and all denominator factors share the same variable map.
+    /// See [`MultivariatePolynomial::unify_variables`] for which variable map is chosen.
+    ///
+    /// If the variables of a rational function are permuted, its normalization,
+    /// which depends on the leading coefficients, is restored.
+    pub fn unify_variables(&mut self, other: &mut Self) {
+        if self.numerator.variables() == other.numerator.variables() {
+            return;
+        }
+
+        let old_self_vars = self.numerator.variables().clone();
+        let old_other_vars = other.numerator.variables().clone();
+
+        self.numerator.unify_variables(&mut other.numerator);
+
+        for d in self.denominators.iter_mut().chain(&mut other.denominators) {
+            d.0.unify_variables(&mut self.numerator);
+        }
+
+        debug_assert!(
+            self.numerator.variables() == other.numerator.variables()
+                && self
+                    .denominators
+                    .iter()
+                    .chain(&other.denominators)
+                    .all(|d| d.0.variables() == self.numerator.variables())
+        );
+
+        let new_vars = self.numerator.variables().clone();
+        for (p, old_vars) in [(self, old_self_vars), (other, old_other_vars)] {
+            if !Self::preserves_term_order(&old_vars, &new_vars) {
+                p.renormalize();
+            }
+        }
+    }
+
+    /// Sort the variable map by [`PolyVariable`]'s ordering.
+    pub(crate) fn sort_variables(&mut self) {
+        if let Some(vars) =
+            MultivariatePolynomial::<R, E>::sorted_variable_map(self.numerator.variables())
+        {
+            self.numerator.embed_in_variable_map(&vars);
+            for (d, _) in &mut self.denominators {
+                d.embed_in_variable_map(&vars);
+            }
+            self.renormalize();
+        }
+    }
+
+    /// Check if rewriting a polynomial in the variables `old` into the variables `new`,
+    /// which contain all variables of `old`, keeps the variables in the same relative order.
+    /// If so, the term order and therefore the leading coefficients are unchanged.
+    fn preserves_term_order(old: &[PolyVariable], new: &[PolyVariable]) -> bool {
+        old.iter()
+            .map(|v| new.iter().position(|x| x == v))
+            .is_sorted()
+    }
+
+    /// Restore the normalization of the numerator and the denominator factors,
+    /// which depends on the variable order.
+    fn renormalize(&mut self) {
+        let ring = self.numerator.ring().clone();
+        let zero = self.numerator.zero();
+        let numerator = std::mem::replace(&mut self.numerator, zero)
+            .mul_coeff(std::mem::replace(&mut self.numer_coeff, ring.one()));
+        let mut denominators = std::mem::take(&mut self.denominators);
+        if !ring.is_one(&self.denom_coeff) {
+            denominators.push((
+                numerator.constant(std::mem::replace(&mut self.denom_coeff, ring.one())),
+                1,
+            ));
+        }
+        *self = Self::from_num_den(numerator, denominators, &ring, false);
+    }
+
     /// Raise this rational function to the nonnegative integer power `e`.
     /// Returns one for exponent zero.
     ///
@@ -1294,6 +1358,8 @@ where
 
 impl<'a, R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent>
     Mul<&'a FactorizedRationalPolynomial<R, E>> for &FactorizedRationalPolynomial<R, E>
+where
+    FactorizedRationalPolynomial<R, E>: FromNumeratorAndFactorizedDenominator<R, R, E>,
 {
     type Output = FactorizedRationalPolynomial<R, E>;
 
