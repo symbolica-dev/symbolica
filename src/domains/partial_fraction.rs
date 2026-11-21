@@ -1224,41 +1224,46 @@ impl<F: Field> PartialFractionRing<F> {
     /// the bulk sum of the coefficient field. Other coefficients, such as
     /// those of finite fields, are added in place.
     fn sum_nonzero(&self, elements: Vec<PartialFraction<F>>) -> PartialFraction<F> {
-        // The highest power of every factor, and then the offset of its block
-        // in the sum.
-        let mut offsets = vec![0; self.basis.len()];
-        let mut poly = 0;
-        for a in &elements {
-            poly = poly.max(a.poly);
-            for c in &a.chains {
-                let e = &mut offsets[c.factor as usize];
+        let poly = elements.iter().map(|a| a.poly).max().unwrap_or(0);
+        let chain_count: usize = elements.iter().map(|a| a.chains.len()).sum();
+        // The highest power of every factor, from a table indexed by factor
+        // if the basis is small compared to the number of chains, and by
+        // sorting otherwise.
+        let mut chains: Vec<Chain> = if self.basis.len() <= 4 * chain_count {
+            let mut exponents = vec![0; self.basis.len()];
+            for c in elements.iter().flat_map(|a| &a.chains) {
+                let e = &mut exponents[c.factor as usize];
                 *e = (*e).max(c.exponent);
             }
-        }
-        let mut chains = vec![];
+            (0..)
+                .zip(exponents)
+                .filter(|(_, exponent)| *exponent > 0)
+                .map(|(factor, exponent)| Chain {
+                    factor,
+                    exponent,
+                    offset: 0,
+                })
+                .collect()
+        } else {
+            let mut chains: Vec<Chain> = elements.iter().flat_map(|a| &a.chains).copied().collect();
+            chains.sort_unstable_by_key(|c| (c.factor, std::cmp::Reverse(c.exponent)));
+            chains.dedup_by_key(|c| c.factor);
+            chains
+        };
         let mut len = poly;
-        for (factor, offset) in offsets.iter_mut().enumerate() {
-            if *offset > 0 {
-                let c = Chain {
-                    factor: factor as u32,
-                    exponent: *offset,
-                    offset: len as u32,
-                };
-                *offset = c.offset;
-                len += self.chain_len(&c);
-                chains.push(c);
-            }
+        for c in &mut chains {
+            c.offset = len as u32;
+            len += self.chain_len(c);
         }
         // The blocks `(start, len)` of the sum that hold the polynomial part
         // and the factor blocks of a summand, in storage order.
-        let blocks = |poly: usize, chains: &[Chain]| {
+        let blocks = |poly: usize, summand: &[Chain]| {
             let mut blocks = SmallVec::<[(usize, usize); 8]>::new();
             blocks.push((0, poly));
-            blocks.extend(
-                chains
-                    .iter()
-                    .map(|c| (offsets[c.factor as usize] as usize, self.chain_len(c))),
-            );
+            blocks.extend(summand.iter().map(|c| {
+                let t = chains.partition_point(|t| t.factor < c.factor);
+                (chains[t].offset as usize, self.chain_len(c))
+            }));
             blocks
         };
 

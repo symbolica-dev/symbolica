@@ -126,10 +126,21 @@ impl<F: Field> PartialFractionAlignment<F> {
         }
         let source_count = source.factor_count();
         let target_count = target.factor_count();
+        // The target index of every source factor that is also a target factor.
+        let exact: Vec<_> = {
+            let index = target.basis.index.lock().unwrap();
+            (0..source_count)
+                .map(|i| {
+                    index
+                        .get(source.basis.monic(i as u32))
+                        .copied()
+                        .filter(|&j| j < target_count)
+                })
+                .collect()
+        };
         let mut images = Vec::with_capacity(source_count);
-        for i in 0..source_count {
+        for (i, exact) in exact.into_iter().enumerate() {
             let factor = source.basis.monic(i as u32);
-            let exact = (0..target_count).find(|&j| target.basis.monic(j as u32) == factor);
             images.push(match exact {
                 Some(j) => FactorImage::Exact(j),
                 None => {
