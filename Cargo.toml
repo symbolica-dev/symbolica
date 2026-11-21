@@ -181,17 +181,7 @@ harness = false
 required-features = ["symbolica_benchmarks"]
 
 [[bench]]
-name = "partial_fraction_ring"
-harness = false
-required-features = ["symbolica_benchmarks"]
-
-[[bench]]
-name = "partial_fraction_nested"
-harness = false
-required-features = ["symbolica_benchmarks"]
-
-[[bench]]
-name = "partial_fraction_dimension"
+name = "partial_fraction"
 harness = false
 required-features = ["symbolica_benchmarks"]
 

@@ -558,6 +558,79 @@ mod tests {
         }
     }
 
+    /// Reconstruct `7 + (3/2 - 5x/3)/(x^2+1) + 13/(x^2+1)^2` from images that
+    /// are factored locally: `x^2+1` splits modulo 13, 17, 29 and 37 but not
+    /// modulo 7, 11, 19 and 31. Some coordinates vanish at a prime (the
+    /// polynomial part at 7, the highest pole at 13) and keep their slots.
+    #[test]
+    fn locally_factored_images_reconstruct_rational_coordinates() {
+        use crate::domains::{finite_field::FiniteFieldCore, integer::Integer};
+
+        let reference_ring =
+            PartialFractionRing::with_basis(Q, variable(), &[q_poly(&[1, 0, 1])]).unwrap();
+        let reference = PartialFractionLayout::new(&reference_ring, 3, &[(0, 2)]).unwrap();
+        let (numerator, denominator) = ([129, -10, 93, -10, 42], [6, 0, 12, 0, 6]);
+
+        let mut modulus = Integer::one();
+        let mut residues: Vec<Integer> = vec![];
+        for prime in [13_u64, 7, 17, 11, 19, 29, 31, 37] {
+            let field = Zp64::new(prime);
+            let layout = reference
+                .map_field(field.clone(), |c| rational_to_finite_field(c, &field))
+                .unwrap();
+            let local = PartialFractionRing::new(field.clone(), variable(), &[]);
+            let answer = local
+                .try_from_fraction(&fp_poly(&field, &numerator), &fp_poly(&field, &denominator))
+                .unwrap();
+            assert_eq!(local.factor_count(), if prime % 4 == 1 { 2 } else { 1 });
+            let aligned = PartialFractionAlignment::new(&local, layout.ring())
+                .unwrap()
+                .convert(&answer)
+                .unwrap();
+            let coordinates = layout.export(&aligned).unwrap();
+            assert_eq!(layout.import(&coordinates).unwrap(), aligned);
+            if prime == 7 {
+                assert!(field.is_zero(&coordinates[0]));
+            }
+            if prime == 13 {
+                assert!(coordinates[5..].iter().all(|c| field.is_zero(c)));
+            }
+
+            let coordinates = coordinates.iter().map(|c| field.to_integer(c));
+            if residues.is_empty() {
+                residues = coordinates.collect();
+            } else {
+                for (r, c) in residues.iter_mut().zip(coordinates) {
+                    *r = Integer::chinese_remainder(r.clone(), c, modulus.clone(), prime.into());
+                }
+            }
+            modulus *= &Integer::from(prime);
+        }
+
+        let reconstructed: Vec<Rational> = residues
+            .iter()
+            .map(|r| Rational::maximal_quotient_reconstruction(r, &modulus, None).unwrap())
+            .collect();
+        assert_eq!(
+            reconstructed,
+            vec![
+                Rational::from(7),
+                0.into(),
+                0.into(),
+                (3, 2).into(),
+                (-5, 3).into(),
+                13.into(),
+                0.into()
+            ]
+        );
+        assert_eq!(
+            reference.import(&reconstructed).unwrap(),
+            reference_ring
+                .try_from_fraction(&q_poly(&numerator), &q_poly(&denominator))
+                .unwrap()
+        );
+    }
+
     #[test]
     fn incompatible_fields_variables_and_uncovered_factors_are_rejected() {
         let f5 = Zp64::new(5);
