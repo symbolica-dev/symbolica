@@ -1652,6 +1652,7 @@ impl Workspace {
 pub struct RecycledAtom(Atom);
 
 impl From<Atom> for RecycledAtom {
+    #[inline]
     fn from(a: Atom) -> Self {
         RecycledAtom(a)
     }
@@ -1677,6 +1678,7 @@ impl RecycledAtom {
     }
 
     /// Wrap an atom so that it gets recycled upon dropping.
+    #[inline]
     pub fn wrap(atom: Atom) -> RecycledAtom {
         RecycledAtom(atom)
     }
@@ -1706,12 +1708,14 @@ impl RecycledAtom {
 impl Deref for RecycledAtom {
     type Target = Atom;
 
+    #[inline]
     fn deref(&self) -> &Atom {
         &self.0
     }
 }
 
 impl DerefMut for RecycledAtom {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Atom {
         &mut self.0
     }
