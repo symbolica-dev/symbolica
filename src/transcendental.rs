@@ -4420,15 +4420,23 @@ fn zeta_integer_numeric_eval(order: i64, binary_prec: u32) -> Complex<Float> {
     )
 }
 
+/// The Bernoulli polynomial `B_n(x) = Σ_k binom(n, k) B_{n-k} x^k`, with `B_1 = -1/2`.
 fn bernoulli_polynomial(n: u32, x: &Complex<Float>, binary_prec: u32) -> Complex<Float> {
     let zero = Float::new(binary_prec);
     let mut sum = Complex::new(zero.clone(), zero.clone());
 
     for k in 0..=n {
+        // `bernoulli_number` follows the convention `B_1 = +1/2` (used by `zeta` at non-positive integers);
+        // with it the sum would be `B_n(x + 1) = B_n(x) + n x^(n-1)`.
+        let bernoulli = if n - k == 1 {
+            -bernoulli_number(1)
+        } else {
+            bernoulli_number(n - k)
+        };
         let coeff = Float::with_integer(
             binary_prec,
             Integer::binom(n.into(), k.into()).to_multi_prec(),
-        ) * bernoulli_number(n - k).to_multi_prec_float(binary_prec);
+        ) * bernoulli.to_multi_prec_float(binary_prec);
         sum += Complex::new(coeff, zero.clone()) * pow_complex_u32(x, k);
     }
 
@@ -6010,6 +6018,45 @@ mod tests {
                 assert_precision_complex(&actual, &expected, bits, "defining power series");
             }
         }
+    }
+
+    /// Orders >= 3 with |log z| >= 4 use the inversion formula with a Bernoulli polynomial. Between |log z| = 4 and
+    /// 2 pi the logarithmic expansion still converges, which gives a reference independent of the Bernoulli numbers.
+    #[cfg(feature = "float-mpfr")]
+    #[test]
+    fn polylog_higher_integer_inversion_matches_logarithmic_expansion() {
+        for bits in [128, 1024] {
+            let arguments = [
+                Complex::new(Float::with_val(bits, -90), Float::new(bits)),
+                Complex::new(Float::with_val(bits, 30), Float::with_val(bits, 40)),
+                Complex::new(Float::with_val(bits, -40), Float::with_val(bits, -60)),
+            ];
+            for argument in &arguments {
+                let logarithm = argument.log();
+                assert!(logarithm.norm().re >= Float::with_val(bits, 4));
+                for order in 3u32..=6 {
+                    let expected =
+                        super::polylog_jonquiere_integer(order, &logarithm, bits).unwrap();
+                    let actual =
+                        polylog_integer_numeric_eval(i64::from(order), argument, bits, 0).unwrap();
+                    assert_precision_complex(&actual, &expected, bits, "inversion formula");
+                }
+            }
+        }
+
+        // Li_3(-1023) = -66.88182522923009044773515272275085177237695816861... (mpmath, 60 digits).
+        let argument = Complex::new(Float::with_val(256, -1023), Float::new(256));
+        let actual = polylog_integer_numeric_eval(3, &argument, 256, 0).unwrap();
+        let expected = Complex::new(
+            Float::parse(
+                "-66.881825229230090447735152722750851772376958168617",
+                Some(256),
+            )
+            .unwrap(),
+            Float::new(256),
+        );
+        let error = complex_l1_norm(&(actual - expected));
+        assert!(error < Float::parse("1e-45", Some(256)).unwrap());
     }
 
     #[cfg(feature = "float-mpfr")]
