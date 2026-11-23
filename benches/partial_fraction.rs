@@ -26,7 +26,9 @@
 //!   short sums and products of such elements.
 //!
 //! Fixture construction and validation (all representations agree) are
-//! outside the timed regions.
+//! outside the timed regions. Validation runs before all benchmarks and takes
+//! a few seconds; set `PARTIAL_FRACTION_BENCH_NO_VALIDATION` to skip it, for
+//! example when profiling single benchmarks.
 
 use std::{fmt, hint::black_box, sync::Arc};
 
@@ -712,14 +714,16 @@ mod basis {
 }
 
 fn main() {
-    for &case in zp::CASES {
-        zp::validate(case);
+    if std::env::var_os("PARTIAL_FRACTION_BENCH_NO_VALIDATION").is_none() {
+        for &case in zp::CASES {
+            zp::validate(case);
+        }
+        for &case in nested::DIMENSION.iter().chain(nested::KINEMATIC) {
+            nested::validate(case);
+        }
+        basis::Fixture::new(Zp64::new(PRIME), 16).validate();
+        basis::Fixture::new(Q, 16).validate();
     }
-    for &case in nested::DIMENSION.iter().chain(nested::KINEMATIC) {
-        nested::validate(case);
-    }
-    basis::Fixture::new(Zp64::new(PRIME), 16).validate();
-    basis::Fixture::new(Q, 16).validate();
     divan::main();
 }
 
