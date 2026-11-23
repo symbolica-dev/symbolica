@@ -384,10 +384,12 @@ mod dense {
     }
 }
 
-/// `a += b`, moving `b` into a zero `a`: in coefficient fields such as
-/// rational functions, even an addition of zero is costly.
+/// `a += b`. Coefficients that own heap data, such as rational functions,
+/// cost much more to add than to move, even when one of them is zero, so `b`
+/// is moved into a zero `a`. Other coefficients, such as those of finite
+/// fields, are added directly.
 fn add_moved<F: Ring>(field: &F, a: &mut F::Element, b: F::Element) {
-    if field.is_zero(a) {
+    if std::mem::needs_drop::<F::Element>() && field.is_zero(a) {
         *a = b;
     } else {
         field.add_assign(a, &b);
@@ -396,10 +398,39 @@ fn add_moved<F: Ring>(field: &F, a: &mut F::Element, b: F::Element) {
 
 /// `a -= b`, moving `-b` into a zero `a` (see [add_moved]).
 fn sub_moved<F: Ring>(field: &F, a: &mut F::Element, b: F::Element) {
-    if field.is_zero(a) {
+    if std::mem::needs_drop::<F::Element>() && field.is_zero(a) {
         *a = field.neg(b);
     } else {
         field.sub_assign(a, &b);
+    }
+}
+
+/// `a += scale * b`. For coefficients that own heap data (see [add_moved]),
+/// a zero `b` is skipped and a zero `a` is assigned without an addition.
+#[inline(always)]
+fn add_scaled<F: Ring>(
+    field: &F,
+    a: &mut F::Element,
+    b: &F::Element,
+    scale: Scale<'_, F::Element>,
+) {
+    if std::mem::needs_drop::<F::Element>() {
+        if field.is_zero(b) {
+            return;
+        }
+        if field.is_zero(a) {
+            *a = match scale {
+                Scale::One => b.clone(),
+                Scale::MinusOne => field.neg(b),
+                Scale::By(c) => field.mul(b, c),
+            };
+            return;
+        }
+    }
+    match scale {
+        Scale::One => field.add_assign(a, b),
+        Scale::MinusOne => field.sub_assign(a, b),
+        Scale::By(c) => field.add_mul_assign(a, b, c),
     }
 }
 
@@ -1333,23 +1364,8 @@ impl<F: Field> PartialFractionRing<F> {
         s: &[F::Element],
         scale: Scale<'_, F::Element>,
     ) {
-        let field = &self.field;
-        match scale {
-            Scale::One => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.add_assign(d, s);
-                }
-            }
-            Scale::MinusOne => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.sub_assign(d, s);
-                }
-            }
-            Scale::By(c) => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.add_mul_assign(d, s, c);
-                }
-            }
+        for (d, s) in d.iter_mut().zip(s) {
+            add_scaled(&self.field, d, s, scale);
         }
     }
 
@@ -1784,11 +1800,11 @@ impl<F: Field> PartialFractionRing<F> {
                 for j in 0..e {
                     let mut value = field.mul(&a.coefficients[o + j], r);
                     if j + 1 < e {
-                        field.add_assign(&mut value, &a.coefficients[o + j + 1]);
+                        add_scaled(field, &mut value, &a.coefficients[o + j + 1], Scale::One);
                     }
                     a.coefficients[o + j] = value;
                 }
-                field.add_assign(&mut a.coefficients[0], &first);
+                add_moved(field, &mut a.coefficients[0], first);
             } else {
                 // x a_j = top f + rest: rest / f^j + top / f^(j-1).
                 let f = self.basis.monic(c.factor);
@@ -1807,7 +1823,7 @@ impl<F: Field> PartialFractionRing<F> {
                     }
                     a.coefficients[base] = field.neg(&field.mul(&top, &f[0]));
                     let target = if j == 0 { 0 } else { base - k };
-                    field.add_assign(&mut a.coefficients[target], &top);
+                    add_moved(field, &mut a.coefficients[target], top);
                 }
             }
         }
@@ -2110,7 +2126,7 @@ impl<F: Field> PartialFractionRing<F> {
                 let mut coefficients = p.iter_mut().rev();
                 let mut carry = coefficients.next().unwrap();
                 for x in coefficients {
-                    field.add_mul_assign(x, &*carry, s);
+                    add_scaled(field, x, &*carry, Scale::By(s));
                     carry = x;
                 }
                 p.rotate_left(1);
