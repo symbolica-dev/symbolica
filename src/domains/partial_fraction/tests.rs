@@ -8,6 +8,7 @@ use crate::{
         finite_field::{FiniteFieldSamplingPolicy, Zp64},
         integer::Z,
         rational::Q,
+        rational_polynomial::RationalPolynomialField,
     },
     parse, symbol,
 };
@@ -539,4 +540,522 @@ fn images_modulo_primes() {
         ring.element_to_finite_field(&target, &a),
         Err(PartialFractionError::UnmappableCoefficient)
     );
+}
+
+/// Check products, fused multiply-adds, divisions and their canonical forms
+/// against rational polynomials over Zp, for samples of `ring`.
+fn check_against_rational_polynomials_over_zp(
+    ring: &PartialFractionRing<Zp64>,
+    field: &Zp64,
+    rng: &mut StdRng,
+    policy: &PartialFractionSamplingPolicy<FiniteFieldSamplingPolicy>,
+    sparse: bool,
+    iterations: usize,
+) {
+    let to = |v: &PartialFraction<Zp64>| -> RationalPolynomial<Zp64, u16> {
+        ring.to_rational_polynomial(v, field)
+    };
+    // Canonical: equal to the element rebuilt from its rational form.
+    let canon = |v: &PartialFraction<Zp64>, r: &RationalPolynomial<Zp64, u16>| {
+        assert_eq!(&ring.try_from_rational_polynomial(r).unwrap(), v);
+    };
+    for it in 0..iterations {
+        let s = |rng: &mut StdRng| {
+            if sparse {
+                sparse_sample(ring, rng, policy)
+            } else {
+                ring.sample(rng, policy)
+            }
+        };
+        let a = s(rng);
+        let b = s(rng);
+        let c = s(rng);
+        let (ra, rb, rc) = (to(&a), to(&b), to(&c));
+        let p = ring.mul(&a, &b);
+        let rp = &ra * &rb;
+        assert_eq!(to(&p), rp, "mul it {it}");
+        canon(&p, &rp);
+        // add_mul / sub_mul onto a nonzero accumulator.
+        let mut d = c.clone();
+        ring.add_mul_assign(&mut d, &a, &b);
+        let rd = &rc + &rp;
+        assert_eq!(to(&d), rd);
+        canon(&d, &rd);
+        let mut d = c.clone();
+        ring.sub_mul_assign(&mut d, &a, &b);
+        let rd = &rc - &rp;
+        assert_eq!(to(&d), rd);
+        canon(&d, &rd);
+        // Total and partial cancellation.
+        let mut d = p.clone();
+        ring.sub_mul_assign(&mut d, &b, &a);
+        assert!(d.is_zero(), "full cancellation");
+        assert!(d.coefficients().is_empty());
+        let mut d = ring.add(&p, &c);
+        ring.sub_mul_assign(&mut d, &a, &b);
+        assert_eq!(d, c);
+        let mut d = ring.neg(&p);
+        ring.add_mul_assign(&mut d, &a, &b);
+        assert!(d.is_zero());
+        // Zero accumulator, sub path.
+        let mut d = ring.zero();
+        ring.sub_mul_assign(&mut d, &a, &b);
+        assert_eq!(d, ring.neg(&p));
+        // Squares, one, zero.
+        let sq = ring.mul(&a, &a);
+        let rsq = &ra * &ra;
+        assert_eq!(to(&sq), rsq);
+        canon(&sq, &rsq);
+        assert_eq!(ring.mul(&a, &ring.one()), a);
+        assert_eq!(ring.mul(&ring.one(), &a), a);
+        assert!(ring.mul(&a, &ring.zero()).is_zero());
+        let mut z = ring.zero();
+        ring.add_mul_assign(&mut z, &a, &ring.zero());
+        assert!(z.is_zero());
+        // Factor division and powers.
+        for f in 0..ring.factor_count() {
+            for e in [1, 3] {
+                let q = ring.div_factor_power(&a, f, e);
+                let rq = &ra * &to(&ring.inv_factor_power(f, e));
+                assert_eq!(to(&q), rq);
+                canon(&q, &rq);
+            }
+        }
+        // Division by elements whose inverse needs no new basis factor: a
+        // division by an arbitrary element would append composite factors
+        // to the shared basis, which later samples use.
+        for f in 0..ring.factor_count() {
+            let d = ring.inv_factor_power(f, 2);
+            let q = ring.div(&a, &d);
+            let rq = &ra / &to(&d);
+            assert_eq!(to(&q), rq, "div it {it}");
+            canon(&q, &rq);
+        }
+        // Three-fold product with mixed association.
+        let t = ring.mul(&ring.mul(&a, &b), &c);
+        assert_eq!(t, ring.mul(&a, &ring.mul(&b, &c)));
+        assert_eq!(to(&t), &rp * &rc);
+    }
+}
+
+fn zp_ring(prime: u64, factors: &[&[i64]]) -> (PartialFractionRing<Zp64>, Zp64) {
+    let x = variable();
+    let field = Zp64::new(prime);
+    let fs: Vec<_> = factors
+        .iter()
+        .map(|c| {
+            UnivariatePolynomial::from_coefficients(
+                &field,
+                c.iter().map(|&v| field.nth(v.into())).collect(),
+                x.clone(),
+            )
+        })
+        .collect();
+    (
+        PartialFractionRing::with_basis(field.clone(), x, &fs).unwrap(),
+        field,
+    )
+}
+
+#[test]
+fn products_over_zp_with_high_linear_exponents() {
+    let (ring, field) = zp_ring(
+        1_000_000_007,
+        &[&[-1, 1], &[2, 1], &[0, 1], &[7, 3], &[-5, 1]],
+    );
+    let mut rng = StdRng::seed_from_u64(11);
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=4,
+        exponent: 0..=6,
+        coefficient: FiniteFieldSamplingPolicy::Full,
+    };
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &policy, false, 40);
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &policy, true, 60);
+}
+
+#[test]
+fn products_over_zp_with_nonlinear_and_composite_factors() {
+    // The blocks (x - 1)(x + 3) and (x + 5)(x^2 + 2) are composite, the
+    // others are x + 2, x^2 + 1, x, 2 x^2 + x + 3 and x^4 + x^3 + 9.
+    let (ring, field) = zp_ring(
+        1_000_000_007,
+        &[
+            &[-3, 2, 1],
+            &[2, 1],
+            &[1, 0, 1],
+            &[10, 2, 5, 1],
+            &[0, 1],
+            &[3, 1, 2],
+            &[9, 0, 0, 1, 1],
+        ],
+    );
+    let mut rng = StdRng::seed_from_u64(12);
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=5,
+        exponent: 0..=4,
+        coefficient: FiniteFieldSamplingPolicy::Full,
+    };
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &policy, true, 60);
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=2,
+        exponent: 0..=2,
+        coefficient: FiniteFieldSamplingPolicy::Full,
+    };
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &policy, false, 20);
+    // Small coefficients: many zero blocks and accidental cancellations.
+    let small = PartialFractionSamplingPolicy {
+        degree: 0..=3,
+        exponent: 0..=5,
+        coefficient: (0..=2).into(),
+    };
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &small, true, 80);
+}
+
+#[test]
+fn products_over_a_small_field_with_cancellations() {
+    // A tiny prime makes zero coefficients and cancellations frequent.
+    let (ring, field) = zp_ring(5, &[&[1, 1], &[2, 0, 1], &[1, 1, 0, 1]]);
+    let mut rng = StdRng::seed_from_u64(13);
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=3,
+        exponent: 0..=4,
+        coefficient: FiniteFieldSamplingPolicy::Full,
+    };
+    check_against_rational_polynomials_over_zp(&ring, &field, &mut rng, &policy, false, 150);
+}
+
+#[test]
+fn products_over_q_with_dense_high_exponents() {
+    let ring = seeded_q_ring();
+    let mut rng = StdRng::seed_from_u64(14);
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=3,
+        exponent: 0..=4,
+        coefficient: Integer::from(-3)..=Integer::from(3),
+    };
+    for _ in 0..30 {
+        let a = sparse_sample(&ring, &mut rng, &policy);
+        let b = sparse_sample(&ring, &mut rng, &policy);
+        let c = sparse_sample(&ring, &mut rng, &policy);
+        let (ra, rb, rc) = (
+            to_q_rational(&ring, &a),
+            to_q_rational(&ring, &b),
+            to_q_rational(&ring, &c),
+        );
+        let p = ring.mul(&a, &b);
+        let rp = &ra * &rb;
+        assert_eq!(to_q_rational(&ring, &p), rp);
+        assert_eq!(ring.try_from_rational_polynomial(&rp).unwrap(), p);
+        let mut d = c.clone();
+        ring.sub_mul_assign(&mut d, &a, &b);
+        let rd = &rc - &rp;
+        assert_eq!(ring.try_from_rational_polynomial(&rd).unwrap(), d);
+        let mut d = c.clone();
+        ring.add_mul_assign(&mut d, &b, &a);
+        let rd = &rc + &rp;
+        assert_eq!(ring.try_from_rational_polynomial(&rd).unwrap(), d);
+    }
+    // Dense samples over all seven factors.
+    let policy = PartialFractionSamplingPolicy {
+        degree: 0..=2,
+        exponent: 0..=2,
+        coefficient: Integer::from(-2)..=Integer::from(2),
+    };
+    for _ in 0..8 {
+        let a = ring.sample(&mut rng, &policy);
+        let b = ring.sample(&mut rng, &policy);
+        let rp = &to_q_rational(&ring, &a) * &to_q_rational(&ring, &b);
+        assert_eq!(
+            ring.try_from_rational_polynomial(&rp).unwrap(),
+            ring.mul(&a, &b)
+        );
+    }
+}
+
+#[test]
+fn factorizing_ring_used_from_several_threads() {
+    // A factorizing ring that discovers (linear) factors from several threads.
+    let x = variable();
+    let field = Zp64::new(1_000_000_007);
+    let ring = PartialFractionRing::new(field.clone(), x.clone(), &[]);
+    let handles: Vec<_> = (0..4)
+        .map(|t| {
+            let ring = ring.clone();
+            let field = field.clone();
+            let x = x.clone();
+            std::thread::spawn(move || {
+                let mut rng = StdRng::seed_from_u64(100 + t);
+                let poly = |c: &[u64]| {
+                    UnivariatePolynomial::from_coefficients(
+                        &field,
+                        c.iter().map(|&v| field.nth(v.into())).collect(),
+                        x.clone(),
+                    )
+                };
+                for _ in 0..40 {
+                    let r1: u64 = rng.random_range(0..12);
+                    let r2: u64 = rng.random_range(0..12);
+                    let q: u64 = rng.random_range(1..12);
+                    // (x+r1)^2 (x+r2) (x^2+q) denominators and numerators.
+                    let den = &(&(&poly(&[r1, 1]) * &poly(&[r1, 1])) * &poly(&[r2 + 13, 1]))
+                        * &poly(&[q, 0, 1]);
+                    let num = poly(&[rng.random_range(0..9), rng.random_range(0..9), 1]);
+                    let Ok(a) = ring.try_from_fraction(&num, &den) else {
+                        continue;
+                    };
+                    let b = ring.try_from_fraction(&den, &poly(&[q + 1, 1, 1])).unwrap();
+                    let to = |v: &PartialFraction<Zp64>| -> RationalPolynomial<Zp64, u16> {
+                        ring.to_rational_polynomial(v, &field)
+                    };
+                    let (ra, rb) = (to(&a), to(&b));
+                    let p = ring.mul(&a, &b);
+                    assert_eq!(to(&p), &ra * &rb);
+                    if !a.is_zero() {
+                        let d = ring.div(&b, &a);
+                        assert_eq!(to(&d), &rb / &ra);
+                    }
+                    let mut s = a.clone();
+                    ring.sub_mul_assign(&mut s, &a, &b);
+                    assert_eq!(to(&s), &ra - &(&ra * &rb));
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+/// A numerator and a denominator.
+type Fraction<F> = (UnivariatePolynomial<F>, UnivariatePolynomial<F>);
+
+fn fraction_mul<F: Field>(a: &Fraction<F>, b: &Fraction<F>) -> Fraction<F> {
+    (&a.0 * &b.0, &a.1 * &b.1)
+}
+
+fn fraction_add<F: Field>(a: &Fraction<F>, b: &Fraction<F>, subtract: bool) -> Fraction<F> {
+    let (x, y) = (&a.0 * &b.1, &b.0 * &a.1);
+    (if subtract { &x - &y } else { &x + &y }, &a.1 * &b.1)
+}
+
+/// Check the products, fused multiply-adds, products with fractions and
+/// polynomials, factor divisions, multiplication by the variable and sums of
+/// `a`, `b` and `c` against the elements imported from the same operations on
+/// their fractions, an independent code path. None of them may extend the
+/// basis.
+fn check_against_fractions<F: Field>(
+    ring: &PartialFractionRing<F>,
+    a: &PartialFraction<F>,
+    b: &PartialFraction<F>,
+    c: &PartialFraction<F>,
+    polynomials: &[UnivariatePolynomial<F>],
+) {
+    let import = |(n, d): &Fraction<F>| ring.try_from_fraction(n, d).unwrap();
+    let (fa, fb, fc) = (
+        ring.to_fraction(a),
+        ring.to_fraction(b),
+        ring.to_fraction(c),
+    );
+    let factor_count = ring.factor_count();
+    assert_eq!(&import(&fa), a);
+    let fab = fraction_mul(&fa, &fb);
+    let ab = import(&fab);
+    assert_eq!(ring.mul(a, b), ab);
+    assert_eq!(ring.mul(b, a), ab);
+    assert_eq!(ring.mul(a, a), import(&fraction_mul(&fa, &fa)));
+    for subtract in [false, true] {
+        let expected = import(&fraction_add(&fc, &fab, subtract));
+        for (x, y) in [(a, b), (b, a)] {
+            let mut d = c.clone();
+            if subtract {
+                ring.sub_mul_assign(&mut d, x, y);
+            } else {
+                ring.add_mul_assign(&mut d, x, y);
+            }
+            assert_eq!(d, expected);
+            // A zero accumulator that keeps the storage of c.
+            let mut d = c.clone();
+            ring.sub_assign(&mut d, c);
+            assert!(d.is_zero() && d.coefficients().is_empty());
+            if subtract {
+                ring.sub_mul_assign(&mut d, x, y);
+                assert_eq!(d, ring.neg(&ab));
+            } else {
+                ring.add_mul_assign(&mut d, x, y);
+                assert_eq!(d, ab);
+            }
+        }
+    }
+    let mut d = ring.add(&ab, c);
+    ring.sub_mul_assign(&mut d, b, a);
+    assert_eq!(&d, c);
+    let abc = import(&fraction_mul(&fab, &fc));
+    assert_eq!(ring.mul(&ab, c), abc);
+    assert_eq!(ring.mul(a, &ring.mul(b, c)), abc);
+
+    let one = ring.factor(0).one();
+    let mut cache = PowerCache::new();
+    for (i, p) in polynomials.iter().enumerate() {
+        let denominator: Vec<_> = (0..factor_count)
+            .filter(|f| (i + f) % 3 != 0)
+            .map(|f| (f, (i + f) % 4))
+            .collect();
+        let d = denominator
+            .iter()
+            .fold(one.clone(), |d, &(f, e)| &d * &ring.factor(f).pow(e));
+        let expected = import(&fraction_mul(&fa, &(p.clone(), d)));
+        assert_eq!(ring.mul_fraction(a, p, &denominator), expected);
+        assert_eq!(
+            ring.mul_fraction_cached(a, p, &denominator, &mut cache),
+            expected
+        );
+        let expected = import(&fraction_mul(&fa, &(p.clone(), one.clone())));
+        assert_eq!(ring.mul_polynomial(a, p), expected);
+    }
+    for f in 0..factor_count {
+        for e in [1, 2, 5] {
+            let expected = import(&(fa.0.clone(), &fa.1 * &ring.factor(f).pow(e)));
+            assert_eq!(ring.div_factor_power(a, f, e), expected);
+        }
+    }
+    let mut d = a.clone();
+    ring.mul_variable_assign(&mut d);
+    let x = one.monomial(ring.field().one(), 1);
+    assert_eq!(d, import(&(&fa.0 * &x, fa.1.clone())));
+    let sum = ring.sum([a.clone(), b.clone(), c.clone(), ring.neg(a)]);
+    assert_eq!(sum, import(&fraction_add(&fb, &fc, false)));
+    assert_eq!(ring.factor_count(), factor_count);
+}
+
+/// A random element with a polynomial part of up to `poly` coefficients and
+/// up to `factors` distinct factors of exponents up to `exponent`, whose
+/// coefficients, from `coefficient`, may be zero anywhere.
+fn random_element<F: Field>(
+    ring: &PartialFractionRing<F>,
+    rng: &mut StdRng,
+    (poly, factors, exponent): (usize, usize, usize),
+    coefficient: &mut impl FnMut(&mut StdRng) -> F::Element,
+) -> PartialFraction<F> {
+    let polynomial = (0..rng.random_range(0..=poly))
+        .map(|_| coefficient(rng))
+        .collect();
+    let mut blocks: Vec<(usize, Vec<F::Element>)> = vec![];
+    for _ in 0..rng.random_range(0..=factors) {
+        let f = rng.random_range(0..ring.factor_count());
+        if blocks.iter().all(|(g, _)| *g != f) {
+            let len = rng.random_range(1..=exponent) * ring.factor(f).degree();
+            blocks.push((f, (0..len).map(|_| coefficient(rng)).collect()));
+        }
+    }
+    ring.element_from_coefficients(polynomial, blocks).unwrap()
+}
+
+/// Check random elements of `ring`, including constants and polynomials, with
+/// [check_against_fractions].
+fn check_random_against_fractions<F: Field>(
+    ring: &PartialFractionRing<F>,
+    rng: &mut StdRng,
+    iterations: usize,
+    exponent: usize,
+    polynomials: &[UnivariatePolynomial<F>],
+    mut coefficient: impl FnMut(&mut StdRng) -> F::Element,
+) {
+    let n = ring.factor_count();
+    for i in 0..iterations {
+        let shape = [(0, 1), (1, 2), (3, n), (6, n)][i % 4];
+        let a = random_element(ring, rng, (shape.0, shape.1, exponent), &mut coefficient);
+        let b = random_element(ring, rng, (4, 2, exponent), &mut coefficient);
+        let c = random_element(ring, rng, (3, n, exponent), &mut coefficient);
+        check_against_fractions(ring, &a, &b, &c, polynomials);
+        let constant = random_element(ring, rng, (1, 0, 1), &mut coefficient);
+        let polynomial = random_element(ring, rng, (4, 0, 1), &mut coefficient);
+        check_against_fractions(ring, &constant, &a, &b, polynomials);
+        check_against_fractions(ring, &a, &constant, &polynomial, polynomials);
+        check_against_fractions(ring, &polynomial, &b, &c, polynomials);
+    }
+}
+
+#[test]
+fn arithmetic_agrees_with_fractions_over_small_fields() {
+    let check =
+        |prime: u64, factors: &[&[i64]], seed: u64, iterations: usize| {
+            let (ring, field) = zp_ring(prime, factors);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let polynomials: Vec<_> = (1..=4)
+                .map(|len| {
+                    let c = (0..len)
+                        .map(|_| field.nth(rng.random_range(0..prime).into()))
+                        .collect();
+                    UnivariatePolynomial::from_coefficients(&field, c, ring.variable().clone())
+                })
+                .collect();
+            // Mostly zero or small coefficients, which cancel often.
+            check_random_against_fractions(&ring, &mut rng, iterations, 6, &polynomials, |rng| {
+                match rng.random_range(0..10) {
+                    0..3 => field.zero(),
+                    3..7 => field.nth(rng.random_range(0..3.min(prime)).into()),
+                    _ => field.nth(rng.random_range(0..prime).into()),
+                }
+            });
+        };
+    check(3, &[&[1, 1], &[1, 0, 1], &[0, 1], &[2, 2, 0, 1]], 4, 100);
+    // x^2 + 1, the composite (x + 1)(x + 2), x^3 + x + 1, x + 3 and x^4 + 2.
+    check(
+        7,
+        &[
+            &[1, 0, 1],
+            &[2, 3, 1],
+            &[1, 1, 0, 1],
+            &[3, 1],
+            &[2, 0, 0, 0, 1],
+        ],
+        2,
+        60,
+    );
+}
+
+#[test]
+fn arithmetic_agrees_with_fractions_over_rational_functions() {
+    type Coefficient = RationalPolynomial<IntegerRing, u16>;
+    let field = RationalPolynomialField::<IntegerRing, u16>::new(Z);
+    let y = Arc::new(vec![symbol!("pf_y").into()]);
+    // (a y + b) / (c y + d).
+    let element = |[a, b, c, d]: [i64; 4]| -> Coefficient {
+        let linear = |slope: i64, constant: i64| {
+            let mut p = MultivariatePolynomial::new(&Z, None, y.clone());
+            p.append_monomial(constant.into(), &[0]);
+            p.append_monomial(slope.into(), &[1]);
+            p
+        };
+        Coefficient::from_num_den(linear(a, b), linear(c, d), &Z, true)
+    };
+    let x = variable();
+    let poly = |c: Vec<Coefficient>| UnivariatePolynomial::from_coefficients(&field, c, x.clone());
+    let (zero, one) = (field.zero(), field.one());
+    // x - y, x - 2 y - 1, x^2 + y and x.
+    let ring = PartialFractionRing::with_basis(
+        field.clone(),
+        x.clone(),
+        &[
+            poly(vec![element([-1, 0, 0, 1]), one.clone()]),
+            poly(vec![element([-2, -1, 0, 1]), one.clone()]),
+            poly(vec![element([1, 0, 0, 1]), zero.clone(), one.clone()]),
+            poly(vec![zero, one.clone()]),
+        ],
+    )
+    .unwrap();
+    let mut rng = StdRng::seed_from_u64(6);
+    let polynomials = [poly(vec![one, element([1, 0, 0, 1])])];
+    check_random_against_fractions(&ring, &mut rng, 4, 2, &polynomials, |rng| {
+        match rng.random_range(0..4) {
+            0 => field.zero(),
+            1 => element([0, rng.random_range(-2..=2), 0, 1]),
+            _ => element([
+                rng.random_range(-2..=2),
+                rng.random_range(-2..=2),
+                1,
+                rng.random_range(1..=3),
+            ]),
+        }
+    });
 }

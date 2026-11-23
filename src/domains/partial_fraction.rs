@@ -188,30 +188,56 @@ mod dense {
     pub(super) fn add<F: Ring>(field: &F, a: &[F::Element], b: &[F::Element]) -> Vec<F::Element> {
         let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
         let mut r = long.to_vec();
-        for (r, s) in r.iter_mut().zip(short) {
-            field.add_assign(r, s);
-        }
-        trim(field, &mut r);
+        add_assign(field, &mut r, short);
         r
+    }
+
+    /// `a += b`.
+    pub(super) fn add_assign<F: Ring>(field: &F, a: &mut Vec<F::Element>, b: &[F::Element]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), field.zero());
+        }
+        for (a, b) in a.iter_mut().zip(b) {
+            field.add_assign(a, b);
+        }
+        trim(field, a);
     }
 
     pub(super) fn sub<F: Ring>(field: &F, a: &[F::Element], b: &[F::Element]) -> Vec<F::Element> {
         let mut r = a.to_vec();
-        if r.len() < b.len() {
-            r.resize(b.len(), field.zero());
-        }
-        for (r, s) in r.iter_mut().zip(b) {
-            field.sub_assign(r, s);
-        }
-        trim(field, &mut r);
+        sub_assign(field, &mut r, b);
         r
     }
 
-    pub(super) fn mul<F: Ring>(field: &F, a: &[F::Element], b: &[F::Element]) -> Vec<F::Element> {
-        if a.is_empty() || b.is_empty() {
-            return vec![];
+    /// `a -= b`.
+    pub(super) fn sub_assign<F: Ring>(field: &F, a: &mut Vec<F::Element>, b: &[F::Element]) {
+        if a.len() < b.len() {
+            a.resize(b.len(), field.zero());
         }
-        let mut r = vec![field.zero(); a.len() + b.len() - 1];
+        for (a, b) in a.iter_mut().zip(b) {
+            field.sub_assign(a, b);
+        }
+        trim(field, a);
+    }
+
+    pub(super) fn mul<F: Ring>(field: &F, a: &[F::Element], b: &[F::Element]) -> Vec<F::Element> {
+        let mut r = vec![];
+        mul_into(field, &mut r, a, b);
+        r
+    }
+
+    /// `r = a b`, reusing the storage of `r`.
+    pub(super) fn mul_into<F: Ring>(
+        field: &F,
+        r: &mut Vec<F::Element>,
+        a: &[F::Element],
+        b: &[F::Element],
+    ) {
+        r.clear();
+        if a.is_empty() || b.is_empty() {
+            return;
+        }
+        r.resize(a.len() + b.len() - 1, field.zero());
         for (i, x) in a.iter().enumerate() {
             if field.is_zero(x) {
                 continue;
@@ -220,8 +246,7 @@ mod dense {
                 field.add_mul_assign(r, x, y);
             }
         }
-        trim(field, &mut r);
-        r
+        trim(field, r);
     }
 
     pub(super) fn pow<F: Ring>(field: &F, a: &[F::Element], e: usize) -> Vec<F::Element> {
@@ -257,6 +282,34 @@ mod dense {
         trim(field, &mut r);
         trim(field, &mut q);
         (q, r)
+    }
+
+    /// Divide `r` by the monic `m` in place: `r` becomes the remainder and
+    /// the quotient is stored in `q`, reusing its storage.
+    pub(super) fn divrem_monic_assign<F: Ring>(
+        field: &F,
+        r: &mut Vec<F::Element>,
+        m: &[F::Element],
+        q: &mut Vec<F::Element>,
+    ) {
+        let k = m.len() - 1;
+        q.clear();
+        if r.len() <= k {
+            return;
+        }
+        q.resize(r.len() - k, field.zero());
+        for i in (0..q.len()).rev() {
+            let c = std::mem::replace(&mut r[i + k], field.zero());
+            if !field.is_zero(&c) {
+                for (x, m) in r[i..i + k].iter_mut().zip(m) {
+                    field.sub_mul_assign(x, &c, m);
+                }
+            }
+            q[i] = c;
+        }
+        r.truncate(k);
+        trim(field, r);
+        trim(field, q);
     }
 
     /// Quotient and remainder of `a` by the nonzero `b`.
@@ -556,7 +609,8 @@ impl<F: Field> FactorBasis<F> {
     }
 }
 
-/// The monic irreducible factors of `p` by Symbolica's factorization.
+/// The monic irreducible factors of the monic `p` by Symbolica's
+/// factorization.
 fn factorize<F: Field>(field: &F, p: &[F::Element]) -> Vec<(Vec<F::Element>, usize)>
 where
     MultivariatePolynomial<F, u16, LexOrder>: Factorize,
@@ -615,12 +669,22 @@ impl<F: Field> Hash for PartialFractionRing<F> {
 }
 
 /// One basis factor's coefficients `a_1, ..., a_e` in an element, `deg f`
-/// ascending coefficients per `a_j`, starting at `offset`.
+/// ascending coefficients per `a_j`, starting at `offset`. The degree of the
+/// factor is stored with it to spare lookups in the basis.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 struct Chain {
     factor: u32,
     exponent: u32,
+    degree: u32,
     offset: u32,
+}
+
+impl Chain {
+    /// The number of coefficients, `e deg f`.
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.exponent as usize * self.degree as usize
+    }
 }
 
 /// An element of a [PartialFractionRing].
@@ -716,6 +780,13 @@ impl<F: Field> PartialFraction<F> {
     pub fn coefficients(&self) -> &[F::Element] {
         &self.coefficients
     }
+
+    /// Set the element to zero, keeping its storage.
+    fn clear(&mut self) {
+        self.poly = 0;
+        self.chains.clear();
+        self.coefficients.clear();
+    }
 }
 
 impl<F: Field> PartialFractionRing<F>
@@ -803,11 +874,51 @@ impl<F: Field> PowerCache<F> {
 }
 
 /// How a source is scaled when it is added to a destination.
-#[derive(Clone, Copy)]
 enum Scale<'a, E> {
     One,
     MinusOne,
     By(&'a E),
+}
+
+// Not derived: derive would require `E: Clone`.
+impl<E> Clone for Scale<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E> Copy for Scale<'_, E> {}
+
+impl<'a, E> Scale<'a, E> {
+    /// The scale with a factor of one replaced by [Scale::One], which avoids
+    /// multiplications by one.
+    fn normalized<F: Ring<Element = E>>(self, field: &F) -> Self {
+        match self {
+            Scale::By(c) if field.is_one(c) => Scale::One,
+            scale => scale,
+        }
+    }
+}
+
+/// Scratch polynomials of [PartialFractionRing::divide_chain], reused across
+/// calls.
+struct DivisionWorkspace<F: Field> {
+    carry: Vec<F::Element>,
+    s: Vec<F::Element>,
+    b: Vec<F::Element>,
+    t: Vec<F::Element>,
+}
+
+// Not derived: derive would require `F: Default`.
+impl<F: Field> Default for DivisionWorkspace<F> {
+    fn default() -> Self {
+        Self {
+            carry: vec![],
+            s: vec![],
+            b: vec![],
+            t: vec![],
+        }
+    }
 }
 
 impl<F: Field> PartialFractionRing<F> {
@@ -967,11 +1078,6 @@ impl<F: Field> PartialFractionRing<F> {
         UnivariatePolynomial::from_coefficients(&self.field, coefficients, self.variable.clone())
     }
 
-    #[inline(always)]
-    fn chain_len(&self, c: &Chain) -> usize {
-        c.exponent as usize * self.basis.degree(c.factor)
-    }
-
     /// The degree of the stored basis denominator: `sum_i e_i deg f_i`.
     /// For composite factors this may exceed the reduced denominator degree;
     /// [Self::to_fraction] removes any partial cancellations.
@@ -1008,6 +1114,7 @@ impl<F: Field> PartialFractionRing<F> {
             a.chains.push(Chain {
                 factor: factor as u32,
                 exponent: (block.len() / degree) as u32,
+                degree: degree as u32,
                 offset: a.coefficients.len() as u32,
             });
             a.coefficients.extend(block);
@@ -1087,73 +1194,74 @@ impl<F: Field> PartialFractionRing<F> {
         // The union of the factor lists.
         let (mut i, mut j, mut count, mut total) = (0, 0, 0, new_poly);
         while i < a.chains.len() || j < chains.len() {
-            let (factor, exponent) = match (a.chains.get(i), chains.get(j)) {
+            let c = match (a.chains.get(i), chains.get(j)) {
                 (Some(x), Some(y)) if x.factor == y.factor => {
                     i += 1;
                     j += 1;
-                    (x.factor, x.exponent.max(y.exponent))
+                    Chain {
+                        exponent: x.exponent.max(y.exponent),
+                        ..*x
+                    }
                 }
                 (Some(x), Some(y)) if x.factor < y.factor => {
                     i += 1;
-                    (x.factor, x.exponent)
+                    *x
                 }
                 (Some(x), None) => {
                     i += 1;
-                    (x.factor, x.exponent)
+                    *x
                 }
                 (_, Some(y)) => {
                     j += 1;
-                    (y.factor, y.exponent)
+                    *y
                 }
                 (None, None) => unreachable!(),
             };
             count += 1;
-            total += exponent as usize * self.basis.degree(factor);
+            total += c.len();
         }
         let old_count = a.chains.len();
         a.chains.resize(count, Chain::default());
         a.coefficients.resize(total, self.field.zero());
         // Place the blocks from the back. Every block moves to a position at or
         // after its old one; moved-from positions receive zeros (by induction
-        // every destination position holds a zero before the swap).
+        // every destination position holds a zero before the rotation).
         let (mut i, mut j, mut k, mut end) = (old_count, chains.len(), count, total);
         while k > 0 {
             let old = (i > 0).then(|| a.chains[i - 1]);
             let new = (j > 0).then(|| chains[j - 1]);
-            let (factor, exponent, moved) = match (old, new) {
+            let (c, moved) = match (old, new) {
                 (Some(x), Some(y)) if x.factor == y.factor => {
                     i -= 1;
                     j -= 1;
-                    (x.factor, x.exponent.max(y.exponent), Some(x))
+                    let exponent = x.exponent.max(y.exponent);
+                    (Chain { exponent, ..x }, Some(x))
                 }
                 (Some(x), Some(y)) if x.factor > y.factor => {
                     i -= 1;
-                    (x.factor, x.exponent, Some(x))
+                    (x, Some(x))
                 }
                 (Some(x), None) => {
                     i -= 1;
-                    (x.factor, x.exponent, Some(x))
+                    (x, Some(x))
                 }
                 (_, Some(y)) => {
                     j -= 1;
-                    (y.factor, y.exponent, None)
+                    (y, None)
                 }
                 (None, None) => unreachable!(),
             };
-            let offset = end - exponent as usize * self.basis.degree(factor);
+            let offset = end - c.len();
             if let Some(x) = moved {
                 let from = x.offset as usize;
                 if from != offset {
-                    for t in (0..self.chain_len(&x)).rev() {
-                        a.coefficients.swap(from + t, offset + t);
-                    }
+                    a.coefficients[from..offset + x.len()].rotate_right(offset - from);
                 }
             }
             k -= 1;
             a.chains[k] = Chain {
-                factor,
-                exponent,
                 offset: offset as u32,
+                ..c
             };
             end = offset;
         }
@@ -1170,11 +1278,20 @@ impl<F: Field> PartialFractionRing<F> {
             poly -= 1;
         }
         let mut changed = poly != a.poly;
-        let mut write = poly;
+        // The kept blocks move down over the dropped zeros, one run of
+        // adjacent blocks at a time: the run `start..end` moves to `write`,
+        // and the zeros in between move up.
+        let (mut write, mut start, mut end) = (poly, poly, poly);
+        let move_run = |a: &mut PartialFraction<F>, write: &mut usize, start, end| {
+            if start != *write {
+                a.coefficients[*write..end].rotate_left(start - *write);
+            }
+            *write += end - start;
+        };
         let mut kept = 0;
         for index in 0..a.chains.len() {
             let c = a.chains[index];
-            let degree = self.basis.degree(c.factor);
+            let degree = c.degree as usize;
             let from = c.offset as usize;
             let mut exponent = c.exponent as usize;
             while exponent > 0
@@ -1188,27 +1305,105 @@ impl<F: Field> PartialFractionRing<F> {
                 changed = true;
                 continue;
             }
-            let len = exponent * degree;
-            if from != write {
-                changed = true;
-                for t in 0..len {
-                    a.coefficients.swap(write + t, from + t);
-                }
+            if from != end {
+                move_run(a, &mut write, start, end);
+                start = from;
             }
-            changed |= exponent != c.exponent as usize;
+            end = from + exponent * degree;
+            changed |= start != write || exponent != c.exponent as usize;
             a.chains[kept] = Chain {
-                factor: c.factor,
                 exponent: exponent as u32,
-                offset: write as u32,
+                offset: (write + from - start) as u32,
+                ..c
             };
             kept += 1;
-            write += len;
         }
+        move_run(a, &mut write, start, end);
         if changed || write != a.coefficients.len() {
             a.chains.truncate(kept);
             a.coefficients.truncate(write);
             a.poly = poly;
         }
+    }
+
+    /// `d += scale * s`, element-wise.
+    fn add_scaled_slice(
+        &self,
+        d: &mut [F::Element],
+        s: &[F::Element],
+        scale: Scale<'_, F::Element>,
+    ) {
+        let field = &self.field;
+        match scale {
+            Scale::One => {
+                for (d, s) in d.iter_mut().zip(s) {
+                    field.add_assign(d, s);
+                }
+            }
+            Scale::MinusOne => {
+                for (d, s) in d.iter_mut().zip(s) {
+                    field.sub_assign(d, s);
+                }
+            }
+            Scale::By(c) => {
+                for (d, s) in d.iter_mut().zip(s) {
+                    field.add_mul_assign(d, s, c);
+                }
+            }
+        }
+    }
+
+    /// `d = scale * s`, element-wise.
+    fn assign_scaled_slice(
+        &self,
+        d: &mut [F::Element],
+        s: &[F::Element],
+        scale: Scale<'_, F::Element>,
+    ) {
+        let field = &self.field;
+        match scale {
+            Scale::One => d.clone_from_slice(s),
+            Scale::MinusOne => {
+                for (d, s) in d.iter_mut().zip(s) {
+                    *d = field.neg(s);
+                }
+            }
+            Scale::By(c) => {
+                for (d, s) in d.iter_mut().zip(s) {
+                    *d = field.mul(s, c);
+                }
+            }
+        }
+    }
+
+    /// Apply `f` to every block of `b` (its polynomial part and the
+    /// coefficients of every factor) and the coefficients of `r` at the same
+    /// positions, for an `r` whose layout covers `b`. Returns `true` iff a
+    /// block of `b` reaches the top of the polynomial part or of a factor of
+    /// `r`: only then can `r` acquire a zero top block.
+    fn zip_blocks(
+        &self,
+        r: &mut PartialFraction<F>,
+        b: &PartialFraction<F>,
+        mut f: impl FnMut(&mut [F::Element], &[F::Element]),
+    ) -> bool {
+        f(&mut r.coefficients[..b.poly], &b.coefficients[..b.poly]);
+        let mut top = b.poly == r.poly;
+        let mut targets = r.chains.iter();
+        for c in &b.chains {
+            let t = targets
+                .by_ref()
+                .find(|t| t.factor == c.factor)
+                .expect("the layout covers the source");
+            top |= t.exponent == c.exponent;
+            let len = c.len();
+            let (from, to) = (c.offset as usize, t.offset as usize);
+            f(
+                &mut r.coefficients[to..to + len],
+                &b.coefficients[from..from + len],
+            );
+        }
+        top
     }
 
     /// `a += scale * b`.
@@ -1227,14 +1422,10 @@ impl<F: Field> PartialFractionRing<F> {
             return;
         }
         let field = &self.field;
-        let scale = match scale {
-            Scale::By(c) if field.is_one(c) => Scale::One,
-            scale => scale,
-        };
+        let scale = scale.normalized(field);
         if a.is_zero() {
             a.poly = b.poly;
-            a.chains.clear();
-            a.chains.extend_from_slice(&b.chains);
+            a.chains.clone_from(&b.chains);
             a.coefficients.clear();
             match scale {
                 Scale::One => a.coefficients.extend_from_slice(&b.coefficients),
@@ -1250,42 +1441,9 @@ impl<F: Field> PartialFractionRing<F> {
         if !self.covers(a, b.poly, &b.chains) {
             self.widen(a, b.poly, &b.chains);
         }
-        let add = |d: &mut [F::Element], s: &[F::Element]| match scale {
-            Scale::One => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.add_assign(d, s);
-                }
-            }
-            Scale::MinusOne => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.sub_assign(d, s);
-                }
-            }
-            Scale::By(c) => {
-                for (d, s) in d.iter_mut().zip(s) {
-                    field.add_mul_assign(d, s, c);
-                }
-            }
-        };
-        add(&mut a.coefficients[..b.poly], &b.coefficients[..b.poly]);
         // Only a block that b reaches at the top of a can become a zero top
         // block; otherwise a stays canonical.
-        let mut top_touched = b.poly == a.poly;
-        let mut targets = a.chains.iter();
-        for c in &b.chains {
-            let t = targets
-                .by_ref()
-                .find(|t| t.factor == c.factor)
-                .expect("the layout covers the source");
-            top_touched |= t.exponent == c.exponent;
-            let len = self.chain_len(c);
-            let (from, to) = (c.offset as usize, t.offset as usize);
-            add(
-                &mut a.coefficients[to..to + len],
-                &b.coefficients[from..from + len],
-            );
-        }
-        if top_touched {
+        if self.zip_blocks(a, b, |d, s| self.add_scaled_slice(d, s, scale)) {
             self.normalize(a);
         }
     }
@@ -1295,14 +1453,13 @@ impl<F: Field> PartialFractionRing<F> {
     /// has at least `poly` coefficients and whose chains `layout`, sorted by
     /// factor, contain those of `summand`.
     fn positions<'a>(
-        &'a self,
         poly: usize,
         summand: &'a [Chain],
         layout: &'a [Chain],
     ) -> impl Iterator<Item = usize> + 'a {
         let blocks = summand.iter().map(|c| {
             let start = layout[layout.partition_point(|t| t.factor < c.factor)].offset as usize;
-            start..start + self.chain_len(c)
+            start..start + c.len()
         });
         std::iter::once(0..poly).chain(blocks).flatten()
     }
@@ -1331,6 +1488,7 @@ impl<F: Field> PartialFractionRing<F> {
                 .map(|(factor, exponent)| Chain {
                     factor,
                     exponent,
+                    degree: self.basis.degree(factor) as u32,
                     offset: 0,
                 })
                 .collect()
@@ -1343,15 +1501,12 @@ impl<F: Field> PartialFractionRing<F> {
         let mut len = poly;
         for c in &mut chains {
             c.offset = len as u32;
-            len += self.chain_len(c);
+            len += c.len();
         }
         if !std::mem::needs_drop::<F::Element>() {
             let mut coefficients = vec![self.field.zero(); len];
             for a in &elements {
-                for (i, c) in self
-                    .positions(a.poly, &a.chains, &chains)
-                    .zip(&a.coefficients)
-                {
+                for (i, c) in Self::positions(a.poly, &a.chains, &chains).zip(&a.coefficients) {
                     self.field.add_assign(&mut coefficients[i], c);
                 }
             }
@@ -1372,7 +1527,7 @@ impl<F: Field> PartialFractionRing<F> {
                 chains: a_chains,
                 coefficients,
             } = a;
-            for (i, c) in self.positions(a_poly, &a_chains, &chains).zip(coefficients) {
+            for (i, c) in Self::positions(a_poly, &a_chains, &chains).zip(coefficients) {
                 columns[i].push(c);
             }
         }
@@ -1387,7 +1542,11 @@ impl<F: Field> PartialFractionRing<F> {
 
     /// `result += a * b`, or `result -= a * b` if `subtract`: the products of
     /// `b` with the polynomial part and with every chain of the shorter factor
-    /// are accumulated one at a time, without a complete temporary product.
+    /// are computed in turn in one scratch element, whose storage is reused,
+    /// and added to `result`, whose layout is widened once to hold the
+    /// product and normalized once. While `result` is zero, a partial product
+    /// is computed in it directly (and negated in place if `subtract`); the
+    /// widening then happens at the next addition.
     fn add_product_assign(
         &self,
         result: &mut PartialFraction<F>,
@@ -1399,100 +1558,188 @@ impl<F: Field> PartialFractionRing<F> {
             return;
         }
         let (a, b) = if a.len() > b.len() { (b, a) } else { (a, b) };
-        let accumulate = |result: &mut PartialFraction<F>, product: PartialFraction<F>| {
-            if result.is_zero() {
-                *result = if subtract { self.neg(product) } else { product };
-            } else {
-                self.add_scaled_assign(
-                    result,
-                    &product,
-                    if subtract {
-                        Scale::MinusOne
-                    } else {
-                        Scale::One
-                    },
-                );
+        let field = &self.field;
+        let mut widened = false;
+        let mut add = |result: &mut PartialFraction<F>,
+                       source: &PartialFraction<F>,
+                       scale: Scale<'_, F::Element>| {
+            if !widened {
+                widened = true;
+                self.widen_for_product(result, a, b);
             }
+            self.zip_blocks(result, source, |d, s| self.add_scaled_slice(d, s, scale));
         };
-        match a.polynomial_part() {
-            [] => {}
+        if let [c] = a.polynomial_part() {
             // A constant scales b directly.
-            [c] if subtract => self.add_scaled_assign(result, b, Scale::By(&self.field.neg(c))),
-            [c] => self.add_scaled_assign(result, b, Scale::By(c)),
-            p => accumulate(result, self.mul_dense(b, p)),
+            let negated;
+            let c = if subtract {
+                negated = field.neg(c);
+                &negated
+            } else {
+                c
+            };
+            if result.is_zero() {
+                self.add_scaled_assign(result, b, Scale::By(c));
+            } else {
+                add(result, b, Scale::By(c).normalized(field));
+            }
+        }
+        let sign = if subtract {
+            Scale::MinusOne
+        } else {
+            Scale::One
+        };
+        let mut product = PartialFraction::default();
+        let mut powers = PowerCache::new();
+        let mut workspace = DivisionWorkspace::default();
+        // Add a partial product, computed in `product`, or `direct`ly in the
+        // zero result.
+        let mut accumulate =
+            |result: &mut PartialFraction<F>, product: &PartialFraction<F>, direct: bool| {
+                if !direct {
+                    add(result, product, sign);
+                } else if subtract {
+                    for x in &mut result.coefficients {
+                        *x = field.neg(&*x);
+                    }
+                }
+            };
+        if a.poly > 1 {
+            let direct = result.is_zero();
+            let target = if direct { &mut *result } else { &mut product };
+            self.mul_dense_into(target, b, a.polynomial_part());
+            accumulate(result, &product, direct);
         }
         for c in &a.chains {
+            let direct = result.is_zero();
+            let target = if direct { &mut *result } else { &mut product };
             let o = c.offset as usize;
-            let blocks = &a.coefficients[o..o + self.chain_len(c)];
-            accumulate(result, self.mul_chain(b, c.factor, blocks));
+            let blocks = &a.coefficients[o..o + c.len()];
+            self.mul_chain_into(target, b, c.factor, blocks, &mut powers, &mut workspace);
+            accumulate(result, &product, direct);
+        }
+        if widened {
+            self.normalize(result);
         }
     }
 
-    /// `b * sum_j a_j / g^j` for the coefficients `a_1, ..., a_e` of the basis
-    /// factor `g` (`e` blocks of `deg g` coefficients), by Horner's rule in
-    /// `1/g` inside one layout: that of `b`, with room for the polynomial part
-    /// of a product with `a_j` and for `e` more powers of `g`.
-    fn mul_chain(
+    /// Widen the layout of `r` to hold every partial product of `a * b`: the
+    /// polynomial part of `a * b`, the factors of `b` and those of `a`, with
+    /// the exponents of common factors added.
+    fn widen_for_product(
         &self,
+        r: &mut PartialFraction<F>,
+        a: &PartialFraction<F>,
+        b: &PartialFraction<F>,
+    ) {
+        let poly = if a.poly > 0 {
+            a.poly + b.poly - 1
+        } else {
+            b.poly
+        };
+        let mut chains: SmallVec<[Chain; 8]> = SmallVec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < a.chains.len() || j < b.chains.len() {
+            let c = match (a.chains.get(i), b.chains.get(j)) {
+                (Some(x), Some(y)) if x.factor == y.factor => {
+                    i += 1;
+                    j += 1;
+                    Chain {
+                        exponent: x.exponent + y.exponent,
+                        ..*x
+                    }
+                }
+                (Some(x), Some(y)) if x.factor < y.factor => {
+                    i += 1;
+                    *x
+                }
+                (Some(x), None) => {
+                    i += 1;
+                    *x
+                }
+                (_, Some(y)) => {
+                    j += 1;
+                    *y
+                }
+                (None, None) => unreachable!(),
+            };
+            chains.push(c);
+        }
+        if !self.covers(r, poly, &chains) {
+            self.widen(r, poly, &chains);
+        }
+    }
+
+    /// `r = b * sum_j a_j / g^j` for the coefficients `a_1, ..., a_e` of the
+    /// basis factor `g` in `blocks` (`e` blocks of `deg g` coefficients),
+    /// reusing the storage of `r`. Horner's rule in `1/g` runs inside one
+    /// layout: that of `b`, with room for the polynomial part of a product
+    /// with `a_j` and for `e` more powers of `g`, with one in-place division
+    /// per power and one normalization. The products `b x^i` that a nonlinear
+    /// `g` requires are computed once and kept in `powers`.
+    fn mul_chain_into(
+        &self,
+        r: &mut PartialFraction<F>,
         b: &PartialFraction<F>,
         g: u32,
         blocks: &[F::Element],
-    ) -> PartialFraction<F> {
+        powers: &mut PowerCache<F>,
+        workspace: &mut DivisionWorkspace<F>,
+    ) {
         let field = &self.field;
-        let degree = self.basis.degree(g);
-        let e = blocks.len() / degree;
-        let mut chains = b.chains.clone();
-        let (position, start) = match chains.binary_search_by_key(&g, |c| c.factor) {
-            Ok(i) => {
-                let start = chains[i].exponent as usize;
-                chains[i].exponent += e as u32;
-                (i, start)
-            }
-            Err(i) => {
-                chains.insert(
-                    i,
-                    Chain {
-                        factor: g,
-                        exponent: e as u32,
-                        offset: 0,
-                    },
-                );
-                (i, 0)
-            }
-        };
-        let mut t = PartialFraction::default();
-        self.widen(&mut t, b.poly + degree - 1, &chains);
+        let k = self.basis.degree(g);
+        let e = blocks.len() / k;
+        while powers.powers.len() + 1 < k {
+            let mut next = powers.powers.last().unwrap_or(b).clone();
+            self.mul_variable_assign(&mut next);
+            powers.powers.push(next);
+        }
+        let position = b.chains.partition_point(|c| c.factor < g);
+        let current = b
+            .chains
+            .get(position)
+            .filter(|c| c.factor == g)
+            .map_or(0, |c| c.exponent);
+        r.chains.clear();
+        r.chains.extend_from_slice(&b.chains[..position]);
+        r.chains.push(Chain {
+            factor: g,
+            exponent: current + e as u32,
+            degree: k as u32,
+            offset: 0,
+        });
+        r.chains
+            .extend_from_slice(&b.chains[position + usize::from(current > 0)..]);
+        let mut offset = b.poly + k - 1;
+        for c in &mut r.chains {
+            c.offset = offset as u32;
+            offset += c.len();
+        }
+        r.coefficients.clear();
+        r.coefficients.resize(offset, field.zero());
         // The used length of the polynomial part; divisions release room,
         // which holds zeros.
-        t.poly = 0;
-        let mut scratch = vec![];
-        for (step, j) in (0..e).rev().enumerate() {
-            // The first product is written into zeros.
-            let first = step == 0;
-            let block = &blocks[j * degree..(j + 1) * degree];
-            if degree == 1 {
-                let c = &block[0];
-                if first || !field.is_zero(c) {
-                    t.poly = t.poly.max(b.poly);
-                    if first {
-                        self.zip_in_layout(&mut t, b, |d, s| *d = field.mul(s, c));
-                    } else {
-                        self.zip_in_layout(&mut t, b, |d, s| field.add_mul_assign(d, s, c));
-                    }
+        r.poly = 0;
+        // The first product is written into zeros.
+        let mut zero = true;
+        for j in (0..e).rev() {
+            for (i, c) in blocks[j * k..(j + 1) * k].iter().enumerate() {
+                if field.is_zero(c) {
+                    continue;
                 }
-            } else if block.iter().any(|x| !field.is_zero(x)) {
-                let product = self.mul_dense(b, block);
-                t.poly = t.poly.max(product.poly);
-                if first {
-                    self.zip_in_layout(&mut t, &product, |d, s| *d = s.clone());
+                let source = if i == 0 { b } else { &powers.powers[i - 1] };
+                r.poly = r.poly.max(source.poly);
+                let scale = Scale::By(c).normalized(field);
+                if zero {
+                    self.zip_blocks(r, source, |d, s| self.assign_scaled_slice(d, s, scale));
+                    zero = false;
                 } else {
-                    self.zip_in_layout(&mut t, &product, |d, s| field.add_assign(d, s));
+                    self.zip_blocks(r, source, |d, s| self.add_scaled_slice(d, s, scale));
                 }
             }
-            self.divide_once(&mut t, position, start + step, &mut scratch);
+            self.divide_once(r, position, current as usize + e - 1 - j, workspace);
         }
-        self.normalize(&mut t);
-        t
+        self.normalize(r);
     }
 
     /// `a *= c` for a field element `c`.
@@ -1568,20 +1815,27 @@ impl<F: Field> PartialFractionRing<F> {
 
     /// `a * p` for a polynomial `p` given by its ascending coefficients.
     fn mul_dense(&self, a: &PartialFraction<F>, p: &[F::Element]) -> PartialFraction<F> {
-        if p.len() <= 1 {
-            if p.is_empty() || self.field.is_zero(&p[0]) {
-                return PartialFraction::default();
-            }
-            let mut result = a.clone();
-            self.mul_scalar_assign(&mut result, &p[0]);
-            return result;
-        }
-        self.mul_dense_fraction(a, p, &[], None)
+        let mut r = PartialFraction::default();
+        self.mul_dense_into(&mut r, a, p);
+        r
     }
 
-    /// `a * p / prod_i f_i^e_i`, computed in one final layout: the products
-    /// `a x^i` (by Horner's rule, or taken from `cache`) and then one in-place
-    /// division per factor power, without intermediate normalizations.
+    /// `r = a * p` for a polynomial `p` given by its ascending coefficients,
+    /// reusing the storage of `r`.
+    fn mul_dense_into(&self, r: &mut PartialFraction<F>, a: &PartialFraction<F>, p: &[F::Element]) {
+        if p.len() <= 1 {
+            if p.is_empty() || self.field.is_zero(&p[0]) {
+                r.clear();
+            } else {
+                r.clone_from(a);
+                self.mul_scalar_assign(r, &p[0]);
+            }
+            return;
+        }
+        self.mul_dense_fraction_into(r, a, p, &[], None);
+    }
+
+    /// `a * p / prod_i f_i^e_i`, see [Self::mul_dense_fraction_into].
     fn mul_dense_fraction(
         &self,
         a: &PartialFraction<F>,
@@ -1589,16 +1843,33 @@ impl<F: Field> PartialFractionRing<F> {
         denominator: &[(usize, usize)],
         cache: Option<&mut PowerCache<F>>,
     ) -> PartialFraction<F> {
+        let mut r = PartialFraction::default();
+        self.mul_dense_fraction_into(&mut r, a, p, denominator, cache);
+        r
+    }
+
+    /// `r = a * p / prod_i f_i^e_i`, reusing the storage of `r`, computed in
+    /// one final layout: the products `a x^i` (by Horner's rule, or taken from
+    /// `cache`) and then one in-place division per factor power, without
+    /// intermediate normalizations.
+    fn mul_dense_fraction_into(
+        &self,
+        r: &mut PartialFraction<F>,
+        a: &PartialFraction<F>,
+        p: &[F::Element],
+        denominator: &[(usize, usize)],
+        cache: Option<&mut PowerCache<F>>,
+    ) {
         let field = &self.field;
+        r.clear();
         let Some(top) = p.iter().rposition(|c| !field.is_zero(c)) else {
-            return PartialFraction::default();
+            return;
         };
         if a.is_zero() {
-            return PartialFraction::default();
+            return;
         }
         // The final layout: a's factors and the denominator's, with the
         // exponents added, and room for the polynomial part of a p.
-        let mut chains = Vec::with_capacity(a.chains.len() + denominator.len());
         let mut sorted: SmallVec<[(u32, u32); 4]> = denominator
             .iter()
             .filter(|(_, e)| *e > 0)
@@ -1620,37 +1891,52 @@ impl<F: Field> PartialFractionRing<F> {
         let (mut i, mut j) = (0, 0);
         let mut offset = a.poly + top;
         while i < a.chains.len() || j < sorted.len() {
-            let (factor, exponent) = match (a.chains.get(i), sorted.get(j)) {
+            let c = match (a.chains.get(i), sorted.get(j)) {
                 (Some(x), Some(&(g, e))) if x.factor == g => {
                     i += 1;
                     j += 1;
-                    (g, x.exponent + e)
+                    Chain {
+                        exponent: x.exponent + e,
+                        ..*x
+                    }
                 }
                 (Some(x), Some(&(g, _))) if x.factor < g => {
                     i += 1;
-                    (x.factor, x.exponent)
+                    *x
                 }
                 (Some(x), None) => {
                     i += 1;
-                    (x.factor, x.exponent)
+                    *x
                 }
                 (_, Some(&(g, e))) => {
                     j += 1;
-                    (g, e)
+                    Chain {
+                        factor: g,
+                        exponent: e,
+                        degree: self.basis.degree(g) as u32,
+                        offset: 0,
+                    }
                 }
                 (None, None) => unreachable!(),
             };
-            chains.push(Chain {
-                factor,
-                exponent,
+            r.chains.push(Chain {
                 offset: offset as u32,
+                ..c
             });
-            offset += exponent as usize * self.basis.degree(factor);
+            offset += c.len();
         }
-        let mut r = PartialFraction {
-            poly: a.poly + top,
-            chains,
-            coefficients: vec![field.zero(); offset],
+        r.poly = a.poly + top;
+        r.coefficients.resize(offset, field.zero());
+        // The first term is assigned to the zero layout, later ones are added.
+        let mut zero = true;
+        let mut add = |r: &mut PartialFraction<F>, source: &PartialFraction<F>, c: &F::Element| {
+            let scale = Scale::By(c).normalized(field);
+            if zero {
+                self.zip_blocks(r, source, |d, s| self.assign_scaled_slice(d, s, scale));
+                zero = false;
+            } else {
+                self.zip_blocks(r, source, |d, s| self.add_scaled_slice(d, s, scale));
+            }
         };
         let logical = match cache {
             Some(cache) => {
@@ -1660,32 +1946,23 @@ impl<F: Field> PartialFractionRing<F> {
                     self.mul_variable_assign(&mut next);
                     cache.powers.push(next);
                 }
-                // The first product is written into zeros.
-                let mut first = true;
                 for (i, c) in p[..=top].iter().enumerate() {
                     if !field.is_zero(c) {
                         let source = if i == 0 { a } else { &cache.powers[i - 1] };
-                        if first {
-                            self.zip_in_layout(&mut r, source, |d, s| *d = field.mul(s, c));
-                            first = false;
-                        } else {
-                            self.zip_in_layout(&mut r, source, |d, s| {
-                                field.add_mul_assign(d, s, c)
-                            });
-                        }
+                        add(r, source, c);
                     }
                 }
                 a.poly + top
             }
             None => {
                 // Horner: ((p_n a) x + p_(n-1) a) x + ...
-                self.zip_in_layout(&mut r, a, |d, s| *d = field.mul(s, &p[top]));
+                add(r, a, &p[top]);
                 let mut logical = a.poly;
                 for c in p[..top].iter().rev() {
-                    self.mul_variable_in_layout(&mut r, logical);
+                    self.mul_variable_in_layout(r, logical);
                     logical += 1;
                     if !field.is_zero(c) {
-                        self.zip_in_layout(&mut r, a, |d, s| field.add_mul_assign(d, s, c));
+                        add(r, a, c);
                     }
                 }
                 logical
@@ -1693,7 +1970,7 @@ impl<F: Field> PartialFractionRing<F> {
         };
         r.poly = logical;
         // One in-place division per factor power.
-        let mut scratch = vec![];
+        let mut workspace = DivisionWorkspace::default();
         for &(g, e) in &sorted {
             let position = r
                 .chains
@@ -1703,45 +1980,11 @@ impl<F: Field> PartialFractionRing<F> {
                 .chains
                 .binary_search_by_key(&g, |c| c.factor)
                 .map_or(0, |i| a.chains[i].exponent as usize);
-            let base = start;
             for step in 0..e as usize {
-                self.divide_once(&mut r, position, base + step, &mut scratch);
+                self.divide_once(r, position, start + step, &mut workspace);
             }
         }
-        self.normalize(&mut r);
-        r
-    }
-
-    /// Apply `f(r_i, b_i)` to every coefficient `b_i` of a source `b` whose
-    /// layout `r` covers and the coefficient `r_i` at its position in `r` (no
-    /// widening, no normalization).
-    fn zip_in_layout(
-        &self,
-        r: &mut PartialFraction<F>,
-        b: &PartialFraction<F>,
-        mut f: impl FnMut(&mut F::Element, &F::Element),
-    ) {
-        for (d, s) in r.coefficients[..b.poly]
-            .iter_mut()
-            .zip(&b.coefficients[..b.poly])
-        {
-            f(d, s);
-        }
-        let mut targets = r.chains.iter();
-        for chain in &b.chains {
-            let t = targets
-                .by_ref()
-                .find(|t| t.factor == chain.factor)
-                .expect("the layout covers the source");
-            let len = self.chain_len(chain);
-            let (from, to) = (chain.offset as usize, t.offset as usize);
-            for (d, s) in r.coefficients[to..to + len]
-                .iter_mut()
-                .zip(&b.coefficients[from..from + len])
-            {
-                f(d, s);
-            }
-        }
+        self.normalize(r);
     }
 
     /// `a * p` for a polynomial `p`.
@@ -1820,6 +2063,7 @@ impl<F: Field> PartialFractionRing<F> {
             &[Chain {
                 factor: factor as u32,
                 exponent: current + exponent as u32,
+                degree: self.basis.degree(factor as u32) as u32,
                 offset: 0,
             }],
         );
@@ -1828,9 +2072,9 @@ impl<F: Field> PartialFractionRing<F> {
             .chains
             .binary_search_by_key(&(factor as u32), |c| c.factor)
             .expect("the widened layout holds the factor");
-        let mut scratch = vec![];
+        let mut workspace = DivisionWorkspace::default();
         for step in 0..exponent {
-            self.divide_once(a, position, current as usize + step, &mut scratch);
+            self.divide_once(a, position, current as usize + step, &mut workspace);
         }
         self.normalize(a);
     }
@@ -1843,13 +2087,14 @@ impl<F: Field> PartialFractionRing<F> {
         a: &mut PartialFraction<F>,
         position: usize,
         g_exponent: usize,
-        scratch: &mut Vec<F::Element>,
+        w: &mut DivisionWorkspace<F>,
     ) {
         let field = &self.field;
         let basis = &*self.basis;
         let g_chain = a.chains[position];
         let g = g_chain.factor;
-        let k = basis.degree(g);
+        let gm = basis.monic(g);
+        let k = gm.len() - 1;
         let g_offset = g_chain.offset as usize;
         // a_j -> a_(j+1); the new a_1 collects the residues.
         a.coefficients[g_offset..g_offset + (g_exponent + 1) * k].rotate_right(k);
@@ -1872,14 +2117,25 @@ impl<F: Field> PartialFractionRing<F> {
                 let remainder = std::mem::replace(&mut p[poly - 1], field.zero());
                 add_moved(field, &mut a.coefficients[g_offset], remainder);
             } else {
-                let (q, r) = dense::divrem_monic(field, &a.coefficients[..poly], basis.monic(g));
-                let mut q = q.into_iter();
-                for c in &mut a.coefficients[..poly] {
-                    *c = q.next().unwrap_or_else(|| field.zero());
+                // Long division in place leaves R in the lowest k
+                // coefficients and Q above them.
+                let (p, residues) = a.coefficients.split_at_mut(g_offset);
+                let p = &mut p[..poly];
+                for i in (0..poly.saturating_sub(k)).rev() {
+                    let c = p[i + k].clone();
+                    if !field.is_zero(&c) {
+                        for (x, m) in p[i..i + k].iter_mut().zip(gm) {
+                            field.sub_mul_assign(x, &c, m);
+                        }
+                    }
                 }
-                for (i, r) in r.into_iter().enumerate() {
-                    add_moved(field, &mut a.coefficients[g_offset + i], r);
+                let r = poly.min(k);
+                for (residue, r) in residues.iter_mut().zip(&mut p[..r]) {
+                    if !field.is_zero(r) {
+                        add_moved(field, residue, std::mem::replace(r, field.zero()));
+                    }
                 }
+                p.rotate_left(r);
             }
         }
         for index in 0..a.chains.len() {
@@ -1890,7 +2146,7 @@ impl<F: Field> PartialFractionRing<F> {
             let offset = chain.offset as usize;
             // The final layout reserves poles for later divisions. Do not
             // run field arithmetic over their currently zero top blocks.
-            let degree = basis.degree(chain.factor);
+            let degree = chain.degree as usize;
             let mut e = chain.exponent as usize;
             while e > 0
                 && a.coefficients[offset + (e - 1) * degree..offset + e * degree]
@@ -1902,7 +2158,7 @@ impl<F: Field> PartialFractionRing<F> {
             if e == 0 {
                 continue;
             }
-            if g_root.is_some() && basis.root(chain.factor).is_some() {
+            if g_root.is_some() && degree == 1 {
                 // a_i / ((x - r)^i (x - s)) with t = s - r:
                 // a'_e = -a_e / t, a'_i = (a'_(i+1) - a_i) / t, residue at s: -a'_1.
                 let (d, negated) = basis.inverse_difference(g, chain.factor);
@@ -1912,50 +2168,66 @@ impl<F: Field> PartialFractionRing<F> {
                 sub_moved(field, &mut a.coefficients[g_offset], a_1);
                 continue;
             }
-            let degree = basis.degree(chain.factor);
-            scratch.clear();
-            scratch.extend_from_slice(&a.coefficients[offset..offset + e * degree]);
-            let c = self.divide_chain(chain.factor, e, scratch, g);
-            a.coefficients[offset..offset + e * degree].clone_from_slice(scratch);
-            for (i, c) in c.into_iter().enumerate() {
-                add_moved(field, &mut a.coefficients[g_offset + i], c);
+            self.divide_chain(
+                chain.factor,
+                &mut a.coefficients[offset..offset + e * degree],
+                g,
+                w,
+            );
+            for (residue, c) in a.coefficients[g_offset..].iter_mut().zip(w.carry.drain(..)) {
+                add_moved(field, residue, c);
             }
         }
         a.poly = poly.saturating_sub(k);
     }
 
-    /// Divide one h-chain by a coprime factor g, without expanding h^e.
-    /// Descend from the highest pole using s = g*b + h*carry, where
-    /// b = s*(g^-1 mod h) mod h. The carry contributes to the next lower
-    /// pole, and the final carry is the numerator over g. Intermediate
-    /// degrees depend only on deg(h)+deg(g), not the pole exponent e.
-    fn divide_chain(&self, h: u32, e: usize, a: &mut [F::Element], g: u32) -> Vec<F::Element> {
+    /// Divide one h-chain, the blocks `a`, by a coprime factor g, without
+    /// expanding h^e. Descend from the highest pole using s = g*b + h*carry,
+    /// where b = s*(g^-1 mod h) mod h. The carry contributes to the next lower
+    /// pole, and the final carry, left in `w.carry`, is the numerator over g.
+    /// Intermediate degrees depend only on deg(h)+deg(g), not the pole
+    /// exponent e.
+    fn divide_chain(&self, h: u32, a: &mut [F::Element], g: u32, w: &mut DivisionWorkspace<F>) {
         let field = &self.field;
         let hm = self.basis.monic(h);
         let gm = self.basis.monic(g);
-        let degree = hm.len() - 1;
         let inverse = self.basis.inverse_mod(g, h);
-        let mut carry = vec![];
-        for j in (0..e).rev() {
-            let mut block = a[j * degree..(j + 1) * degree].to_vec();
-            dense::trim(field, &mut block);
-            let s = dense::add(field, &block, &carry);
-            let residue = dense::divrem_monic(field, &s, hm).1;
-            let b = dense::divrem_monic(field, &dense::mul(field, &residue, inverse), hm).1;
-            let numerator = dense::sub(field, &s, &dense::mul(field, gm, &b));
-            let (quotient, remainder) = dense::divrem_monic(field, &numerator, hm);
-            debug_assert!(
-                remainder.is_empty(),
-                "partial-fraction recurrence left a remainder"
-            );
-            carry = quotient;
-            for c in &mut a[j * degree..(j + 1) * degree] {
-                *c = field.zero();
+        let DivisionWorkspace { carry, s, b, t } = w;
+        carry.clear();
+        for block in a.chunks_exact_mut(hm.len() - 1).rev() {
+            s.clear();
+            s.extend_from_slice(block);
+            dense::trim(field, s);
+            dense::add_assign(field, s, carry);
+            // The carry is free to hold the discarded quotients.
+            let residue = if s.len() < hm.len() {
+                &*s
+            } else {
+                t.clone_from(s);
+                dense::divrem_monic_assign(field, t, hm, carry);
+                &*t
+            };
+            dense::mul_into(field, b, residue, inverse);
+            dense::divrem_monic_assign(field, b, hm, carry);
+            if gm.len() == 2 {
+                // For a linear g, deg(s - g*b) <= deg h, so the monic h
+                // divides it with the constant quotient -b_(deg h - 1).
+                carry.clear();
+                if let Some(top) = b.get(hm.len() - 2) {
+                    carry.push(field.neg(top));
+                }
+            } else {
+                dense::mul_into(field, t, gm, b);
+                dense::sub_assign(field, s, t);
+                dense::divrem_monic_assign(field, s, hm, carry);
+                debug_assert!(s.is_empty(), "partial-fraction recurrence left a remainder");
             }
-            a[j * degree..j * degree + b.len()].clone_from_slice(&b);
+            let mut b = b.drain(..);
+            for c in block {
+                *c = b.next().unwrap_or_else(|| field.zero());
+            }
         }
         debug_assert!(carry.len() < gm.len());
-        carry
     }
 
     /// Numerator and monic basis denominator, before partial cancellation
@@ -1991,7 +2263,7 @@ impl<F: Field> PartialFractionRing<F> {
     }
 
     fn may_have_partial_cancellation(&self, a: &PartialFraction<F>) -> bool {
-        self.basis.factorizer.is_none() && a.chains.iter().any(|c| self.basis.degree(c.factor) > 1)
+        self.basis.factorizer.is_none() && a.chains.iter().any(|c| c.degree > 1)
     }
 
     fn has_partial_cancellation(&self, a: &PartialFraction<F>) -> bool {
