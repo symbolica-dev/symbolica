@@ -61,21 +61,48 @@ fn recombined_known_factors_do_not_invoke_factorization() {
     );
     assert_eq!(factorization_inputs().len(), 1);
 
+    // A linear cofactor is irreducible and is appended without factorization.
     let shared = ring.clone();
     let unknown = dense::mul(&Q, &known, &coefficients(&[-4, 1]));
     assert_eq!(
         shared.denominator_factors(&unknown),
         Some(vec![(0, 3), (1, 2), (3, 1)])
     );
-    assert_eq!(factorization_inputs().len(), 2);
+    assert_eq!(factorization_inputs().len(), 1);
     assert_eq!(ring.factor_count(), 4);
+}
+
+#[test]
+fn known_factors_are_divided_out_until_a_known_or_linear_cofactor_remains() {
+    let ring = recording_ring(&[&[3, 0, 0, 1], &[1, 0, 1], &[-1, 1]]);
+    let quadratic = coefficients(&[1, 0, 1]);
+    let d = dense::mul(
+        &Q,
+        &coefficients(&[3, 0, 0, 1]),
+        &dense::pow(&Q, &quadratic, 7),
+    );
+    assert_eq!(ring.denominator_factors(&d), Some(vec![(0, 1), (1, 7)]));
+
+    // A new linear cofactor is appended without factorization.
+    let d = dense::mul(&Q, &coefficients(&[-1, 1]), &coefficients(&[-2, 1]));
+    assert_eq!(ring.denominator_factors(&d), Some(vec![(2, 1), (3, 1)]));
+    let d = dense::mul(&Q, &quadratic, &coefficients(&[-5, 1]));
+    assert_eq!(ring.denominator_factors(&d), Some(vec![(1, 1), (4, 1)]));
+    assert!(factorization_inputs().is_empty());
+
+    // A power of a new linear factor is factored.
+    let power = dense::pow(&Q, &coefficients(&[-7, 1]), 3);
+    let d = dense::mul(&Q, &quadratic, &power);
+    assert_eq!(ring.denominator_factors(&d), Some(vec![(1, 1), (5, 3)]));
+    assert_eq!(factorization_inputs(), vec![power]);
 }
 
 #[test]
 fn factorized_import_keeps_factors_and_leading_coefficient_powers() {
     let ring = recording_ring(&[]);
-    let first = ring.polynomial(coefficients(&[2, -2])); // -2 (x - 1)
-    let second = ring.polynomial(coefficients(&[6, 3])); // 3 (x + 2)
+    // Quadratic factors: linear ones are appended without factorization.
+    let first = ring.polynomial(coefficients(&[-2, 0, -2])); // -2 (x^2 + 1)
+    let second = ring.polynomial(coefficients(&[6, 3, 3])); // 3 (x^2 + x + 2)
     let numerator = ring.polynomial(coefficients(&[3, 1]));
     let input = FactorizedRationalPolynomial::<RationalField, u16> {
         numerator: numerator.clone().to_multivariate(),
@@ -93,7 +120,7 @@ fn factorized_import_keeps_factors_and_leading_coefficient_powers() {
     // before factorization, and the two factors are never multiplied together.
     assert_eq!(
         factorization_inputs(),
-        vec![coefficients(&[-1, 1]), coefficients(&[2, 1])]
+        vec![coefficients(&[1, 0, 1]), coefficients(&[2, 1, 1])]
     );
     let denominator = dense::mul(
         &Q,
@@ -118,7 +145,7 @@ fn factorized_import_keeps_factors_and_leading_coefficient_powers() {
 fn factorized_import_preserves_cancellation_after_basis_extension() {
     let ring = recording_ring(&[&[-1, 1]]);
     let known = ring.polynomial(coefficients(&[-2, 2])); // 2 (x - 1)
-    let outside = ring.polynomial(coefficients(&[1, 1]));
+    let outside = ring.polynomial(coefficients(&[1, 0, 1]));
     let input = FactorizedRationalPolynomial::<RationalField, u16> {
         numerator: outside.clone().to_multivariate(),
         numer_coeff: 4.into(),
@@ -129,7 +156,7 @@ fn factorized_import_preserves_cancellation_after_basis_extension() {
         .try_from_factorized_rational_polynomial(&input)
         .unwrap();
     assert_eq!(actual, ring.inv_factor_power(0, 2));
-    assert_eq!(factorization_inputs(), vec![coefficients(&[1, 1])]);
+    assert_eq!(factorization_inputs(), vec![coefficients(&[1, 0, 1])]);
     assert_eq!(ring.factor_count(), 2);
 }
 

@@ -32,8 +32,8 @@
 //! so existing elements remain valid when new denominators enter.
 //!
 //! - [PartialFractionRing::new] uses [Factorize] to split new denominators.
-//!   Known factors are trial-divided first; only the remaining cofactor is
-//!   factored. Denominator decompositions are cached.
+//!   Known factors are divided out first; only the remaining cofactor is
+//!   factored. Recent denominator decompositions are cached.
 //! - [PartialFractionRing::with_basis] preserves supplied pairwise-coprime
 //!   blocks, which need not be irreducible. It supports any coefficient field:
 //!   uncovered denominators add coprime, possibly composite blocks without
@@ -475,6 +475,10 @@ type Factorizer<F> = fn(&F, &[<F as Set>::Element]) -> Vec<(Vec<<F as Set>::Elem
 /// The `(factor, exponent)` lists of monic denominators.
 type DenominatorCache<F> = HashMap<Vec<<F as Set>::Element>, Vec<(usize, usize)>>;
 
+/// The number of denominator decompositions a basis keeps; the cache is
+/// cleared when it is full.
+const DENOMINATOR_CACHE_CAPACITY: usize = 1 << 16;
+
 /// The inverse `(r_g - r_h)^-1` of the difference of the roots of two linear
 /// factors. Units are recorded as such, so that no product with them is
 /// formed.
@@ -514,7 +518,7 @@ struct FactorBasis<F: Field> {
     factors: AppendOnlyVec<Factor<F>>,
     /// The index of every factor; held while appending.
     index: Mutex<HashMap<Vec<F::Element>, usize>>,
-    /// The factor exponents of every monic denominator seen so far.
+    /// The factor exponents of recently seen monic denominators.
     denominators: Mutex<DenominatorCache<F>>,
     /// Optional adapter to Factorize, installed by PartialFractionRing::new.
     /// When present, every stored block is irreducible. When absent, preserve
@@ -586,6 +590,25 @@ impl<F: Field> FactorBasis<F> {
             Pair::General(_, low_mod_high) => low_mod_high,
             Pair::Linear(..) => unreachable!("a nonlinear factor"),
         }
+    }
+
+    /// The index of the monic `factor`, if it is in the basis.
+    fn find(&self, factor: &[F::Element]) -> Option<usize> {
+        self.index.lock().unwrap().get(factor).copied()
+    }
+
+    /// The cached factor exponents of the monic denominator `d`.
+    fn cached(&self, d: &[F::Element]) -> Option<Vec<(usize, usize)>> {
+        self.denominators.lock().unwrap().get(d).cloned()
+    }
+
+    /// Cache the factor exponents of the monic denominator `d`.
+    fn cache(&self, d: &[F::Element], exponents: &[(usize, usize)]) {
+        let mut cache = self.denominators.lock().unwrap();
+        if cache.len() >= DENOMINATOR_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(d.to_vec(), exponents.to_vec());
     }
 
     /// The index of the monic `factor`, appended if it is new. Fails if it is
@@ -828,10 +851,10 @@ where
     /// are factored into monic irreducible factors that seed the basis (their
     /// order fixes the first factor indices); every denominator that later
     /// enters the ring (from a conversion, [Ring::try_inv], [Field::inv] or
-    /// [Field::div]) is trial-divided by the basis. Only the remaining cofactor
-    /// is factored, and its new irreducible factors are appended. Denominator
-    /// decompositions are cached. Sums and products never create new factors, so
-    /// arithmetic never factors.
+    /// [Field::div]) is divided by the known factors. Only the remaining
+    /// cofactor is factored, and its new irreducible factors are appended.
+    /// Recent denominator decompositions are cached. Sums and products never
+    /// create new factors, so arithmetic never factors.
     pub fn new(field: F, variable: Arc<PolyVariable>, hints: &[UnivariatePolynomial<F>]) -> Self {
         let ring = Self::from_monic_factors(field, variable, vec![], Some(factorize::<F>))
             .expect("an empty basis");
@@ -1016,35 +1039,20 @@ impl<F: Field> PartialFractionRing<F> {
     /// first. With the Factorize adapter, append irreducible remainder factors;
     /// otherwise return None for the general composite-cover path.
     fn denominator_factors(&self, d: &[F::Element]) -> Option<Vec<(usize, usize)>> {
-        if let Some(e) = self.basis.denominators.lock().unwrap().get(d) {
-            return Some(e.clone());
+        if let Some(e) = self.basis.cached(d) {
+            return Some(e);
         }
         let field = &self.field;
-        let mut exponents: Vec<(usize, usize)> = vec![];
-        let mut rest = d.to_vec();
-        // New products and powers of known factors need no factorization.
-        // Concurrent insertions after this snapshot are reconciled by `push`.
-        for i in 0..self.basis.len() {
-            if rest.len() <= 1 {
-                break;
-            }
-            let f = self.basis.monic(i as u32);
-            let mut e = 0;
-            while rest.len() >= f.len() {
-                let (q, r) = dense::divrem_monic(field, &rest, f);
-                if !r.is_empty() {
-                    break;
-                }
-                rest = q;
-                e += 1;
-            }
-            if e > 0 {
-                exponents.push((i, e));
-            }
-        }
+        let (mut exponents, rest) = self.divide_known_factors(d);
         if rest.len() > 1 {
             let factorizer = self.basis.factorizer?;
-            for (f, m) in factorizer(field, &rest) {
+            // A linear cofactor is irreducible.
+            let factors = if rest.len() == 2 {
+                vec![(rest, 1)]
+            } else {
+                factorizer(field, &rest)
+            };
+            for (f, m) in factors {
                 // Irreducible factors are coprime to every other factor.
                 let i = self.basis.push(field, f).ok()?;
                 match exponents.iter_mut().find(|(j, _)| *j == i) {
@@ -1054,12 +1062,63 @@ impl<F: Field> PartialFractionRing<F> {
             }
         }
         exponents.sort_unstable();
-        self.basis
-            .denominators
-            .lock()
-            .unwrap()
-            .insert(d.to_vec(), exponents.clone());
+        self.basis.cache(d, &exponents);
         Some(exponents)
+    }
+
+    /// Divide the monic `d` by the powers of the basis factors that divide it,
+    /// returning their exponents and the cofactor.
+    ///
+    /// Factors of a higher degree than the cofactor are skipped, a linear
+    /// factor `x - r` is tested by evaluating the cofactor at `r`, and the
+    /// scan stops as soon as the cofactor is constant, linear or a basis
+    /// factor. Concurrent insertions after this snapshot are reconciled by
+    /// `push`.
+    fn divide_known_factors(&self, d: &[F::Element]) -> (Vec<(usize, usize)>, Vec<F::Element>) {
+        let field = &self.field;
+        // Whether the scan can stop: the cofactor is constant, a basis factor
+        // (no other factor divides it; it moves into the exponents) or linear
+        // (only itself divides it).
+        let done = |rest: &mut Vec<F::Element>, exponents: &mut Vec<(usize, usize)>| {
+            if rest.len() <= 1 {
+                return true;
+            }
+            if let Some(j) = self.basis.find(rest) {
+                exponents.push((j, 1));
+                *rest = vec![field.one()];
+                return true;
+            }
+            rest.len() == 2
+        };
+        let mut exponents = vec![];
+        let mut rest = d.to_vec();
+        if done(&mut rest, &mut exponents) {
+            return (exponents, rest);
+        }
+        for i in 0..self.basis.len() {
+            let f = &self.basis.factors[i];
+            let mut e = 0;
+            while rest.len() >= f.monic.len() {
+                if let Some(root) = &f.root
+                    && !field.is_zero(&dense::evaluate(field, &rest, root))
+                {
+                    break;
+                }
+                let (q, r) = dense::divrem_monic(field, &rest, &f.monic);
+                if !r.is_empty() {
+                    break;
+                }
+                rest = q;
+                e += 1;
+            }
+            if e > 0 {
+                exponents.push((i, e));
+                if done(&mut rest, &mut exponents) {
+                    break;
+                }
+            }
+        }
+        (exponents, rest)
     }
 
     /// The position of `variable` in the variables of `p`, checking that `p`
@@ -2356,20 +2415,23 @@ impl<F: Field> PartialFractionRing<F> {
             // Reduce before adding new composite blocks or covering proper
             // divisors of existing blocks.
             let g = dense::gcd(field, &n, &d);
-            n = dense::divrem_monic(field, &n, &g).0;
-            d = dense::divrem_monic(field, &d, &g).0;
+            if g.len() > 1 {
+                n = dense::divrem_monic(field, &n, &g).0;
+                d = dense::divrem_monic(field, &d, &g).0;
+            }
+            // An unchanged denominator has been tested against the basis.
             if d.len() == 1 {
                 vec![]
+            } else if g.len() > 1
+                && let Some(exponents) = self.denominator_factors(&d)
+            {
+                exponents
             } else {
-                if let Some(exponents) = self.denominator_factors(&d) {
-                    exponents
-                } else {
-                    // Localization at a composite factor also inverts each
-                    // of its divisors: 1/g = (f/g)/f when g divides f.
-                    let (exponents, multiplier) = self.extend_denominator_cover(&d)?;
-                    n = dense::mul(field, &n, &multiplier);
-                    exponents
-                }
+                // Localization at a composite factor also inverts each
+                // of its divisors: 1/g = (f/g)/f when g divides f.
+                let (exponents, multiplier) = self.extend_denominator_cover(&d)?;
+                n = dense::mul(field, &n, &multiplier);
+                exponents
             }
         };
         let mut a = self.element_from_dense(n);
@@ -2399,15 +2461,24 @@ impl<F: Field> PartialFractionRing<F> {
         let mut multiplier = vec![field.one()];
         let mut exponents = vec![];
         for i in 0..self.basis.len() {
-            let f = self.basis.monic(i as u32);
+            let f = &self.basis.factors[i];
             let mut e = 0;
             while rest.len() > 1 {
-                let g = dense::gcd(field, &rest, f);
-                if g.len() <= 1 {
-                    break;
+                if let Some(root) = &f.root {
+                    // The gcd with a linear block is the block or one.
+                    if !field.is_zero(&dense::evaluate(field, &rest, root)) {
+                        break;
+                    }
+                    rest = dense::divrem_monic(field, &rest, &f.monic).0;
+                } else {
+                    let g = dense::gcd(field, &rest, &f.monic);
+                    if g.len() <= 1 {
+                        break;
+                    }
+                    rest = dense::divrem_monic(field, &rest, &g).0;
+                    let cofactor = dense::divrem_monic(field, &f.monic, &g).0;
+                    multiplier = dense::mul(field, &multiplier, &cofactor);
                 }
-                rest = dense::divrem_monic(field, &rest, &g).0;
-                multiplier = dense::mul(field, &multiplier, &dense::divrem_monic(field, f, &g).0);
                 e += 1;
             }
             if e > 0 {
@@ -2437,11 +2508,7 @@ impl<F: Field> PartialFractionRing<F> {
                 }
             }
             if multiplier.len() == 1 && self.field.is_one(&multiplier[0]) {
-                self.basis
-                    .denominators
-                    .lock()
-                    .unwrap()
-                    .insert(d.to_vec(), exponents.clone());
+                self.basis.cache(d, &exponents);
             }
             return Ok((exponents, multiplier));
         }
