@@ -331,6 +331,59 @@ mod dense {
     }
 }
 
+/// `a += b`, moving `b` into a zero `a`: in coefficient fields such as
+/// rational functions, even an addition of zero is costly.
+fn add_moved<F: Ring>(field: &F, a: &mut F::Element, b: F::Element) {
+    if field.is_zero(a) {
+        *a = b;
+    } else {
+        field.add_assign(a, &b);
+    }
+}
+
+/// `a -= b`, moving `-b` into a zero `a` (see [add_moved]).
+fn sub_moved<F: Ring>(field: &F, a: &mut F::Element, b: F::Element) {
+    if field.is_zero(a) {
+        *a = field.neg(b);
+    } else {
+        field.sub_assign(a, &b);
+    }
+}
+
+/// Divide the coefficients `a_1, ..., a_e` of a chain of `x - r` by `x - s`
+/// in place: `a'_e = -a_e u` and `a'_i = (a'_(i+1) - a_i) u` for
+/// `u = (s - r)^-1`, which is `d`, or `-d` if `negated`, where no `d` stands
+/// for one. The residue at `s` is `-a'_1`. Neither `-d` nor a product with a
+/// unit is formed: in symbolic coefficient fields, even those normalize.
+fn descend_linear<F: Ring>(
+    field: &F,
+    block: &mut [F::Element],
+    d: Option<&F::Element>,
+    negated: bool,
+) {
+    let mut block = block.iter_mut().rev();
+    let Some(mut next) = block.next() else {
+        return;
+    };
+    if !negated {
+        *next = field.neg(&*next);
+    }
+    if let Some(d) = d {
+        field.mul_assign(next, d);
+    }
+    for x in block {
+        if negated {
+            field.sub_assign(x, &*next);
+        } else {
+            *x = field.sub(&*next, &*x);
+        }
+        if let Some(d) = d {
+            field.mul_assign(x, d);
+        }
+        next = x;
+    }
+}
+
 /// The monic irreducible factors of a nonconstant monic polynomial, with
 /// their multiplicities.
 type Factorizer<F> = fn(&F, &[<F as Set>::Element]) -> Vec<(Vec<<F as Set>::Element>, usize)>;
@@ -338,11 +391,21 @@ type Factorizer<F> = fn(&F, &[<F as Set>::Element]) -> Vec<(Vec<<F as Set>::Elem
 /// The `(factor, exponent)` lists of monic denominators.
 type DenominatorCache<F> = HashMap<Vec<<F as Set>::Element>, Vec<(usize, usize)>>;
 
+/// The inverse `(r_g - r_h)^-1` of the difference of the roots of two linear
+/// factors. Units are recorded as such, so that no product with them is
+/// formed.
+#[derive(Debug)]
+enum LinearInverse<E> {
+    One,
+    MinusOne,
+    Other(E),
+}
+
 /// Data relating a basis factor to an earlier one.
 #[derive(Debug)]
 enum Pair<E> {
     /// Both factors are linear: `(r_self - r_earlier)^-1`.
-    Linear(E),
+    Linear(LinearInverse<E>),
     /// `f_self^-1 mod f_earlier` and `f_earlier^-1 mod f_self`.
     General(Vec<E>, Vec<E>),
 }
@@ -417,13 +480,16 @@ impl<F: Field> FactorBasis<F> {
         self.factors[factor as usize].root.as_ref()
     }
 
-    /// `(r_g - r_h)^-1` for distinct linear factors `g` and `h`.
+    /// `(d, negated)` with `(r_g - r_h)^-1 = d`, or `-d` if `negated`, for
+    /// distinct linear factors `g` and `h`, where no `d` stands for one.
     #[inline(always)]
-    fn inverse_difference(&self, field: &F, g: u32, h: u32) -> F::Element {
+    fn inverse_difference(&self, g: u32, h: u32) -> (Option<&F::Element>, bool) {
         let (high, low) = (g.max(h), g.min(h));
+        let negated = high != g;
         match &self.factors[high as usize].pairs[low as usize] {
-            Pair::Linear(d) if high == g => d.clone(),
-            Pair::Linear(d) => field.neg(d),
+            Pair::Linear(LinearInverse::One) => (None, negated),
+            Pair::Linear(LinearInverse::MinusOne) => (None, !negated),
+            Pair::Linear(LinearInverse::Other(d)) => (Some(d), negated),
             Pair::General(..) => unreachable!("linear factors"),
         }
     }
@@ -434,7 +500,7 @@ impl<F: Field> FactorBasis<F> {
         match &self.factors[high as usize].pairs[low as usize] {
             Pair::General(high_mod_low, _) if high == h => high_mod_low,
             Pair::General(_, low_mod_high) => low_mod_high,
-            Pair::Linear(_) => unreachable!("a nonlinear factor"),
+            Pair::Linear(..) => unreachable!("a nonlinear factor"),
         }
     }
 
@@ -461,7 +527,14 @@ impl<F: Field> FactorBasis<F> {
                     if field.is_zero(&difference) {
                         return Err(PartialFractionError::NotCoprime(j, k));
                     }
-                    Pair::Linear(field.inv(&difference))
+                    let inverse = field.inv(&difference);
+                    Pair::Linear(if field.is_one(&inverse) {
+                        LinearInverse::One
+                    } else if field.is_one(&field.neg(&inverse)) {
+                        LinearInverse::MinusOne
+                    } else {
+                        LinearInverse::Other(inverse)
+                    })
                 }
                 _ => Pair::General(
                     dense::inverse_mod(field, &factor, &earlier.monic)
@@ -1312,8 +1385,9 @@ impl<F: Field> PartialFractionRing<F> {
         result
     }
 
-    /// Accumulate products directly, without building a complete temporary
-    /// product and then scanning it once more for add/sub-multiply.
+    /// `result += a * b`, or `result -= a * b` if `subtract`: the products of
+    /// `b` with the polynomial part and with every chain of the shorter factor
+    /// are accumulated one at a time, without a complete temporary product.
     fn add_product_assign(
         &self,
         result: &mut PartialFraction<F>,
@@ -1325,8 +1399,7 @@ impl<F: Field> PartialFractionRing<F> {
             return;
         }
         let (a, b) = if a.len() > b.len() { (b, a) } else { (a, b) };
-        let field = &self.field;
-        let mut accumulate = |product: PartialFraction<F>| {
+        let accumulate = |result: &mut PartialFraction<F>, product: PartialFraction<F>| {
             if result.is_zero() {
                 *result = if subtract { self.neg(product) } else { product };
             } else {
@@ -1341,27 +1414,85 @@ impl<F: Field> PartialFractionRing<F> {
                 );
             }
         };
-        if a.poly > 0 {
-            accumulate(self.mul_dense(b, a.polynomial_part()));
+        match a.polynomial_part() {
+            [] => {}
+            // A constant scales b directly.
+            [c] if subtract => self.add_scaled_assign(result, b, Scale::By(&self.field.neg(c))),
+            [c] => self.add_scaled_assign(result, b, Scale::By(c)),
+            p => accumulate(result, self.mul_dense(b, p)),
         }
         for c in &a.chains {
-            // b * sum_j a_j / g^j by Horner in 1/g.
-            let degree = self.basis.degree(c.factor);
             let o = c.offset as usize;
-            let block = |j: usize| &a.coefficients[o + j * degree..o + (j + 1) * degree];
-            let mut t = PartialFraction::default();
-            for j in (0..c.exponent as usize).rev() {
-                let coefficient = block(j);
-                if degree == 1 {
-                    self.add_scaled_assign(&mut t, b, Scale::By(&coefficient[0]));
-                } else if coefficient.iter().any(|x| !field.is_zero(x)) {
-                    let product = self.mul_dense(b, coefficient);
-                    self.add_scaled_assign(&mut t, &product, Scale::One);
-                }
-                self.div_factor_power_assign(&mut t, c.factor as usize, 1);
-            }
-            accumulate(t);
+            let blocks = &a.coefficients[o..o + self.chain_len(c)];
+            accumulate(result, self.mul_chain(b, c.factor, blocks));
         }
+    }
+
+    /// `b * sum_j a_j / g^j` for the coefficients `a_1, ..., a_e` of the basis
+    /// factor `g` (`e` blocks of `deg g` coefficients), by Horner's rule in
+    /// `1/g` inside one layout: that of `b`, with room for the polynomial part
+    /// of a product with `a_j` and for `e` more powers of `g`.
+    fn mul_chain(
+        &self,
+        b: &PartialFraction<F>,
+        g: u32,
+        blocks: &[F::Element],
+    ) -> PartialFraction<F> {
+        let field = &self.field;
+        let degree = self.basis.degree(g);
+        let e = blocks.len() / degree;
+        let mut chains = b.chains.clone();
+        let (position, start) = match chains.binary_search_by_key(&g, |c| c.factor) {
+            Ok(i) => {
+                let start = chains[i].exponent as usize;
+                chains[i].exponent += e as u32;
+                (i, start)
+            }
+            Err(i) => {
+                chains.insert(
+                    i,
+                    Chain {
+                        factor: g,
+                        exponent: e as u32,
+                        offset: 0,
+                    },
+                );
+                (i, 0)
+            }
+        };
+        let mut t = PartialFraction::default();
+        self.widen(&mut t, b.poly + degree - 1, &chains);
+        // The used length of the polynomial part; divisions release room,
+        // which holds zeros.
+        t.poly = 0;
+        let mut scratch = vec![];
+        for (step, j) in (0..e).rev().enumerate() {
+            // The first product is written into zeros.
+            let first = step == 0;
+            let block = &blocks[j * degree..(j + 1) * degree];
+            if degree == 1 {
+                let c = &block[0];
+                if first || !field.is_zero(c) {
+                    t.poly = t.poly.max(b.poly);
+                    if first {
+                        self.zip_in_layout(&mut t, b, |d, s| *d = field.mul(s, c));
+                    } else {
+                        self.zip_in_layout(&mut t, b, |d, s| field.add_mul_assign(d, s, c));
+                    }
+                }
+            } else if block.iter().any(|x| !field.is_zero(x)) {
+                let product = self.mul_dense(b, block);
+                t.poly = t.poly.max(product.poly);
+                if first {
+                    self.zip_in_layout(&mut t, &product, |d, s| *d = s.clone());
+                } else {
+                    self.zip_in_layout(&mut t, &product, |d, s| field.add_assign(d, s));
+                }
+            }
+            self.divide_once(&mut t, position, start + step, &mut scratch);
+        }
+        self.normalize(&mut t);
+        t
     }
 
     /// `a *= c` for a field element `c`.
@@ -1529,23 +1660,32 @@ impl<F: Field> PartialFractionRing<F> {
                     self.mul_variable_assign(&mut next);
                     cache.powers.push(next);
                 }
+                // The first product is written into zeros.
+                let mut first = true;
                 for (i, c) in p[..=top].iter().enumerate() {
                     if !field.is_zero(c) {
                         let source = if i == 0 { a } else { &cache.powers[i - 1] };
-                        self.add_scaled_in_layout(&mut r, source, c);
+                        if first {
+                            self.zip_in_layout(&mut r, source, |d, s| *d = field.mul(s, c));
+                            first = false;
+                        } else {
+                            self.zip_in_layout(&mut r, source, |d, s| {
+                                field.add_mul_assign(d, s, c)
+                            });
+                        }
                     }
                 }
                 a.poly + top
             }
             None => {
                 // Horner: ((p_n a) x + p_(n-1) a) x + ...
-                self.add_scaled_in_layout(&mut r, a, &p[top]);
+                self.zip_in_layout(&mut r, a, |d, s| *d = field.mul(s, &p[top]));
                 let mut logical = a.poly;
                 for c in p[..top].iter().rev() {
                     self.mul_variable_in_layout(&mut r, logical);
                     logical += 1;
                     if !field.is_zero(c) {
-                        self.add_scaled_in_layout(&mut r, a, c);
+                        self.zip_in_layout(&mut r, a, |d, s| field.add_mul_assign(d, s, c));
                     }
                 }
                 logical
@@ -1572,20 +1712,20 @@ impl<F: Field> PartialFractionRing<F> {
         r
     }
 
-    /// `r += c * b` for a source `b` whose layout `r` covers (no widening,
-    /// no normalization).
-    fn add_scaled_in_layout(
+    /// Apply `f(r_i, b_i)` to every coefficient `b_i` of a source `b` whose
+    /// layout `r` covers and the coefficient `r_i` at its position in `r` (no
+    /// widening, no normalization).
+    fn zip_in_layout(
         &self,
         r: &mut PartialFraction<F>,
         b: &PartialFraction<F>,
-        c: &F::Element,
+        mut f: impl FnMut(&mut F::Element, &F::Element),
     ) {
-        let field = &self.field;
         for (d, s) in r.coefficients[..b.poly]
             .iter_mut()
             .zip(&b.coefficients[..b.poly])
         {
-            field.add_mul_assign(d, s, c);
+            f(d, s);
         }
         let mut targets = r.chains.iter();
         for chain in &b.chains {
@@ -1599,7 +1739,7 @@ impl<F: Field> PartialFractionRing<F> {
                 .iter_mut()
                 .zip(&b.coefficients[from..from + len])
             {
-                field.add_mul_assign(d, s, c);
+                f(d, s);
             }
         }
     }
@@ -1718,21 +1858,27 @@ impl<F: Field> PartialFractionRing<F> {
         let poly = a.poly;
         if poly > 0 {
             if let Some(s) = g_root {
-                let mut carry = a.coefficients[poly - 1].clone();
-                for i in (0..poly - 1).rev() {
-                    let mut next = a.coefficients[i].clone();
-                    field.add_mul_assign(&mut next, &carry, s);
-                    a.coefficients[i] = std::mem::replace(&mut carry, next);
+                // Synthetic division in place: p_i += s p_(i+1), descending,
+                // leaves the quotient in p_1, ..., p_(n-1) and the remainder
+                // in p_0, which a rotation moves to the top.
+                let p = &mut a.coefficients[..poly];
+                let mut coefficients = p.iter_mut().rev();
+                let mut carry = coefficients.next().unwrap();
+                for x in coefficients {
+                    field.add_mul_assign(x, &*carry, s);
+                    carry = x;
                 }
-                a.coefficients[poly - 1] = field.zero();
-                field.add_assign(&mut a.coefficients[g_offset], &carry);
+                p.rotate_left(1);
+                let remainder = std::mem::replace(&mut p[poly - 1], field.zero());
+                add_moved(field, &mut a.coefficients[g_offset], remainder);
             } else {
                 let (q, r) = dense::divrem_monic(field, &a.coefficients[..poly], basis.monic(g));
-                for i in 0..poly {
-                    a.coefficients[i] = q.get(i).cloned().unwrap_or_else(|| field.zero());
+                let mut q = q.into_iter();
+                for c in &mut a.coefficients[..poly] {
+                    *c = q.next().unwrap_or_else(|| field.zero());
                 }
-                for (i, r) in r.iter().enumerate() {
-                    field.add_assign(&mut a.coefficients[g_offset + i], r);
+                for (i, r) in r.into_iter().enumerate() {
+                    add_moved(field, &mut a.coefficients[g_offset + i], r);
                 }
             }
         }
@@ -1759,29 +1905,11 @@ impl<F: Field> PartialFractionRing<F> {
             if g_root.is_some() && basis.root(chain.factor).is_some() {
                 // a_i / ((x - r)^i (x - s)) with t = s - r:
                 // a'_e = -a_e / t, a'_i = (a'_(i+1) - a_i) / t, residue at s: -a'_1.
-                let inverse = &basis.inverse_difference(field, g, chain.factor);
-                let mut next = field.zero();
-                if field.is_one(inverse) {
-                    // Avoid normalized multiplication by one in symbolic
-                    // coefficient fields; only subtraction is required.
-                    for i in (0..e).rev() {
-                        field.sub_assign(&mut next, &a.coefficients[offset + i]);
-                        a.coefficients[offset + i] = next.clone();
-                    }
-                } else if field.is_one(&field.neg(inverse)) {
-                    // (next - a_i) * (-1) = a_i - next.
-                    for i in (0..e).rev() {
-                        next = field.sub(&a.coefficients[offset + i], &next);
-                        a.coefficients[offset + i] = next.clone();
-                    }
-                } else {
-                    for i in (0..e).rev() {
-                        field.sub_assign(&mut next, &a.coefficients[offset + i]);
-                        field.mul_assign(&mut next, inverse);
-                        a.coefficients[offset + i] = next.clone();
-                    }
-                }
-                field.sub_assign(&mut a.coefficients[g_offset], &next);
+                let (d, negated) = basis.inverse_difference(g, chain.factor);
+                let block = &mut a.coefficients[offset..offset + e];
+                descend_linear(field, block, d, negated);
+                let a_1 = block[0].clone();
+                sub_moved(field, &mut a.coefficients[g_offset], a_1);
                 continue;
             }
             let degree = basis.degree(chain.factor);
@@ -1789,8 +1917,8 @@ impl<F: Field> PartialFractionRing<F> {
             scratch.extend_from_slice(&a.coefficients[offset..offset + e * degree]);
             let c = self.divide_chain(chain.factor, e, scratch, g);
             a.coefficients[offset..offset + e * degree].clone_from_slice(scratch);
-            for (i, c) in c.iter().enumerate() {
-                field.add_assign(&mut a.coefficients[g_offset + i], c);
+            for (i, c) in c.into_iter().enumerate() {
+                add_moved(field, &mut a.coefficients[g_offset + i], c);
             }
         }
         a.poly = poly.saturating_sub(k);
