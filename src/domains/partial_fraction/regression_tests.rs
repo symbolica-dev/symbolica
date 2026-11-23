@@ -1,5 +1,7 @@
 //! Regressions for basis extension and univariate input validation.
 
+use rand::{Rng, SeedableRng, rngs::StdRng};
+
 use super::*;
 use crate::{
     domains::{finite_field::Zp64, integer::Z, rational::Q},
@@ -806,4 +808,211 @@ fn composite_basis_over_rational_functions_covers_linear_blocks_by_evaluation() 
         previous = Some(a);
     }
     assert_basis_extends(&ring, &blocks);
+}
+
+#[test]
+fn supplied_basis_rejects_common_factors_of_any_degree() {
+    let x = variable();
+    let basis = |factors: &[&[i64]]| {
+        let factors: Vec<_> = factors.iter().map(|c| poly(&x, c)).collect();
+        PartialFractionRing::with_basis(Q, x.clone(), &factors).map(|r| r.factor_count())
+    };
+    assert_eq!(
+        basis(&[&[-1, 1], &[-1, 0, 1]]),
+        Err(PartialFractionError::NotCoprime(0, 1))
+    );
+    assert_eq!(
+        basis(&[&[-1, 0, 1], &[2, 3, 1]]),
+        Err(PartialFractionError::NotCoprime(0, 1))
+    );
+    // x^3 - 8 has the root 2.
+    assert_eq!(
+        basis(&[&[-1, 1], &[-2, 1], &[1, 0, 1], &[-8, 0, 0, 1]]),
+        Err(PartialFractionError::NotCoprime(1, 3))
+    );
+    assert_eq!(basis(&[&[-1, 1], &[1, 1], &[1, 0, 1], &[2, 0, 1]]), Ok(4));
+}
+
+#[test]
+fn supplied_basis_checks_agree_with_pairwise_gcds() {
+    fn check<F: Field>(field: F, seed: u64, max_degree: usize) {
+        let x = variable();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut accepted = 0;
+        for _ in 0..200 {
+            let factors: Vec<_> = (0..rng.random_range(0..10))
+                .map(|_| {
+                    let degree = match rng.random_range(0..20) {
+                        0 => 0,
+                        _ => rng.random_range(1..=max_degree),
+                    };
+                    let mut c: Vec<_> = (0..degree)
+                        .map(|_| field.nth(rng.random_range(-2..=2).into()))
+                        .collect();
+                    c.push(field.nth(rng.random_range(1..=2).into()));
+                    UnivariatePolynomial::from_coefficients(&field, c, x.clone())
+                })
+                .collect();
+            let monic: Vec<_> = factors
+                .iter()
+                .map(|f| {
+                    let mut c = f.coefficients.clone();
+                    dense::make_monic(&field, &mut c);
+                    c
+                })
+                .collect();
+            // The first constant factor, or the first factor with a common
+            // factor with an earlier one.
+            let expected = (0..monic.len()).find_map(|i| {
+                if monic[i].len() == 1 {
+                    return Some(PartialFractionError::ConstantFactor(i));
+                }
+                (0..i)
+                    .find(|&j| dense::gcd(&field, &monic[j], &monic[i]).len() > 1)
+                    .map(|j| PartialFractionError::NotCoprime(j, i))
+            });
+            let ring = PartialFractionRing::with_basis(field.clone(), x.clone(), &factors);
+            match (expected, ring) {
+                (None, Ok(ring)) => {
+                    accepted += 1;
+                    // Every pair of factors has its inverses.
+                    for i in 0..factors.len() {
+                        for j in 0..factors.len() {
+                            let a = ring
+                                .mul(&ring.inv_factor_power(i, 2), &ring.inv_factor_power(j, 1));
+                            let d = &ring.factor(i).pow(2) * &ring.factor(j);
+                            assert_eq!(ring.mul_polynomial(&a, &d), ring.one());
+                        }
+                    }
+                }
+                (expected, ring) => assert_eq!(ring.err(), expected, "{monic:?}"),
+            }
+        }
+        assert!(accepted > 20);
+    }
+    check(Zp64::new(7), 1, 3);
+    check(Zp64::new(5), 2, 2);
+    check(Q, 3, 2);
+    check(Q, 4, 3);
+}
+
+#[test]
+fn concurrent_first_uses_of_inverses_agree_with_one_thread() {
+    use std::sync::Barrier;
+
+    let field = Zp64::new(1_000_000_007);
+    let x = variable();
+    let polynomial = |c: &[i64]| {
+        UnivariatePolynomial::from_coefficients(
+            &field,
+            c.iter().map(|&c| field.nth(c.into())).collect(),
+            x.clone(),
+        )
+    };
+    // Linear and nonlinear factors with several chunks of pairs each.
+    let mut factors: Vec<UnivariatePolynomial<Zp64>> = vec![];
+    let candidates = (0..100)
+        .map(|r| polynomial(&[-r, 1]))
+        .chain((1..30).map(|c| polynomial(&[1000 * c + 7, 0, 1])))
+        .chain((1..10).map(|c| polynomial(&[100_003 * c + 1, 1, 0, 1])));
+    for f in candidates {
+        if factors
+            .iter()
+            .all(|g| dense::gcd(&field, &g.coefficients, &f.coefficients).len() == 1)
+        {
+            factors.push(f);
+        }
+    }
+    assert!(factors.len() > 2 * PAIR_CHUNK);
+    // Products of random sums of poles, and their quotients, which may extend
+    // the basis in an order that depends on the thread.
+    let work = |ring: &PartialFractionRing<Zp64>, seed: u64| {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut element = || {
+            ring.sum((0..3).map(|_| {
+                let factor = rng.random_range(0..factors.len());
+                let mut a = ring.inv_factor_power(factor, rng.random_range(1..4));
+                ring.mul_scalar_assign(&mut a, &field.nth(rng.random_range(1..100).into()));
+                a
+            }))
+        };
+        (0..60)
+            .map(|_| {
+                let (a, b) = (element(), element());
+                (ring.mul(&a, &b), ring.to_fraction(&ring.div(&a, &b)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected: Vec<_> = (0..2)
+        .map(|seed| {
+            let ring = PartialFractionRing::with_basis(field.clone(), x.clone(), &factors).unwrap();
+            work(&ring, seed)
+        })
+        .collect();
+    let ring = PartialFractionRing::with_basis(field.clone(), x.clone(), &factors).unwrap();
+    let threads = 8;
+    let start = Barrier::new(threads);
+    std::thread::scope(|scope| {
+        for t in 0..threads {
+            let (start, ring, work, expected) = (&start, &ring, &work, &expected);
+            scope.spawn(move || {
+                start.wait();
+                // Threads with the same seed race to compute the same pairs.
+                assert_eq!(work(ring, (t % 2) as u64), expected[t % 2]);
+            });
+        }
+    });
+}
+
+#[test]
+fn concurrent_extension_and_lazy_inverses_agree() {
+    use std::sync::Barrier;
+
+    let x = variable();
+    // Overlapping denominators (x - i)(x - i - 1) and coprime x^2 + i + 1.
+    let denominator = |i: i64| match i % 3 {
+        0 => poly(&x, &[i + 1, 0, 1]),
+        _ => poly(&x, &[i * (i + 1), -(2 * i + 1), 1]),
+    };
+    let rings = [
+        PartialFractionRing::with_basis(Q, x.clone(), &[]).unwrap(),
+        PartialFractionRing::new(Q, x.clone(), &[]),
+    ];
+    for ring in &rings {
+        let threads = 8;
+        let start = Barrier::new(threads);
+        std::thread::scope(|scope| {
+            for t in 0..threads as i64 {
+                let (start, x, denominator) = (&start, &x, &denominator);
+                scope.spawn(move || {
+                    start.wait();
+                    let denominators: Vec<_> = (0..12).map(|i| denominator((i + t) % 12)).collect();
+                    let elements: Vec<_> = denominators
+                        .iter()
+                        .map(|d| ring.try_from_fraction(&poly(x, &[1]), d).unwrap())
+                        .collect();
+                    for (a, da) in elements.iter().zip(&denominators) {
+                        for (b, db) in elements.iter().zip(&denominators) {
+                            let product = ring.mul(a, b);
+                            let product =
+                                ring.mul_polynomial(&ring.mul_polynomial(&product, da), db);
+                            assert_eq!(product, ring.one());
+                        }
+                    }
+                });
+            }
+        });
+        for i in 0..ring.factor_count() {
+            for j in 0..i {
+                assert_eq!(
+                    dense::gcd(
+                        &Q,
+                        &ring.factor(i).coefficients,
+                        &ring.factor(j).coefficients
+                    ),
+                    vec![Q.one()]
+                );
+            }
+        }
+    }
 }

@@ -17,7 +17,7 @@
 //! - zero tests and equality are exact and structural;
 //! - multiplication by a polynomial and division by a basis factor are
 //!   linear-time updates of the coefficient vector, using inverses between
-//!   the factors that are computed once, when a factor joins the basis (with
+//!   the factors that are computed once, when they are first needed (with
 //!   closed recurrences when both factors are linear).
 //!
 //! This makes the type a good fit for long sequences of sums of products
@@ -105,7 +105,7 @@ use std::{
     fmt::{Display, Error, Write},
     hash::{Hash, Hasher},
     ops::RangeInclusive,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use ahash::HashMap;
@@ -498,26 +498,43 @@ enum Pair<E> {
     General(Vec<E>, Vec<E>),
 }
 
-/// A basis factor with the data relating it to every earlier factor.
+/// The number of pairs in a chunk of [Factor::pairs].
+const PAIR_CHUNK: usize = 32;
+
+/// A chunk of lazily computed pairs.
+type PairChunk<E> = Box<[OnceLock<Pair<E>>; PAIR_CHUNK]>;
+
+/// A basis factor with the data relating it to the earlier factors.
 #[derive(Debug)]
 struct Factor<F: Field> {
     /// Ascending coefficients, the last one is one.
     monic: Vec<F::Element>,
     /// `r` if the factor is `x - r`.
     root: Option<F::Element>,
-    /// One entry per earlier factor.
-    pairs: Vec<Pair<F::Element>>,
+    /// The pair with earlier factor `j` is entry `j % PAIR_CHUNK` of chunk
+    /// `j / PAIR_CHUNK`. Chunks are allocated, and pairs computed, on first
+    /// use.
+    pairs: Box<[OnceLock<PairChunk<F::Element>>]>,
+}
+
+/// The positions of the factors of a [FactorBasis].
+struct FactorIndex<E> {
+    positions: HashMap<Vec<E>, usize>,
+    /// The ascending indices of the nonlinear factors.
+    nonlinear: Vec<u32>,
 }
 
 /// The append-only factor basis of a [PartialFractionRing].
 ///
 /// Like Symbolica's symbol table, the factors live in an [AppendOnlyVec]:
 /// reading them is lock-free, and appending (rare) is serialized by the
-/// `index` lock. A factor's index never changes.
+/// `index` lock. A factor's index never changes. The inverses relating two
+/// factors are computed when an operation first needs them, and are shared by
+/// all clones of the ring.
 struct FactorBasis<F: Field> {
     factors: AppendOnlyVec<Factor<F>>,
     /// The index of every factor; held while appending.
-    index: Mutex<HashMap<Vec<F::Element>, usize>>,
+    index: Mutex<FactorIndex<F::Element>>,
     /// The factor exponents of recently seen monic denominators.
     denominators: Mutex<DenominatorCache<F>>,
     /// Optional adapter to Factorize, installed by PartialFractionRing::new.
@@ -542,7 +559,10 @@ impl<F: Field> FactorBasis<F> {
     fn new(factorizer: Option<Factorizer<F>>) -> Self {
         Self {
             factors: AppendOnlyVec::new(),
-            index: Mutex::new(HashMap::default()),
+            index: Mutex::new(FactorIndex {
+                positions: HashMap::default(),
+                nonlinear: vec![],
+            }),
             denominators: Mutex::new(HashMap::default()),
             factorizer,
         }
@@ -568,13 +588,45 @@ impl<F: Field> FactorBasis<F> {
         self.factors[factor as usize].root.as_ref()
     }
 
+    /// The data relating factor `high` to the earlier factor `low`, computed
+    /// on first use.
+    #[inline(always)]
+    fn pair(&self, field: &F, high: u32, low: u32) -> &Pair<F::Element> {
+        let low = low as usize;
+        self.factors[high as usize].pairs[low / PAIR_CHUNK]
+            .get_or_init(|| Box::new(std::array::from_fn(|_| OnceLock::new())))[low % PAIR_CHUNK]
+            .get_or_init(|| self.new_pair(field, high, low))
+    }
+
+    /// Compute the data relating factor `high` to the earlier factor `low`.
+    #[cold]
+    fn new_pair(&self, field: &F, high: u32, low: usize) -> Pair<F::Element> {
+        let (factor, earlier) = (&self.factors[high as usize], &self.factors[low]);
+        match (&factor.root, &earlier.root) {
+            (Some(r), Some(s)) => {
+                let inverse = field.inv(&field.sub(r, s));
+                Pair::Linear(if field.is_one(&inverse) {
+                    LinearInverse::One
+                } else if field.is_one(&field.neg(&inverse)) {
+                    LinearInverse::MinusOne
+                } else {
+                    LinearInverse::Other(inverse)
+                })
+            }
+            _ => Pair::General(
+                dense::inverse_mod(field, &factor.monic, &earlier.monic).expect("coprime factors"),
+                dense::inverse_mod(field, &earlier.monic, &factor.monic).expect("coprime factors"),
+            ),
+        }
+    }
+
     /// `(d, negated)` with `(r_g - r_h)^-1 = d`, or `-d` if `negated`, for
     /// distinct linear factors `g` and `h`, where no `d` stands for one.
     #[inline(always)]
-    fn inverse_difference(&self, g: u32, h: u32) -> (Option<&F::Element>, bool) {
+    fn inverse_difference(&self, field: &F, g: u32, h: u32) -> (Option<&F::Element>, bool) {
         let (high, low) = (g.max(h), g.min(h));
         let negated = high != g;
-        match &self.factors[high as usize].pairs[low as usize] {
+        match self.pair(field, high, low) {
             Pair::Linear(LinearInverse::One) => (None, negated),
             Pair::Linear(LinearInverse::MinusOne) => (None, !negated),
             Pair::Linear(LinearInverse::Other(d)) => (Some(d), negated),
@@ -583,9 +635,9 @@ impl<F: Field> FactorBasis<F> {
     }
 
     /// `f_h^-1 mod f_g` for distinct factors `h` and `g`, not both linear.
-    fn inverse_mod(&self, h: u32, g: u32) -> &[F::Element] {
+    fn inverse_mod(&self, field: &F, h: u32, g: u32) -> &[F::Element] {
         let (high, low) = (g.max(h), g.min(h));
-        match &self.factors[high as usize].pairs[low as usize] {
+        match self.pair(field, high, low) {
             Pair::General(high_mod_low, _) if high == h => high_mod_low,
             Pair::General(_, low_mod_high) => low_mod_high,
             Pair::Linear(..) => unreachable!("a nonlinear factor"),
@@ -594,7 +646,7 @@ impl<F: Field> FactorBasis<F> {
 
     /// The index of the monic `factor`, if it is in the basis.
     fn find(&self, factor: &[F::Element]) -> Option<usize> {
-        self.index.lock().unwrap().get(factor).copied()
+        self.index.lock().unwrap().positions.get(factor).copied()
     }
 
     /// The cached factor exponents of the monic denominator `d`.
@@ -611,11 +663,20 @@ impl<F: Field> FactorBasis<F> {
         cache.insert(d.to_vec(), exponents.to_vec());
     }
 
-    /// The index of the monic `factor`, appended if it is new. Fails if it is
-    /// constant or not coprime to a factor of the basis.
-    fn push(&self, field: &F, factor: Vec<F::Element>) -> Result<usize, PartialFractionError> {
+    /// The index of the monic `factor`, appended if it is new. The caller
+    /// guarantees that a new factor is coprime to the factors with an index
+    /// below `coprime`; the others are checked. Fails if it is constant or
+    /// not coprime to a factor of the basis.
+    ///
+    /// No inverses are computed here: [Self::pair] computes them on first use.
+    fn push(
+        &self,
+        field: &F,
+        factor: Vec<F::Element>,
+        coprime: usize,
+    ) -> Result<usize, PartialFractionError> {
         let mut index = self.index.lock().unwrap();
-        if let Some(&i) = index.get(&factor) {
+        if let Some(&i) = index.positions.get(&factor) {
             return Ok(i);
         }
         let k = self.factors.len();
@@ -626,37 +687,33 @@ impl<F: Field> FactorBasis<F> {
             return Err(PartialFractionError::TooManyFactors);
         }
         let root = (factor.len() == 2).then(|| field.neg(&factor[0]));
-        let mut pairs = Vec::with_capacity(k);
-        for (j, earlier) in self.factors.iter().enumerate() {
-            let pair = match (&root, &earlier.root) {
-                (Some(r), Some(s)) => {
-                    let difference = field.sub(r, s);
-                    if field.is_zero(&difference) {
-                        return Err(PartialFractionError::NotCoprime(j, k));
-                    }
-                    let inverse = field.inv(&difference);
-                    Pair::Linear(if field.is_one(&inverse) {
-                        LinearInverse::One
-                    } else if field.is_one(&field.neg(&inverse)) {
-                        LinearInverse::MinusOne
-                    } else {
-                        LinearInverse::Other(inverse)
-                    })
-                }
-                _ => Pair::General(
-                    dense::inverse_mod(field, &factor, &earlier.monic)
-                        .ok_or(PartialFractionError::NotCoprime(j, k))?,
-                    dense::inverse_mod(field, &earlier.monic, &factor)
-                        .ok_or(PartialFractionError::NotCoprime(j, k))?,
-                ),
-            };
-            pairs.push(pair);
+        // Distinct monic linear factors are coprime, so a linear factor is
+        // only checked against the nonlinear ones, at its root.
+        let common = if let Some(r) = &root {
+            let first = index.nonlinear.partition_point(|&j| (j as usize) < coprime);
+            index.nonlinear[first..]
+                .iter()
+                .map(|&j| j as usize)
+                .find(|&j| field.is_zero(&dense::evaluate(field, &self.factors[j].monic, r)))
+        } else {
+            (coprime..k).find(|&j| match &self.factors[j].root {
+                Some(s) => field.is_zero(&dense::evaluate(field, &factor, s)),
+                None => dense::gcd(field, &factor, &self.factors[j].monic).len() > 1,
+            })
+        };
+        if let Some(j) = common {
+            return Err(PartialFractionError::NotCoprime(j, k));
         }
-        index.insert(factor.clone(), k);
+        if root.is_none() {
+            index.nonlinear.push(k as u32);
+        }
+        index.positions.insert(factor.clone(), k);
         let pushed = self.factors.push(Factor {
             monic: factor,
             root,
-            pairs,
+            pairs: (0..k.div_ceil(PAIR_CHUNK))
+                .map(|_| OnceLock::new())
+                .collect(),
         });
         debug_assert_eq!(pushed, k);
         Ok(k)
@@ -1018,7 +1075,7 @@ impl<F: Field> PartialFractionRing<F> {
     ) -> Result<Self, PartialFractionError> {
         let basis = FactorBasis::new(factorizer);
         for (i, f) in factors.into_iter().enumerate() {
-            match basis.push(&field, f) {
+            match basis.push(&field, f, 0) {
                 Ok(j) if j == i => {}
                 // A repeated factor.
                 Ok(j) => return Err(PartialFractionError::NotCoprime(j, i)),
@@ -1053,8 +1110,8 @@ impl<F: Field> PartialFractionRing<F> {
                 factorizer(field, &rest)
             };
             for (f, m) in factors {
-                // Irreducible factors are coprime to every other factor.
-                let i = self.basis.push(field, f).ok()?;
+                // Distinct monic irreducible factors are coprime.
+                let i = self.basis.push(field, f, usize::MAX).ok()?;
                 match exponents.iter_mut().find(|(j, _)| *j == i) {
                     Some((_, e)) => *e += m,
                     None => exponents.push((i, m)),
@@ -2236,7 +2293,7 @@ impl<F: Field> PartialFractionRing<F> {
             if g_root.is_some() && degree == 1 {
                 // a_i / ((x - r)^i (x - s)) with t = s - r:
                 // a'_e = -a_e / t, a'_i = (a'_(i+1) - a_i) / t, residue at s: -a'_1.
-                let (d, negated) = basis.inverse_difference(g, chain.factor);
+                let (d, negated) = basis.inverse_difference(field, g, chain.factor);
                 let block = &mut a.coefficients[offset..offset + e];
                 descend_linear(field, block, d, negated);
                 let a_1 = block[0].clone();
@@ -2266,7 +2323,7 @@ impl<F: Field> PartialFractionRing<F> {
         let field = &self.field;
         let hm = self.basis.monic(h);
         let gm = self.basis.monic(g);
-        let inverse = self.basis.inverse_mod(g, h);
+        let inverse = self.basis.inverse_mod(field, g, h);
         let DivisionWorkspace { carry, s, b, t } = w;
         carry.clear();
         for block in a.chunks_exact_mut(hm.len() - 1).rev() {
@@ -2497,9 +2554,11 @@ impl<F: Field> PartialFractionRing<F> {
         d: &[F::Element],
     ) -> Result<(Vec<(usize, usize)>, Vec<F::Element>), PartialFractionError> {
         loop {
+            // A remainder is coprime to the factors that the cover tries.
+            let coprime = self.basis.len();
             let (mut exponents, multiplier, rest) = self.denominator_cover_parts(d);
             if rest.len() > 1 {
-                match self.basis.push(&self.field, rest) {
+                match self.basis.push(&self.field, rest, coprime) {
                     Ok(i) => exponents.push((i, 1)),
                     // Another thread appended an overlapping block after our
                     // snapshot. Recompute the cover against the enlarged basis.

@@ -132,6 +132,7 @@ impl<F: Field> PartialFractionAlignment<F> {
             (0..source_count)
                 .map(|i| {
                     index
+                        .positions
                         .get(source.basis.monic(i as u32))
                         .copied()
                         .filter(|&j| j < target_count)
