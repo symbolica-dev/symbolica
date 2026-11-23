@@ -17,6 +17,7 @@
 pub mod algebraic;
 pub mod atom;
 pub mod factorized_rational_polynomial;
+pub mod partial_fraction;
 pub mod rational_polynomial;
 
 pub use numerica::domains::*;
