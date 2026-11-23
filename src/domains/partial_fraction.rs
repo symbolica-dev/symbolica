@@ -105,7 +105,7 @@ use std::{
     fmt::{Display, Error, Write},
     hash::{Hash, Hasher},
     ops::RangeInclusive,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 use ahash::HashMap;
@@ -535,8 +535,9 @@ struct FactorBasis<F: Field> {
     factors: AppendOnlyVec<Factor<F>>,
     /// The index of every factor; held while appending.
     index: Mutex<FactorIndex<F::Element>>,
-    /// The factor exponents of recently seen monic denominators.
-    denominators: Mutex<DenominatorCache<F>>,
+    /// The factor exponents of recently seen monic denominators. A hit only
+    /// takes the read lock; a miss computes the exponents unlocked.
+    denominators: RwLock<DenominatorCache<F>>,
     /// Optional adapter to Factorize, installed by PartialFractionRing::new.
     /// When present, every stored block is irreducible. When absent, preserve
     /// composite blocks and extend by coprime remainders without factoring.
@@ -563,7 +564,7 @@ impl<F: Field> FactorBasis<F> {
                 positions: HashMap::default(),
                 nonlinear: vec![],
             }),
-            denominators: Mutex::new(HashMap::default()),
+            denominators: RwLock::new(HashMap::default()),
             factorizer,
         }
     }
@@ -651,12 +652,12 @@ impl<F: Field> FactorBasis<F> {
 
     /// The cached factor exponents of the monic denominator `d`.
     fn cached(&self, d: &[F::Element]) -> Option<Vec<(usize, usize)>> {
-        self.denominators.lock().unwrap().get(d).cloned()
+        self.denominators.read().unwrap().get(d).cloned()
     }
 
     /// Cache the factor exponents of the monic denominator `d`.
     fn cache(&self, d: &[F::Element], exponents: &[(usize, usize)]) {
-        let mut cache = self.denominators.lock().unwrap();
+        let mut cache = self.denominators.write().unwrap();
         if cache.len() >= DENOMINATOR_CACHE_CAPACITY {
             cache.clear();
         }

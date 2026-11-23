@@ -728,7 +728,7 @@ fn denominator_cache_is_cleared_when_full_without_changing_decompositions() {
                 for id in (1 + t..=total).step_by(4) {
                     let e = ring.denominator_factors(&denominator(id));
                     assert_eq!(e, Some(exponents(id)));
-                    let cached = ring.basis.denominators.lock().unwrap().len();
+                    let cached = ring.basis.denominators.read().unwrap().len();
                     assert!(cached <= DENOMINATOR_CACHE_CAPACITY);
                 }
             });
