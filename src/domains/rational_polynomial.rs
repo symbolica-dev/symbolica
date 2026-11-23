@@ -1110,15 +1110,8 @@ where
             );
         }
 
-        let denom_gcd = self.denominator.gcd(&other.denominator);
-
-        let mut a_denom_red = Cow::Borrowed(&self.denominator);
-        let mut b_denom_red = Cow::Borrowed(&other.denominator);
-
-        if !denom_gcd.is_one() {
-            a_denom_red = Cow::Owned(&self.denominator / &denom_gcd);
-            b_denom_red = Cow::Owned(&other.denominator / &denom_gcd);
-        }
+        let (denom_gcd, a_denom_red, b_denom_red) =
+            gcd_quotients(&self.denominator, &other.denominator);
 
         let num1 = &self.numerator * &b_denom_red;
         let num2 = &other.numerator * &a_denom_red;
@@ -1133,10 +1126,13 @@ where
             a_denom_red.as_ref() * &other.denominator
         };
 
-        let g = num.gcd(&denom_gcd);
+        let (g, cofactors) = num.gcd_with_cofactors(&denom_gcd);
 
         if !g.is_one() {
-            num = num / &g;
+            num = match cofactors {
+                Some((num, _)) => num,
+                None => num / &g,
+            };
             den = den / &g;
         }
 
@@ -1145,6 +1141,25 @@ where
             denominator: den,
         }
     }
+}
+
+/// The gcd `g` of `a` and `b` with the quotients `a / g` and `b / g`. The
+/// quotients that certify the gcd are reused when the gcd algorithm provides
+/// them, which saves two divisions.
+fn gcd_quotients<'a, R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent>(
+    a: &'a MultivariatePolynomial<R, E>,
+    b: &'a MultivariatePolynomial<R, E>,
+) -> (
+    MultivariatePolynomial<R, E>,
+    Cow<'a, MultivariatePolynomial<R, E>>,
+    Cow<'a, MultivariatePolynomial<R, E>>,
+) {
+    let (g, cofactors) = a.gcd_with_cofactors(b);
+    if g.is_one() {
+        return (g, Cow::Borrowed(a), Cow::Borrowed(b));
+    }
+    let (a, b) = cofactors.unwrap_or_else(|| (a / &g, b / &g));
+    (g, Cow::Owned(a), Cow::Owned(b))
 }
 
 impl<R: EuclideanDomain + PolynomialGCD<E>, E: PositiveExponent> Sub for RationalPolynomial<R, E>
@@ -1195,31 +1210,11 @@ where
             return &a * &b;
         }
 
-        let gcd1 = self.numerator.gcd(&other.denominator);
-        let gcd2 = self.denominator.gcd(&other.numerator);
-
-        if gcd1.is_one() {
-            if gcd2.is_one() {
-                RationalPolynomial {
-                    numerator: &self.numerator * &other.numerator,
-                    denominator: &self.denominator * &other.denominator,
-                }
-            } else {
-                RationalPolynomial {
-                    numerator: &self.numerator * &(&other.numerator / &gcd2),
-                    denominator: (&self.denominator / &gcd2) * &other.denominator,
-                }
-            }
-        } else if gcd2.is_one() {
-            RationalPolynomial {
-                numerator: (&self.numerator / &gcd1) * &other.numerator,
-                denominator: &self.denominator * &(&other.denominator / &gcd1),
-            }
-        } else {
-            RationalPolynomial {
-                numerator: (&self.numerator / &gcd1) * &(&other.numerator / &gcd2),
-                denominator: (&self.denominator / &gcd2) * &(&other.denominator / &gcd1),
-            }
+        let (_, a_num, b_den) = gcd_quotients(&self.numerator, &other.denominator);
+        let (_, a_den, b_num) = gcd_quotients(&self.denominator, &other.numerator);
+        RationalPolynomial {
+            numerator: a_num.as_ref() * b_num.as_ref(),
+            denominator: a_den.as_ref() * b_den.as_ref(),
         }
     }
 }
